@@ -320,7 +320,7 @@ export class ProcessManager extends EventEmitter {
    * Spawn a new process for a session
    */
   spawn(config: ProcessConfig): { pid: number; success: boolean } {
-    const { sessionId, toolType, cwd, command, args, requiresPty, prompt, shell, shellArgs, shellEnvVars, images, imageArgs, promptArgs, contextWindow, customEnvVars, noPromptSeparator } = config;
+    const { sessionId, toolType, cwd, command, args, requiresPty, prompt, shell, shellArgs, shellEnvVars, images, imageArgs, promptArgs, contextWindow, customEnvVars, noPromptSeparator, sshRemoteConfig } = config;
 
     // Detect Windows early for logging decisions throughout the function
     const isWindows = process.platform === 'win32';
@@ -333,9 +333,10 @@ export class ProcessManager extends EventEmitter {
     let finalArgs: string[];
     let tempImageFiles: string[] = [];
 
-    if (hasImages && prompt && capabilities.supportsStreamJsonInput) {
+    if ((hasImages || (sshRemoteConfig && prompt)) && capabilities.supportsStreamJsonInput) {
       // For agents that support stream-json input (like Claude Code), add the flag
       // The prompt will be sent via stdin as a JSON message with image data
+      // Also used for SSH remote execution to avoid command line length limits
       finalArgs = [...args, '--input-format', 'stream-json'];
     } else if (hasImages && prompt && imageArgs) {
       // For agents that use file-based image args (like Codex, OpenCode),
@@ -1349,13 +1350,14 @@ export class ProcessManager extends EventEmitter {
         });
 
         // Handle stdin for batch mode
-        if (isStreamJsonMode && prompt && images) {
-          // Stream-json mode with images: send the message via stdin
-          const streamJsonMessage = buildStreamJsonMessage(prompt, images);
-          logger.debug('[ProcessManager] Sending stream-json message with images', 'ProcessManager', {
+        if (isStreamJsonMode && prompt && (images || sshRemoteConfig)) {
+          // Stream-json mode with images or SSH: send the message via stdin
+          const streamJsonMessage = buildStreamJsonMessage(prompt, images || []);
+          logger.debug('[ProcessManager] Sending stream-json message', 'ProcessManager', {
             sessionId,
             messageLength: streamJsonMessage.length,
-            imageCount: images.length
+            imageCount: (images || []).length,
+            isSsh: !!sshRemoteConfig
           });
           childProcess.stdin?.write(streamJsonMessage + '\n');
           childProcess.stdin?.end(); // Signal end of input
