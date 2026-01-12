@@ -71,7 +71,7 @@ interface ProcessConfig {
   contextWindow?: number; // Configured context window size (0 or undefined = not configured, hide UI)
   customEnvVars?: Record<string, string>; // Custom environment variables from user configuration
   noPromptSeparator?: boolean; // If true, don't add '--' before the prompt (e.g., OpenCode doesn't support it)
-  sshRemoteConfig?: SshRemoteConfig; // SSH remote configuration for remote execution
+  sshRemoteConfig?: SshRemoteConfig | null; // SSH remote configuration for remote execution
   // SSH remote execution context
   sshRemoteId?: string; // ID of SSH remote being used (for SSH-specific error messages)
   sshRemoteHost?: string; // Hostname of SSH remote (for error messages)
