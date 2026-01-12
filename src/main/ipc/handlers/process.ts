@@ -137,6 +137,13 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           containsHash: config.prompt.includes('#'),
           containsNewline: config.prompt.includes('\n'),
         } : undefined,
+        // SSH remote config logging
+        hasSessionSshRemoteConfig: !!config.sessionSshRemoteConfig,
+        sessionSshRemoteConfig: config.sessionSshRemoteConfig ? {
+          enabled: config.sessionSshRemoteConfig.enabled,
+          remoteId: config.sessionSshRemoteConfig.remoteId,
+          hasWorkingDirOverride: !!config.sessionSshRemoteConfig.workingDirOverride,
+        } : null,
       });
       let finalArgs = buildAgentArgs(agent, {
         baseArgs: config.args,
@@ -232,9 +239,18 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 
       // Only consider SSH remote for non-terminal AI agent sessions
       // SSH is session-level ONLY - no agent-level or global defaults
+      // Log SSH evaluation on Windows for debugging
+      if (isWindows) {
+        logger.info(`Evaluating SSH remote config`, LOG_CONTEXT, {
+          toolType: config.toolType,
+          isTerminal: config.toolType === 'terminal',
+          hasSessionSshRemoteConfig: !!config.sessionSshRemoteConfig,
+          willUseSsh: config.toolType !== 'terminal' && !!config.sessionSshRemoteConfig,
+        });
+      }
       if (config.toolType !== 'terminal' && config.sessionSshRemoteConfig) {
         // Session-level SSH config provided - resolve and use it
-        logger.debug(`Using session-level SSH config`, LOG_CONTEXT, {
+        logger.info(`Using session-level SSH config`, LOG_CONTEXT, {
           sessionId: config.sessionId,
           enabled: config.sessionSshRemoteConfig.enabled,
           remoteId: config.sessionSshRemoteConfig.remoteId,
