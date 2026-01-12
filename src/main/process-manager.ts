@@ -742,13 +742,20 @@ export class ProcessManager extends EventEmitter {
         // Get the output parser for this agent type (if available)
         const outputParser = getOutputParser(toolType) || undefined;
 
-        logger.debug('[ProcessManager] Output parser lookup', 'ProcessManager', {
+        // Use INFO level on Windows for stdin debugging
+        const streamDebugLogFn = isWindows ? logger.info.bind(logger) : logger.debug.bind(logger);
+        streamDebugLogFn('[ProcessManager] Stream-json detection', 'ProcessManager', {
           sessionId,
           toolType,
           hasParser: !!outputParser,
           parserId: outputParser?.agentId,
           isStreamJsonMode,
           isBatchMode,
+          hasPrompt: !!prompt,
+          promptLength: prompt?.length,
+          hasSshRemoteConfig: !!sshRemoteConfig,
+          hasImages: !!images,
+          imageCount: images?.length || 0,
           // Include args preview for SSH debugging (last arg often contains wrapped command)
           argsPreview: finalArgs.length > 0 ? finalArgs[finalArgs.length - 1]?.substring(0, 200) : undefined,
         });
@@ -1351,21 +1358,35 @@ export class ProcessManager extends EventEmitter {
         });
 
         // Handle stdin for batch mode
+        // Use INFO level on Windows for visibility
+        const stdinLogFn = isWindows ? logger.info.bind(logger) : logger.debug.bind(logger);
+
+        stdinLogFn('[ProcessManager] Stdin decision', 'ProcessManager', {
+          sessionId,
+          isStreamJsonMode,
+          hasPrompt: !!prompt,
+          hasImages: !!images,
+          hasSshRemoteConfig: !!sshRemoteConfig,
+          willSendViaStdin: isStreamJsonMode && !!prompt && (!!images || !!sshRemoteConfig),
+          isBatchMode,
+        });
+
         if (isStreamJsonMode && prompt && (images || sshRemoteConfig)) {
           // Stream-json mode with images or SSH: send the message via stdin
           const streamJsonMessage = buildStreamJsonMessage(prompt, images || []);
-          logger.debug('[ProcessManager] Sending stream-json message', 'ProcessManager', {
+          stdinLogFn('[ProcessManager] Sending stream-json message', 'ProcessManager', {
             sessionId,
             messageLength: streamJsonMessage.length,
             imageCount: (images || []).length,
-            isSsh: !!sshRemoteConfig
+            isSsh: !!sshRemoteConfig,
+            hasStdin: !!childProcess.stdin,
           });
           childProcess.stdin?.write(streamJsonMessage + '\n');
           childProcess.stdin?.end(); // Signal end of input
         } else if (isBatchMode) {
           // Regular batch mode: close stdin immediately since prompt is passed as CLI arg
           // Some CLIs wait for stdin to close before processing
-          logger.debug('[ProcessManager] Closing stdin for batch mode', 'ProcessManager', { sessionId });
+          stdinLogFn('[ProcessManager] Closing stdin for batch mode', 'ProcessManager', { sessionId });
           childProcess.stdin?.end();
         }
 
