@@ -744,6 +744,16 @@ export function ConversationScreen({ theme, showThinking, setShowThinking }: Con
       return;
     }
 
+    // Log message send to main process for debugging
+    console.log('[Wizard] User sending message:', {
+      messageLength: trimmedInput.length,
+      selectedAgent: state.selectedAgent,
+      directoryPath: state.directoryPath,
+      hasRemoteSsh: !!state.sessionSshRemoteConfig?.enabled,
+      remoteId: state.sessionSshRemoteConfig?.remoteId || null,
+      conversationHistoryLength: state.conversationHistory.length,
+    });
+
     // Set immediate guard before any async work
     isSendingRef.current = true;
 
