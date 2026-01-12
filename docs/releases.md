@@ -15,12 +15,13 @@ Maestro can update itself automatically! This feature was introduced in **v0.8.7
 
 ## v0.14.x
 
-**Latest: v0.14.5-test11** | Released January 12, 2026
+**Latest: v0.14.5-test12** | Released January 12, 2026
 
 
 
 ### Previous Releases in this Series
 
+- **v0.14.5-test11** (January 12, 2026)
 - **v0.14.5-test9** (January 12, 2026)
 - **v0.14.5-test8** (January 12, 2026)
 - **v0.14.5-test7** (January 12, 2026)
