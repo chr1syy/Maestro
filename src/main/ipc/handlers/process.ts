@@ -341,6 +341,7 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
         // Stats tracking: use cwd as projectPath if not explicitly provided
         projectPath: config.cwd,
         // SSH remote context (for SSH-specific error messages)
+        sshRemoteConfig: sshRemoteUsed,
         sshRemoteId: sshRemoteUsed?.id,
         sshRemoteHost: sshRemoteUsed?.host,
       });
