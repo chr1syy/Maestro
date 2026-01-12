@@ -37,6 +37,12 @@ export interface ConversationConfig {
   projectName: string;
   /** Existing Auto Run documents (when continuing from previous session) */
   existingDocs?: ExistingDocument[];
+  /** SSH remote configuration for remote agent execution */
+  sessionSshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -112,6 +118,12 @@ interface ConversationSession {
   toolExecutionListenerCleanup?: () => void;
   /** Timeout ID for response timeout (for cleanup) */
   responseTimeoutId?: NodeJS.Timeout;
+  /** SSH remote configuration for remote execution */
+  sessionSshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -162,6 +174,7 @@ class ConversationManager {
       isActive: true,
       systemPrompt,
       outputBuffer: '',
+      sessionSshRemoteConfig: config.sessionSshRemoteConfig,
     };
 
     // Log conversation start
@@ -172,6 +185,8 @@ class ConversationManager {
       projectName: config.projectName,
       hasExistingDocs: !!config.existingDocs,
       existingDocsCount: config.existingDocs?.length || 0,
+      hasRemoteSsh: !!config.sessionSshRemoteConfig?.enabled,
+      remoteId: config.sessionSshRemoteConfig?.remoteId || null,
     });
 
     return sessionId;
@@ -482,6 +497,8 @@ class ConversationManager {
         agentCommand: agent.command,
         args: argsForSpawn,
         cwd: this.session!.directoryPath,
+        hasRemoteSsh: !!this.session!.sessionSshRemoteConfig?.enabled,
+        remoteId: this.session!.sessionSshRemoteConfig?.remoteId || null,
       });
 
       window.maestro.process
@@ -492,6 +509,7 @@ class ConversationManager {
           command: commandToUse,
           args: argsForSpawn,
           prompt: prompt,
+          sessionSshRemoteConfig: this.session!.sessionSshRemoteConfig,
         })
         .then(() => {
           wizardDebugLogger.log('spawn', 'Agent process spawned successfully', {
