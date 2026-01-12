@@ -25,6 +25,12 @@ export interface GenerationConfig {
   conversationHistory: WizardMessage[];
   /** Optional subfolder within Auto Run Docs (e.g., "Initiation") */
   subfolder?: string;
+  /** SSH remote configuration for remote agent execution */
+  sessionSshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -1025,6 +1031,8 @@ class PhaseGenerator {
         agentCommand: agent.command,
         argsCount: argsForSpawn.length,
         promptLength: prompt.length,
+        hasRemoteSsh: !!config.sessionSshRemoteConfig?.enabled,
+        remoteId: config.sessionSshRemoteConfig?.remoteId || null,
       });
       window.maestro.process
         .spawn({
@@ -1034,6 +1042,7 @@ class PhaseGenerator {
           command: commandToUse,
           args: argsForSpawn,
           prompt,
+          sessionSshRemoteConfig: config.sessionSshRemoteConfig,
         })
         .then(() => {
           console.log('[PhaseGenerator] Agent spawned successfully');
