@@ -234,14 +234,20 @@ class ConversationManager {
 
     try {
       // Get the agent configuration
+      // Pass SSH remote ID if SSH is enabled for this session
+      const sshRemoteId = this.session.sessionSshRemoteConfig?.enabled
+        ? this.session.sessionSshRemoteConfig.remoteId
+        : undefined;
+
       wizardDebugLogger.log('info', 'Fetching agent configuration', {
         agentType: this.session.agentType,
         sessionId: this.session.sessionId,
         hasRemoteSsh: !!this.session.sessionSshRemoteConfig?.enabled,
         remoteId: this.session.sessionSshRemoteConfig?.remoteId || null,
+        passingSshRemoteId: sshRemoteId || null,
       });
 
-      const agent = await window.maestro.agents.get(this.session.agentType);
+      const agent = await window.maestro.agents.get(this.session.agentType, sshRemoteId || undefined);
 
       // Log to main process (writes to maestro-debug.log on Windows)
       console.log('[Wizard] Agent fetch result:', {
