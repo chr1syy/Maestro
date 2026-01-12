@@ -112,6 +112,14 @@ async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
     try {
       const sshCommand = await buildSshCommand(sshRemote, remoteOptions);
 
+      
+      // Log what we're about to execute
+      logger.info(`Executing SSH detection command for '${agentDef.binaryName}'`, LOG_CONTEXT, {
+        command: sshCommand.command,
+        args: sshCommand.args,
+        fullCommand: `${sshCommand.command} ${sshCommand.args.join(' ')}`,
+      });
+
       // Execute with timeout
       const resultPromise = execFileNoThrow(sshCommand.command, sshCommand.args);
       const timeoutPromise = new Promise<{ exitCode: number; stdout: string; stderr: string }>((_, reject) => {
@@ -119,6 +127,15 @@ async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
       });
 
       const result = await Promise.race([resultPromise, timeoutPromise]);
+
+      // Log the actual SSH command output for debugging
+      logger.info(`SSH command result for '${agentDef.binaryName}'`, LOG_CONTEXT, {
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+      });
 
       // Check for SSH connection errors in stderr
       if (result.stderr && (
