@@ -15,6 +15,7 @@ import { getSshRemoteConfig, createSshRemoteStoreAdapter } from '../../utils/ssh
 import { buildSshCommand } from '../../utils/ssh-command-builder';
 import type { SshRemoteConfig } from '../../../shared/types';
 import { powerManager } from '../../power-manager';
+import { getAgentCapabilities } from '../../agent-capabilities';
 
 const LOG_CONTEXT = '[ProcessManager]';
 
@@ -236,6 +237,7 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
       let commandToSpawn = config.command;
       let argsToSpawn = finalArgs;
       let sshRemoteUsed: SshRemoteConfig | null = null;
+      let shouldSendPromptViaStdin = false;
 
       // Only consider SSH remote for non-terminal AI agent sessions
       // SSH is session-level ONLY - no agent-level or global defaults
@@ -266,17 +268,28 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           // SSH remote is configured - wrap the command for remote execution
           sshRemoteUsed = sshResult.config;
 
-          // For SSH execution, we need to include the prompt in the args here
-          // because ProcessManager.spawn() won't add it (we pass prompt: undefined for SSH)
-          // Use promptArgs if available (e.g., OpenCode -p), otherwise use positional arg
+          // For SSH execution with stream-json capable agents (like Claude Code),
+          // we send the prompt via stdin instead of as a CLI arg to avoid command
+          // line length limits and escaping issues. For other agents, we include
+          // the prompt in the args as before.
+          const capabilities = getAgentCapabilities(config.toolType);
           let sshArgs = finalArgs;
+
           if (config.prompt) {
-            if (agent?.promptArgs) {
-              sshArgs = [...finalArgs, ...agent.promptArgs(config.prompt)];
-            } else if (agent?.noPromptSeparator) {
-              sshArgs = [...finalArgs, config.prompt];
+            // If agent supports stream-json input, send prompt via stdin
+            // ProcessManager will detect this and send the prompt as a JSON message
+            if (capabilities.supportsStreamJsonInput) {
+              shouldSendPromptViaStdin = true;
+              // Don't add prompt to args - it will be sent via stdin
             } else {
-              sshArgs = [...finalArgs, '--', config.prompt];
+              // For agents that don't support stream-json, add prompt to args
+              if (agent?.promptArgs) {
+                sshArgs = [...finalArgs, ...agent.promptArgs(config.prompt)];
+              } else if (agent?.noPromptSeparator) {
+                sshArgs = [...finalArgs, config.prompt];
+              } else {
+                sshArgs = [...finalArgs, '--', config.prompt];
+              }
             }
           }
 
@@ -311,6 +324,7 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
             customPath: config.sessionCustomPath || null,
             hasCustomEnvVars: !!effectiveCustomEnvVars && Object.keys(effectiveCustomEnvVars).length > 0,
             sshCommand: `${sshCommand.command} ${sshCommand.args.join(' ')}`,
+            promptViaStdin: shouldSendPromptViaStdin,
           });
         }
       }
@@ -326,9 +340,10 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
         // When using SSH, disable PTY (SSH provides its own terminal handling)
         // and env vars are passed via the remote command string
         requiresPty: sshRemoteUsed ? false : agent?.requiresPty,
-        // When using SSH, the prompt was already added to sshArgs above before
-        // building the SSH command, so don't let ProcessManager add it again
-        prompt: sshRemoteUsed ? undefined : config.prompt,
+        // When using SSH with stream-json capable agents, pass the prompt so
+        // ProcessManager can send it via stdin. For other SSH cases, prompt was
+        // already added to sshArgs, so pass undefined to prevent double-adding.
+        prompt: sshRemoteUsed && shouldSendPromptViaStdin ? config.prompt : sshRemoteUsed ? undefined : config.prompt,
         shell: shellToUse,
         shellArgs: shellArgsStr,         // Shell-specific CLI args (for terminal sessions)
         shellEnvVars: shellEnvVars,      // Shell-specific env vars (for terminal sessions)
