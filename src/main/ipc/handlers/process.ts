@@ -280,7 +280,8 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
             // ProcessManager will detect this and send the prompt as a JSON message
             if (capabilities.supportsStreamJsonInput) {
               shouldSendPromptViaStdin = true;
-              // Don't add prompt to args - it will be sent via stdin
+              // Add --input-format stream-json flag so Claude knows to read from stdin
+              sshArgs = [...finalArgs, '--input-format', 'stream-json'];
             } else {
               // For agents that don't support stream-json, add prompt to args
               if (agent?.promptArgs) {
