@@ -719,8 +719,7 @@ jobs:
           url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
           color: 0x58B09C
 
-  # Sync release notes to docs after release is published
-  sync-docs:
+
     needs: release
     runs-on: ubuntu-latest
     if: always() && needs.release.result == 'success'
