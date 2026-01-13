@@ -233,29 +233,61 @@ class ConversationManager {
     try {
       // Get the agent configuration
       const agent = await window.maestro.agents.get(this.session.agentType);
-      if (!agent || !agent.available) {
-        const error = `Agent ${this.session.agentType} is not available`;
-        wizardDebugLogger.log('error', 'Agent not available', {
+
+      // For SSH remote sessions, skip the availability check since we're executing remotely
+      // The agent detector checks for binaries locally, but we need to execute on the remote host
+      const isRemoteSession = this.session.sshRemoteConfig?.enabled && this.session.sshRemoteConfig?.remoteId;
+
+      if (!agent) {
+        const error = `Agent ${this.session.agentType} configuration not found`;
+        wizardDebugLogger.log('error', 'Agent config not found', {
           agentType: this.session.agentType,
-          agent: agent ? {
+        });
+        return {
+          success: false,
+          error,
+        };
+      }
+
+      // Only check availability for local sessions
+      if (!isRemoteSession && !agent.available) {
+        const error = `Agent ${this.session.agentType} is not available locally`;
+        wizardDebugLogger.log('error', 'Agent not available locally', {
+          agentType: this.session.agentType,
+          agent: {
             available: agent.available,
             path: agent.path,
             command: agent.command,
             customPath: (agent as any).customPath,
-          } : null,
+          },
         });
-        // Also log to console for immediate debugging
-        console.error('[Wizard] Agent not available:', {
+        console.error('[Wizard] Agent not available locally:', {
           agentType: this.session.agentType,
-          agentAvailable: agent?.available,
-          agentPath: agent?.path,
-          agentCommand: agent?.command,
+          agentAvailable: agent.available,
+          agentPath: agent.path,
+          agentCommand: agent.command,
           agentCustomPath: (agent as any)?.customPath,
         });
         return {
           success: false,
           error,
         };
+      }
+
+      // For remote sessions, log that we're skipping the availability check
+      if (isRemoteSession) {
+        wizardDebugLogger.log('info', 'Executing agent on SSH remote (skipping local availability check)', {
+          agentType: this.session.agentType,
+          remoteId: this.session.sshRemoteConfig?.remoteId,
+          agentCommand: agent.command,
+          agentPath: agent.path,
+          agentCustomPath: (agent as any).customPath,
+        });
+        console.log('[Wizard] Executing agent on SSH remote:', {
+          agentType: this.session.agentType,
+          remoteId: this.session.sshRemoteConfig?.remoteId,
+          agentCommand: agent.command,
+        });
       }
 
       // Build the full prompt with conversation context
