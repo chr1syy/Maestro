@@ -253,8 +253,14 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           // For SSH execution, we need to include the prompt in the args here
           // because ProcessManager.spawn() won't add it (we pass prompt: undefined for SSH)
           // Use promptArgs if available (e.g., OpenCode -p), otherwise use positional arg
+          //
+          // IMPORTANT: For large prompts (>4000 chars), don't embed in command line to avoid
+          // Windows command line length limits (~8191 chars). SSH wrapping adds significant overhead.
+          // Instead, add --input-format stream-json and let ProcessManager send via stdin.
+          const isLargePrompt = config.prompt && config.prompt.length > 4000;
           let sshArgs = finalArgs;
-          if (config.prompt) {
+          if (config.prompt && !isLargePrompt) {
+            // Small prompt - embed in command line as usual
             if (agent?.promptArgs) {
               sshArgs = [...finalArgs, ...agent.promptArgs(config.prompt)];
             } else if (agent?.noPromptSeparator) {
@@ -262,6 +268,15 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
             } else {
               sshArgs = [...finalArgs, '--', config.prompt];
             }
+          } else if (config.prompt && isLargePrompt) {
+            // Large prompt - use stdin mode
+            // Add --input-format stream-json flag so agent reads from stdin
+            sshArgs = [...finalArgs, '--input-format', 'stream-json'];
+            logger.info(`Using stdin for large prompt in SSH remote execution`, LOG_CONTEXT, {
+              sessionId: config.sessionId,
+              promptLength: config.prompt.length,
+              reason: 'avoid-command-line-length-limit',
+            });
           }
 
           // Build the SSH command that wraps the agent execution
@@ -329,9 +344,9 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
         // When using SSH, disable PTY (SSH provides its own terminal handling)
         // and env vars are passed via the remote command string
         requiresPty: sshRemoteUsed ? false : agent?.requiresPty,
-        // When using SSH, the prompt was already added to sshArgs above before
-        // building the SSH command, so don't let ProcessManager add it again
-        prompt: sshRemoteUsed ? undefined : config.prompt,
+        // When using SSH with small prompts, the prompt was already added to sshArgs above
+        // For large prompts, pass it to ProcessManager so it can send via stdin
+        prompt: (sshRemoteUsed && config.prompt && config.prompt.length > 4000) ? config.prompt : (sshRemoteUsed ? undefined : config.prompt),
         shell: shellToUse,
         shellArgs: shellArgsStr,         // Shell-specific CLI args (for terminal sessions)
         shellEnvVars: shellEnvVars,      // Shell-specific env vars (for terminal sessions)
