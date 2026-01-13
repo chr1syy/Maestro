@@ -284,6 +284,17 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
       const agentDetector = requireDependency(getAgentDetector, 'Agent detector');
       logger.debug(`Getting agent: ${agentId}`, LOG_CONTEXT);
       const agent = await agentDetector.getAgent(agentId);
+
+      // Debug logging for agent availability
+      logger.debug(`Agent retrieved: ${agentId}`, LOG_CONTEXT, {
+        available: agent?.available,
+        hasPath: !!agent?.path,
+        path: agent?.path,
+        command: agent?.command,
+        hasCustomPath: !!agent?.customPath,
+        customPath: agent?.customPath,
+      });
+
       // Strip argBuilder functions before sending over IPC
       return stripAgentFunctions(agent);
     })
