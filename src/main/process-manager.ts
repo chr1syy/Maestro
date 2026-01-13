@@ -377,12 +377,16 @@ export class ProcessManager extends EventEmitter {
       finalArgs = args;
     }
 
+    // Detect if this is an SSH command for enhanced debugging
+    const isSshCommand = command === 'ssh' || command.endsWith('/ssh') || command.endsWith('\\ssh.exe');
+
     // Log spawn config - use INFO level on Windows for easier debugging
     const spawnConfigLogFn = isWindows ? logger.info.bind(logger) : logger.debug.bind(logger);
     spawnConfigLogFn('[ProcessManager] spawn() config', 'ProcessManager', {
       sessionId,
       toolType,
       platform: process.platform,
+      isSshCommand,
       hasPrompt: !!prompt,
       promptLength: prompt?.length,
       // On Windows, log first/last 100 chars of prompt to help debug truncation issues
@@ -398,6 +402,24 @@ export class ProcessManager extends EventEmitter {
       baseArgsCount: args.length,
       finalArgsCount: finalArgs.length,
     });
+
+    // SSH-specific debug logging for remote execution diagnostics
+    if (isSshCommand) {
+      logger.debug('[ProcessManager] SSH command spawn details', 'ProcessManager', {
+        sessionId,
+        toolType,
+        sshCommand: command,
+        sshArgsCount: finalArgs.length,
+        sshArgsPreview: finalArgs.slice(0, -1), // All args except the last (which is the wrapped command)
+        remoteCommandArg: finalArgs[finalArgs.length - 1], // The wrapped remote command string
+        sshRemoteId: config.sshRemoteId,
+        sshRemoteHost: config.sshRemoteHost,
+        // Full command for debugging
+        fullSshCommand: `${command} ${finalArgs.map(arg =>
+          arg.includes(' ') ? `'${arg.replace(/'/g, "'\\''")}'` : arg
+        ).join(' ')}`,
+      });
+    }
 
     // Determine if this should use a PTY:
     // - If toolType is 'terminal', always use PTY for full shell emulation
@@ -1177,6 +1199,26 @@ export class ProcessManager extends EventEmitter {
             jsonBufferLength: managedProcess.jsonBuffer?.length || 0,
             jsonBufferPreview: managedProcess.jsonBuffer?.substring(0, 200)
           });
+
+          // SSH-specific debug logging for remote execution diagnostics
+          if (managedProcess.sshRemoteId) {
+            logger.debug('[ProcessManager] SSH process exit details', 'ProcessManager', {
+              sessionId,
+              exitCode: code,
+              sshRemoteId: managedProcess.sshRemoteId,
+              sshRemoteHost: managedProcess.sshRemoteHost,
+              command: managedProcess.command,
+              argsCount: managedProcess.args?.length || 0,
+              stderrLength: managedProcess.stderrBuffer?.length || 0,
+              stdoutLength: managedProcess.stdoutBuffer?.length || 0,
+              // Show stderr content for debugging (first 500 chars)
+              stderrPreview: managedProcess.stderrBuffer?.substring(0, 500) || '(empty)',
+              // Show stdout content for debugging (first 500 chars)
+              stdoutPreview: managedProcess.stdoutBuffer?.substring(0, 500) || '(empty)',
+              // For non-zero exit codes, show full command that was executed
+              fullCommand: code !== 0 ? `${managedProcess.command} ${managedProcess.args?.join(' ') || ''}` : undefined,
+            });
+          }
 
           // Debug: Log exit details for group chat sessions
           if (sessionId.includes('group-chat-')) {

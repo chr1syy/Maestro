@@ -308,6 +308,25 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
             hasCustomEnvVars: !!effectiveCustomEnvVars && Object.keys(effectiveCustomEnvVars).length > 0,
             sshCommand: `${sshCommand.command} ${sshCommand.args.join(' ')}`,
           });
+
+          // Detailed debug logging to diagnose SSH command execution issues
+          logger.debug(`SSH command details for debugging`, LOG_CONTEXT, {
+            sessionId: config.sessionId,
+            toolType: config.toolType,
+            sshBinary: sshCommand.command,
+            sshArgsCount: sshCommand.args.length,
+            sshArgsArray: sshCommand.args,
+            // Show the last arg which contains the wrapped remote command
+            remoteCommandString: sshCommand.args[sshCommand.args.length - 1],
+            // Show the agent command that will execute remotely
+            agentBinary: remoteCommand,
+            agentArgs: sshArgs,
+            agentCwd: config.cwd,
+            // Full invocation for copy-paste debugging
+            fullSshInvocation: `${sshCommand.command} ${sshCommand.args.map(arg =>
+              arg.includes(' ') ? `'${arg}'` : arg
+            ).join(' ')}`,
+          });
         }
       }
 

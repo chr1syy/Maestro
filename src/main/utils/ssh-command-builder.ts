@@ -274,11 +274,19 @@ export async function buildSshCommand(
   args.push(wrappedCommand);
 
   // Debug logging to trace the exact command being built
-  logger.info('Built SSH command', '[ssh-command-builder]', {
+  logger.debug('Built SSH command', '[ssh-command-builder]', {
+    host: config.host,
+    username: config.username,
+    port: config.port,
+    useSshConfig: config.useSshConfig,
+    privateKeyPath: config.privateKeyPath ? '***configured***' : undefined,
     remoteCommand,
     wrappedCommand,
     sshPath,
+    sshArgs: args,
     fullCommand: `${sshPath} ${args.join(' ')}`,
+    // Show the exact command string that will execute on the remote
+    remoteExecutionString: wrappedCommand,
   });
 
   return {

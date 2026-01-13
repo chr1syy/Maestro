@@ -37,6 +37,12 @@ export interface ConversationConfig {
   projectName: string;
   /** Existing Auto Run documents (when continuing from previous session) */
   existingDocs?: ExistingDocument[];
+  /** SSH remote configuration (for remote execution) */
+  sshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -112,6 +118,12 @@ interface ConversationSession {
   toolExecutionListenerCleanup?: () => void;
   /** Timeout ID for response timeout (for cleanup) */
   responseTimeoutId?: NodeJS.Timeout;
+  /** SSH remote configuration (for remote execution) */
+  sshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -162,6 +174,7 @@ class ConversationManager {
       isActive: true,
       systemPrompt,
       outputBuffer: '',
+      sshRemoteConfig: config.sshRemoteConfig,
     };
 
     // Log conversation start
@@ -492,6 +505,8 @@ class ConversationManager {
           command: commandToUse,
           args: argsForSpawn,
           prompt: prompt,
+          // Pass SSH configuration for remote execution
+          sessionSshRemoteConfig: this.session!.sshRemoteConfig,
         })
         .then(() => {
           wizardDebugLogger.log('spawn', 'Agent process spawned successfully', {
