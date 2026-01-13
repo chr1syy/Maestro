@@ -15,25 +15,9 @@ Maestro can update itself automatically! This feature was introduced in **v0.8.7
 
 ## v0.14.x
 
-**Latest: v0.14.5-15** | Released January 13, 2026
+**Latest: v0.14.5-test-ssh-fix-1** | Released January 13, 2026
 
 
-
-### Previous Releases in this Series
-
-- **v0.14.5-test14** (January 12, 2026)
-- **v0.14.5-test13** (January 12, 2026)
-- **v0.14.5-test12** (January 12, 2026)
-- **v0.14.5-test11** (January 12, 2026)
-- **v0.14.5-test9** (January 12, 2026)
-- **v0.14.5-test8** (January 12, 2026)
-- **v0.14.5-test7** (January 12, 2026)
-- **v0.14.5-test6** (January 12, 2026)
-- **v0.14.5-test5** (January 1, 1)
-- **v0.14.5-test4** (January 12, 2026)
-- **v0.14.5-test3** (January 12, 2026)
-- **v0.14.5-test2** (January 12, 2026)
-- **v0.14.5-test** (January 11, 2026)
 
 ---
 
