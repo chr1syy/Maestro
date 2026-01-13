@@ -18,17 +18,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            platform: mac
-            arch: universal
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          # ARM64 Linux requires native ARM64 runner for node-pty native module
-          # Cross-compilation from x64 doesn't work: https://github.com/electron-userland/electron-builder/issues/7608
-          - os: ubuntu-24.04-arm
-            platform: linux-arm64
-            arch: arm64
           - os: windows-latest
             platform: win
             arch: x64
