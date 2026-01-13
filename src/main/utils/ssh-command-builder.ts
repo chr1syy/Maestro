@@ -36,6 +36,8 @@ export interface RemoteCommandOptions {
   cwd?: string;
   /** Environment variables to set on the remote (optional) */
   env?: Record<string, string>;
+  /** Indicates the caller will send input via stdin to the remote command (optional) */
+  useStdin?: boolean;
 }
 
 /**
@@ -47,7 +49,7 @@ const DEFAULT_SSH_OPTIONS: Record<string, string> = {
   StrictHostKeyChecking: 'accept-new', // Auto-accept new host keys
   ConnectTimeout: '10', // Connection timeout in seconds
   ClearAllForwardings: 'yes', // Disable port forwarding from SSH config (avoids "Address already in use" errors)
-  RequestTTY: 'force', // Force TTY allocation - required for Claude Code's --print mode to produce output
+  RequestTTY: 'no', // Default: do NOT request a TTY. We only force a TTY for specific remote modes (e.g., --print)
   LogLevel: 'ERROR', // Suppress SSH warnings like "Pseudo-terminal will not be allocated..."
 };
 
@@ -99,13 +101,19 @@ export function buildRemoteCommand(options: RemoteCommandOptions): string {
   // Build the command with arguments
   const commandWithArgs = buildShellCommand(command, args);
 
+  // If command expects JSON via stdin (stream-json), use exec to replace the
+  // shell process so stdin is delivered directly to the agent binary and no
+  // intermediate shell produces control sequences that could corrupt the stream.
+  const hasStreamJsonInput = options.useStdin ? true : (Array.isArray(args) && args.includes('--input-format') && args.includes('stream-json'));
+  const finalCommandWithArgs = hasStreamJsonInput ? `exec ${commandWithArgs}` : commandWithArgs;
+
   // Combine env exports with command
   let fullCommand: string;
   if (envExports.length > 0) {
     // Prepend env vars inline: VAR1='val1' VAR2='val2' command args
-    fullCommand = `${envExports.join(' ')} ${commandWithArgs}`;
+    fullCommand = `${envExports.join(' ')} ${finalCommandWithArgs}`;
   } else {
-    fullCommand = commandWithArgs;
+    fullCommand = finalCommandWithArgs;
   }
 
   parts.push(fullCommand);
@@ -175,9 +183,29 @@ export async function buildSshCommand(
   // Resolve the SSH binary path (handles packaged Electron apps where PATH is limited)
   const sshPath = await resolveSshPath();
 
-  // Force TTY allocation - required for Claude Code's --print mode to produce output
-  // Without a TTY, Claude Code with --print hangs indefinitely
-  args.push('-tt');
+  // Decide whether we need to force a TTY for the remote command.
+  // Historically we forced a TTY for Claude Code when running with `--print`.
+  // However, for stream-json input (sending JSON via stdin) a TTY injects terminal
+  // control sequences that corrupt the stream. Only enable forced TTY for cases
+  // that explicitly require it (e.g., `--print` without `--input-format stream-json`).
+  const remoteArgs = remoteOptions.args || [];
+  const hasPrintFlag = remoteArgs.includes('--print');
+  const hasStreamJsonInput = remoteOptions.useStdin ? true : (remoteArgs.includes('--input-format') && remoteArgs.includes('stream-json'));
+  const forceTty = Boolean(hasPrintFlag && !hasStreamJsonInput);
+
+  // Log the decision so callers can debug why a TTY was or was not forced
+  logger.debug('SSH TTY decision', '[ssh-command-builder]', {
+    host: config.host,
+    useStdinFlag: !!remoteOptions.useStdin,
+    hasPrintFlag,
+    hasStreamJsonInput,
+    forceTty,
+  });
+
+  if (forceTty) {
+    // -tt must come first for reliable forced allocation in some SSH implementations
+    args.push('-tt');
+  }
 
   // When using SSH config, we let SSH handle authentication settings
   // Only add explicit overrides if provided
@@ -192,9 +220,15 @@ export async function buildSshCommand(
   }
 
   // Default SSH options for non-interactive operation
-  // These are always needed to ensure BatchMode behavior
+  // These are always needed to ensure BatchMode behavior. If `forceTty` is true,
+  // override RequestTTY to `force` so SSH will allocate a TTY even in non-interactive contexts.
   for (const [key, value] of Object.entries(DEFAULT_SSH_OPTIONS)) {
-    args.push('-o', `${key}=${value}`);
+    // If we will force a TTY for this command, override the RequestTTY option
+    if (key === 'RequestTTY' && forceTty) {
+      args.push('-o', `${key}=force`);
+    } else {
+      args.push('-o', `${key}=${value}`);
+    }
   }
 
   // Port specification - only add if not default and not using SSH config
