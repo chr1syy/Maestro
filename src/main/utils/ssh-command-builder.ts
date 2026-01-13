@@ -238,11 +238,10 @@ export async function buildSshCommand(
   });
 
   // Wrap the command to execute via the user's login shell.
-  // $SHELL -ilc ensures the user's full PATH (including homebrew, nvm, etc.) is available.
-  // -i forces interactive mode (critical for .bashrc to not bail out)
+  // bash -lc ensures the user's full PATH (including homebrew, nvm, etc.) is available.
   // -l loads login profile for PATH
   // -c executes the command
-  // Using $SHELL respects the user's configured shell (bash, zsh, etc.)
+  // exec replaces bash with the command, ensuring stdin/stdout/stderr are properly connected
   //
   // WHY -i IS CRITICAL:
   // On Ubuntu (and many Linux distros), .bashrc has a guard at the top:
@@ -270,7 +269,8 @@ export async function buildSshCommand(
   // ~/.bash_profile or ~/.profile are available for non-interactive
   // remote commands, then source ~/.bashrc to cover interactive
   // additions that might also be present.
-  const wrappedCommand = `bash -lc "source ~/.bash_profile 2>/dev/null || source ~/.profile 2>/dev/null; source ~/.bashrc 2>/dev/null; ${escapedCommand}"`;
+  // Use 'exec' to replace bash with the command, ensuring stdin/stdout/stderr are properly forwarded.
+  const wrappedCommand = `bash -lc "source ~/.bash_profile 2>/dev/null || source ~/.profile 2>/dev/null; source ~/.bashrc 2>/dev/null; exec ${escapedCommand}"`;
   args.push(wrappedCommand);
 
   // Debug logging to trace the exact command being built
