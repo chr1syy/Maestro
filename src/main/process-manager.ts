@@ -328,15 +328,41 @@ export class ProcessManager extends EventEmitter {
     // For batch mode with images, use stream-json mode and send message via stdin
     // For batch mode without images, append prompt to args with -- separator (unless noPromptSeparator is true)
     // For agents with promptArgs (like OpenCode -p), use the promptArgs function to build prompt CLI args
+    //
+    // IMPORTANT: For large prompts (>4000 chars) or SSH remote execution, use stdin to avoid
+    // Windows command line length limits (~8191 chars). SSH wrapping adds significant overhead,
+    // so we need to be conservative with the threshold.
     const hasImages = images && images.length > 0;
     const capabilities = getAgentCapabilities(toolType);
+    const isLargePrompt = prompt && prompt.length > 4000;
+    const isSshRemote = !!config.sshRemoteId;
+    const useStdinForPrompt = (hasImages || isLargePrompt || isSshRemote) && prompt && capabilities.supportsStreamJsonInput;
     let finalArgs: string[];
     let tempImageFiles: string[] = [];
 
-    if (hasImages && prompt && capabilities.supportsStreamJsonInput) {
+    // Detect if we're spawning SSH (command is 'ssh' or ends with ssh binary name)
+    const isSshCommand = command === 'ssh' || command.endsWith('/ssh') || command.endsWith('\\ssh.exe');
+
+    if (useStdinForPrompt) {
       // For agents that support stream-json input (like Claude Code), add the flag
-      // The prompt will be sent via stdin as a JSON message with image data
-      finalArgs = [...args, '--input-format', 'stream-json'];
+      // The prompt will be sent via stdin as a JSON message (with or without image data)
+      // For SSH execution, the flag is already embedded in the SSH command string by the IPC handler
+      if (!isSshCommand) {
+        finalArgs = [...args, '--input-format', 'stream-json'];
+      } else {
+        finalArgs = args; // For SSH, args already contain the flag in the remote command string
+      }
+      if (hasImages || isLargePrompt || isSshRemote) {
+        logger.debug('[ProcessManager] Using stdin for prompt to avoid command line length limits', 'ProcessManager', {
+          sessionId,
+          hasImages,
+          promptLength: prompt?.length,
+          isLargePrompt,
+          isSshRemote,
+          isSshCommand,
+          sshRemoteId: config.sshRemoteId,
+        });
+      }
     } else if (hasImages && prompt && imageArgs) {
       // For agents that use file-based image args (like Codex, OpenCode),
       // save images to temp files and add CLI args
@@ -377,8 +403,7 @@ export class ProcessManager extends EventEmitter {
       finalArgs = args;
     }
 
-    // Detect if this is an SSH command for enhanced debugging
-    const isSshCommand = command === 'ssh' || command.endsWith('/ssh') || command.endsWith('\\ssh.exe');
+    // Note: isSshCommand is already declared earlier in the function (needed for stdin logic)
 
     // Log spawn config - use INFO level on Windows for easier debugging
     const spawnConfigLogFn = isWindows ? logger.info.bind(logger) : logger.debug.bind(logger);
@@ -1391,13 +1416,21 @@ export class ProcessManager extends EventEmitter {
         });
 
         // Handle stdin for batch mode
-        if (isStreamJsonMode && prompt && images) {
-          // Stream-json mode with images: send the message via stdin
-          const streamJsonMessage = buildStreamJsonMessage(prompt, images);
-          logger.debug('[ProcessManager] Sending stream-json message with images', 'ProcessManager', {
+        if (isStreamJsonMode && prompt) {
+          // Stream-json mode: send the message via stdin (with or without images)
+          // This is used for:
+          // 1. Prompts with images (always uses stdin)
+          // 2. Large prompts (>4000 chars) to avoid command line length limits
+          // 3. SSH remote execution (command line gets wrapped, so use stdin)
+          const streamJsonMessage = buildStreamJsonMessage(prompt, images || []);
+          logger.debug('[ProcessManager] Sending stream-json message via stdin', 'ProcessManager', {
             sessionId,
             messageLength: streamJsonMessage.length,
-            imageCount: images.length
+            imageCount: images?.length || 0,
+            promptLength: prompt.length,
+            reason: images && images.length > 0 ? 'has-images' :
+                    prompt.length > 4000 ? 'large-prompt' :
+                    isSshRemote ? 'ssh-remote' : 'default'
           });
           childProcess.stdin?.write(streamJsonMessage + '\n');
           childProcess.stdin?.end(); // Signal end of input
