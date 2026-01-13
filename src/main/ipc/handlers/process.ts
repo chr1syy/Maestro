@@ -287,6 +287,9 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           //    the remote shell's PATH resolve it. This avoids using local paths like
           //    '/opt/homebrew/bin/codex' which don't exist on the remote host.
           const remoteCommand = config.sessionCustomPath || agent?.binaryName || config.command;
+          // Decide whether we'll send input via stdin to the remote command
+          const useStdin = sshArgs.includes('--input-format') && sshArgs.includes('stream-json');
+
           const sshCommand = await buildSshCommand(sshResult.config, {
             command: remoteCommand,
             args: sshArgs,
@@ -294,6 +297,9 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
             cwd: config.cwd,
             // Pass custom environment variables to the remote command
             env: effectiveCustomEnvVars,
+            // Explicitly indicate whether stdin will be used so ssh-command-builder
+            // can avoid forcing a TTY for stream-json modes.
+            useStdin,
           });
 
           commandToSpawn = sshCommand.command;
