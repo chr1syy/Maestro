@@ -27,6 +27,7 @@ export function getExpandedEnv(): NodeJS.ProcessEnv {
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
     const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
     const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
 
     additionalPaths = [
       path.join(appData, 'npm'),
@@ -34,7 +35,12 @@ export function getExpandedEnv(): NodeJS.ProcessEnv {
       path.join(programFiles, 'cloudflared'),
       path.join(home, 'scoop', 'shims'),
       path.join(process.env.ChocolateyInstall || 'C:\\ProgramData\\chocolatey', 'bin'),
-      path.join(process.env.SystemRoot || 'C:\\Windows', 'System32'),
+      // Windows OpenSSH (built-in on Windows 10/11)
+      path.join(systemRoot, 'System32', 'OpenSSH'),
+      path.join(systemRoot, 'System32'),
+      // Git for Windows SSH
+      path.join(programFiles, 'Git', 'usr', 'bin'),
+      path.join(programFiles, 'Git', 'cmd'),
     ];
   } else {
     additionalPaths = [
@@ -207,6 +213,29 @@ export async function detectSshPath(): Promise<string | null> {
 
   if (result.exitCode === 0 && result.stdout.trim()) {
     sshPathCache = result.stdout.trim().split('\n')[0];
+  } else if (process.platform === 'win32') {
+    // Fallback: Check well-known Windows SSH locations directly
+    const fs = await import('fs');
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+
+    const wellKnownPaths = [
+      path.join(systemRoot, 'System32', 'OpenSSH', 'ssh.exe'),
+      path.join(programFiles, 'Git', 'usr', 'bin', 'ssh.exe'),
+      path.join(programFiles, 'OpenSSH', 'ssh.exe'),
+      path.join(programFiles, 'Git', 'cmd', 'ssh.exe'),
+    ];
+
+    for (const sshPath of wellKnownPaths) {
+      try {
+        if (fs.existsSync(sshPath)) {
+          sshPathCache = sshPath;
+          break;
+        }
+      } catch {
+        // Continue checking other paths
+      }
+    }
   }
 
   sshDetectionDone = true;
