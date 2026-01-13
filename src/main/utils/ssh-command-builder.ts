@@ -266,7 +266,11 @@ export async function buildSshCommand(
   //   SSH receives this as one argument, passes to remote shell
   //   The login shell runs with full PATH from /etc/profile, ~/.bash_profile, AND ~/.bashrc
   const escapedCommand = shellEscapeForDoubleQuotes(remoteCommand);
-  const wrappedCommand = `bash -lc "source ~/.bashrc 2>/dev/null; ${escapedCommand}"`;
+  // Source login/profile files first so PATH modifications made in
+  // ~/.bash_profile or ~/.profile are available for non-interactive
+  // remote commands, then source ~/.bashrc to cover interactive
+  // additions that might also be present.
+  const wrappedCommand = `bash -lc "source ~/.bash_profile 2>/dev/null || source ~/.profile 2>/dev/null; source ~/.bashrc 2>/dev/null; ${escapedCommand}"`;
   args.push(wrappedCommand);
 
   // Debug logging to trace the exact command being built
