@@ -237,7 +237,20 @@ class ConversationManager {
         const error = `Agent ${this.session.agentType} is not available`;
         wizardDebugLogger.log('error', 'Agent not available', {
           agentType: this.session.agentType,
-          agent: agent ? { available: agent.available } : null,
+          agent: agent ? {
+            available: agent.available,
+            path: agent.path,
+            command: agent.command,
+            customPath: (agent as any).customPath,
+          } : null,
+        });
+        // Also log to console for immediate debugging
+        console.error('[Wizard] Agent not available:', {
+          agentType: this.session.agentType,
+          agentAvailable: agent?.available,
+          agentPath: agent?.path,
+          agentCommand: agent?.command,
+          agentCustomPath: (agent as any)?.customPath,
         });
         return {
           success: false,
