@@ -21,13 +21,19 @@ const FILE_TREE_RETRY_DELAY_MS = 20000;
  */
 function getSshContext(session: Session): SshContext | undefined {
   const sshRemoteId = session.sshRemoteId || session.sessionSshRemoteConfig?.remoteId || undefined;
+  console.log('[getSshContext] session.sshRemoteId:', session.sshRemoteId);
+  console.log('[getSshContext] session.sessionSshRemoteConfig?.remoteId:', session.sessionSshRemoteConfig?.remoteId);
+  console.log('[getSshContext] resolved sshRemoteId:', sshRemoteId);
   if (!sshRemoteId) {
+    console.log('[getSshContext] No SSH remote ID found, returning undefined');
     return undefined;
   }
-  return {
+  const context = {
     sshRemoteId,
     remoteCwd: session.remoteCwd || session.sessionSshRemoteConfig?.workingDirOverride,
   };
+  console.log('[getSshContext] Returning context:', context);
+  return context;
 }
 
 export type { RightPanelHandle } from '../../components/RightPanel';
