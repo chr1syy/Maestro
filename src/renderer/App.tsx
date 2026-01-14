@@ -1579,7 +1579,7 @@ function MaestroConsoleInner() {
       } | null = null;
       let queuedItemToProcess: { sessionId: string; item: QueuedItem } | null = null;
       // Track if we need to run synopsis after completion (for /commit and other AI commands)
-      let synopsisData: { sessionId: string; cwd: string; agentSessionId: string; command: string; groupName: string; projectName: string; tabName?: string; tabId?: string; lastSynopsisTime?: number; toolType?: ToolType; sessionConfig?: { customPath?: string; customArgs?: string; customEnvVars?: Record<string, string>; customModel?: string; customContextWindow?: number; } } | null = null;
+      let synopsisData: { sessionId: string; cwd: string; agentSessionId: string; command: string; groupName: string; projectName: string; tabName?: string; tabId?: string; lastSynopsisTime?: number; toolType?: ToolType; sessionConfig?: { customPath?: string; customArgs?: string; customEnvVars?: Record<string, string>; customModel?: string; customContextWindow?: number; sessionSshRemoteConfig?: { enabled: boolean; remoteId: string | null; workingDirOverride?: string }; } } | null = null;
 
       if (isFromAi) {
         const currentSession = sessionsRef.current.find(s => s.id === actualSessionId);
@@ -1695,6 +1695,7 @@ function MaestroConsoleInner() {
                 customEnvVars: currentSession.customEnvVars,
                 customModel: currentSession.customModel,
                 customContextWindow: currentSession.customContextWindow,
+                sessionSshRemoteConfig: currentSession.sessionSshRemoteConfig,
               }
             };
           }
@@ -4881,6 +4882,7 @@ You are taking over this conversation. Based on the context above, provide a bri
           customEnvVars: activeSession.customEnvVars,
           customModel: activeSession.customModel,
           customContextWindow: activeSession.customContextWindow,
+          sessionSshRemoteConfig: activeSession.sessionSshRemoteConfig,
         }
       );
 
