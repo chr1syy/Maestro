@@ -679,7 +679,7 @@ export class ProcessManager extends EventEmitter {
         let spawnArgs = finalArgs;
         let useShell = false;
 
-        if (isWindows) {
+        if (isWindows && !isSshRemote) {
           const lowerCommand = command.toLowerCase();
           // Use shell for batch files
           if (lowerCommand.endsWith('.cmd') || lowerCommand.endsWith('.bat')) {

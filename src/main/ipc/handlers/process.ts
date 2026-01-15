@@ -60,6 +60,7 @@ export interface ProcessHandlerDependencies {
   agentConfigsStore: Store<AgentConfigsData>;
   settingsStore: Store<MaestroSettings>;
   getMainWindow: () => BrowserWindow | null;
+  sessionsStore: Store<{ sessions: any[] }>;
 }
 
 /**
@@ -75,7 +76,7 @@ export interface ProcessHandlerDependencies {
  * - runCommand: Execute a single command and capture output
  */
 export function registerProcessHandlers(deps: ProcessHandlerDependencies): void {
-  const { getProcessManager, getAgentDetector, agentConfigsStore, settingsStore, getMainWindow } = deps;
+  const { getProcessManager, getAgentDetector, agentConfigsStore, settingsStore, getMainWindow, sessionsStore } = deps;
 
   // Spawn a new process for a session
   // Supports agent-specific argument builders for batch mode, JSON output, resume, read-only mode, YOLO mode
@@ -113,6 +114,26 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
     }) => {
       const processManager = requireProcessManager(getProcessManager);
       const agentDetector = requireDependency(getAgentDetector, 'Agent detector');
+
+      // Synopsis SSH Fix: If this is a synopsis session and it's missing SSH config,
+      // try to inherit it from the parent session. This is a backend workaround for
+      // a suspected frontend state issue where the remote config isn't passed.
+      const synopsisMatch = config.sessionId.match(/^(.+)-synopsis-\d+$/);
+      if (synopsisMatch && (!config.sessionSshRemoteConfig || !config.sessionSshRemoteConfig.enabled)) {
+        const originalSessionId = synopsisMatch[1];
+        const sessions = sessionsStore.get('sessions', []);
+        const originalSession = sessions.find(s => s.id === originalSessionId);
+
+        if (originalSession && originalSession.sessionSshRemoteConfig?.enabled) {
+          const sshConfig = originalSession.sessionSshRemoteConfig;
+          config.sessionSshRemoteConfig = sshConfig;
+          logger.info(`Inferred SSH config for synopsis session from parent session`, LOG_CONTEXT, {
+            sessionId: config.sessionId,
+            originalSessionId: originalSessionId,
+            sshRemoteId: sshConfig.remoteId,
+          });
+        }
+      }
 
       // Get agent definition to access config options and argument builders
       const agent = await agentDetector.getAgent(config.toolType);
@@ -232,6 +253,13 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
       // ========================================================================
       // Command Resolution: Apply session-level custom path override if set
       // This allows users to override the detected agent path per-session
+      //
+      // WINDOWS FIX: On Windows, prefer the resolved agent path with .exe extension
+      // to avoid using shell:true in ProcessManager. When shell:true is used,
+      // stdin piping through cmd.exe is unreliable - data written to stdin may not
+      // be forwarded to the child process. This breaks stream-json input mode.
+      // By using the full path with .exe extension, ProcessManager will spawn
+      // the process directly without cmd.exe wrapper, ensuring stdin works correctly.
       // ========================================================================
       let commandToSpawn = config.sessionCustomPath || config.command;
       let argsToSpawn = finalArgs;
@@ -241,6 +269,20 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           customPath: config.sessionCustomPath,
           originalCommand: config.command,
         });
+      } else if (isWindows && agent?.path && !config.sessionSshRemoteConfig?.enabled) {
+        // On Windows LOCAL execution, use the full resolved agent path if it ends with .exe or .com
+        // This avoids ProcessManager setting shell:true for extensionless commands,
+        // which breaks stdin piping (needed for stream-json input mode)
+        // NOTE: Skip this for SSH sessions - SSH uses the remote agent path, not local
+        const pathExt = require('path').extname(agent.path).toLowerCase();
+        if (pathExt === '.exe' || pathExt === '.com') {
+          commandToSpawn = agent.path;
+          logger.debug(`Using full agent path on Windows to avoid shell wrapper`, LOG_CONTEXT, {
+            originalCommand: config.command,
+            resolvedPath: agent.path,
+            reason: 'stdin-reliability',
+          });
+        }
       }
 
       // ========================================================================
@@ -258,10 +300,11 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           toolType: config.toolType,
           isTerminal: config.toolType === 'terminal',
           hasSessionSshRemoteConfig: !!config.sessionSshRemoteConfig,
-          willUseSsh: config.toolType !== 'terminal' && !!config.sessionSshRemoteConfig,
+          sshEnabled: config.sessionSshRemoteConfig?.enabled,
+          willUseSsh: config.toolType !== 'terminal' && config.sessionSshRemoteConfig?.enabled,
         });
       }
-      if (config.toolType !== 'terminal' && config.sessionSshRemoteConfig) {
+      if (config.toolType !== 'terminal' && config.sessionSshRemoteConfig?.enabled) {
         // Session-level SSH config provided - resolve and use it
         logger.info(`Using session-level SSH config`, LOG_CONTEXT, {
           sessionId: config.sessionId,

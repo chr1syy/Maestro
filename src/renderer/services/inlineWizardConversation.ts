@@ -96,6 +96,12 @@ export interface InlineWizardConversationConfig {
   existingDocs?: ExistingDocument[];
   /** Auto Run folder path */
   autoRunFolderPath?: string;
+  /** SSH remote configuration (for remote execution) */
+  sessionSshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -114,6 +120,12 @@ export interface InlineWizardConversationSession {
   systemPrompt: string;
   /** Whether the session is active */
   isActive: boolean;
+  /** SSH remote configuration (for remote execution) */
+  sessionSshRemoteConfig?: {
+    enabled: boolean;
+    remoteId: string | null;
+    workingDirOverride?: string;
+  };
 }
 
 /**
@@ -260,6 +272,8 @@ export function startInlineWizardConversation(
     projectName: config.projectName,
     systemPrompt,
     isActive: true,
+    // Only pass SSH config if it is explicitly enabled to prevent false positives in process manager
+    sessionSshRemoteConfig: config.sessionSshRemoteConfig?.enabled ? config.sessionSshRemoteConfig : undefined,
   };
 }
 
@@ -449,6 +463,7 @@ function buildArgsForAgent(agent: any): string[] {
       // The agent can read files to understand the project, but cannot write/edit
       // This ensures the wizard conversation phase doesn't make code changes
       if (!args.includes('--allowedTools')) {
+        // Split tools into separate arguments for better cross-platform compatibility (especially Windows)
         args.push('--allowedTools', 'Read', 'Glob', 'Grep', 'LS');
       }
       return args;
@@ -659,6 +674,8 @@ export async function sendWizardMessage(
           command: agent.command,
           args: argsForSpawn,
           prompt: fullPrompt,
+          // Pass SSH config for remote execution
+          sessionSshRemoteConfig: session.sessionSshRemoteConfig,
         })
         .then(() => {
           callbacks?.onReceiving?.();
