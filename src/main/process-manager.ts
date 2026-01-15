@@ -1445,7 +1445,7 @@ export class ProcessManager extends EventEmitter {
         } else if (isBatchMode) {
           // Regular batch mode: close stdin immediately since prompt is passed as CLI arg
           // Some CLIs wait for stdin to close before processing
-          stdinLogFn('[ProcessManager] Closing stdin for batch mode', 'ProcessManager', { sessionId });
+          logger.debug('[ProcessManager] Closing stdin for batch mode', 'ProcessManager', { sessionId });
           childProcess.stdin?.end();
         }
 
