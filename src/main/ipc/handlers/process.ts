@@ -15,7 +15,6 @@ import { getSshRemoteConfig, createSshRemoteStoreAdapter } from '../../utils/ssh
 import { buildSshCommand } from '../../utils/ssh-command-builder';
 import type { SshRemoteConfig } from '../../../shared/types';
 import { powerManager } from '../../power-manager';
-import { getAgentCapabilities } from '../../agent-capabilities';
 
 const LOG_CONTEXT = '[ProcessManager]';
 
