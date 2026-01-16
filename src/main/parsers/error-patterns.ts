@@ -23,7 +23,7 @@ import { logger } from '../utils/logger';
  * Valid ToolType values that have error patterns registered.
  * Used to validate input to getErrorPatterns and log warnings for unknown agents.
  */
-const VALID_TOOL_TYPES = new Set<string>(['claude', 'claude-code', 'aider', 'opencode', 'codex', 'terminal']);
+const VALID_TOOL_TYPES = new Set<string>(['claude', 'claude-code', 'aider', 'opencode', 'codex', 'gemini-cli', 'terminal']);
 
 /**
  * Error pattern definition with regex and user-friendly message
@@ -536,6 +536,114 @@ export const CODEX_ERROR_PATTERNS: AgentErrorPatterns = {
 };
 
 // ============================================================================
+// Gemini CLI Error Patterns
+// ============================================================================
+
+export const GEMINI_ERROR_PATTERNS: AgentErrorPatterns = {
+  auth_expired: [
+    {
+      pattern: /invalid api key/i,
+      message: 'Your Gemini API key is invalid. Please check your credentials.',
+      recoverable: true,
+    },
+    {
+      pattern: /authentication failed/i,
+      message: 'Gemini authentication failed. Please check your API key.',
+      recoverable: true,
+    },
+    {
+      pattern: /unauthorized/i,
+      message: 'Unauthorized access. Please check your Gemini API key.',
+      recoverable: true,
+    },
+    {
+      pattern: /api.*key.*expired/i,
+      message: 'Your Gemini API key has expired. Please renew your credentials.',
+      recoverable: true,
+    },
+  ],
+
+  token_exhaustion: [
+    {
+      pattern: /context.*length/i,
+      message: 'Context length exceeded. Start a new session.',
+      recoverable: true,
+    },
+    {
+      pattern: /maximum.*tokens/i,
+      message: 'Maximum token limit reached. Start a new session.',
+      recoverable: true,
+    },
+    {
+      pattern: /token.*limit/i,
+      message: 'Token limit reached. Consider starting a fresh conversation.',
+      recoverable: true,
+    },
+  ],
+
+  rate_limited: [
+    {
+      pattern: /rate.*limit/i,
+      message: 'Rate limit exceeded. Gemini will automatically switch to fallback model.',
+      recoverable: true,
+    },
+    {
+      pattern: /too many requests/i,
+      message: 'Too many requests. Gemini will automatically switch to fallback model.',
+      recoverable: true,
+    },
+    {
+      pattern: /quota.*exceeded/i,
+      message: 'API quota exceeded. Gemini will automatically switch to fallback model.',
+      recoverable: true,
+    },
+    {
+      // HTTP 429 - Rate limited
+      pattern: /\b429\b/,
+      message: 'Rate limit hit. Gemini will automatically switch to fallback model.',
+      recoverable: true,
+    },
+    {
+      // Gemini-specific rate limit messages
+      pattern: /resource.*exhausted/i,
+      message: 'Gemini resources exhausted. Switching to fallback model.',
+      recoverable: true,
+    },
+  ],
+
+  network_error: [
+    {
+      pattern: /connection\s*(failed|refused|error|reset|closed)/i,
+      message: 'Connection failed. Check your internet connection.',
+      recoverable: true,
+    },
+    {
+      pattern: /timeout/i,
+      message: 'Request timed out. Please try again.',
+      recoverable: true,
+    },
+    {
+      pattern: /network.*error/i,
+      message: 'Network error. Please check your connection.',
+      recoverable: true,
+    },
+  ],
+
+  agent_crashed: [
+    {
+      pattern: /gemini-cli.*crashed/i,
+      message: 'Gemini CLI crashed unexpectedly.',
+      recoverable: true,
+    },
+    {
+      pattern: /\b(fatal|unexpected|internal|unhandled)\s+error\b/i,
+      message: 'An unexpected error occurred in Gemini CLI.',
+      recoverable: true,
+    },
+  ],
+};
+
+// ============================================================================
 // SSH Error Patterns
 // ============================================================================
 
@@ -707,6 +815,7 @@ const patternRegistry = new Map<ToolType, AgentErrorPatterns>([
   ['claude-code', CLAUDE_ERROR_PATTERNS],
   ['opencode', OPENCODE_ERROR_PATTERNS],
   ['codex', CODEX_ERROR_PATTERNS],
+  ['gemini-cli', GEMINI_ERROR_PATTERNS],
 ]);
 
 /**
