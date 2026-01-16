@@ -47,6 +47,10 @@ export interface UseAgentErrorRecoveryOptions {
   onRestartAgent?: () => void;
   /** Callback to open authentication flow */
   onAuthenticate?: () => void;
+  /** The fallback model to use, if configured */
+  fallbackModel?: string;
+  /** Callback to retry with the fallback model */
+  onUseFallback?: (fallbackModel: string) => void;
 }
 
 export interface UseAgentErrorRecoveryResult {
@@ -109,6 +113,16 @@ function getRecoveryActionsForError(
           onClick: options.onNewSession,
         });
       }
+      // Add fallback model option if available
+      if (options.onUseFallback && options.fallbackModel) {
+        actions.push({
+          id: 'fallback',
+          label: `Retry with ${options.fallbackModel}`,
+          description: 'Use a different model to bypass capacity issues',
+          icon: <RefreshCw className="w-4 h-4" />,
+          onClick: () => options.onUseFallback!(options.fallbackModel!),
+        });
+      }
       break;
 
     case 'rate_limited':
@@ -121,6 +135,16 @@ function getRecoveryActionsForError(
           primary: true,
           icon: <RefreshCw className="w-4 h-4" />,
           onClick: options.onRetry,
+        });
+      }
+      // Add fallback model option if available
+      if (options.onUseFallback && options.fallbackModel) {
+        actions.push({
+          id: 'fallback',
+          label: `Retry with ${options.fallbackModel}`,
+          description: 'Use a different model to bypass capacity issues',
+          icon: <RefreshCw className="w-4 h-4" />,
+          onClick: () => options.onUseFallback!(options.fallbackModel!),
         });
       }
       break;

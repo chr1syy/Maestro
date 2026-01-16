@@ -365,6 +365,12 @@ export function useAgentExecution(
       sessionSshRemoteConfig?: { enabled: boolean; remoteId: string | null; workingDirOverride?: string };
     }
   ): Promise<AgentSpawnResult> => {
+    // Disable synopsis for gemini-cli as it's causing tool hallucination errors
+    if (toolType === 'gemini-cli') {
+      console.log('[spawnBackgroundSynopsis] Synopsis is disabled for gemini-cli. Skipping.');
+      return { success: true, response: 'NOTHING_TO_REPORT' };
+    }
+
     try {
       const agent = await window.maestro.agents.get(toolType);
       if (!agent) {

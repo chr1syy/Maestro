@@ -2148,6 +2148,7 @@ function MaestroConsoleInner() {
 						// 2. This was a custom AI command (pendingAICommandForSynopsis)
 						// Only trigger when queue is empty (final task complete) and we have a agentSessionId
 						const shouldSynopsis =
+							currentSession.toolType !== 'gemini-cli' && // Do not run synopsis for Gemini
 							currentSession.executionQueue.length === 0 &&
 							(completedTab?.agentSessionId || currentSession.agentSessionId) &&
 							(completedTab?.saveToHistory ||
@@ -3887,164 +3888,202 @@ function MaestroConsoleInner() {
 	const hasNoAgents = useMemo(() => sessions.length === 0, [sessions.length]);
 
 	// Get the session with the active error (for AgentErrorModal)
-	const errorSession = useMemo(
-		() =>
-			agentErrorModalSessionId
-				? sessions.find(s => s.id === agentErrorModalSessionId)
-				: null,
-		[agentErrorModalSessionId, sessions]
-	);
-
-	// Handler to close the agent error modal without clearing the error
-	const handleCloseAgentErrorModal = useCallback(() => {
-		setAgentErrorModalSessionId(null);
-	}, []);
-
-	// Handler to clear agent error and resume operations
-	const handleClearAgentError = useCallback(
-		(sessionId: string, tabId?: string) => {
-			setSessions(prev =>
-				prev.map(s => {
-					if (s.id !== sessionId) return s;
-					const targetTabId = tabId ?? s.agentErrorTabId;
-					const updatedAiTabs = targetTabId
-						? s.aiTabs.map(tab =>
+		const errorSession = useMemo(
+			() =>
+				agentErrorModalSessionId
+					? sessions.find(s => s.id === agentErrorModalSessionId)
+					: null,
+			[agentErrorModalSessionId, sessions]
+		);
+	
+		// State for holding the fallback model for the erroring session
+		const [errorSessionFallbackModel, setErrorSessionFallbackModel] = useState<string | null>(null);
+	
+		// When an error session becomes active, fetch its config to get the fallback model
+		useEffect(() => {
+			if (errorSession?.toolType) {
+				window.maestro.agents.getConfig(errorSession.toolType)
+					.then(config => {
+						setErrorSessionFallbackModel(config.fallbackModel || null);
+					})
+					.catch(() => setErrorSessionFallbackModel(null));
+			} else {
+				setErrorSessionFallbackModel(null);
+			}
+		}, [errorSession]);
+	
+		// Handler to close the agent error modal without clearing the error
+		const handleCloseAgentErrorModal = useCallback(() => {
+			setAgentErrorModalSessionId(null);
+		}, []);
+	
+		// Handler to clear agent error and resume operations
+		const handleClearAgentError = useCallback(
+			(sessionId: string, tabId?: string) => {
+				setSessions(prev =>
+					prev.map(s => {
+						if (s.id !== sessionId) return s;
+						const targetTabId = tabId ?? s.agentErrorTabId;
+						const updatedAiTabs = targetTabId
+							? s.aiTabs.map(tab =>
 								tab.id === targetTabId ? { ...tab, agentError: undefined } : tab
-						  )
-						: s.aiTabs;
-					return {
-						...s,
-						agentError: undefined,
+							  )
+							: s.aiTabs;
+						return {
+							...s,
+							agentError: undefined,
 						agentErrorTabId: undefined,
 						agentErrorPaused: false,
 						state: 'idle' as SessionState,
 						aiTabs: updatedAiTabs
-					};
-				})
-			);
-			setAgentErrorModalSessionId(null);
-			// Notify main process to clear error state
-			window.maestro.agentError.clearError(sessionId).catch(err => {
-				console.error('Failed to clear agent error:', err);
+						};
+					})
+				);
+				setAgentErrorModalSessionId(null);
+				// Notify main process to clear error state
+				window.maestro.agentError.clearError(sessionId).catch(err => {
+					console.error('Failed to clear agent error:', err);
+				});
+			},
+			[]
+		);
+	
+		// Handler to set fallback model and let user retry
+		const handleUseFallback = useCallback((fallbackModel: string) => {
+			if (!errorSession) return;
+	
+			// 1. Set the custom model on the session
+			setSessions(prev => prev.map(s =>
+				s.id === errorSession.id ? { ...s, customModel: fallbackModel } : s
+			));
+	
+			// 2. Clear the error
+			handleClearAgentError(errorSession.id);
+	
+			// 3. Add a toast to inform the user and focus input for manual retry
+			addToast({
+				type: 'info',
+				title: 'Fallback Model Set',
+				message: `Now using ${fallbackModel}. Press Enter to retry.`
 			});
-		},
-		[]
-	);
-
-	// Handler to start a new session (recovery action)
-	const handleStartNewSessionAfterError = useCallback(
-		(sessionId: string) => {
-			const session = sessions.find(s => s.id === sessionId);
-			if (!session) return;
-
-			// Clear the error state
-			handleClearAgentError(sessionId);
-
-			// Create a new tab in the session to start fresh
-			setSessions(prev =>
-				prev.map(s => {
-					if (s.id !== sessionId) return s;
-					const result = createTab(s, {
-						saveToHistory: defaultSaveToHistory,
-						showThinking: defaultShowThinking
-					});
-					if (!result) return s;
-					return result.session;
-				})
-			);
-
-			// Focus the input after creating new tab
 			setTimeout(() => inputRef.current?.focus(), 0);
-		},
-		[sessions, handleClearAgentError, defaultSaveToHistory, defaultShowThinking]
-	);
-
-	// Handler to retry after error (recovery action)
-	const handleRetryAfterError = useCallback(
-		(sessionId: string) => {
-			// Clear the error state and let user retry manually
-			handleClearAgentError(sessionId);
-
-			// Focus the input for retry
-			setTimeout(() => inputRef.current?.focus(), 0);
-		},
-		[handleClearAgentError]
-	);
-
-	// Handler to restart the agent (recovery action for crashes)
-	const handleRestartAgentAfterError = useCallback(
-		async (sessionId: string) => {
-			const session = sessions.find(s => s.id === sessionId);
-			if (!session) return;
-
-			// Clear the error state
-			handleClearAgentError(sessionId);
-
-			// Kill any existing processes and respawn
-			try {
-				await window.maestro.process.kill(`${sessionId}-ai`);
-			} catch {
-				// Process may not exist
-			}
-
-			// The agent will be respawned when user sends next message
-			// Focus the input
-			setTimeout(() => inputRef.current?.focus(), 0);
-		},
-		[sessions, handleClearAgentError]
-	);
-
-	const handleAuthenticateAfterError = useCallback(
-		(sessionId: string) => {
-			const session = sessions.find(s => s.id === sessionId);
-			if (!session) return;
-
-			handleClearAgentError(sessionId);
-			setActiveSessionId(sessionId);
-			setSessions(prev =>
-				prev.map(s =>
-					s.id === sessionId ? { ...s, inputMode: 'terminal' } : s
-				)
-			);
-
-			setTimeout(() => inputRef.current?.focus(), 0);
-		},
-		[sessions, handleClearAgentError, setActiveSessionId, setSessions]
-	);
-
-	// Use the agent error recovery hook to get recovery actions
-	const { recoveryActions } = useAgentErrorRecovery({
-		error: errorSession?.agentError,
-		agentId: errorSession?.toolType || 'claude-code',
-		sessionId: errorSession?.id || '',
-		onNewSession: errorSession
-			? () => handleStartNewSessionAfterError(errorSession.id)
-			: undefined,
-		onRetry: errorSession
-			? () => handleRetryAfterError(errorSession.id)
-			: undefined,
-		onClearError: errorSession
-			? () => handleClearAgentError(errorSession.id)
-			: undefined,
-		onRestartAgent: errorSession
-			? () => handleRestartAgentAfterError(errorSession.id)
-			: undefined,
-		onAuthenticate: errorSession
-			? () => handleAuthenticateAfterError(errorSession.id)
-			: undefined
-	});
-
-	// Handler to clear group chat error (now uses context's clearGroupChatError)
-	const handleClearGroupChatError = handleClearGroupChatErrorBase;
-
-	// Use the agent error recovery hook for group chat errors
-	const { recoveryActions: groupChatRecoveryActions } = useAgentErrorRecovery({
-		error: groupChatError?.error,
-		agentId: 'claude-code', // Group chat moderator is always claude-code for now
-		sessionId: groupChatError?.groupChatId || '',
-		onRetry: handleClearGroupChatError,
-		onClearError: handleClearGroupChatError
-	});
+		}, [errorSession, handleClearAgentError, addToast, setSessions, inputRef]);
+	
+		// Handler to start a new session (recovery action)
+		const handleStartNewSessionAfterError = useCallback(
+			(sessionId: string) => {
+				const session = sessions.find(s => s.id === sessionId);
+				if (!session) return;
+	
+				// Clear the error state
+				handleClearAgentError(sessionId);
+	
+				// Create a new tab in the session to start fresh
+				setSessions(prev =>
+					prev.map(s => {
+						if (s.id !== sessionId) return s;
+						const result = createTab(s, {
+							saveToHistory: defaultSaveToHistory,
+							showThinking: defaultShowThinking
+						});
+						if (!result) return s;
+						return result.session;
+					})
+				);
+	
+				// Focus the input after creating new tab
+				setTimeout(() => inputRef.current?.focus(), 0);
+			},
+			[sessions, handleClearAgentError, defaultSaveToHistory, defaultShowThinking]
+		);
+	
+		// Handler to retry after error (recovery action)
+		const handleRetryAfterError = useCallback(
+			(sessionId: string) => {
+				// Clear the error state and let user retry manually
+				handleClearAgentError(sessionId);
+	
+				// Focus the input for retry
+				setTimeout(() => inputRef.current?.focus(), 0);
+			},
+			[handleClearAgentError]
+		);
+	
+		// Handler to restart the agent (recovery action for crashes)
+		const handleRestartAgentAfterError = useCallback(
+			async (sessionId: string) => {
+				const session = sessions.find(s => s.id === sessionId);
+				if (!session) return;
+	
+				// Clear the error state
+				handleClearAgentError(sessionId);
+	
+				// Kill any existing processes and respawn
+				try {
+					await window.maestro.process.kill(`${sessionId}-ai`);
+				} catch {
+					// Process may not exist
+				}
+	
+				// The agent will be respawned when user sends next message
+				// Focus the input
+				setTimeout(() => inputRef.current?.focus(), 0);
+			},
+			[sessions, handleClearAgentError]
+		);
+	
+		const handleAuthenticateAfterError = useCallback(
+			(sessionId: string) => {
+				const session = sessions.find(s => s.id === sessionId);
+				if (!session) return;
+				handleClearAgentError(sessionId);
+				setActiveSessionId(sessionId);
+				setSessions(prev =>
+					prev.map(s =>
+						s.id === sessionId ? { ...s, inputMode: 'terminal' } : s
+					)
+				);
+	
+				setTimeout(() => inputRef.current?.focus(), 0);
+			},
+			[sessions, handleClearAgentError, setActiveSessionId, setSessions]
+		);
+	
+		// Use the agent error recovery hook to get recovery actions
+		const { recoveryActions } = useAgentErrorRecovery({
+			error: errorSession?.agentError,
+			agentId: errorSession?.toolType || 'claude-code',
+			sessionId: errorSession?.id || '',
+			onNewSession: errorSession
+				? () => handleStartNewSessionAfterError(errorSession.id)
+				: undefined,
+			onRetry: errorSession
+				? () => handleRetryAfterError(errorSession.id)
+				: undefined,
+			onClearError: errorSession
+				? () => handleClearAgentError(errorSession.id)
+				: undefined,
+			onRestartAgent: errorSession
+				? () => handleRestartAgentAfterError(errorSession.id)
+				: undefined,
+			onAuthenticate: errorSession
+				? () => handleAuthenticateAfterError(errorSession.id)
+				: undefined,
+			fallbackModel: errorSessionFallbackModel || undefined,
+			onUseFallback: handleUseFallback,
+		});
+	
+		// Handler to clear group chat error (now uses context's clearGroupChatError)
+		const handleClearGroupChatError = handleClearGroupChatErrorBase;
+	
+		// Use the agent error recovery hook for group chats
+		const { recoveryActions: groupChatRecoveryActions } = useAgentErrorRecovery({
+			error: groupChatError?.error,
+			agentId: 'claude-code', // Group chat moderator is always claude-code for now
+			sessionId: groupChatError?.groupChatId || '',
+			onRetry: handleClearGroupChatError,
+			onClearError: handleClearGroupChatError
+		});
 
 	// Tab completion hook for terminal mode
 	const { getSuggestions: getTabCompletionSuggestions } =

@@ -108,6 +108,35 @@ export const AGENT_DEFINITIONS: Omit<AgentConfig, 'available' | 'path' | 'capabi
     binaryName: 'gemini',
     command: 'gemini',
     args: [],
+    // Use the correct flag for JSON output, as revealed by the help text.
+    jsonOutputArgs: ['--output-format', 'stream-json'],
+    // Prevent Maestro from appending the prompt as a CLI argument.
+    // The 'expectsRawPromptStdin' capability will handle sending it via stdin.
+    promptArgs: (_prompt: string) => [],
+    // Add agent-specific configuration options for model selection
+    configOptions: [
+      {
+        key: 'model',
+        type: 'text',
+        label: 'Model',
+        description: 'Model to use (e.g., "gemini-1.5-pro", "gemini-1.5-flash"). Leave empty for default.',
+        default: '', // Empty string means use gemini-cli's default model
+        argBuilder: (value: string) => {
+          // Only add --model arg if a model is specified
+          if (value && value.trim()) {
+            return ['--model', value.trim()];
+          }
+          return [];
+        },
+      },
+      {
+        key: 'fallbackModel',
+        type: 'text',
+        label: 'Fallback Model',
+        description: 'Fallback model to use if the primary model is unavailable (e.g., due to rate limits).',
+        default: 'gemini-1.5-pro', // A reasonable default fallback
+      },
+    ],
   },
   {
     id: 'qwen3-coder',

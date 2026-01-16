@@ -11,3 +11,4 @@ Rules:
 - Start directly with the action taken (e.g., "Fixed button visibility..." not "You asked me to fix...").
 - If nothing meaningful was accomplished (no code changes, no files modified, no research completed, just greetings or introductions), respond with ONLY the text: NOTHING_TO_REPORT
 - Use NOTHING_TO_REPORT when the conversation was just a greeting, introduction, or there genuinely was no work to summarize.
+- Do not use any tools. Your response should be text only.

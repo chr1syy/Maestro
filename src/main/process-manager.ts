@@ -1451,6 +1451,14 @@ export class ProcessManager extends EventEmitter {
           });
           childProcess.stdin?.write(payload);
           childProcess.stdin?.end();
+        } else if (capabilities.expectsRawPromptStdin && prompt) {
+          // Raw prompt mode for agents that expect the raw prompt string on stdin
+          logger.debug('[ProcessManager] Sending raw prompt via stdin', 'ProcessManager', {
+            sessionId,
+            promptLength: prompt.length,
+          });
+          childProcess.stdin?.write(prompt);
+          childProcess.stdin?.end();
         } else if (isBatchMode) {
           // Regular batch mode: close stdin immediately since prompt is passed as CLI arg
           // Some CLIs wait for stdin to close before processing
