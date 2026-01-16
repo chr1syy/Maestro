@@ -350,6 +350,13 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     }
   }, []);
 
+  // Track the current SSH remote ID for re-detection
+  // Uses _pending_ key when no agent is selected, which is the shared SSH config
+  const currentSshRemoteId = useMemo(() => {
+    const config = agentSshRemoteConfigs['_pending_'] || agentSshRemoteConfigs[selectedAgent];
+    return config?.enabled ? config.remoteId : null;
+  }, [agentSshRemoteConfigs, selectedAgent]);
+
   const handleRefreshAgent = React.useCallback(async (agentId: string) => {
     setRefreshingAgent(agentId);
     setDebugInfo(null);
@@ -545,13 +552,6 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
       }));
     }
   }, [selectedAgent, agentSshRemoteConfigs]);
-
-  // Track the current SSH remote ID for re-detection
-  // Uses _pending_ key when no agent is selected, which is the shared SSH config
-  const currentSshRemoteId = useMemo(() => {
-    const config = agentSshRemoteConfigs['_pending_'] || agentSshRemoteConfigs[selectedAgent];
-    return config?.enabled ? config.remoteId : null;
-  }, [agentSshRemoteConfigs, selectedAgent]);
 
   // Track initial load to avoid re-running on first mount
   const initialLoadDoneRef = useRef(false);
