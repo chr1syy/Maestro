@@ -375,8 +375,8 @@ export class AgentDetector {
       // Windows-specific paths
       const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
       const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
-      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+      const programFiles = process.env.ProgramFiles || 'C:\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\Program Files (x86)';
 
       additionalPaths = [
         // Claude Code PowerShell installer (irm https://claude.ai/install.ps1 | iex)
@@ -415,12 +415,12 @@ export class AgentDetector {
         path.join(home, 'scoop', 'shims'),
         path.join(home, 'scoop', 'apps', 'opencode', 'current'),
         // Chocolatey (OpenCode, other tools)
-        path.join(process.env.ChocolateyInstall || 'C:\\ProgramData\\chocolatey', 'bin'),
+        path.join(process.env.ChocolateyInstall || 'C:\ProgramData\chocolatey', 'bin'),
         // Go binaries (some tools installed via 'go install')
         path.join(home, 'go', 'bin'),
         // Windows system paths
-        path.join(process.env.SystemRoot || 'C:\\Windows', 'System32'),
-        path.join(process.env.SystemRoot || 'C:\\Windows'),
+        path.join(process.env.SystemRoot || 'C:\Windows', 'System32'),
+        path.join(process.env.SystemRoot || 'C:\Windows'),
       ];
     } else {
       // Unix-like paths (macOS/Linux)
@@ -465,7 +465,7 @@ export class AgentDetector {
     const home = os.homedir();
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
     const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+    const programFiles = process.env.ProgramFiles || 'C:\Program Files';
 
     // Define known installation paths for each binary, in priority order
     // Prefer .exe (standalone installers) over .cmd (npm wrappers)
@@ -494,7 +494,7 @@ export class AgentDetector {
         path.join(home, 'scoop', 'shims', 'opencode.exe'),
         path.join(home, 'scoop', 'apps', 'opencode', 'current', 'opencode.exe'),
         // Chocolatey installation
-        path.join(process.env.ChocolateyInstall || 'C:\\ProgramData\\chocolatey', 'bin', 'opencode.exe'),
+        path.join(process.env.ChocolateyInstall || 'C:\ProgramData\chocolatey', 'bin', 'opencode.exe'),
         // Go install
         path.join(home, 'go', 'bin', 'opencode.exe'),
         // npm (has known issues on Windows, but check anyway)
