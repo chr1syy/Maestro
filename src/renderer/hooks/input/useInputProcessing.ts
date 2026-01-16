@@ -637,7 +637,8 @@ export function useInputProcessing(deps: UseInputProcessingDeps): UseInputProces
       (activeSession.toolType === 'claude' ||
        activeSession.toolType === 'claude-code' ||
        activeSession.toolType === 'opencode' ||
-       activeSession.toolType === 'codex');
+       activeSession.toolType === 'codex' ||
+       activeSession.toolType === 'gemini-cli');
 
     if (isBatchModeAgent) {
       // Batch mode: Spawn new agent process with prompt
