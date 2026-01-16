@@ -354,7 +354,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     setRefreshingAgent(agentId);
     setDebugInfo(null);
     try {
-      const result = await window.maestro.agents.refresh(agentId);
+      const result = await window.maestro.agents.refresh(agentId, currentSshRemoteId);
       setAgents(result.agents);
       if (result.debugInfo && !result.debugInfo.available) {
         setDebugInfo(result.debugInfo);
@@ -364,7 +364,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     } finally {
       setRefreshingAgent(null);
     }
-  }, []);
+  }, [currentSshRemoteId]);
 
   // Load available models for an agent that supports model selection
   const loadModelsForAgent = React.useCallback(async (agentId: string, forceRefresh = false) => {

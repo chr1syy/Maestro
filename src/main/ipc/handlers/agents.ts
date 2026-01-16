@@ -243,18 +243,36 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
   // Refresh agent detection with debug info (clears cache and returns detailed error info)
   ipcMain.handle(
     'agents:refresh',
-    withIpcErrorLogging(handlerOpts('refresh'), async (agentId?: string) => {
+    withIpcErrorLogging(handlerOpts('refresh'), async (agentId?: string, sshRemoteId?: string) => {
       const agentDetector = requireDependency(getAgentDetector, 'Agent detector');
 
       // Clear the cache to force re-detection
       agentDetector.clearCache();
 
-      // Get environment info for debugging
-      const envPath = process.env.PATH || '';
-      const homeDir = process.env.HOME || '';
+      let agents: any[];
 
-      // Detect all agents fresh
-      const agents = await agentDetector.detectAgents();
+      // If SSH remote ID provided, detect agents on remote host
+      if (sshRemoteId) {
+        const sshConfig = getSshRemoteById(settingsStore, sshRemoteId);
+        if (!sshConfig) {
+          logger.warn(`SSH remote not found or disabled: ${sshRemoteId}, returning unavailable agents`, LOG_CONTEXT);
+          agents = AGENT_DEFINITIONS.map((agentDef) => ({
+            ...agentDef,
+            available: false,
+            path: undefined,
+            capabilities: getAgentCapabilities(agentDef.id),
+            error: `SSH remote configuration not found: ${sshRemoteId}`,
+          }));
+        } else {
+          logger.info(`Refreshing agents on remote host: ${sshConfig.host}`, LOG_CONTEXT);
+          agents = await detectAgentsRemote(sshConfig);
+        }
+      } else {
+        // Local detection
+        logger.info('Refreshing available agents locally', LOG_CONTEXT);
+        agents = await agentDetector.detectAgents();
+      }
+
 
       // If a specific agent was requested, return detailed debug info
       if (agentId) {
@@ -267,14 +285,14 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
           available: agent?.available || false,
           path: agent?.path || null,
           binaryName: agent?.binaryName || agentId,
-          envPath,
-          homeDir,
+          envPath: process.env.PATH || '',
+          homeDir: process.env.HOME || '',
           platform: process.platform,
           whichCommand: command,
-          error: null as string | null,
+          error: agent?.error || null as string | null,
         };
 
-        if (!agent?.available) {
+        if (!agent?.available && !sshRemoteId) { // Only run local which/where for local refreshes
           // Try running which/where to get error output
           const result = await execFileNoThrow(command, [agent?.binaryName || agentId]);
           debugInfo.error =
