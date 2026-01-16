@@ -85,9 +85,9 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
   const [availableModels, setAvailableModels] = useState<Record<string, string[]>>({});
   const [loadingModels, setLoadingModels] = useState<Record<string, boolean>>({});
   const [directoryWarningAcknowledged, setDirectoryWarningAcknowledged] = useState(false);
-  // SSH Remote configuration
+  // SSH Remote configuration - Unified for the modal
   const [sshRemotes, setSshRemotes] = useState<SshRemoteConfig[]>([]);
-  const [agentSshRemoteConfigs, setAgentSshRemoteConfigs] = useState<Record<string, AgentSshRemoteConfig>>({});
+  const [sessionSshConfig, setSessionSshConfig] = useState<AgentSshRemoteConfig>({ enabled: false, remoteId: null });
   // Remote path validation state (only used when SSH is enabled)
   const [remotePathValidation, setRemotePathValidation] = useState<{
     checking: boolean;
@@ -128,26 +128,18 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     setDirectoryWarningAcknowledged(false);
   }, [workingDir]);
 
-  // Check if SSH remote is enabled for the selected agent or pending config
-  // When no agent is selected, check the _pending_ config (user may select SSH before choosing agent)
+  // Check if SSH remote is enabled
   const isSshEnabled = useMemo(() => {
-    const config = selectedAgent
-      ? agentSshRemoteConfigs[selectedAgent]
-      : agentSshRemoteConfigs['_pending_'];
-    return config?.enabled && !!config?.remoteId;
-  }, [selectedAgent, agentSshRemoteConfigs]);
+    return sessionSshConfig.enabled && !!sessionSshConfig.remoteId;
+  }, [sessionSshConfig]);
 
-  // Get SSH remote host for display (moved up for use in validation)
-  // Also works with pending config when no agent is selected
+  // Get SSH remote host for display
   const sshRemoteHost = useMemo(() => {
     if (!isSshEnabled) return undefined;
-    const config = selectedAgent
-      ? agentSshRemoteConfigs[selectedAgent]
-      : agentSshRemoteConfigs['_pending_'];
-    if (!config?.remoteId) return undefined;
-    const remote = sshRemotes.find(r => r.id === config.remoteId);
+    if (!sessionSshConfig.remoteId) return undefined;
+    const remote = sshRemotes.find(r => r.id === sessionSshConfig.remoteId);
     return remote?.host;
-  }, [isSshEnabled, selectedAgent, agentSshRemoteConfigs, sshRemotes]);
+  }, [isSshEnabled, sessionSshConfig.remoteId, sshRemotes]);
 
   // Validate remote path when SSH is enabled (debounced)
   useEffect(() => {
@@ -163,9 +155,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
       return;
     }
 
-    // Get the SSH remote ID for this agent
-    const config = agentSshRemoteConfigs[selectedAgent] || agentSshRemoteConfigs['_pending_'];
-    const sshRemoteId = config?.remoteId;
+    const sshRemoteId = sessionSshConfig.remoteId;
     if (!sshRemoteId) {
       setRemotePathValidation({ checking: false, valid: false, isDirectory: false });
       return;
@@ -209,7 +199,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     }, 300);
 
     return () => clearTimeout(timeoutId);
-  }, [workingDir, isSshEnabled, selectedAgent, agentSshRemoteConfigs]);
+  }, [workingDir, isSshEnabled, sessionSshConfig.remoteId]);
 
   // Define handlers first before they're used in effects
   const loadAgents = async (source?: Session, sshRemoteId?: string) => {
@@ -222,13 +212,10 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
       if (sshRemoteId) {
         const connectionErrors = detectedAgents
           .filter((a: AgentConfig) => !a.hidden)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           .filter((a: any) => a.error)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           .map((a: any) => a.error);
         const allHaveErrors = connectionErrors.length > 0 &&
           detectedAgents.filter((a: AgentConfig) => !a.hidden)
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             .every((a: any) => a.error || !a.available);
 
         if (allHaveErrors && connectionErrors.length > 0) {
@@ -241,14 +228,11 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
       setAgents(detectedAgents);
 
       // Per-agent config (path, args, env vars) starts empty - each agent gets its own config
-      // No provider-level loading - config is set per-agent during creation
-      // Only reset if NOT duplicating (source session will provide values)
-      // Also preserve SSH configs when re-detecting (sshRemoteId is provided during re-detection)
       if (!source && !sshRemoteId) {
         setCustomAgentPaths({});
         setCustomAgentArgs({});
         setCustomAgentEnvVars({});
-        setAgentSshRemoteConfigs({});
+        setSessionSshConfig({ enabled: false, remoteId: null });
       }
 
       // Load configurations for all agents (model, contextWindow - these are provider-level)
@@ -294,7 +278,6 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
       setCustomAgentEnvVars(envVars);
 
       // Select first available non-hidden agent (or source agent if duplicating)
-      // (hidden agents like 'terminal' should never be auto-selected)
       if (source) {
         setSelectedAgent(source.toolType);
       } else {
@@ -326,14 +309,11 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
 
         // Pre-fill SSH remote configuration if source session has it
         if (source.sessionSshRemoteConfig?.enabled && source.sessionSshRemoteConfig?.remoteId) {
-          setAgentSshRemoteConfigs(prev => ({
-            ...prev,
-            [source.toolType]: {
-              enabled: true,
-              remoteId: source.sessionSshRemoteConfig!.remoteId!,
-              workingDirOverride: source.sessionSshRemoteConfig!.workingDirOverride
-            }
-          }));
+          setSessionSshConfig({
+            enabled: true,
+            remoteId: source.sessionSshRemoteConfig!.remoteId!,
+            workingDirOverride: source.sessionSshRemoteConfig!.workingDirOverride
+          });
         }
       }
     } catch (error) {
@@ -350,12 +330,9 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     }
   }, []);
 
-  // Track the current SSH remote ID for re-detection
-  // Uses _pending_ key when no agent is selected, which is the shared SSH config
   const currentSshRemoteId = useMemo(() => {
-    const config = agentSshRemoteConfigs['_pending_'] || agentSshRemoteConfigs[selectedAgent];
-    return config?.enabled ? config.remoteId : null;
-  }, [agentSshRemoteConfigs, selectedAgent]);
+    return sessionSshConfig.enabled ? sessionSshConfig.remoteId : null;
+  }, [sessionSshConfig]);
 
   const handleRefreshAgent = React.useCallback(async (agentId: string) => {
     setRefreshingAgent(agentId);
@@ -415,18 +392,6 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     const agentCustomContextWindow = agentConfigs[selectedAgent]?.contextWindow || undefined;
     const agentCustomProviderPath = agentConfigs[selectedAgent]?.providerPath?.trim() || undefined;
 
-    // Get SSH remote configuration for this session (stored per-session, not per-agent)
-    const sshRemoteConfig = agentSshRemoteConfigs[selectedAgent];
-    // Convert to session-level format: ALWAYS pass explicitly to override any agent-level config
-    // For new sessions, this ensures consistent behavior with the UI selection
-    const sessionSshRemoteConfig = sshRemoteConfig?.enabled && sshRemoteConfig?.remoteId
-      ? {
-          enabled: true,
-          remoteId: sshRemoteConfig.remoteId,
-          workingDirOverride: sshRemoteConfig.workingDirOverride
-        }
-      : { enabled: false, remoteId: null };
-
     onCreate(
       selectedAgent,
       expandedWorkingDir,
@@ -438,7 +403,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
       agentCustomModel,
       agentCustomContextWindow,
       agentCustomProviderPath,
-      sessionSshRemoteConfig
+      sessionSshConfig
     );
     onClose();
 
@@ -450,12 +415,8 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     setCustomAgentPaths(prev => ({ ...prev, [selectedAgent]: '' }));
     setCustomAgentArgs(prev => ({ ...prev, [selectedAgent]: '' }));
     setCustomAgentEnvVars(prev => ({ ...prev, [selectedAgent]: {} }));
-    setAgentSshRemoteConfigs(prev => {
-      const newConfigs = { ...prev };
-      delete newConfigs[selectedAgent];
-      return newConfigs;
-    });
-  }, [instanceName, selectedAgent, workingDir, nudgeMessage, customAgentPaths, customAgentArgs, customAgentEnvVars, agentConfigs, agentSshRemoteConfigs, onCreate, onClose, expandTilde, existingSessions]);
+    setSessionSshConfig({ enabled: false, remoteId: null });
+  }, [instanceName, selectedAgent, workingDir, nudgeMessage, customAgentPaths, customAgentArgs, customAgentEnvVars, agentConfigs, sessionSshConfig, onCreate, onClose, expandTilde, existingSessions]);
 
   // Check if form is valid for submission
   const isFormValid = useMemo(() => {
@@ -511,9 +472,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
   useEffect(() => {
     if (isOpen) {
       // Pass sourceSession to loadAgents to handle pre-fill AFTER agents are loaded
-      // This prevents the race condition where loadAgents would overwrite pre-filled values
       loadAgents(sourceSession);
-      // Keep all agents collapsed by default, or expand when duplicating to show custom config
       if (sourceSession) {
         setExpandedAgent(sourceSession.toolType);
       } else {
@@ -525,7 +484,6 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
   }, [isOpen, sourceSession]);
 
   // Load SSH remote configurations independently of agent detection
-  // This ensures SSH remotes are available even if agent detection fails
   useEffect(() => {
     if (isOpen) {
       const loadSshConfigs = async () => {
@@ -542,23 +500,11 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
     }
   }, [isOpen]);
 
-  // Transfer pending SSH config to selected agent automatically
-  // This ensures SSH config is preserved when agent is auto-selected or manually clicked
-  useEffect(() => {
-    if (selectedAgent && agentSshRemoteConfigs['_pending_'] && !agentSshRemoteConfigs[selectedAgent]) {
-      setAgentSshRemoteConfigs(prev => ({
-        ...prev,
-        [selectedAgent]: prev['_pending_'],
-      }));
-    }
-  }, [selectedAgent, agentSshRemoteConfigs]);
-
   // Track initial load to avoid re-running on first mount
   const initialLoadDoneRef = useRef(false);
   const lastSshRemoteIdRef = useRef<string | null | undefined>(undefined);
 
   // Re-detect agents when SSH remote selection changes
-  // This allows users to see which agents are available on remote vs local
   useEffect(() => {
     // Skip if modal not open
     if (!isOpen) {
@@ -687,19 +633,7 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
                             const nowExpanded = !isExpanded;
                             setExpandedAgent(nowExpanded ? agent.id : null);
                             // Always select when clicking a supported agent (even if not available)
-                            // User can configure a custom path to make it usable
                             setSelectedAgent(agent.id);
-                            // Transfer pending SSH config to the newly selected agent if it doesn't have one
-                            setAgentSshRemoteConfigs(prev => {
-                              const pendingConfig = prev['_pending_'];
-                              if (pendingConfig && !prev[agent.id]) {
-                                return {
-                                  ...prev,
-                                  [agent.id]: pendingConfig,
-                                };
-                              }
-                              return prev;
-                            });
                             // Load models when expanding an agent that supports model selection
                             if (nowExpanded && agent.capabilities?.supportsModelSelection) {
                               loadModelsForAgent(agent.id);
@@ -770,7 +704,6 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
                       </div>
 
                       {/* Expanded details for supported agents */}
-                      {/* Per-agent config (path, args, env vars) is local state only - saved to agent on create */}
                       {isSupported && isExpanded && (
                         <div className="px-3 pb-3 pt-2">
                           <AgentConfigPanel
@@ -1025,21 +958,12 @@ export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSes
           )}
 
           {/* SSH Remote Execution - Top Level */}
-          {/* Show SSH selector when remotes are configured, regardless of agent selection */}
-          {/* This allows users to see and configure SSH settings even while troubleshooting agent detection */}
-          {/* Uses '_pending_' key when no agent selected, transfers to agent when selected */}
           {sshRemotes.length > 0 && (
             <SshRemoteSelector
               theme={theme}
               sshRemotes={sshRemotes}
-              sshRemoteConfig={agentSshRemoteConfigs[selectedAgent] || agentSshRemoteConfigs['_pending_']}
-              onSshRemoteConfigChange={(config) => {
-                const key = selectedAgent || '_pending_';
-                setAgentSshRemoteConfigs(prev => ({
-                  ...prev,
-                  [key]: config
-                }));
-              }}
+              sshRemoteConfig={sessionSshConfig}
+              onSshRemoteConfigChange={setSessionSshConfig}
             />
           )}
 
