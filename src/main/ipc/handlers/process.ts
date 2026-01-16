@@ -442,9 +442,8 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
         // When using SSH, disable PTY (SSH provides its own terminal handling)
         // and env vars are passed via the remote command string
         requiresPty: sshRemoteUsed ? false : agent?.requiresPty,
-        // When using SSH with small prompts, the prompt was already added to sshArgs above
-        // For large prompts, pass it to ProcessManager so it can send via stdin
-        prompt: (sshRemoteUsed && config.prompt && config.prompt.length > 4000) ? config.prompt : (sshRemoteUsed ? undefined : config.prompt),
+        // Always pass the prompt to ProcessManager; it will decide how to handle it (CLI arg or stdin)
+        prompt: config.prompt,
         shell: shellToUse,
         shellArgs: shellArgsStr,         // Shell-specific CLI args (for terminal sessions)
         shellEnvVars: shellEnvVars,      // Shell-specific env vars (for terminal sessions)
