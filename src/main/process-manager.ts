@@ -1442,6 +1442,15 @@ export class ProcessManager extends EventEmitter {
           });
           childProcess.stdin?.write(streamJsonMessage + '\n');
           childProcess.stdin?.end(); // Signal end of input
+        } else if (capabilities.expectsSimpleJsonStdin && prompt) {
+          // Simple JSON mode for agents that expect { "prompt": "..." } on stdin
+          const payload = JSON.stringify({ prompt });
+          logger.debug('[ProcessManager] Sending simple JSON message via stdin', 'ProcessManager', {
+            sessionId,
+            messageLength: payload.length,
+          });
+          childProcess.stdin?.write(payload);
+          childProcess.stdin?.end();
         } else if (isBatchMode) {
           // Regular batch mode: close stdin immediately since prompt is passed as CLI arg
           // Some CLIs wait for stdin to close before processing

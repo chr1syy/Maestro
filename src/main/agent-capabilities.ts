@@ -69,6 +69,9 @@ export interface AgentCapabilities {
 
   /** Agent can export its context for transfer to other sessions/agents */
   supportsContextExport: boolean;
+
+  /** Agent expects a simple { "prompt": "..." } JSON object on stdin instead of a raw string */
+  expectsSimpleJsonStdin: boolean;
 }
 
 /**
@@ -95,6 +98,7 @@ export const DEFAULT_CAPABILITIES: AgentCapabilities = {
   supportsThinkingDisplay: false,
   supportsContextMerge: false,
   supportsContextExport: false,
+  expectsSimpleJsonStdin: false,
 };
 
 /**
@@ -216,6 +220,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: false, // Not yet investigated
     supportsContextMerge: false, // Not yet investigated - PLACEHOLDER
     supportsContextExport: false, // Not yet investigated - PLACEHOLDER
+    expectsSimpleJsonStdin: true, // Verified: Requires { "prompt": "..." } on stdin
   },
 
   /**
