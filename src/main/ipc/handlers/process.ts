@@ -15,6 +15,7 @@ import { getSshRemoteConfig, createSshRemoteStoreAdapter } from '../../utils/ssh
 import { buildSshCommand } from '../../utils/ssh-command-builder';
 import type { SshRemoteConfig } from '../../../shared/types';
 import { powerManager } from '../../power-manager';
+import { getAgentCapabilities } from '../../agent-capabilities';
 
 const LOG_CONTEXT = '[ProcessManager]';
 
@@ -331,6 +332,9 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
           // Instead, add --input-format stream-json and let ProcessManager send via stdin.
           const isLargePrompt = config.prompt && config.prompt.length > 4000;
           let sshArgs = finalArgs;
+          // Get agent capabilities for specific stdin handling
+          const agentCapabilities = agent ? getAgentCapabilities(agent.id) : null;
+
           if (config.prompt && !isLargePrompt) {
             // Small prompt - embed in command line as usual
             if (agent?.promptArgs) {
@@ -341,14 +345,41 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
               sshArgs = [...finalArgs, '--', config.prompt];
             }
           } else if (config.prompt && isLargePrompt) {
-            // Large prompt - use stdin mode
-            // Add --input-format stream-json flag so agent reads from stdin
-            sshArgs = [...finalArgs, '--input-format', 'stream-json'];
-            logger.info(`Using stdin for large prompt in SSH remote execution`, LOG_CONTEXT, {
-              sessionId: config.sessionId,
-              promptLength: config.prompt.length,
-              reason: 'avoid-command-line-length-limit',
-            });
+            // Large prompt over SSH
+            if (agentCapabilities?.supportsStreamJsonInput) {
+                // Agent supports stream-json, add the flag
+                sshArgs = [...finalArgs, '--input-format', 'stream-json'];
+                logger.info(`Using stdin with 'stream-json' for large prompt in SSH remote execution`, LOG_CONTEXT, {
+                    sessionId: config.sessionId,
+                    promptLength: config.prompt.length,
+                    reason: 'avoid-command-line-length-limit',
+                });
+            } else if (agentCapabilities?.expectsSimpleJsonStdin) {
+                // Agent expects simple JSON on stdin, no special arg needed for the remote command itself
+                // ProcessManager will handle writing JSON to stdin
+                logger.info(`Using stdin with simple JSON for large prompt in SSH remote execution (no CLI arg)`, LOG_CONTEXT, {
+                    sessionId: config.sessionId,
+                    promptLength: config.prompt.length,
+                    reason: 'avoid-command-line-length-limit',
+                });
+            } else {
+                // Fallback for large prompts over SSH for agents that don't support special stdin flags
+                logger.warn(`Large prompt over SSH but agent does not support special stdin flags (stream-json or simple-json). Prompt may be truncated or cause errors.`, LOG_CONTEXT, {
+                    sessionId: config.sessionId,
+                    promptLength: config.prompt.length,
+                });
+                // In this case, we'll embed the prompt as an argument.
+                // This is a fallback and indicates a limitation of the agent.
+                // The subsequent logic in buildSshCommand will handle escaping if it ends up in args.
+                // Also, if the prompt is truly large, it might exceed command line limits.
+                if (agent?.promptArgs) {
+                    sshArgs = [...finalArgs, ...agent.promptArgs(config.prompt)];
+                } else if (agent?.noPromptSeparator) {
+                    sshArgs = [...finalArgs, config.prompt];
+                } else {
+                    sshArgs = [...finalArgs, '--', config.prompt];
+                }
+            }
           }
 
           // Build the SSH command that wraps the agent execution

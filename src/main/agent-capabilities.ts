@@ -137,6 +137,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: true, // Emits streaming assistant messages
     supportsContextMerge: true,  // Can receive merged context via prompts
     supportsContextExport: true, // Session storage supports context export
+    expectsSimpleJsonStdin: false,
   },
 
   /**
@@ -163,6 +164,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: false, // Terminal is not an AI agent
     supportsContextMerge: false, // Terminal is not an AI agent
     supportsContextExport: false, // Terminal has no AI context
+    expectsSimpleJsonStdin: false,
   },
 
   /**
@@ -192,6 +194,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: true, // Emits reasoning tokens (o3/o4-mini)
     supportsContextMerge: true,  // Can receive merged context via prompts
     supportsContextExport: true, // Session storage supports context export
+    expectsSimpleJsonStdin: false,
   },
 
   /**
@@ -249,6 +252,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: false, // Not yet investigated
     supportsContextMerge: false, // Not yet investigated - PLACEHOLDER
     supportsContextExport: false, // Not yet investigated - PLACEHOLDER
+    expectsSimpleJsonStdin: false,
   },
 
   /**
@@ -278,6 +282,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: false, // Not yet investigated
     supportsContextMerge: false, // Not yet investigated - PLACEHOLDER
     supportsContextExport: false, // Not yet investigated - PLACEHOLDER
+    expectsSimpleJsonStdin: false,
   },
 
   /**
@@ -307,6 +312,7 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsThinkingDisplay: true, // Emits streaming text chunks
     supportsContextMerge: true,  // Can receive merged context via prompts
     supportsContextExport: true, // Session storage supports context export
+    expectsSimpleJsonStdin: false,
   },
 };
 
