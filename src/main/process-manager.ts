@@ -5,13 +5,23 @@ import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { stripControlSequences, stripAllAnsiCodes } from './utils/terminalFilter';
+import {
+	stripControlSequences,
+	stripAllAnsiCodes
+} from './utils/terminalFilter';
 import { logger } from './utils/logger';
-import { getOutputParser, type ParsedEvent, type AgentOutputParser } from './parsers';
+import {
+	getOutputParser,
+	type ParsedEvent,
+	type AgentOutputParser
+} from './parsers';
 import { aggregateModelUsage } from './parsers/usage-aggregator';
 import { matchSshErrorPattern } from './parsers/error-patterns';
 import type { AgentError, SshRemoteConfig } from '../shared/types';
-import { detectNodeVersionManagerBinPaths, expandTilde } from '../shared/pathUtils';
+import {
+	detectNodeVersionManagerBinPaths,
+	expandTilde
+} from '../shared/pathUtils';
 import { getAgentCapabilities } from './agent-capabilities';
 import { shellEscapeForDoubleQuotes } from './utils/shell-escape';
 import { getExpandedEnv, resolveSshPath } from './utils/cliDetection';
@@ -45,13 +55,17 @@ const MAX_BUFFER_SIZE = 100 * 1024; // 100KB
  * Append to a buffer while enforcing max size limit.
  * If the buffer exceeds MAX_BUFFER_SIZE, keeps only the last MAX_BUFFER_SIZE bytes.
  */
-function appendToBuffer(buffer: string, data: string, maxSize: number = MAX_BUFFER_SIZE): string {
-  const combined = buffer + data;
-  if (combined.length <= maxSize) {
-    return combined;
-  }
-  // Keep only the last maxSize characters
-  return combined.slice(-maxSize);
+function appendToBuffer(
+	buffer: string,
+	data: string,
+	maxSize: number = MAX_BUFFER_SIZE
+): string {
+	const combined = buffer + data;
+	if (combined.length <= maxSize) {
+		return combined;
+	}
+	// Keep only the last maxSize characters
+	return combined.slice(-maxSize);
 }
 
 interface ProcessConfig {
@@ -82,123 +96,131 @@ interface ProcessConfig {
 }
 
 interface ManagedProcess {
-  sessionId: string;
-  toolType: string;
-  ptyProcess?: pty.IPty;
-  childProcess?: ChildProcess;
-  cwd: string;
-  pid: number;
-  isTerminal: boolean;
-  isBatchMode?: boolean; // True for agents that run in batch mode (exit after response)
-  isStreamJsonMode?: boolean; // True when using stream-json input/output (for images)
-  jsonBuffer?: string; // Buffer for accumulating JSON output in batch mode
-  lastCommand?: string; // Last command sent to terminal (for filtering command echoes)
-  sessionIdEmitted?: boolean; // True after session_id has been emitted (prevents duplicate emissions)
-  resultEmitted?: boolean; // True after result data has been emitted (prevents duplicate emissions)
-  errorEmitted?: boolean; // True after an error has been emitted (prevents duplicate error emissions)
-  startTime: number; // Timestamp when process was spawned
-  outputParser?: AgentOutputParser; // Parser for agent-specific JSON output
-  stderrBuffer?: string; // Buffer for accumulating stderr output (for error detection)
-  stdoutBuffer?: string; // Buffer for accumulating stdout output (for error detection at exit)
-  streamedText?: string; // Buffer for accumulating streamed text from partial events (OpenCode, Codex)
-  contextWindow?: number; // Configured context window size (0 or undefined = not configured)
-  tempImageFiles?: string[]; // Temp files to clean up when process exits (for file-based image args)
-  command?: string; // The command used to spawn this process (e.g., 'claude', '/usr/bin/zsh')
-  args?: string[]; // The arguments passed to the command
-  lastUsageTotals?: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadInputTokens: number;
-    cacheCreationInputTokens: number;
-    reasoningTokens: number;
-  };
-  usageIsCumulative?: boolean;
-  // Stats tracking fields
-  querySource?: 'user' | 'auto'; // Whether this query is user-initiated or from Auto Run
-  tabId?: string; // Tab ID for multi-tab tracking
-  projectPath?: string; // Project path for stats tracking
-  // SSH remote context (for SSH-specific error messages)
-  sshRemoteId?: string; // ID of SSH remote being used
-  sshRemoteHost?: string; // Hostname of SSH remote
+	sessionId: string;
+	toolType: string;
+	ptyProcess?: pty.IPty;
+	childProcess?: ChildProcess;
+	cwd: string;
+	pid: number;
+	isTerminal: boolean;
+	isBatchMode?: boolean; // True for agents that run in batch mode (exit after response)
+	isStreamJsonMode?: boolean; // True when using stream-json input/output (for images)
+	jsonBuffer?: string; // Buffer for accumulating JSON output in batch mode
+	lastCommand?: string; // Last command sent to terminal (for filtering command echoes)
+	sessionIdEmitted?: boolean; // True after session_id has been emitted (prevents duplicate emissions)
+	resultEmitted?: boolean; // True after result data has been emitted (prevents duplicate emissions)
+	errorEmitted?: boolean; // True after an error has been emitted (prevents duplicate error emissions)
+	startTime: number; // Timestamp when process was spawned
+	outputParser?: AgentOutputParser; // Parser for agent-specific JSON output
+	stderrBuffer?: string; // Buffer for accumulating stderr output (for error detection)
+	stdoutBuffer?: string; // Buffer for accumulating stdout output (for error detection at exit)
+	streamedText?: string; // Buffer for accumulating streamed text from partial events (OpenCode, Codex)
+	contextWindow?: number; // Configured context window size (0 or undefined = not configured)
+	tempImageFiles?: string[]; // Temp files to clean up when process exits (for file-based image args)
+	command?: string; // The command used to spawn this process (e.g., 'claude', '/usr/bin/zsh')
+	args?: string[]; // The arguments passed to the command
+	lastUsageTotals?: {
+		inputTokens: number;
+		outputTokens: number;
+		cacheReadInputTokens: number;
+		cacheCreationInputTokens: number;
+		reasoningTokens: number;
+	};
+	usageIsCumulative?: boolean;
+	// Stats tracking fields
+	querySource?: 'user' | 'auto'; // Whether this query is user-initiated or from Auto Run
+	tabId?: string; // Tab ID for multi-tab tracking
+	projectPath?: string; // Project path for stats tracking
+	// SSH remote context (for SSH-specific error messages)
+	sshRemoteId?: string; // ID of SSH remote being used
+	sshRemoteHost?: string; // Hostname of SSH remote
+
+	// Data buffering for performance (reduces IPC event frequency)
+	dataBuffer?: string; // Accumulated data waiting to be emitted
+	dataBufferTimeout?: NodeJS.Timeout; // Timer for flushing the buffer
 }
 
 /**
  * Parse a data URL and extract base64 data and media type
  */
-function parseDataUrl(dataUrl: string): { base64: string; mediaType: string } | null {
-  // Format: data:image/png;base64,iVBORw0KGgo...
-  const match = dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
-  if (!match) return null;
-  return {
-    mediaType: match[1],
-    base64: match[2],
-  };
+function parseDataUrl(
+	dataUrl: string
+): { base64: string; mediaType: string } | null {
+	// Format: data:image/png;base64,iVBORw0KGgo...
+	const match = dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+	if (!match) return null;
+	return {
+		mediaType: match[1],
+		base64: match[2]
+	};
 }
 
 function normalizeCodexUsage(
-  managedProcess: ManagedProcess,
-  usageStats: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadInputTokens: number;
-    cacheCreationInputTokens: number;
-    totalCostUsd: number;
-    contextWindow: number;
-    reasoningTokens?: number;
-  }
+	managedProcess: ManagedProcess,
+	usageStats: {
+		inputTokens: number;
+		outputTokens: number;
+		cacheReadInputTokens: number;
+		cacheCreationInputTokens: number;
+		totalCostUsd: number;
+		contextWindow: number;
+		reasoningTokens?: number;
+	}
 ): typeof usageStats {
-  const totals = {
-    inputTokens: usageStats.inputTokens,
-    outputTokens: usageStats.outputTokens,
-    cacheReadInputTokens: usageStats.cacheReadInputTokens,
-    cacheCreationInputTokens: usageStats.cacheCreationInputTokens,
-    reasoningTokens: usageStats.reasoningTokens || 0,
-  };
+	const totals = {
+		inputTokens: usageStats.inputTokens,
+		outputTokens: usageStats.outputTokens,
+		cacheReadInputTokens: usageStats.cacheReadInputTokens,
+		cacheCreationInputTokens: usageStats.cacheCreationInputTokens,
+		reasoningTokens: usageStats.reasoningTokens || 0
+	};
 
-  const last = managedProcess.lastUsageTotals;
-  const cumulativeFlag = managedProcess.usageIsCumulative;
+	const last = managedProcess.lastUsageTotals;
+	const cumulativeFlag = managedProcess.usageIsCumulative;
 
-  if (cumulativeFlag === false) {
-    managedProcess.lastUsageTotals = totals;
-    return usageStats;
-  }
+	if (cumulativeFlag === false) {
+		managedProcess.lastUsageTotals = totals;
+		return usageStats;
+	}
 
-  if (!last) {
-    managedProcess.lastUsageTotals = totals;
-    return usageStats;
-  }
+	if (!last) {
+		managedProcess.lastUsageTotals = totals;
+		return usageStats;
+	}
 
-  const delta = {
-    inputTokens: totals.inputTokens - last.inputTokens,
-    outputTokens: totals.outputTokens - last.outputTokens,
-    cacheReadInputTokens: totals.cacheReadInputTokens - last.cacheReadInputTokens,
-    cacheCreationInputTokens: totals.cacheCreationInputTokens - last.cacheCreationInputTokens,
-    reasoningTokens: totals.reasoningTokens - last.reasoningTokens,
-  };
+	const delta = {
+		inputTokens: totals.inputTokens - last.inputTokens,
+		outputTokens: totals.outputTokens - last.outputTokens,
+		cacheReadInputTokens:
+			totals.cacheReadInputTokens - last.cacheReadInputTokens,
+		cacheCreationInputTokens:
+			totals.cacheCreationInputTokens - last.cacheCreationInputTokens,
+		reasoningTokens: totals.reasoningTokens - last.reasoningTokens
+	};
 
-  const isMonotonic =
-    delta.inputTokens >= 0 &&
-    delta.outputTokens >= 0 &&
-    delta.cacheReadInputTokens >= 0 &&
-    delta.cacheCreationInputTokens >= 0 &&
-    delta.reasoningTokens >= 0;
+	const isMonotonic =
+		delta.inputTokens >= 0 &&
+		delta.outputTokens >= 0 &&
+		delta.cacheReadInputTokens >= 0 &&
+		delta.cacheCreationInputTokens >= 0 &&
+		delta.reasoningTokens >= 0;
 
-  if (!isMonotonic) {
-    managedProcess.usageIsCumulative = false;
-    managedProcess.lastUsageTotals = totals;
-    return usageStats;
-  }
+	if (!isMonotonic) {
+		managedProcess.usageIsCumulative = false;
+		managedProcess.lastUsageTotals = totals;
+		return usageStats;
+	}
 
-  managedProcess.usageIsCumulative = true;
-  managedProcess.lastUsageTotals = totals;
-  return {
-    ...usageStats,
-    inputTokens: delta.inputTokens,
-    outputTokens: delta.outputTokens,
-    cacheReadInputTokens: delta.cacheReadInputTokens,
-    cacheCreationInputTokens: delta.cacheCreationInputTokens,
-    reasoningTokens: delta.reasoningTokens,
-  };
+	managedProcess.usageIsCumulative = true;
+	managedProcess.lastUsageTotals = totals;
+	return {
+		...usageStats,
+		inputTokens: delta.inputTokens,
+		outputTokens: delta.outputTokens,
+		cacheReadInputTokens: delta.cacheReadInputTokens,
+		cacheCreationInputTokens: delta.cacheCreationInputTokens,
+		reasoningTokens: delta.reasoningTokens
+	};
 }
 
 // UsageStats, ModelStats, and aggregateModelUsage are now imported from ./parsers/usage-aggregator
@@ -212,58 +234,59 @@ function normalizeCodexUsage(
  * with agent-detector.ts.
  */
 function buildUnixBasePath(): string {
-  const standardPaths = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
-  const versionManagerPaths = detectNodeVersionManagerBinPaths();
+	const standardPaths =
+		'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+	const versionManagerPaths = detectNodeVersionManagerBinPaths();
 
-  if (versionManagerPaths.length > 0) {
-    return versionManagerPaths.join(':') + ':' + standardPaths;
-  }
+	if (versionManagerPaths.length > 0) {
+		return versionManagerPaths.join(':') + ':' + standardPaths;
+	}
 
-  return standardPaths;
+	return standardPaths;
 }
 
 /**
  * Build a stream-json message for Claude Code with images and text
  */
 function buildStreamJsonMessage(prompt: string, images: string[]): string {
-  // Build content array with images first, then text
-  const content: Array<{
-    type: 'image' | 'text';
-    text?: string;
-    source?: { type: 'base64'; media_type: string; data: string };
-  }> = [];
+	// Build content array with images first, then text
+	const content: Array<{
+		type: 'image' | 'text';
+		text?: string;
+		source?: { type: 'base64'; media_type: string; data: string };
+	}> = [];
 
-  // Add images
-  for (const dataUrl of images) {
-    const parsed = parseDataUrl(dataUrl);
-    if (parsed) {
-      content.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: parsed.mediaType,
-          data: parsed.base64,
-        },
-      });
-    }
-  }
+	// Add images
+	for (const dataUrl of images) {
+		const parsed = parseDataUrl(dataUrl);
+		if (parsed) {
+			content.push({
+				type: 'image',
+				source: {
+					type: 'base64',
+					media_type: parsed.mediaType,
+					data: parsed.base64
+				}
+			});
+		}
+	}
 
-  // Add text prompt
-  content.push({
-    type: 'text',
-    text: prompt,
-  });
+	// Add text prompt
+	content.push({
+		type: 'text',
+		text: prompt
+	});
 
-  // Build the stream-json message
-  const message = {
-    type: 'user',
-    message: {
-      role: 'user',
-      content,
-    },
-  };
+	// Build the stream-json message
+	const message = {
+		type: 'user',
+		message: {
+			role: 'user',
+			content
+		}
+	};
 
-  return JSON.stringify(message);
+	return JSON.stringify(message);
 }
 
 /**
@@ -271,27 +294,38 @@ function buildStreamJsonMessage(prompt: string, images: string[]): string {
  * Returns the full path to the temp file.
  */
 function saveImageToTempFile(dataUrl: string, index: number): string | null {
-  const parsed = parseDataUrl(dataUrl);
-  if (!parsed) {
-    logger.warn('[ProcessManager] Failed to parse data URL for temp file', 'ProcessManager');
-    return null;
-  }
+	const parsed = parseDataUrl(dataUrl);
+	if (!parsed) {
+		logger.warn(
+			'[ProcessManager] Failed to parse data URL for temp file',
+			'ProcessManager'
+		);
+		return null;
+	}
 
-  // Determine file extension from media type
-  const ext = parsed.mediaType.split('/')[1] || 'png';
-  const filename = `maestro-image-${Date.now()}-${index}.${ext}`;
-  const tempPath = path.join(os.tmpdir(), filename);
+	// Determine file extension from media type
+	const ext = parsed.mediaType.split('/')[1] || 'png';
+	const filename = `maestro-image-${Date.now()}-${index}.${ext}`;
+	const tempPath = path.join(os.tmpdir(), filename);
 
-  try {
-    // Convert base64 to buffer and write to file
-    const buffer = Buffer.from(parsed.base64, 'base64');
-    fs.writeFileSync(tempPath, buffer);
-    logger.debug('[ProcessManager] Saved image to temp file', 'ProcessManager', { tempPath, size: buffer.length });
-    return tempPath;
-  } catch (error) {
-    logger.error('[ProcessManager] Failed to save image to temp file', 'ProcessManager', { error: String(error) });
-    return null;
-  }
+	try {
+		// Convert base64 to buffer and write to file
+		const buffer = Buffer.from(parsed.base64, 'base64');
+		fs.writeFileSync(tempPath, buffer);
+		logger.debug(
+			'[ProcessManager] Saved image to temp file',
+			'ProcessManager',
+			{ tempPath, size: buffer.length }
+		);
+		return tempPath;
+	} catch (error) {
+		logger.error(
+			'[ProcessManager] Failed to save image to temp file',
+			'ProcessManager',
+			{ error: String(error) }
+		);
+		return null;
+	}
 }
 
 /**
@@ -299,19 +333,28 @@ function saveImageToTempFile(dataUrl: string, index: number): string | null {
  * Fire-and-forget to avoid blocking the main thread.
  */
 function cleanupTempFiles(files: string[]): void {
-  // Use async operations to avoid blocking the main thread
-  for (const file of files) {
-    fsPromises.unlink(file)
-      .then(() => {
-        logger.debug('[ProcessManager] Cleaned up temp file', 'ProcessManager', { file });
-      })
-      .catch((error) => {
-        // ENOENT is fine - file already deleted
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          logger.warn('[ProcessManager] Failed to clean up temp file', 'ProcessManager', { file, error: String(error) });
-        }
-      });
-  }
+	// Use async operations to avoid blocking the main thread
+	for (const file of files) {
+		fsPromises
+			.unlink(file)
+			.then(() => {
+				logger.debug(
+					'[ProcessManager] Cleaned up temp file',
+					'ProcessManager',
+					{ file }
+				);
+			})
+			.catch(error => {
+				// ENOENT is fine - file already deleted
+				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+					logger.warn(
+						'[ProcessManager] Failed to clean up temp file',
+						'ProcessManager',
+						{ file, error: String(error) }
+					);
+				}
+			});
+	}
 }
 
 export class ProcessManager extends EventEmitter {

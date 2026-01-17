@@ -162,6 +162,12 @@ const formatFileSize = (bytes: number): string => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 };
 
+// Large file thresholds to prevent UI freezes
+// Files larger than this will skip token counting (expensive operation)
+const LARGE_FILE_TOKEN_SKIP_THRESHOLD = 1024 * 1024; // 1MB
+// Files larger than this will have content truncated for syntax highlighting
+const LARGE_FILE_PREVIEW_LIMIT = 100 * 1024; // 100KB for syntax highlighting
+
 // Format date/time for display
 const formatDateTime = (isoString: string): string => {
   const date = new Date(isoString);
@@ -465,6 +471,25 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
   // Any non-binary, non-image file can be edited as text
   const isEditableText = !isImage && !isBinary;
 
+  // Check if file is large (for performance optimizations)
+  // Use content length as primary check since fileStats may not be loaded yet
+  const isLargeFile = useMemo(() => {
+    if (!file?.content) return false;
+    return file.content.length > LARGE_FILE_TOKEN_SKIP_THRESHOLD;
+  }, [file?.content]);
+
+  // For very large files, truncate content for syntax highlighting to prevent freezes
+  const displayContent = useMemo(() => {
+    if (!file?.content) return '';
+    if (!isMarkdown && !isImage && !isBinary && file.content.length > LARGE_FILE_PREVIEW_LIMIT) {
+      return file.content.substring(0, LARGE_FILE_PREVIEW_LIMIT);
+    }
+    return file.content;
+  }, [file?.content, isMarkdown, isImage, isBinary]);
+
+  // Track if content is truncated for display
+  const isContentTruncated = file?.content && displayContent.length < file.content.length;
+
   // Calculate task counts for markdown files
   const taskCounts = useMemo(() => {
     if (!isMarkdown || !file?.content) return null;
@@ -627,9 +652,10 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
     }
   }, [file?.path, sshRemoteId]);
 
-  // Count tokens when file content changes (skip for images and binary files)
+  // Count tokens when file content changes (skip for images, binary files, and large files)
+  // Large files would freeze the UI during token encoding
   useEffect(() => {
-    if (!file?.content || isImage || isBinary) {
+    if (!file?.content || isImage || isBinary || isLargeFile) {
       setTokenCount(null);
       return;
     }
@@ -643,7 +669,7 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
         console.error('Failed to count tokens:', err);
         setTokenCount(null);
       });
-  }, [file?.content, isImage, isBinary]);
+  }, [file?.content, isImage, isBinary, isLargeFile]);
 
   // Sync edit content when file changes or when entering edit mode
   useEffect(() => {
@@ -934,13 +960,17 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
         // Scroll to current match
         const currentRange = allRanges[targetIndex];
         const rect = currentRange.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
         const scrollParent = contentRef.current;
 
         if (scrollParent && rect) {
-          // Calculate scroll position to center the match
-          const scrollTop = scrollParent.scrollTop + rect.top - containerRect.top - scrollParent.clientHeight / 2 + rect.height / 2;
-          scrollParent.scrollTo({ top: scrollTop, behavior: 'smooth' });
+          // Calculate position of the match relative to the scroll container's top
+          // rect.top is viewport-relative, so we need to account for current scroll
+          // and the scroll container's viewport position
+          const scrollContainerRect = scrollParent.getBoundingClientRect();
+          const matchOffsetInScrollContainer = rect.top - scrollContainerRect.top + scrollParent.scrollTop;
+          // Calculate scroll position to center the match vertically
+          const scrollTop = matchOffsetInScrollContainer - scrollParent.clientHeight / 2 + rect.height / 2;
+          scrollParent.scrollTo({ top: Math.max(0, scrollTop), behavior: 'smooth' });
         }
       } else {
         (CSS as any).highlights.delete('search-results');
@@ -1078,9 +1108,18 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
     return formatShortcutKeys(shortcut.keys);
   };
 
-  // Handle search in edit mode - jump to and select the match in textarea
+  // Track previous search query and match index for edit mode navigation
+  const prevSearchQueryRef = useRef<string>('');
+  const prevMatchIndexRef = useRef<number>(0);
+
+  // Handle search in edit mode - count matches and update state
+  // Note: We separate counting from selection to avoid stealing focus while typing
   useEffect(() => {
     if (!isEditableText || !markdownEditMode || !searchQuery.trim() || !textareaRef.current) {
+      if (isEditableText && markdownEditMode) {
+        setTotalMatches(0);
+        setCurrentMatchIndex(0);
+      }
       return;
     }
 
@@ -1108,20 +1147,29 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
       return;
     }
 
-    // Select the current match in the textarea
-    const currentMatch = matches[validIndex];
-    if (currentMatch) {
-      const textarea = textareaRef.current;
-      textarea.focus();
-      textarea.setSelectionRange(currentMatch.start, currentMatch.end);
+    // Only scroll and select when navigating between matches (Enter/Shift+Enter)
+    // or when search query is complete (user stopped typing)
+    // We detect navigation by checking if currentMatchIndex changed without searchQuery changing
+    const isNavigating = prevSearchQueryRef.current === searchQuery && prevMatchIndexRef.current !== currentMatchIndex;
+    prevSearchQueryRef.current = searchQuery;
+    prevMatchIndexRef.current = currentMatchIndex;
 
-      // Scroll to make the selection visible
-      // Calculate approximate line number and scroll to it
-      const textBeforeMatch = content.substring(0, currentMatch.start);
-      const lineNumber = textBeforeMatch.split('\n').length;
-      const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 24;
-      const targetScroll = (lineNumber - 5) * lineHeight; // Leave some lines above
-      textarea.scrollTop = Math.max(0, targetScroll);
+    // Select the current match in the textarea only when navigating
+    if (isNavigating) {
+      const currentMatch = matches[validIndex];
+      if (currentMatch) {
+        const textarea = textareaRef.current;
+        textarea.focus();
+        textarea.setSelectionRange(currentMatch.start, currentMatch.end);
+
+        // Scroll to make the selection visible
+        // Calculate approximate line number and scroll to it
+        const textBeforeMatch = content.substring(0, currentMatch.start);
+        const lineNumber = textBeforeMatch.split('\n').length;
+        const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 24;
+        const targetScroll = (lineNumber - 5) * lineHeight; // Leave some lines above
+        textarea.scrollTop = Math.max(0, targetScroll);
+      }
     }
   }, [searchQuery, currentMatchIndex, isEditableText, markdownEditMode, editContent]);
 
@@ -1727,6 +1775,23 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
           </div>
         ) : (
           <div ref={codeContainerRef}>
+            {/* Large file truncation banner */}
+            {isContentTruncated && (
+              <div
+                className="px-4 py-2 flex items-center gap-2 text-sm"
+                style={{
+                  backgroundColor: theme.colors.warning + '20',
+                  borderBottom: `1px solid ${theme.colors.warning}40`,
+                  color: theme.colors.warning
+                }}
+              >
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>
+                  Large file preview truncated. Showing first {formatFileSize(LARGE_FILE_PREVIEW_LIMIT)} of {formatFileSize(file.content.length)}.
+                  Use an external editor for the full file.
+                </span>
+              </div>
+            )}
             <SyntaxHighlighter
               language={language}
               style={vscDarkPlus}
@@ -1739,7 +1804,7 @@ export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(funct
               showLineNumbers
               PreTag="div"
             >
-              {file.content}
+              {displayContent}
             </SyntaxHighlighter>
           </div>
         )}
