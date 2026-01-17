@@ -23,7 +23,7 @@ import { logger } from '../utils/logger';
  * Valid ToolType values that have error patterns registered.
  * Used to validate input to getErrorPatterns and log warnings for unknown agents.
  */
-const VALID_TOOL_TYPES = new Set<string>(['claude', 'claude-code', 'aider', 'opencode', 'codex', 'terminal']);
+const VALID_TOOL_TYPES = new Set<string>(['claude', 'claude-code', 'aider', 'opencode', 'codex', 'terminal', 'copilot-cli']);
 
 /**
  * Error pattern definition with regex and user-friendly message
@@ -384,6 +384,89 @@ export const OPENCODE_ERROR_PATTERNS: AgentErrorPatterns = {
 };
 
 // ============================================================================
+// Copilot CLI Error Patterns
+// ============================================================================
+
+export const COPILOT_ERROR_PATTERNS: AgentErrorPatterns = {
+  auth_expired: [
+    {
+      pattern: /not authenticated|authentication.*(?:failed|required)/i,
+      message: 'Authentication required. Please run `gh auth login` to authenticate with GitHub.',
+      recoverable: true,
+    },
+    {
+      pattern: /invalid.*token|token.*expired/i,
+      message: 'GitHub token expired. Please re-authenticate with `gh auth login`.',
+      recoverable: true,
+    },
+  ],
+
+  rate_limited: [
+    {
+      pattern: /rate.*limit|too many requests/i,
+      message: 'Rate limit exceeded. Please wait before trying again.',
+      recoverable: true,
+    },
+    {
+      pattern: /quota.*exceeded/i,
+      message: 'API quota exceeded. Please wait or upgrade your plan.',
+      recoverable: false,
+    },
+  ],
+
+  network_error: [
+    {
+      pattern: /connection\s*(failed|refused|error|reset|closed|timed?\s*out)/i,
+      message: 'Connection error. Check your network.',
+      recoverable: true,
+    },
+    {
+      pattern: /network\s+(error|failure|unavailable)/i,
+      message: 'Network error. Please check your connection.',
+      recoverable: true,
+    },
+    {
+      pattern: /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND/i,
+      message: 'Network error. Check your connection.',
+      recoverable: true,
+    },
+  ],
+
+  agent_crashed: [
+    {
+      pattern: /cannot specify prompt both with.*flags/i,
+      message: 'Invalid flag combination. Use either -p or -i, not both.',
+      recoverable: true,
+    },
+    {
+      pattern: /option.*argument.*is invalid/i,
+      message: (match: RegExpMatchArray) => {
+        return match[0] || 'Invalid argument provided to option.';
+      },
+      recoverable: true,
+    },
+    {
+      pattern: /\b(fatal|unexpected|internal|unhandled)\s+error\b/i,
+      message: 'An unexpected error occurred in Copilot CLI.',
+      recoverable: true,
+    },
+    {
+      pattern: /\bpanic\b/i,
+      message: 'Copilot CLI encountered a critical error.',
+      recoverable: true,
+    },
+  ],
+
+  permission_denied: [
+    {
+      pattern: /don't have permission|permission.*denied/i,
+      message: 'Permission denied. Grant the necessary permissions with --allow-all-tools or specific allow flags.',
+      recoverable: true,
+    },
+  ],
+};
+
+// ============================================================================
 // Codex Error Patterns
 // ============================================================================
 
@@ -707,6 +790,7 @@ const patternRegistry = new Map<ToolType, AgentErrorPatterns>([
   ['claude-code', CLAUDE_ERROR_PATTERNS],
   ['opencode', OPENCODE_ERROR_PATTERNS],
   ['codex', CODEX_ERROR_PATTERNS],
+  ['copilot-cli', COPILOT_ERROR_PATTERNS],
 ]);
 
 /**

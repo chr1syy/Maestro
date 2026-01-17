@@ -170,6 +170,61 @@ export const AGENT_DEFINITIONS: Omit<AgentConfig, 'available' | 'path' | 'capabi
     command: 'aider',
     args: [], // Base args (placeholder - to be configured when implemented)
   },
+  {
+    id: 'copilot-cli',
+    name: 'GitHub Copilot CLI',
+    binaryName: 'copilot',
+    command: 'copilot',
+    args: [], // Base args (none - flags are added dynamically)
+    // Copilot CLI argument builders
+    // Batch mode: copilot -p "prompt" --allow-all-tools --silent [--model <model>] [--continue]
+    // Output: Plain text only (no JSON support)
+    // Sessions: Automatic persistence in ~/.copilot/session-state/ with --continue flag
+    batchModeArgs: ['--allow-all-tools', '--silent'], // Required for non-interactive execution with clean output
+    resumeArgs: (_sessionId: string) => ['--continue'], // Continue most recent session (sessionId not used - Copilot manages internally)
+    modelArgs: (modelId: string) => ['--model', modelId], // Model selection (e.g., 'claude-sonnet-4.5', 'gpt-5.2-codex')
+    promptArgs: (prompt: string) => ['-p', prompt], // Prompt flag for batch mode
+    // Agent-specific configuration options shown in UI
+    configOptions: [
+      {
+        key: 'model',
+        type: 'select',
+        label: 'Model',
+        description: 'AI model to use for queries. Default: claude-sonnet-4.5',
+        default: 'claude-sonnet-4.5',
+        options: [
+          'claude-sonnet-4.5',
+          'claude-haiku-4.5',
+          'claude-opus-4.5',
+          'claude-sonnet-4',
+          'gpt-5.2-codex',
+          'gpt-5.1-codex-max',
+          'gpt-5.1-codex',
+          'gpt-5.2',
+          'gpt-5.1',
+          'gpt-5',
+          'gpt-5.1-codex-mini',
+          'gpt-5-mini',
+          'gpt-4.1',
+          'gemini-3-pro-preview',
+        ],
+        argBuilder: (value: string) => {
+          // Only add --model arg if a non-default model is specified
+          if (value && value !== 'claude-sonnet-4.5') {
+            return ['--model', value];
+          }
+          return [];
+        },
+      },
+      {
+        key: 'contextWindow',
+        type: 'number',
+        label: 'Context Window Size',
+        description: 'Maximum context window size in tokens. Required for context usage display. Default: 200000 (Claude Sonnet 4.5)',
+        default: 200000, // Default for Claude Sonnet 4.5
+      },
+    ],
+  },
 ];
 
 export class AgentDetector {

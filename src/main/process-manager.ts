@@ -1312,6 +1312,22 @@ export class ProcessManager extends EventEmitter {
             }
           }
 
+          // Special handling for Copilot CLI: generate a stable session ID
+          // Copilot manages sessions internally (~/.copilot/session-state/)
+          // but doesn't provide session IDs in output. We generate one for Maestro's persistence.
+          if (toolType === 'copilot-cli' && !managedProcess.sessionIdEmitted && managedProcess.resultEmitted) {
+            managedProcess.sessionIdEmitted = true;
+            // Generate session ID in format: copilot-session-{timestamp}
+            // This ensures uniqueness and allows tracking across Maestro restarts
+            const generatedSessionId = `copilot-session-${managedProcess.startTime}`;
+            logger.debug('[ProcessManager] Generated session ID for Copilot CLI', 'ProcessManager', {
+              sessionId,
+              generatedSessionId,
+              startTime: managedProcess.startTime,
+            });
+            this.emit('session-id', sessionId, generatedSessionId);
+          }
+
           // Check for errors using the parser (if not already emitted)
           // Note: Some agents (OpenCode) may exit with code 0 but still have errors
           // The parser's detectErrorFromExit handles both non-zero exit and the

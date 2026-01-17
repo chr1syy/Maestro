@@ -81,6 +81,10 @@ export function buildAgentArgs(
     finalArgs = [...finalArgs, ...agent.resumeArgs(options.agentSessionId)];
   }
 
+  if (agent.promptArgs && options.prompt) {
+    finalArgs = [...finalArgs, ...agent.promptArgs(options.prompt)];
+  }
+
   return finalArgs;
 }
 

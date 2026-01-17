@@ -303,6 +303,35 @@ export const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
     supportsContextMerge: true,  // Can receive merged context via prompts
     supportsContextExport: true, // Session storage supports context export
   },
+
+  /**
+   * GitHub Copilot CLI - GitHub's AI coding assistant
+   * https://github.com/github/copilot-cli
+   *
+   * Verified capabilities based on Phase 1 research and CLI testing.
+   * See Copilot CLI Implementation/Phase-01-Research-Setup.md for investigation details.
+   */
+  'copilot-cli': {
+    supportsResume: true,         // --continue flag (automatic session persistence) - Verified
+    supportsReadOnlyMode: false,  // No dedicated read-only mode (use --deny-tool flags instead)
+    supportsJsonOutput: false,    // Plain text output only (no JSON mode) - Verified
+    supportsSessionId: false,     // Session IDs managed internally (not exposed to user) - Verified
+    supportsImageInput: false,    // No direct image attachment flags - Verified
+    supportsImageInputOnResume: false, // No image support at all
+    supportsSlashCommands: false, // Flag-driven interface (no slash commands)
+    supportsSessionStorage: true, // ~/.copilot/session-state/ - Verified
+    supportsCostTracking: false,  // No cost information in output (usage stats only)
+    supportsUsageStats: true,     // Token counts in stats section (without --silent) - Verified
+    supportsBatchMode: true,      // -p flag for batch execution - Verified
+    requiresPromptToStart: true,  // Copilot requires -p flag with prompt, no eager spawn
+    supportsStreaming: false,     // Output returned all at once (no streaming)
+    supportsResultMessages: false, // Plain text output (no structured result messages)
+    supportsModelSelection: true, // --model flag (Claude, GPT, Gemini families) - Verified
+    supportsStreamJsonInput: false, // No JSON input support
+    supportsThinkingDisplay: false, // Plain text output (no separate thinking content)
+    supportsContextMerge: true,  // Can receive merged context via prompts
+    supportsContextExport: true, // Session storage and --share flag support context export - Verified
+  },
 };
 
 /**
