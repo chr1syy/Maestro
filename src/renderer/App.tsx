@@ -8934,12 +8934,13 @@ You are taking over this conversation. Based on the context above, provide a bri
 				return;
 			}
 
-			// Handle AI mode for batch-mode agents (Claude Code, Codex, OpenCode)
+			// Handle AI mode for batch-mode agents (Claude Code, Codex, OpenCode, GitHub Copilot CLI)
 			const supportedBatchAgents: ToolType[] = [
 				'claude',
 				'claude-code',
 				'codex',
-				'opencode'
+				'opencode',
+				'copilot-cli'
 			];
 			if (!supportedBatchAgents.includes(session.toolType)) {
 				console.log('[Remote] Not a batch-mode agent, skipping');

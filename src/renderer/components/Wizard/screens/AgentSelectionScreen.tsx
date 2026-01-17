@@ -63,6 +63,13 @@ export const AGENT_TILES: AgentTile[] = [
     description: 'Open-source AI coding assistant',
     brandColor: '#F97316', // Orange
   },
+  {
+    id: 'copilot-cli',
+    name: 'GitHub Copilot CLI',
+    supported: true,
+    description: 'GitHub\'s AI coding assistant',
+    brandColor: '#238636', // GitHub green
+  },
   // Coming soon agents at the bottom
   {
     id: 'aider',
@@ -257,6 +264,35 @@ export function AgentLogo({ agentId, supported, detected, brandColor, theme }: {
           />
           <path
             d="M18 22l4 4 6-8"
+            stroke={color}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+
+    case 'copilot-cli':
+      // GitHub Copilot - GitHub's Octocat-inspired logo
+      return (
+        <svg
+          className="w-12 h-12"
+          viewBox="0 0 48 48"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          style={{ opacity }}
+        >
+          {/* GitHub Copilot - stylized AI/chat concept */}
+          {/* Chat bubble with code elements */}
+          <path
+            d="M8 14C8 11.79 9.79 10 12 10H36C38.21 10 40 11.79 40 14V26C40 28.21 38.21 30 36 30H24L16 36V30H12C9.79 30 8 28.21 8 26V14Z"
+            stroke={color}
+            strokeWidth="2"
+            fill="none"
+          />
+          {/* Code brackets inside */}
+          <path
+            d="M16 18L12 22L16 26M32 18L36 22L32 26M20 20L28 24"
             stroke={color}
             strokeWidth="2"
             strokeLinecap="round"

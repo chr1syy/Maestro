@@ -65,7 +65,7 @@ interface EditAgentModalProps {
 }
 
 // Supported agents that are fully implemented
-const SUPPORTED_AGENTS = ['claude-code', 'opencode', 'codex'];
+const SUPPORTED_AGENTS = ['claude-code', 'opencode', 'codex', 'copilot-cli'];
 
 export function NewInstanceModal({ isOpen, onClose, onCreate, theme, existingSessions, sourceSession }: NewInstanceModalProps) {
   const [agents, setAgents] = useState<AgentConfig[]>([]);

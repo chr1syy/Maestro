@@ -74,6 +74,8 @@ function getAgentIcon(agentId: string): string {
       return '⬡';
     case 'opencode':
       return '📟';
+    case 'copilot-cli':
+      return '🐙';
     case 'aider':
       return '🛠️';
     default:

@@ -267,6 +267,7 @@ function SessionInfoPopover({ session, anchorRect, onClose }: SessionInfoPopover
       'claude-code': 'Claude Code',
       'openai-codex': 'OpenAI Codex',
       'gemini-cli': 'Gemini CLI',
+      'copilot-cli': 'GitHub Copilot CLI',
       'qwen3-coder': 'Qwen3 Coder',
     };
     return toolTypeMap[session.toolType] || session.toolType;

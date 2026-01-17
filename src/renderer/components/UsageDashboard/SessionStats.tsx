@@ -95,6 +95,7 @@ function formatAgentName(toolType: ToolType): string {
     'claude-code': 'Claude Code',
     'opencode': 'OpenCode',
     'openai-codex': 'OpenAI Codex',
+    'copilot-cli': 'GitHub Copilot CLI',
     'gemini-cli': 'Gemini CLI',
     'qwen3-coder': 'Qwen3 Coder',
     'aider': 'Aider',

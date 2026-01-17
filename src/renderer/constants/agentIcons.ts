@@ -35,6 +35,9 @@ export const AGENT_ICONS: Record<string, string> = {
   'gemini-cli': '🔷',
   'gemini': '🔷',
 
+  // GitHub Copilot
+  'copilot-cli': '🐙',
+
   // Alibaba family
   'qwen3-coder': '⬡',
   'qwen': '⬡',
