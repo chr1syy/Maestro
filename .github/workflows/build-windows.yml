@@ -1,0 +1,130 @@
+name: Build Windows (Draft)
+
+# Workflow for building Windows packages only
+# Creates draft releases for easy download without pushing to the repository
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 0.1.0-test)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # Windows: Setup for native module compilation
+      - name: Setup Windows build tools
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Windows: Setup Python 3.11 for node-gyp (Python 3.12+ removed distutils)
+      - name: Setup Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Determine version to use
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Generate timestamp-based version
+            VERSION="$(node -p "require('./package.json').version")-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using version: $VERSION"
+
+      # Update package.json with the version
+      - name: Update package.json version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          echo "Updated package.json to version $VERSION"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules
+        run: npm run postinstall
+        env:
+          npm_config_build_from_source: true
+
+      - name: Build application
+        run: npm run build
+        env:
+          VITE_APP_VERSION: ${{ steps.version.outputs.VERSION }}
+
+      # Create release directory
+      - name: Create release directory
+        run: mkdir -p release
+        shell: bash
+
+      - name: Package for Windows
+        shell: bash
+        run: npx electron-builder --win --publish never --config.extraMetadata.version=${{ steps.version.outputs.VERSION }}
+        env:
+          DEBUG: electron-builder
+
+      # List what was built
+      - name: List release artifacts
+        run: ls -la release/
+        shell: bash
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-windows-${{ steps.version.outputs.VERSION }}
+          path: |
+            release/*.exe
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 30
+
+      # Create draft release (if version provided, otherwise skip)
+      - name: Create Draft Release
+        if: github.event.inputs.version != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.exe
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: Maestro v${{ steps.version.outputs.VERSION }} (Windows)
+          draft: true
+          prerelease: true
+          body: |
+            # Windows Build - v${{ steps.version.outputs.VERSION }}
+            
+            This is a draft release created by the Windows-only build workflow.
+            
+            ## Installation
+            
+            Download the `.exe` file and run it to install Maestro on Windows.
+            
+            ---
+            
+            **Note:** This is a draft release and won't be visible publicly until published.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
