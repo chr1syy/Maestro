@@ -3102,4 +3102,151 @@ describe('MainPanel', () => {
 			expect(screen.getByTestId('wizard-conversation-view')).toBeInTheDocument();
 		});
 	});
+
+	describe('File Tab Loading State (SSH Remote Files)', () => {
+		// Helper to create a file preview tab
+		const createFileTab = (
+			overrides: Partial<import('../../../renderer/types').FilePreviewTab> = {}
+		): import('../../../renderer/types').FilePreviewTab => ({
+			id: 'file-tab-1',
+			path: '/remote/path/file.ts',
+			name: 'file',
+			extension: '.ts',
+			content: '',
+			scrollTop: 0,
+			searchQuery: '',
+			editMode: false,
+			editContent: undefined,
+			createdAt: Date.now(),
+			lastModified: 0,
+			...overrides,
+		});
+
+		it('should display loading spinner when file tab isLoading is true', () => {
+			const fileTab = createFileTab({
+				sshRemoteId: 'ssh-remote-1',
+				isLoading: true, // SSH remote file loading
+			});
+
+			const session = createSession({
+				inputMode: 'ai',
+				filePreviewTabs: [fileTab],
+				activeFileTabId: 'file-tab-1',
+				unifiedTabOrder: [
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'file' as const, id: 'file-tab-1' },
+				],
+			});
+
+			render(
+				<MainPanel
+					{...defaultProps}
+					activeSession={session}
+					activeFileTabId="file-tab-1"
+					activeFileTab={fileTab}
+				/>
+			);
+
+			// Should display loading text with file name
+			expect(screen.getByText('Loading file.ts')).toBeInTheDocument();
+			// Should display "Fetching from remote server..." subtitle
+			expect(screen.getByText('Fetching from remote server...')).toBeInTheDocument();
+		});
+
+		it('should render FilePreview when file tab isLoading is false', () => {
+			const fileTab = createFileTab({
+				content: 'const x = 1;',
+				lastModified: Date.now(),
+				sshRemoteId: 'ssh-remote-1',
+				isLoading: false, // Loading complete
+			});
+
+			const session = createSession({
+				inputMode: 'ai',
+				filePreviewTabs: [fileTab],
+				activeFileTabId: 'file-tab-1',
+				unifiedTabOrder: [
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'file' as const, id: 'file-tab-1' },
+				],
+			});
+
+			render(
+				<MainPanel
+					{...defaultProps}
+					activeSession={session}
+					activeFileTabId="file-tab-1"
+					activeFileTab={fileTab}
+				/>
+			);
+
+			// Should render file preview (mocked component)
+			expect(screen.getByTestId('file-preview')).toBeInTheDocument();
+			// Should NOT display loading state
+			expect(screen.queryByText('Fetching from remote server...')).not.toBeInTheDocument();
+		});
+
+		it('should display loading state for file tab without sshRemoteId (local file loading)', () => {
+			const fileTab = createFileTab({
+				path: '/local/path/config.json',
+				name: 'config',
+				extension: '.json',
+				isLoading: true, // Even local files can show loading briefly
+			});
+
+			const session = createSession({
+				inputMode: 'ai',
+				filePreviewTabs: [fileTab],
+				activeFileTabId: 'file-tab-1',
+				unifiedTabOrder: [
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'file' as const, id: 'file-tab-1' },
+				],
+			});
+
+			render(
+				<MainPanel
+					{...defaultProps}
+					activeSession={session}
+					activeFileTabId="file-tab-1"
+					activeFileTab={fileTab}
+				/>
+			);
+
+			// Should display loading text with file name
+			expect(screen.getByText('Loading config.json')).toBeInTheDocument();
+		});
+
+		it('should not show loading state when AI tab is active', () => {
+			const fileTab = createFileTab({
+				sshRemoteId: 'ssh-remote-1',
+				isLoading: true, // Loading but not active
+			});
+
+			const session = createSession({
+				inputMode: 'ai',
+				filePreviewTabs: [fileTab],
+				activeFileTabId: null, // AI tab is active, not file tab
+				activeTabId: 'tab-1',
+				unifiedTabOrder: [
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'file' as const, id: 'file-tab-1' },
+				],
+			});
+
+			render(
+				<MainPanel
+					{...defaultProps}
+					activeSession={session}
+					activeFileTabId={null}
+					activeFileTab={null}
+				/>
+			);
+
+			// Should NOT display loading state (file tab is not active)
+			expect(screen.queryByText('Fetching from remote server...')).not.toBeInTheDocument();
+			// Should display terminal output (default for AI tab)
+			expect(screen.getByTestId('terminal-output')).toBeInTheDocument();
+		});
+	});
 });
