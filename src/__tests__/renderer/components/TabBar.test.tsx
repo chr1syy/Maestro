@@ -3076,3 +3076,473 @@ describe('FileTab overlay menu', () => {
 		vi.useRealTimers();
 	});
 });
+
+describe('Unified tabs drag and drop', () => {
+	const mockOnUnifiedTabReorder = vi.fn();
+	const mockOnTabReorder = vi.fn();
+	const mockOnFileTabSelect = vi.fn();
+	const mockOnFileTabClose = vi.fn();
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.clearAllMocks();
+		Element.prototype.scrollTo = vi.fn();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const aiTab1 = createTab({ id: 'ai-tab-1', name: 'AI Tab 1', agentSessionId: 'sess-1' });
+	const aiTab2 = createTab({ id: 'ai-tab-2', name: 'AI Tab 2', agentSessionId: 'sess-2' });
+	const aiTabs: AITab[] = [aiTab1, aiTab2];
+
+	const fileTab1: FilePreviewTab = {
+		id: 'file-tab-1',
+		path: '/path/to/file1.ts',
+		name: 'file1',
+		extension: '.ts',
+		scrollTop: 0,
+		searchQuery: '',
+		editMode: false,
+		editContent: undefined,
+		createdAt: Date.now(),
+	};
+
+	const fileTab2: FilePreviewTab = {
+		id: 'file-tab-2',
+		path: '/path/to/file2.md',
+		name: 'file2',
+		extension: '.md',
+		scrollTop: 0,
+		searchQuery: '',
+		editMode: false,
+		editContent: undefined,
+		createdAt: Date.now() + 1,
+	};
+
+	// Unified tabs: AI, File, AI, File
+	const unifiedTabs = [
+		{ type: 'ai' as const, id: 'ai-tab-1', data: aiTab1 },
+		{ type: 'file' as const, id: 'file-tab-1', data: fileTab1 },
+		{ type: 'ai' as const, id: 'ai-tab-2', data: aiTab2 },
+		{ type: 'file' as const, id: 'file-tab-2', data: fileTab2 },
+	];
+
+	it('drags AI tab to file tab position and calls onUnifiedTabReorder', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onTabReorder={mockOnTabReorder}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		const aiTabElement = screen.getByText('AI Tab 1').closest('[data-tab-id]')!;
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		// Start dragging ai-tab-1
+		fireEvent.dragStart(aiTabElement, {
+			dataTransfer: {
+				effectAllowed: '',
+				setData: vi.fn(),
+				getData: vi.fn().mockReturnValue('ai-tab-1'),
+			},
+		});
+
+		// Drop on file-tab-1
+		fireEvent.drop(fileTabElement, {
+			dataTransfer: {
+				getData: vi.fn().mockReturnValue('ai-tab-1'),
+			},
+		});
+
+		// Should call onUnifiedTabReorder with indices in unified array (0 to 1)
+		expect(mockOnUnifiedTabReorder).toHaveBeenCalledWith(0, 1);
+		// Should NOT call legacy onTabReorder since unified is available
+		expect(mockOnTabReorder).not.toHaveBeenCalled();
+	});
+
+	it('drags file tab to AI tab position and calls onUnifiedTabReorder', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onTabReorder={mockOnTabReorder}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+		const aiTabElement = screen.getByText('AI Tab 2').closest('[data-tab-id]')!;
+
+		// Start dragging file-tab-1 (index 1)
+		fireEvent.dragStart(fileTabElement, {
+			dataTransfer: {
+				effectAllowed: '',
+				setData: vi.fn(),
+				getData: vi.fn().mockReturnValue('file-tab-1'),
+			},
+		});
+
+		// Drop on ai-tab-2 (index 2)
+		fireEvent.drop(aiTabElement, {
+			dataTransfer: {
+				getData: vi.fn().mockReturnValue('file-tab-1'),
+			},
+		});
+
+		// Should call onUnifiedTabReorder (from index 1 to index 2)
+		expect(mockOnUnifiedTabReorder).toHaveBeenCalledWith(1, 2);
+	});
+
+	it('drags file tab to another file tab position', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onTabReorder={mockOnTabReorder}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		const fileTab1Element = screen.getByText('file1').closest('[data-tab-id]')!;
+		const fileTab2Element = screen.getByText('file2').closest('[data-tab-id]')!;
+
+		// Start dragging file-tab-1 (index 1)
+		fireEvent.dragStart(fileTab1Element, {
+			dataTransfer: {
+				effectAllowed: '',
+				setData: vi.fn(),
+				getData: vi.fn().mockReturnValue('file-tab-1'),
+			},
+		});
+
+		// Drop on file-tab-2 (index 3)
+		fireEvent.drop(fileTab2Element, {
+			dataTransfer: {
+				getData: vi.fn().mockReturnValue('file-tab-1'),
+			},
+		});
+
+		// Should call onUnifiedTabReorder (from index 1 to index 3)
+		expect(mockOnUnifiedTabReorder).toHaveBeenCalledWith(1, 3);
+	});
+
+	it('does not reorder when dropping on the same tab', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		// Drop on same tab
+		fireEvent.drop(fileTabElement, {
+			dataTransfer: {
+				getData: vi.fn().mockReturnValue('file-tab-1'),
+			},
+		});
+
+		expect(mockOnUnifiedTabReorder).not.toHaveBeenCalled();
+	});
+
+	it('sets drag over visual feedback on target tab', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		const aiTabElement = screen.getByText('AI Tab 1').closest('[data-tab-id]')!;
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		// Start dragging AI tab
+		fireEvent.dragStart(aiTabElement, {
+			dataTransfer: {
+				effectAllowed: '',
+				setData: vi.fn(),
+				getData: vi.fn().mockReturnValue('ai-tab-1'),
+			},
+		});
+
+		// Drag over file tab
+		fireEvent.dragOver(fileTabElement, {
+			dataTransfer: {
+				dropEffect: '',
+			},
+		});
+
+		// File tab should have ring visual
+		expect(fileTabElement).toHaveClass('ring-2');
+	});
+
+	it('uses legacy onTabReorder when unifiedTabs is not provided', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onTabReorder={mockOnTabReorder}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				// No unifiedTabs provided - should fall back to legacy behavior
+			/>
+		);
+
+		const tab1 = screen.getByText('AI Tab 1').closest('[data-tab-id]')!;
+		const tab2 = screen.getByText('AI Tab 2').closest('[data-tab-id]')!;
+
+		// Start dragging tab-1
+		fireEvent.dragStart(tab1, {
+			dataTransfer: {
+				effectAllowed: '',
+				setData: vi.fn(),
+				getData: vi.fn().mockReturnValue('ai-tab-1'),
+			},
+		});
+
+		// Drop on tab-2
+		fireEvent.drop(tab2, {
+			dataTransfer: {
+				getData: vi.fn().mockReturnValue('ai-tab-1'),
+			},
+		});
+
+		// Should use legacy onTabReorder
+		expect(mockOnTabReorder).toHaveBeenCalledWith(0, 1);
+		// Should NOT call onUnifiedTabReorder
+		expect(mockOnUnifiedTabReorder).not.toHaveBeenCalled();
+	});
+
+	it('shows Move to First/Last for file tabs when not at edges', async () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		// Hover over file1 (index 1, not first or last)
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		await act(async () => {
+			fireEvent.mouseEnter(fileTabElement);
+			vi.advanceTimersByTime(450);
+		});
+
+		// Should show both move options
+		expect(screen.getByText('Move to First Position')).toBeInTheDocument();
+		expect(screen.getByText('Move to Last Position')).toBeInTheDocument();
+	});
+
+	it('hides Move to First for first tab', async () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		// Hover over AI Tab 1 (index 0, first tab)
+		const aiTabElement = screen.getByText('AI Tab 1').closest('[data-tab-id]')!;
+
+		await act(async () => {
+			fireEvent.mouseEnter(aiTabElement);
+			vi.advanceTimersByTime(450);
+		});
+
+		// Move to First should be hidden (not just disabled)
+		expect(screen.queryByText('Move to First Position')).not.toBeInTheDocument();
+		// Move to Last should be visible
+		expect(screen.getByText('Move to Last Position')).toBeInTheDocument();
+	});
+
+	it('hides Move to Last for last tab', async () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		// Hover over file2 (index 3, last tab)
+		const fileTabElement = screen.getByText('file2').closest('[data-tab-id]')!;
+
+		await act(async () => {
+			fireEvent.mouseEnter(fileTabElement);
+			vi.advanceTimersByTime(450);
+		});
+
+		// Move to First should be visible
+		expect(screen.getByText('Move to First Position')).toBeInTheDocument();
+		// Move to Last should be hidden (not just disabled)
+		expect(screen.queryByText('Move to Last Position')).not.toBeInTheDocument();
+	});
+
+	it('calls onUnifiedTabReorder when Move to First is clicked on file tab', async () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		// Hover over file1 (index 1)
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		await act(async () => {
+			fireEvent.mouseEnter(fileTabElement);
+			vi.advanceTimersByTime(450);
+		});
+
+		// Click Move to First
+		const moveButton = screen.getByText('Move to First Position');
+		fireEvent.click(moveButton);
+
+		// Should call onUnifiedTabReorder with index 1 -> 0
+		expect(mockOnUnifiedTabReorder).toHaveBeenCalledWith(1, 0);
+	});
+
+	it('calls onUnifiedTabReorder when Move to Last is clicked on file tab', async () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		// Hover over file1 (index 1)
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		await act(async () => {
+			fireEvent.mouseEnter(fileTabElement);
+			vi.advanceTimersByTime(450);
+		});
+
+		// Click Move to Last
+		const moveButton = screen.getByText('Move to Last Position');
+		fireEvent.click(moveButton);
+
+		// Should call onUnifiedTabReorder with index 1 -> 3 (last index)
+		expect(mockOnUnifiedTabReorder).toHaveBeenCalledWith(1, 3);
+	});
+
+	it('middle-click closes file tab', () => {
+		render(
+			<TabBar
+				tabs={aiTabs}
+				activeTabId="ai-tab-1"
+				theme={mockTheme}
+				onTabSelect={vi.fn()}
+				onTabClose={vi.fn()}
+				onNewTab={vi.fn()}
+				onUnifiedTabReorder={mockOnUnifiedTabReorder}
+				unifiedTabs={unifiedTabs}
+				activeFileTabId={null}
+				onFileTabSelect={mockOnFileTabSelect}
+				onFileTabClose={mockOnFileTabClose}
+			/>
+		);
+
+		const fileTabElement = screen.getByText('file1').closest('[data-tab-id]')!;
+
+		// Middle-click on file tab
+		fireEvent.mouseDown(fileTabElement, { button: 1 });
+
+		expect(mockOnFileTabClose).toHaveBeenCalledWith('file-tab-1');
+	});
+});
