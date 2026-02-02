@@ -855,7 +855,7 @@ export function TabSwitcherModal({
 														: extColors.text,
 												}}
 											>
-												{tab.extension.replace(/^\./, '')}
+												{tab.extension.replace(/^\./, '').toUpperCase()}
 											</span>
 											{/* Unsaved indicator */}
 											{hasUnsavedEdits && (

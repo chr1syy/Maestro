@@ -2716,7 +2716,7 @@ describe('FileTab overlay menu', () => {
 		vi.useRealTimers();
 	});
 
-	it('shows file path in overlay header', async () => {
+	it('shows file-specific actions in overlay menu', async () => {
 		vi.useFakeTimers();
 
 		render(
@@ -2741,10 +2741,10 @@ describe('FileTab overlay menu', () => {
 			vi.advanceTimersByTime(450);
 		});
 
-		// Should show full file path
-		expect(screen.getByText('/path/to/document.md')).toBeInTheDocument();
-		// Should show file icon
-		expect(screen.getByTestId('file-text-icon')).toBeInTheDocument();
+		// Should show file-specific actions (these are unique to file tabs)
+		expect(screen.getByText('Copy File Path')).toBeInTheDocument();
+		expect(screen.getByText('Open in Default App')).toBeInTheDocument();
+		expect(screen.getByText('Reveal in Finder')).toBeInTheDocument();
 
 		vi.useRealTimers();
 	});
@@ -2947,7 +2947,7 @@ describe('FileTab overlay menu', () => {
 		const closeTabButtons = screen.getAllByText('Close Tab');
 		// The file tab's Close Tab button is in a standalone button (not the one with "X" icon prefix from AI tab overlay)
 		const closeButton = closeTabButtons.find((btn) =>
-			btn.closest('.shadow-xl')?.querySelector('[data-testid="file-text-icon"]')
+			btn.closest('.shadow-xl')?.textContent?.includes('Copy File Path')
 		);
 		expect(closeButton).toBeTruthy();
 
@@ -3010,7 +3010,7 @@ describe('FileTab overlay menu', () => {
 
 		// Should show Close Other Tabs option
 		const closeOtherButtons = screen.getAllByText('Close Other Tabs');
-		// Find the one in the file tab overlay (has Copy File Path which identifies file tab overlay)
+		// Find the one in the file tab overlay (has Copy File Path action)
 		const closeOtherButton = closeOtherButtons.find((btn) =>
 			btn.closest('.shadow-xl')?.textContent?.includes('Copy File Path')
 		);

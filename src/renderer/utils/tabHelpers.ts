@@ -183,10 +183,15 @@ export function createTab(
 	};
 
 	// Update the session with the new tab added and set as active
+	// Also clear activeFileTabId so the new AI tab is shown in the main panel
+	// Add the new tab to unifiedTabOrder so it appears in the unified tab bar
+	const newTabRef = { type: 'ai' as const, id: newTab.id };
 	const updatedSession: Session = {
 		...session,
 		aiTabs: [...(session.aiTabs || []), newTab],
 		activeTabId: newTab.id,
+		activeFileTabId: null,
+		unifiedTabOrder: [...(session.unifiedTabOrder || []), newTabRef],
 	};
 
 	return {

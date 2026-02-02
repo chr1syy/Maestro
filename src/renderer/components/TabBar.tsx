@@ -20,7 +20,6 @@ import {
 	Loader2,
 	ExternalLink,
 	FolderOpen,
-	FileText,
 } from 'lucide-react';
 import type { AITab, Theme, FilePreviewTab, UnifiedTab } from '../types';
 import { hasDraft } from '../utils/tabHelpers';
@@ -1349,7 +1348,7 @@ const FileTab = memo(function FileTab({
 					paddingBottom: '2px',
 				}}
 			>
-				{tab.extension.replace(/^\./, '')}
+				{tab.extension.replace(/^\./, '').toUpperCase()}
 			</span>
 
 			{/* Close button - visible on hover or when active */}
@@ -1402,36 +1401,6 @@ const FileTab = memo(function FileTab({
 								minWidth: '220px',
 							}}
 						>
-							{/* Header with file path */}
-							<div
-								className="border-b"
-								style={{
-									backgroundColor: theme.colors.bgActivity,
-									borderColor: theme.colors.border,
-								}}
-							>
-								{/* File icon and name */}
-								<div className="px-3 py-2 flex items-center gap-2">
-									<FileText className="w-4 h-4 shrink-0" style={{ color: theme.colors.textDim }} />
-									<span
-										className="text-sm font-medium truncate"
-										style={{ color: theme.colors.textMain }}
-									>
-										{tab.name}
-										{tab.extension}
-									</span>
-								</div>
-
-								{/* File path display */}
-								<div
-									className="px-3 py-2 text-[10px] font-mono truncate"
-									style={{ color: theme.colors.textDim }}
-									title={tab.path}
-								>
-									{tab.path}
-								</div>
-							</div>
-
 							{/* Actions */}
 							<div className="p-1">
 								{/* Copy File Path */}
@@ -1949,14 +1918,14 @@ function TabBarInner({
 						// File tabs are active when: they match activeFileTabId
 						const isActive =
 							unifiedTab.type === 'ai'
-								? unifiedTab.id === activeTabId && activeFileTabId === null
+								? unifiedTab.id === activeTabId && !activeFileTabId
 								: unifiedTab.id === activeFileTabId;
 
 						// Check previous tab's active state for separator logic
 						const prevUnifiedTab = index > 0 ? displayedUnifiedTabs[index - 1] : null;
 						const isPrevActive = prevUnifiedTab
 							? prevUnifiedTab.type === 'ai'
-								? prevUnifiedTab.id === activeTabId && activeFileTabId === null
+								? prevUnifiedTab.id === activeTabId && !activeFileTabId
 								: prevUnifiedTab.id === activeFileTabId
 							: false;
 
@@ -2075,9 +2044,9 @@ function TabBarInner({
 				: // Fallback: render AI tabs only (legacy mode when unifiedTabs not provided)
 					displayedTabs.map((tab, index) => {
 						// AI tabs are active when: they match activeTabId AND no file tab is selected
-						const isActive = tab.id === activeTabId && activeFileTabId === null;
+						const isActive = tab.id === activeTabId && !activeFileTabId;
 						const prevTab = index > 0 ? displayedTabs[index - 1] : null;
-						const isPrevActive = prevTab?.id === activeTabId && activeFileTabId === null;
+						const isPrevActive = prevTab?.id === activeTabId && !activeFileTabId;
 						// Get original index for shortcut hints (Cmd+1-9)
 						const originalIndex = tabs.findIndex((t) => t.id === tab.id);
 
