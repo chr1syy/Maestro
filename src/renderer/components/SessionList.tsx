@@ -2391,7 +2391,7 @@ function SessionListInner(props: SessionListProps) {
 							{/* Menu Overlay */}
 							{menuOpen && (
 								<div
-									className="absolute top-full left-0 mt-2 w-72 rounded-lg shadow-2xl z-50 overflow-hidden"
+									className="absolute top-full left-0 mt-2 w-72 rounded-lg shadow-2xl z-50 overflow-y-auto scrollbar-thin max-h-[calc(100vh-120px)]"
 									data-tour="hamburger-menu-contents"
 									style={{
 										backgroundColor: theme.colors.bgSidebar,
@@ -2430,7 +2430,7 @@ function SessionListInner(props: SessionListProps) {
 						{/* Menu Overlay for Collapsed Sidebar */}
 						{menuOpen && (
 							<div
-								className="absolute top-full left-0 mt-2 w-72 rounded-lg shadow-2xl z-50 overflow-hidden"
+								className="absolute top-full left-0 mt-2 w-72 rounded-lg shadow-2xl z-50 overflow-y-auto scrollbar-thin max-h-[calc(100vh-120px)]"
 								style={{
 									backgroundColor: theme.colors.bgSidebar,
 									border: `1px solid ${theme.colors.border}`,

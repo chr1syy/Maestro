@@ -1083,6 +1083,21 @@ describe('SessionList', () => {
 
 			expect(screen.queryByText('Keyboard Shortcuts')).not.toBeInTheDocument();
 		});
+
+		it('has scrollable menu container for limited viewport height', () => {
+			const props = createDefaultProps({ leftSidebarOpen: true });
+			render(<SessionList {...props} />);
+
+			fireEvent.click(screen.getByTitle('Menu'));
+
+			// Find the menu container by its data-tour attribute
+			const menuContainer = document.querySelector('[data-tour="hamburger-menu-contents"]');
+			expect(menuContainer).toBeInTheDocument();
+			expect(menuContainer).toHaveClass('overflow-y-auto');
+			expect(menuContainer).toHaveClass('scrollbar-thin');
+			// Verify max-height is set (the actual calc value depends on Tailwind)
+			expect(menuContainer?.className).toMatch(/max-h-\[calc\(100vh-120px\)\]/);
+		});
 	});
 
 	// ============================================================================
