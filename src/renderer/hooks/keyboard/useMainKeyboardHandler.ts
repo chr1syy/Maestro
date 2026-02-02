@@ -114,12 +114,16 @@ export function useMainKeyboardHandler(): UseMainKeyboardHandlerReturn {
 				// NOTE: Must use e.code for Alt key combos on macOS because e.key produces special characters
 				const isSessionJumpShortcut =
 					e.altKey && (e.metaKey || e.ctrlKey) && /^Digit[0-9]$/.test(e.code || '');
-				// Allow tab management shortcuts (Cmd+T new tab, Cmd+W close tab) even when file preview overlay is open
+				// Allow tab management shortcuts even when file preview overlay is open:
+				// - Cmd+T: new tab
+				// - Cmd+W: close tab
+				// - Cmd+Shift+T: reopen closed tab
 				const isTabManagementShortcut =
 					(e.metaKey || e.ctrlKey) &&
-					!e.shiftKey &&
 					!e.altKey &&
-					(keyLower === 't' || keyLower === 'w');
+					((keyLower === 't' && !e.shiftKey) || // Cmd+T
+						keyLower === 'w' || // Cmd+W (with or without shift)
+						(keyLower === 't' && e.shiftKey)); // Cmd+Shift+T
 				// Allow tab switcher shortcut (Alt+Cmd+T) even when file preview is open
 				// NOTE: Must use e.code for Alt key combos on macOS because e.key produces special characters
 				const isTabSwitcherShortcut =

@@ -405,6 +405,46 @@ describe('useMainKeyboardHandler', () => {
 			// Alt+Cmd+T should open tab switcher even when file preview overlay is open
 			expect(mockSetTabSwitcherOpen).toHaveBeenCalledWith(true);
 		});
+
+		it('should allow reopen closed tab shortcut (Cmd+Shift+T) when only overlays are open', () => {
+			const { result } = renderHook(() => useMainKeyboardHandler());
+
+			const mockSetSessions = vi.fn();
+			const mockReopenUnifiedClosedTab = vi.fn().mockReturnValue({
+				session: { id: 'test-session', unifiedClosedTabHistory: [] },
+				type: 'file',
+				tab: { id: 'restored-tab' },
+			});
+			const mockActiveSession = {
+				id: 'test-session',
+				name: 'Test',
+				unifiedClosedTabHistory: [{ type: 'file', tab: { id: 'closed-tab' } }],
+			};
+
+			result.current.keyboardHandlerRef.current = createMockContext({
+				hasOpenLayers: () => true, // Overlay is open (e.g., file preview)
+				hasOpenModal: () => false, // But no true modal
+				isTabShortcut: (_e: KeyboardEvent, actionId: string) => actionId === 'reopenClosedTab',
+				activeSession: mockActiveSession,
+				reopenUnifiedClosedTab: mockReopenUnifiedClosedTab,
+				setSessions: mockSetSessions,
+			});
+
+			act(() => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 't',
+						shiftKey: true,
+						metaKey: true,
+						bubbles: true,
+					})
+				);
+			});
+
+			// Cmd+Shift+T should reopen closed tab even when file preview overlay is open
+			expect(mockReopenUnifiedClosedTab).toHaveBeenCalledWith(mockActiveSession);
+			expect(mockSetSessions).toHaveBeenCalled();
+		});
 	});
 
 	describe('navigation handlers delegation', () => {
