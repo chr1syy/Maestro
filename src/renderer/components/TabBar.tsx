@@ -540,7 +540,8 @@ const Tab = memo(function Tab({
 			)}
 
 			{/* Generating name indicator - spinning loader while tab name is being generated */}
-			{tab.isGeneratingName && tab.state !== 'busy' && (
+			{/* Show regardless of busy state since tab naming runs in parallel with the main request */}
+			{tab.isGeneratingName && (
 				<span title="Generating tab name...">
 					<Loader2
 						className="w-3 h-3 shrink-0 animate-spin"
