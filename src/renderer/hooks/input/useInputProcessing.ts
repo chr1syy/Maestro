@@ -911,6 +911,10 @@ export function useInputProcessing(deps: UseInputProcessingDeps): UseInputProces
 
 						// Spawn agent with generic config - the main process will use agent-specific
 						// argument builders (resumeArgs, readOnlyArgs, etc.) to construct the final args
+						console.log('[IMAGE_DEBUG] Sending spawn with images', {
+							imageCount: capturedImages.length,
+							timestamp: new Date().toISOString(),
+						});
 						await window.maestro.process.spawn({
 							sessionId: targetSessionId,
 							toolType: freshSession.toolType,

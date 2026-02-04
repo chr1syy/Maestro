@@ -21,6 +21,11 @@ export function parseDataUrl(dataUrl: string): { base64: string; mediaType: stri
  * Returns the full path to the temp file, or null on failure.
  */
 export function saveImageToTempFile(dataUrl: string, index: number): string | null {
+	logger.info('[IMAGE_DEBUG] saveImageToTempFile called', 'imageUtils', {
+		hasImageBuffer: !!dataUrl,
+		imageSize: dataUrl.length,
+		extension: 'unknown',
+	});
 	const parsed = parseDataUrl(dataUrl);
 	if (!parsed) {
 		logger.warn('[ProcessManager] Failed to parse data URL for temp file', 'ProcessManager');
@@ -37,6 +42,10 @@ export function saveImageToTempFile(dataUrl: string, index: number): string | nu
 		logger.debug('[ProcessManager] Saved image to temp file', 'ProcessManager', {
 			tempPath,
 			size: buffer.length,
+		});
+		logger.debug('[IMAGE_DEBUG] saveImageToTempFile returning', 'imageUtils', {
+			tempPath: tempPath,
+			fileExists: fs.existsSync(tempPath),
 		});
 		return tempPath;
 	} catch (error) {

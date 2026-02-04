@@ -47,6 +47,10 @@ export class ProcessManager extends EventEmitter {
 	 * Spawn a new process for a session
 	 */
 	spawn(config: ProcessConfig): SpawnResult {
+		logger.debug('[IMAGE_DEBUG] ProcessManager.spawn entry', 'ProcessManager', {
+			hasImages: !!config.images,
+			imageCount: config.images?.length || 0,
+		});
 		const usePty = this.shouldUsePty(config);
 
 		if (usePty) {

@@ -71,6 +71,12 @@ export class ChildProcessSpawner {
 		const hasImages = images && images.length > 0;
 		const capabilities = getAgentCapabilities(toolType);
 
+		logger.info('[IMAGE_DEBUG] ChildProcessSpawner.spawn entry', 'ChildProcessSpawner', {
+			hasImages: !!images,
+			imageCount: images?.length || 0,
+			hasImageArgsFunction: !!imageArgs,
+		});
+
 		// Check if prompt will be sent via stdin instead of command line
 		// This is critical for SSH remote execution to avoid shell escaping issues
 		const promptViaStdin = sendPromptViaStdin || sendPromptViaStdinRaw;
@@ -87,6 +93,10 @@ export class ChildProcessSpawner {
 			// For agents that use file-based image args (like Codex, OpenCode)
 			finalArgs = [...args];
 			tempImageFiles = [];
+			logger.info('[IMAGE_DEBUG] ChildProcessSpawner processing images', 'ChildProcessSpawner', {
+				imageCount: images.length,
+				imageArgsFunction: 'defined',
+			});
 			for (let i = 0; i < images.length; i++) {
 				const tempPath = saveImageToTempFile(images[i], i);
 				if (tempPath) {
@@ -224,6 +234,14 @@ export class ChildProcessSpawner {
 				argsCount: spawnArgs.length,
 				promptArgLength: prompt ? spawnArgs[spawnArgs.length - 1]?.length : undefined,
 				fullCommandPreview: `${spawnCommand} ${spawnArgs.join(' ')}`,
+			});
+
+			logger.info('[IMAGE_DEBUG] ChildProcessSpawner final spawn args', 'ChildProcessSpawner', {
+				command: spawnCommand,
+				argCount: spawnArgs.length,
+				hasImageArgs: spawnArgs.some(
+					(arg) => arg.includes('image') || arg.includes('.jpg') || arg.includes('.png')
+				),
 			});
 
 			const childProcess = spawn(spawnCommand, spawnArgs, {

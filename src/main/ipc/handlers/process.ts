@@ -393,6 +393,12 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 					isSshCommand: !!sshRemoteUsed,
 				});
 
+				logger.info('[IMAGE_DEBUG] IPC Handler spawn config', LOG_CONTEXT, {
+					hasImages: !!config.images,
+					imageCount: config.images?.length || 0,
+					configKeys: Object.keys(config),
+				});
+
 				const result = processManager.spawn({
 					...config,
 					command: commandToSpawn,
