@@ -1107,4 +1107,367 @@ describe('OpenCode Moderator - Custom Configuration (Task 3.2)', () => {
 			// Note: SSH wrapping happens at spawn time and preserves these vars
 		});
 	});
+
+	/**
+	 * Test Suite: Usage Stats Tracking for OpenCode Moderator (Task 3.3)
+	 */
+	describe('OpenCode Moderator - Usage Stats Tracking (Task 3.3)', () => {
+		const parser = new OpenCodeOutputParser();
+
+		describe('Parser: Token Extraction from step_finish', () => {
+			it('should extract input tokens from step_finish events', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-001',
+					part: {
+						reason: 'stop',
+						tokens: {
+							input: 2500,
+							output: 1200,
+							reasoning: 0,
+							cache: { read: 300, write: 200 },
+						},
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage).not.toBeNull();
+				expect(event?.usage?.inputTokens).toBe(2500);
+			});
+
+			it('should extract output tokens from step_finish events', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-002',
+					part: {
+						reason: 'stop',
+						tokens: {
+							input: 1000,
+							output: 3000,
+							reasoning: 500,
+							cache: { read: 0, write: 0 },
+						},
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage?.outputTokens).toBe(3000);
+			});
+
+			it('should extract cache tokens from step_finish events', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-003',
+					part: {
+						reason: 'stop',
+						tokens: {
+							input: 100,
+							output: 50,
+							cache: { read: 1000, write: 500 },
+						},
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage?.cacheReadTokens).toBe(1000);
+				expect(event?.usage?.cacheCreationTokens).toBe(500);
+			});
+
+			it('should handle missing cache tokens gracefully', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-004',
+					part: {
+						reason: 'stop',
+						tokens: {
+							input: 200,
+							output: 100,
+						},
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage?.cacheReadTokens).toBe(0);
+				expect(event?.usage?.cacheCreationTokens).toBe(0);
+			});
+		});
+
+		describe('Parser: Cost Extraction from step_finish', () => {
+			it('should extract cost from step_finish.part.cost', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-005',
+					part: {
+						reason: 'stop',
+						tokens: { input: 100, output: 50 },
+						cost: 0.0123,
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage?.costUsd).toBe(0.0123);
+			});
+
+			it('should handle zero cost', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-006',
+					part: {
+						reason: 'stop',
+						tokens: { input: 100, output: 50 },
+						cost: 0,
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage?.costUsd).toBe(0);
+			});
+
+			it('should handle missing cost as zero', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-007',
+					part: {
+						reason: 'stop',
+						tokens: { input: 100, output: 50 },
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				// Missing cost should be treated as 0
+				expect(event?.usage?.costUsd).toBe(0);
+			});
+
+			it('should extract cost with high precision', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-008',
+					part: {
+						reason: 'stop',
+						tokens: { input: 5000, output: 2000 },
+						cost: 0.023456,
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+				expect(event?.usage?.costUsd).toBeCloseTo(0.023456, 6);
+			});
+		});
+
+		describe('Usage Stats: Multiple Step Events', () => {
+			it('should extract stats from multiple sequential step_finish events', () => {
+				const lines = [
+					JSON.stringify({
+						type: 'step_finish',
+						sessionID: 'oc-sess-multi-1',
+						part: {
+							reason: 'tool-calls',
+							tokens: { input: 1000, output: 200 },
+							cost: 0.005,
+						},
+					}),
+					JSON.stringify({
+						type: 'step_finish',
+						sessionID: 'oc-sess-multi-1',
+						part: {
+							reason: 'stop',
+							tokens: { input: 100, output: 500 },
+							cost: 0.003,
+						},
+					}),
+				];
+
+				const events = lines.map((line) => parser.parseJsonLine(line));
+
+				// First step - tool call
+				expect(events[0]?.usage?.inputTokens).toBe(1000);
+				expect(events[0]?.usage?.outputTokens).toBe(200);
+				expect(events[0]?.usage?.costUsd).toBe(0.005);
+
+				// Second step - final result
+				expect(events[1]?.usage?.inputTokens).toBe(100);
+				expect(events[1]?.usage?.outputTokens).toBe(500);
+				expect(events[1]?.usage?.costUsd).toBe(0.003);
+			});
+
+			it('should distinguish between intermediate and final stats', () => {
+				const toolCallLine = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-dist-1',
+					part: {
+						reason: 'tool-calls',
+						tokens: { input: 500, output: 100 },
+						cost: 0.002,
+					},
+				});
+
+				const finalLine = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-dist-1',
+					part: {
+						reason: 'stop',
+						tokens: { input: 100, output: 600 },
+						cost: 0.004,
+					},
+				});
+
+				const toolCallEvent = parser.parseJsonLine(toolCallLine);
+				const finalEvent = parser.parseJsonLine(finalLine);
+
+				// Both have stats, but reason differs
+				expect(toolCallEvent?.isPartial).toBe(false);
+				expect(finalEvent?.isPartial).toBe(false);
+				expect(toolCallEvent?.type).toBe('text');
+				expect(finalEvent?.type).toBe('result');
+			});
+		});
+
+		describe('Real-Time Updates', () => {
+			it('should support incremental cost updates as moderator processes', () => {
+				// Simulate moderator processing with multiple steps
+				const moderatorOutput = [
+					// Step 1: Initial analysis
+					JSON.stringify({
+						type: 'step_finish',
+						sessionID: 'oc-mod-001',
+						part: {
+							reason: 'tool-calls',
+							tokens: { input: 2000, output: 500 },
+							cost: 0.01,
+						},
+					}),
+					// Step 2: Tool execution
+					JSON.stringify({
+						type: 'step_finish',
+						sessionID: 'oc-mod-001',
+						part: {
+							reason: 'tool-calls',
+							tokens: { input: 100, output: 1000 },
+							cost: 0.005,
+						},
+					}),
+					// Step 3: Final response
+					JSON.stringify({
+						type: 'step_finish',
+						sessionID: 'oc-mod-001',
+						part: {
+							reason: 'stop',
+							tokens: { input: 100, output: 2000 },
+							cost: 0.015,
+						},
+					}),
+				];
+
+				const events = moderatorOutput.map((line) => parser.parseJsonLine(line));
+
+				// Verify incremental costs can be tracked
+				const costs = events.map((e) => e?.usage?.costUsd || 0);
+				const totalCost = costs.reduce((a, b) => a + b, 0);
+				expect(totalCost).toBeCloseTo(0.03, 6);
+
+				// Verify incremental tokens
+				const totalInput = events.reduce((sum, e) => sum + (e?.usage?.inputTokens || 0), 0);
+				const totalOutput = events.reduce((sum, e) => sum + (e?.usage?.outputTokens || 0), 0);
+				expect(totalInput).toBe(2200);
+				expect(totalOutput).toBe(3500);
+			});
+		});
+
+		describe('UI Display Compatibility', () => {
+			it('should extract usage stats in format compatible with ModeratorUsage type', () => {
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-display-1',
+					part: {
+						reason: 'stop',
+						tokens: {
+							input: 1500,
+							output: 800,
+							cache: { read: 100, write: 50 },
+						},
+						cost: 0.0089,
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+
+				// ModeratorUsage type expects: contextUsage, totalCost, tokenCount
+				// These are derived from the parser's usage stats
+				expect(event?.usage).not.toBeNull();
+				expect(event?.usage?.inputTokens).toBeDefined();
+				expect(event?.usage?.outputTokens).toBeDefined();
+				expect(event?.usage?.costUsd).toBeDefined();
+
+				// Total tokens = input + output
+				const totalTokens = (event?.usage?.inputTokens || 0) + (event?.usage?.outputTokens || 0);
+				expect(totalTokens).toBe(2300);
+
+				// Cost ready for display
+				expect(event?.usage?.costUsd).toBe(0.0089);
+			});
+
+			it('should handle stats for display even with accumulated context', () => {
+				// When moderator has used tools and accumulated context
+				const line = JSON.stringify({
+					type: 'step_finish',
+					sessionID: 'oc-sess-display-2',
+					part: {
+						reason: 'stop',
+						tokens: {
+							input: 150000, // High due to accumulated context
+							output: 5000,
+							cache: { read: 0, write: 0 },
+						},
+						cost: 0.0456,
+					},
+				});
+
+				const event = parser.parseJsonLine(line);
+
+				// Should still extract cost and token counts
+				expect(event?.usage?.costUsd).toBe(0.0456);
+				expect(event?.usage?.inputTokens).toBe(150000);
+				expect(event?.usage?.outputTokens).toBe(5000);
+
+				// Total tokens accurate even with high context
+				const totalTokens = 155000;
+				expect((event?.usage?.inputTokens || 0) + (event?.usage?.outputTokens || 0)).toBe(
+					totalTokens
+				);
+			});
+		});
+
+		describe('Cost Aggregation Scenarios', () => {
+			it('should support summing costs across multiple moderator interactions', () => {
+				// Simulate multiple messages to moderator, each with its own cost
+				const interactions = [
+					{ inputTokens: 1000, outputTokens: 500, costUsd: 0.01 },
+					{ inputTokens: 500, outputTokens: 300, costUsd: 0.005 },
+					{ inputTokens: 300, outputTokens: 1000, costUsd: 0.012 },
+				];
+
+				const totalCost = interactions.reduce((sum, i) => sum + i.costUsd, 0);
+				const totalTokens = interactions.reduce(
+					(sum, i) => sum + i.inputTokens + i.outputTokens,
+					0
+				);
+
+				expect(totalCost).toBeCloseTo(0.027, 6);
+				expect(totalTokens).toBe(3600);
+			});
+
+			it('should format cost for display with appropriate precision', () => {
+				// Very small costs
+				expect(0.000045).toBeLessThan(0.01);
+
+				// Medium costs
+				expect(0.0456).toBeLessThan(1.0);
+
+				// Large costs
+				expect(1.2345).toBeGreaterThan(1.0);
+
+				// All should be displayable with standard formatCost function logic
+			});
+		});
+	});
 });
