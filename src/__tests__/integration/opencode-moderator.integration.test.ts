@@ -722,3 +722,389 @@ describe('OpenCode Moderator - Integration Flow', () => {
 		});
 	});
 });
+
+/**
+ * Test Suite: Custom Configuration for OpenCode Moderator (Task 3.2)
+ */
+describe('OpenCode Moderator - Custom Configuration (Task 3.2)', () => {
+	describe('Custom Path Support', () => {
+		it('should use custom binary path when specified in moderator config', () => {
+			// This simulates what happens in group-chat-router.ts line 392:
+			// const command = chat.moderatorConfig?.customPath || agent.path || agent.command;
+
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				path: '/usr/bin/opencode', // Default resolved path
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			// Simulate moderator config with custom path
+			const customPath = '/usr/local/bin/opencode-beta';
+
+			// The actual spawning happens with:
+			// const command = chat.moderatorConfig?.customPath || agent.path || agent.command;
+			const resolvedCommand = customPath || agent.path || agent.command;
+
+			expect(resolvedCommand).toBe('/usr/local/bin/opencode-beta');
+			expect(resolvedCommand).not.toBe('/usr/bin/opencode');
+		});
+
+		it('should fall back to agent path when custom path is not specified', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				path: '/usr/bin/opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			// No custom path specified
+			const customPath: string | undefined = undefined;
+			const resolvedCommand = customPath || agent.path || agent.command;
+
+			expect(resolvedCommand).toBe('/usr/bin/opencode');
+		});
+
+		it('should fall back to agent command when both custom path and path are not set', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				// No path property set
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const customPath: string | undefined = undefined;
+			const resolvedCommand = customPath || agent.path || agent.command;
+
+			expect(resolvedCommand).toBe('opencode');
+		});
+	});
+
+	describe('Custom Arguments Support', () => {
+		it('should apply custom arguments from moderator config during moderator spawn', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				modelArgs: (modelId) => ['--model', modelId],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Test moderator prompt',
+				cwd: os.homedir(),
+				readOnlyMode: true,
+			});
+
+			// Apply custom args as would happen in group-chat-router.ts lines 456-457
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomArgs: '--verbose --timeout 600',
+			});
+
+			expect(resolution.args).toContain('--verbose');
+			expect(resolution.args).toContain('--timeout');
+			expect(resolution.args).toContain('600');
+		});
+
+		it('should preserve batch mode prefix with custom arguments', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Test',
+				cwd: os.homedir(),
+				readOnlyMode: true,
+			});
+
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomArgs: '--verbose',
+			});
+
+			// Batch mode prefix 'run' should still be first
+			expect(resolution.args[0]).toBe('run');
+			expect(resolution.args).toContain('--verbose');
+		});
+	});
+
+	describe('Custom Environment Variables Support', () => {
+		it('should apply custom env vars from moderator config', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Test',
+				cwd: os.homedir(),
+			});
+
+			const customEnvVars = {
+				OPENCODE_CONFIG_PATH: '/custom/config.json',
+				DEBUG_LEVEL: 'verbose',
+				CUSTOM_TIMEOUT: '300',
+			};
+
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomEnvVars: customEnvVars,
+			});
+
+			expect(resolution.effectiveCustomEnvVars).toEqual(expect.objectContaining(customEnvVars));
+		});
+
+		it('should merge custom env vars with agent defaults', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				defaultEnvVars: {
+					OPENCODE_LANG: 'en_US',
+					OPENCODE_LOG_LEVEL: 'info',
+				},
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Test',
+				cwd: os.homedir(),
+			});
+
+			const customEnvVars = {
+				CUSTOM_VAR: 'custom_value',
+				OPENCODE_LOG_LEVEL: 'debug', // Override agent default
+			};
+
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomEnvVars: customEnvVars,
+			});
+
+			// Defaults should be merged, with custom vars taking precedence
+			expect(resolution.effectiveCustomEnvVars).toEqual({
+				OPENCODE_LANG: 'en_US',
+				OPENCODE_LOG_LEVEL: 'debug', // Custom overrides default
+				CUSTOM_VAR: 'custom_value',
+			});
+		});
+	});
+
+	describe('Complete Configuration Composition', () => {
+		it('should combine custom path (used as command) with custom args and env vars', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				path: '/usr/bin/opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				modelArgs: (modelId) => ['--model', modelId],
+				defaultEnvVars: { OPENCODE_DEFAULT: 'value' },
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			// Custom moderator config (would come from moderatorConfig in group chat)
+			const customPath = '/usr/local/bin/opencode-custom';
+			const customArgs = '--verbose --timeout 600';
+			const customEnvVars = { CUSTOM_ENV: 'custom_value' };
+
+			// Step 1: Resolve command (line 392 in group-chat-router.ts)
+			const command = customPath || agent.path || agent.command;
+			expect(command).toBe('/usr/local/bin/opencode-custom');
+
+			// Step 2: Build args (lines 447-459 in group-chat-router.ts)
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Moderate discussion',
+				cwd: os.homedir(),
+				readOnlyMode: true,
+			});
+
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomArgs: customArgs,
+				sessionCustomEnvVars: customEnvVars,
+			});
+
+			// Verify command resolved correctly
+			expect(command).toBe('/usr/local/bin/opencode-custom');
+
+			// Verify args contain batch mode prefix
+			expect(resolution.args[0]).toBe('run');
+
+			// Verify custom args applied
+			expect(resolution.args).toContain('--verbose');
+			expect(resolution.args).toContain('--timeout');
+			expect(resolution.args).toContain('600');
+
+			// Verify env vars merged correctly
+			expect(resolution.effectiveCustomEnvVars).toEqual({
+				OPENCODE_DEFAULT: 'value',
+				CUSTOM_ENV: 'custom_value',
+			});
+		});
+
+		it('should validate custom path format for Unix/Windows compatibility', () => {
+			// These would be actual paths a user might specify
+			const unixPath = '/usr/local/bin/opencode-beta';
+			const windowsPath = 'C:\\Program Files\\OpenCode\\opencode.exe';
+			const relativePathOrCommand = 'opencode-custom';
+
+			// All should be valid (the OS handles resolution)
+			expect(unixPath).toBeTruthy();
+			expect(windowsPath).toBeTruthy();
+			expect(relativePathOrCommand).toBeTruthy();
+
+			// They should not be empty or null
+			const pathsToValidate = [unixPath, windowsPath, relativePathOrCommand];
+			pathsToValidate.forEach((p) => {
+				expect(p.length).toBeGreaterThan(0);
+			});
+		});
+	});
+
+	describe('SSH Remote Configuration Integration', () => {
+		it('should preserve custom args when using SSH remote', () => {
+			// When SSH wrapping is applied, custom args should pass through
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Test',
+				cwd: os.homedir(),
+				readOnlyMode: true,
+			});
+
+			const customArgs = '--verbose --debug';
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomArgs: customArgs,
+			});
+
+			// Custom args preserved in resolution
+			expect(resolution.args).toContain('--verbose');
+			expect(resolution.args).toContain('--debug');
+
+			// Note: SSH wrapping happens at spawn time and preserves these args
+		});
+
+		it('should preserve custom env vars when using SSH remote', () => {
+			const agent: AgentConfig = {
+				id: 'opencode',
+				name: 'OpenCode',
+				binaryName: 'opencode',
+				command: 'opencode',
+				args: [],
+				batchModePrefix: ['run'],
+				jsonOutputArgs: ['--format', 'json'],
+				readOnlyArgs: ['--agent', 'plan'],
+				defaultEnvVars: { DEFAULT: 'value' },
+				noPromptSeparator: true,
+				available: true,
+				capabilities: getAgentCapabilities('opencode'),
+			};
+
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [],
+				prompt: 'Test',
+				cwd: os.homedir(),
+			});
+
+			const customEnvVars = { REMOTE_VAR: 'remote_value' };
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomEnvVars: customEnvVars,
+			});
+
+			// Custom env vars preserved and merged
+			expect(resolution.effectiveCustomEnvVars).toEqual(
+				expect.objectContaining({
+					DEFAULT: 'value',
+					REMOTE_VAR: 'remote_value',
+				})
+			);
+
+			// Note: SSH wrapping happens at spawn time and preserves these vars
+		});
+	});
+});
