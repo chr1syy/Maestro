@@ -154,6 +154,12 @@ const mockMaestro = {
 	shell: {
 		openExternal: vi.fn(),
 	},
+	sshRemote: {
+		getConfigs: vi.fn().mockResolvedValue({ success: true, configs: [] }),
+	},
+	sessions: {
+		getAll: vi.fn().mockResolvedValue([]),
+	},
 };
 
 // Mock theme

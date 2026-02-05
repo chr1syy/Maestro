@@ -159,6 +159,12 @@ const mockMaestro = {
 	fs: {
 		readFile: vi.fn(),
 	},
+	sshRemote: {
+		getConfigs: vi.fn().mockResolvedValue({ success: true, configs: [] }),
+	},
+	sessions: {
+		getAll: vi.fn().mockResolvedValue([]),
+	},
 };
 
 // Helper to render with required providers
