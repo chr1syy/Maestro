@@ -603,4 +603,122 @@ describe('OpenCode Moderator - Integration Flow', () => {
 		// Should NOT contain '--' separator
 		expect(baseArgs).not.toContain('--');
 	});
+
+	/**
+	 * Test Suite: Model Selection with ModeratorConfig
+	 * Verifies that model selection is properly preserved when passed through
+	 * the ModeratorConfig from UI and applied during moderator spawning.
+	 */
+	it('should apply custom model from moderatorConfig via applyAgentConfigOverrides', () => {
+		const agent: AgentConfig = {
+			id: 'opencode',
+			name: 'OpenCode',
+			binaryName: 'opencode',
+			command: 'opencode',
+			args: [],
+			batchModePrefix: ['run'],
+			jsonOutputArgs: ['--format', 'json'],
+			readOnlyArgs: ['--agent', 'plan'],
+			resumeArgs: (sessionId) => ['--session', sessionId],
+			modelArgs: (modelId) => ['--model', modelId],
+			noPromptSeparator: true,
+			available: true,
+			capabilities: getAgentCapabilities('opencode'),
+		};
+
+		// Simulate moderator spawning with custom model from UI
+		const prompt = 'Moderate this discussion: @participant should help';
+		const baseArgs = buildAgentArgs(agent, {
+			baseArgs: [],
+			prompt,
+			cwd: os.homedir(),
+			readOnlyMode: true,
+		});
+
+		// User selected model in UI - passed via moderatorConfig
+		const selectedModel = 'ollama/qwen3:8b';
+		const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+			agentConfigValues: {},
+			sessionCustomModel: selectedModel, // This comes from moderatorConfig.customModel
+		});
+
+		// Verify --model flag with correct value is in final args
+		expect(resolution.args).toContain('--model');
+		expect(resolution.args).toContain(selectedModel);
+		expect(resolution.modelSource).toBe('session');
+	});
+
+	it('should support different model formats through moderatorConfig', () => {
+		const agent: AgentConfig = {
+			id: 'opencode',
+			name: 'OpenCode',
+			binaryName: 'opencode',
+			command: 'opencode',
+			args: [],
+			batchModePrefix: ['run'],
+			jsonOutputArgs: ['--format', 'json'],
+			readOnlyArgs: ['--agent', 'plan'],
+			modelArgs: (modelId) => ['--model', modelId],
+			noPromptSeparator: true,
+			available: true,
+			capabilities: getAgentCapabilities('opencode'),
+		};
+
+		const models = ['ollama/qwen3:8b', 'anthropic/claude-sonnet-4-20250514', 'openai/gpt-4'];
+		const baseArgs = buildAgentArgs(agent, { baseArgs: [], prompt: 'Test', cwd: os.homedir() });
+
+		for (const modelId of models) {
+			const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues: {},
+				sessionCustomModel: modelId,
+			});
+
+			expect(resolution.args).toContain(modelId);
+		}
+	});
+
+	it('should combine custom model with custom args and env vars from moderatorConfig', () => {
+		const agent: AgentConfig = {
+			id: 'opencode',
+			name: 'OpenCode',
+			binaryName: 'opencode',
+			command: 'opencode',
+			args: [],
+			batchModePrefix: ['run'],
+			jsonOutputArgs: ['--format', 'json'],
+			readOnlyArgs: ['--agent', 'plan'],
+			modelArgs: (modelId) => ['--model', modelId],
+			defaultEnvVars: { OPENCODE_DEFAULT: 'value' },
+			noPromptSeparator: true,
+			available: true,
+			capabilities: getAgentCapabilities('opencode'),
+		};
+
+		const baseArgs = buildAgentArgs(agent, {
+			baseArgs: [],
+			prompt: 'Test prompt',
+			cwd: os.homedir(),
+			readOnlyMode: true,
+		});
+
+		const resolution = applyAgentConfigOverrides(agent, baseArgs, {
+			agentConfigValues: {},
+			sessionCustomModel: 'ollama/custom:latest',
+			sessionCustomArgs: '--verbose --timeout 300',
+			sessionCustomEnvVars: { CUSTOM_VAR: 'test_value' },
+		});
+
+		// Verify all three customizations are applied
+		expect(resolution.args).toContain('--model');
+		expect(resolution.args).toContain('ollama/custom:latest');
+		expect(resolution.args).toContain('--verbose');
+		expect(resolution.args).toContain('--timeout');
+		expect(resolution.args).toContain('300');
+
+		// Verify env vars are merged (defaults + custom)
+		expect(resolution.effectiveCustomEnvVars).toEqual({
+			OPENCODE_DEFAULT: 'value',
+			CUSTOM_VAR: 'test_value',
+		});
+	});
 });
