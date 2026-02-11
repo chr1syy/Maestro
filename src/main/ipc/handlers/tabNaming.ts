@@ -216,7 +216,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 						};
 
 						// Listen for process exit
-						const onExit = (exitSessionId: string) => {
+						const onExit = (exitSessionId: string, code?: number) => {
 							if (exitSessionId !== sessionId) return;
 
 							// Clean up
@@ -232,6 +232,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 							const tabName = extractTabName(output);
 							logger.debug('Tab naming completed', LOG_CONTEXT, {
 								sessionId,
+								exitCode: code,
 								outputLength: output.length,
 								tabName,
 							});
