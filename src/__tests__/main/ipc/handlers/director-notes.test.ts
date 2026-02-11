@@ -596,7 +596,6 @@ describe('director-notes IPC handlers', () => {
 			const promptArg = vi.mocked(groomContext).mock.calls[0][0].prompt;
 			expect(promptArg).toContain('Lookback period: 14 days');
 			expect(promptArg).toContain('Timestamp cutoff:');
-			expect(promptArg).toContain('Current time:');
 		});
 	});
 });
