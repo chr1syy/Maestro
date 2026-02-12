@@ -92,6 +92,8 @@ interface UseBatchProcessorReturn {
 	startBatchRun: (sessionId: string, config: BatchRunConfig, folderPath: string) => Promise<void>;
 	// Stop batch run for a specific session
 	stopBatchRun: (sessionId: string) => void;
+	// Force kill the running process and immediately end the batch run
+	killBatchRun: (sessionId: string) => Promise<void>;
 	// Custom prompts per session
 	customPrompts: Record<string, string>;
 	setCustomPrompt: (sessionId: string, prompt: string) => void;
@@ -1680,6 +1682,55 @@ export function useBatchProcessor({
 	);
 
 	/**
+	 * Force kill the running process and immediately end the batch run.
+	 * Unlike stopBatchRun (which waits for the current task to complete),
+	 * this terminates the agent process immediately and resets all batch state.
+	 */
+	const killBatchRun = useCallback(
+		async (sessionId: string) => {
+			console.log('[BatchProcessor:killBatchRun] Force killing session:', sessionId);
+
+			// 1. Kill the agent process and wait for termination before cleaning up state
+			try {
+				await window.maestro.process.kill(sessionId);
+			} catch (error) {
+				console.error('[BatchProcessor:killBatchRun] Failed to kill process:', error);
+			}
+
+			// 2. Set stop flag so the processing loop exits if it's still running
+			stopRequestedRefs.current[sessionId] = true;
+
+			// 3. Resolve any pending error state
+			const errorResolution = errorResolutionRefs.current[sessionId];
+			if (errorResolution) {
+				errorResolution.resolve('abort');
+				delete errorResolutionRefs.current[sessionId];
+			}
+
+			// 4. Flush any debounced state updates
+			flushDebouncedUpdate(sessionId);
+
+			// 5. Immediately reset batch state
+			dispatch({
+				type: 'COMPLETE_BATCH',
+				sessionId,
+				finalSessionIds: [],
+			});
+
+			// 6. Broadcast cleared state to web clients
+			broadcastAutoRunState(sessionId, null);
+
+			// 7. Clean up tracking
+			timeTracking.stopTracking(sessionId);
+			delete stopRequestedRefs.current[sessionId];
+
+			// 8. Allow system to sleep
+			window.maestro.power.removeReason(`autorun:${sessionId}`);
+		},
+		[broadcastAutoRunState, flushDebouncedUpdate, timeTracking]
+	);
+
+	/**
 	 * Pause the batch run due to an agent error (Phase 5.10)
 	 * Called externally when agent error is detected
 	 */
@@ -1843,6 +1894,7 @@ export function useBatchProcessor({
 		stoppingBatchSessionIds,
 		startBatchRun,
 		stopBatchRun,
+		killBatchRun,
 		customPrompts,
 		setCustomPrompt,
 		// Error handling (Phase 5.10)

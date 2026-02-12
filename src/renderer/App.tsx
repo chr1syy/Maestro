@@ -2605,7 +2605,7 @@ function MaestroConsoleInner() {
 		setSessions,
 	});
 
-	// Quit confirmation handler - shows modal when trying to quit with busy agents
+	// Quit confirmation handler - shows modal when trying to quit with busy agents or active auto-runs
 	useEffect(() => {
 		// Guard against window.maestro not being defined yet (production timing)
 		if (!window.maestro?.app?.onQuitConfirmationRequest) {
@@ -2617,8 +2617,14 @@ function MaestroConsoleInner() {
 				(s) => s.state === 'busy' && s.busySource === 'ai' && s.toolType !== 'terminal'
 			);
 
-			if (busyAgents.length === 0) {
-				// No busy agents, confirm quit immediately
+			// Check for active auto-runs (batch processor may be between tasks with agent idle)
+			const hasActiveAutoRuns = sessions.some((s) => {
+				const batchState = getBatchStateRef.current?.(s.id);
+				return batchState?.isRunning;
+			});
+
+			if (busyAgents.length === 0 && !hasActiveAutoRuns) {
+				// No busy agents and no active auto-runs, confirm quit immediately
 				window.maestro.app.confirmQuit();
 			} else {
 				// Show quit confirmation modal
@@ -4996,6 +5002,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 		activeBatchSessionIds,
 		startBatchRun,
 		stopBatchRun,
+		killBatchRun,
 		// Error handling (Phase 5.10)
 		pauseBatchOnError,
 		skipCurrentDocument,
@@ -5935,7 +5942,13 @@ You are taking over this conversation. Based on the context above, provide a bri
 				activeSession.id, // Session ID for playbook creation
 				activeSession.autoRunFolderPath, // User-configured Auto Run folder path (if set)
 				activeSession.sessionSshRemoteConfig, // SSH remote config for remote execution
-				conductorProfile // Conductor profile (user's About Me from settings)
+				conductorProfile, // Conductor profile (user's About Me from settings)
+				{
+					customPath: activeSession.customPath,
+					customArgs: activeSession.customArgs,
+					customEnvVars: activeSession.customEnvVars,
+					customModel: activeSession.customModel,
+				}
 			);
 
 			// Rename the tab to "Wizard" immediately when wizard starts
@@ -6019,7 +6032,13 @@ You are taking over this conversation. Based on the context above, provide a bri
 				activeSession.id,
 				activeSession.autoRunFolderPath, // User-configured Auto Run folder path (if set)
 				activeSession.sessionSshRemoteConfig, // SSH remote config for remote execution
-				conductorProfile // Conductor profile (user's About Me from settings)
+				conductorProfile, // Conductor profile (user's About Me from settings)
+				{
+					customPath: activeSession.customPath,
+					customArgs: activeSession.customArgs,
+					customEnvVars: activeSession.customEnvVars,
+					customModel: activeSession.customModel,
+				}
 			);
 
 			// Show a system log entry
@@ -6678,6 +6697,16 @@ You are taking over this conversation. Based on the context above, provide a bri
 			});
 		},
 		[activeBatchSessionIds, activeSession, sessions, stopBatchRun]
+	);
+
+	// Handler to force kill a batch run (process killed immediately, no waiting)
+	// Confirmation is handled by the calling component's own modal
+	const handleKillBatchRun = useCallback(
+		async (sessionId: string) => {
+			console.log('[App:handleKillBatchRun] Force killing sessionId:', sessionId);
+			await killBatchRun(sessionId);
+		},
+		[killBatchRun]
 	);
 
 	// Error handling callbacks for Auto Run (Phase 5.10)
@@ -11251,6 +11280,9 @@ You are taking over this conversation. Based on the context above, provide a bri
 		// File tree refresh
 		refreshFileTree,
 
+		// Open saved file in tab
+		onOpenSavedFileInTab: handleOpenFileTab,
+
 		// Helper functions
 		getActiveTab,
 	});
@@ -11444,6 +11476,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 		// Batch processing handlers
 		handleOpenBatchRunner,
 		handleStopBatchRun,
+		handleKillBatchRun,
 		handleSkipCurrentDocument,
 		handleAbortBatchOnError,
 		handleResumeAfterError,
@@ -11614,6 +11647,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 					quitConfirmModalOpen={quitConfirmModalOpen}
 					onConfirmQuit={handleConfirmQuit}
 					onCancelQuit={handleCancelQuit}
+					activeBatchSessionIds={activeBatchSessionIds}
 					// AppSessionModals props
 					newInstanceModalOpen={newInstanceModalOpen}
 					onCloseNewInstanceModal={handleCloseNewInstanceModal}
