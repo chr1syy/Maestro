@@ -1163,7 +1163,9 @@ function MaestroConsoleInner() {
 
 			// Migration: ensure fileTreeAutoRefreshInterval is set (default 180s for legacy sessions)
 			if (session.fileTreeAutoRefreshInterval == null) {
-				console.warn(`[restoreSession] Session missing fileTreeAutoRefreshInterval, defaulting to 180s`);
+				console.warn(
+					`[restoreSession] Session missing fileTreeAutoRefreshInterval, defaulting to 180s`
+				);
 				session = { ...session, fileTreeAutoRefreshInterval: 180 };
 			}
 
@@ -3612,7 +3614,10 @@ You are taking over this conversation. Based on the context above, provide a bri
 
 	// Effect: process pending resume after agent switch completes
 	useEffect(() => {
-		if (pendingResumeRef.current && activeSession?.id === pendingResumeRef.current.targetSessionId) {
+		if (
+			pendingResumeRef.current &&
+			activeSession?.id === pendingResumeRef.current.targetSessionId
+		) {
 			const { agentSessionId } = pendingResumeRef.current;
 			pendingResumeRef.current = null;
 			handleResumeSession(agentSessionId);
@@ -8328,7 +8333,9 @@ You are taking over this conversation. Based on the context above, provide a bri
 			activeSession.inputMode === 'terminal'
 				? activeSession.shellCwd || activeSession.cwd
 				: activeSession.cwd;
-		const diff = await gitService.getDiff(cwd);
+		const sshRemoteId =
+			activeSession.sshRemoteId || activeSession.sessionSshRemoteConfig?.remoteId || undefined;
+		const diff = await gitService.getDiff(cwd, undefined, sshRemoteId);
 
 		if (diff.diff) {
 			setGitDiffPreview(diff.diff);
@@ -12263,7 +12270,9 @@ You are taking over this conversation. Based on the context above, provide a bri
 							onClose={() => setDirectorNotesOpen(false)}
 							onResumeSession={handleDirectorNotesResumeSession}
 							fileTree={activeSession?.fileTree}
-							onFileClick={(path: string) => handleFileClick({ name: path.split('/').pop() || path, type: 'file' }, path)}
+							onFileClick={(path: string) =>
+								handleFileClick({ name: path.split('/').pop() || path, type: 'file' }, path)
+							}
 						/>
 					</Suspense>
 				)}
