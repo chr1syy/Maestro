@@ -25,6 +25,7 @@ import type {
 	ContextManagementSettings,
 	KeyboardMasteryStats,
 	ThinkingMode,
+	DirectorNotesSettings,
 } from '../../types';
 import {
 	useSettingsStore,
@@ -268,6 +269,16 @@ export interface UseSettingsReturn {
 	// Windows warning suppression
 	suppressWindowsWarning: boolean;
 	setSuppressWindowsWarning: (value: boolean) => void;
+
+	// Director's Notes settings
+	directorNotesSettings: DirectorNotesSettings;
+	setDirectorNotesSettings: (value: DirectorNotesSettings) => void;
+
+	// WakaTime integration settings
+	wakatimeApiKey: string;
+	setWakatimeApiKey: (value: string) => void;
+	wakatimeEnabled: boolean;
+	setWakatimeEnabled: (value: boolean) => void;
 }
 
 export function useSettings(): UseSettingsReturn {

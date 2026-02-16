@@ -29,6 +29,7 @@ import type {
 	ContextManagementSettings,
 	KeyboardMasteryStats,
 	ThinkingMode,
+	DirectorNotesSettings,
 } from '../types';
 import { DEFAULT_CUSTOM_THEME_COLORS } from '../constants/themes';
 import { DEFAULT_SHORTCUTS, TAB_SHORTCUTS, FIXED_SHORTCUTS } from '../constants/shortcuts';
@@ -112,6 +113,11 @@ export const DEFAULT_ONBOARDING_STATS: OnboardingStats = {
 	averagePhasesPerWizard: 0,
 	totalTasksGenerated: 0,
 	averageTasksPerPhase: 0,
+};
+
+export const DEFAULT_DIRECTOR_NOTES_SETTINGS: DirectorNotesSettings = {
+	provider: 'claude-code',
+	defaultLookbackDays: 7,
 };
 
 export const DEFAULT_AI_COMMANDS: CustomAICommand[] = [
@@ -230,6 +236,9 @@ export interface SettingsStoreState {
 	automaticTabNamingEnabled: boolean;
 	fileTabAutoRefreshEnabled: boolean;
 	suppressWindowsWarning: boolean;
+	directorNotesSettings: DirectorNotesSettings;
+	wakatimeApiKey: string;
+	wakatimeEnabled: boolean;
 }
 
 export interface SettingsStoreActions {
@@ -289,6 +298,9 @@ export interface SettingsStoreActions {
 	setAutomaticTabNamingEnabled: (value: boolean) => void;
 	setFileTabAutoRefreshEnabled: (value: boolean) => void;
 	setSuppressWindowsWarning: (value: boolean) => void;
+	setDirectorNotesSettings: (value: DirectorNotesSettings) => void;
+	setWakatimeApiKey: (value: string) => void;
+	setWakatimeEnabled: (value: boolean) => void;
 
 	// Async setters
 	setLogLevel: (value: string) => Promise<void>;
@@ -424,6 +436,9 @@ export const useSettingsStore = create<SettingsStore>()((set, get) => ({
 	automaticTabNamingEnabled: true,
 	fileTabAutoRefreshEnabled: false,
 	suppressWindowsWarning: false,
+	directorNotesSettings: DEFAULT_DIRECTOR_NOTES_SETTINGS,
+	wakatimeApiKey: '',
+	wakatimeEnabled: false,
 
 	// ============================================================================
 	// Simple Setters
@@ -710,6 +725,21 @@ export const useSettingsStore = create<SettingsStore>()((set, get) => ({
 	setSuppressWindowsWarning: (value) => {
 		set({ suppressWindowsWarning: value });
 		window.maestro.settings.set('suppressWindowsWarning', value);
+	},
+
+	setDirectorNotesSettings: (value) => {
+		set({ directorNotesSettings: value });
+		window.maestro.settings.set('directorNotesSettings', value);
+	},
+
+	setWakatimeApiKey: (value) => {
+		set({ wakatimeApiKey: value });
+		window.maestro.settings.set('wakatimeApiKey', value);
+	},
+
+	setWakatimeEnabled: (value) => {
+		set({ wakatimeEnabled: value });
+		window.maestro.settings.set('wakatimeEnabled', value);
 	},
 
 	// ============================================================================
@@ -1554,6 +1584,20 @@ export async function loadAllSettings(): Promise<void> {
 		if (allSettings['suppressWindowsWarning'] !== undefined)
 			patch.suppressWindowsWarning = allSettings['suppressWindowsWarning'] as boolean;
 
+		// Director's Notes settings (merge with defaults to preserve new fields)
+		if (allSettings['directorNotesSettings'] !== undefined) {
+			patch.directorNotesSettings = {
+				...DEFAULT_DIRECTOR_NOTES_SETTINGS,
+				...(allSettings['directorNotesSettings'] as Partial<DirectorNotesSettings>),
+			};
+		}
+
+		if (allSettings['wakatimeApiKey'] !== undefined)
+			patch.wakatimeApiKey = allSettings['wakatimeApiKey'] as string;
+
+		if (allSettings['wakatimeEnabled'] !== undefined)
+			patch.wakatimeEnabled = allSettings['wakatimeEnabled'] as boolean;
+
 		// Apply the entire patch in one setState call
 		patch.settingsLoaded = true;
 		useSettingsStore.setState(patch);
@@ -1657,5 +1701,8 @@ export function getSettingsActions() {
 		setAutomaticTabNamingEnabled: state.setAutomaticTabNamingEnabled,
 		setFileTabAutoRefreshEnabled: state.setFileTabAutoRefreshEnabled,
 		setSuppressWindowsWarning: state.setSuppressWindowsWarning,
+		setDirectorNotesSettings: state.setDirectorNotesSettings,
+		setWakatimeApiKey: state.setWakatimeApiKey,
+		setWakatimeEnabled: state.setWakatimeEnabled,
 	};
 }

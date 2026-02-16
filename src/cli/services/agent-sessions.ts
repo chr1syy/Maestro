@@ -5,6 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { encodeClaudeProjectPath } from '../../shared/pathUtils';
 
 // ============================================================================
 // Constants (inlined from main/constants.ts to avoid Electron dependencies)
@@ -83,15 +84,9 @@ function readOriginsStore(): OriginsStore {
 	if (platform === 'darwin') {
 		configDir = path.join(home, 'Library', 'Application Support', 'Maestro');
 	} else if (platform === 'win32') {
-		configDir = path.join(
-			process.env.APPDATA || path.join(home, 'AppData', 'Roaming'),
-			'Maestro'
-		);
+		configDir = path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Maestro');
 	} else {
-		configDir = path.join(
-			process.env.XDG_CONFIG_HOME || path.join(home, '.config'),
-			'Maestro'
-		);
+		configDir = path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'Maestro');
 	}
 
 	const filePath = path.join(configDir, 'claude-session-origins.json');
@@ -129,11 +124,6 @@ function getSessionOriginInfo(
 // ============================================================================
 // Session Parsing
 // ============================================================================
-
-/** Encode project path the same way Claude Code does: replace / and . with - */
-function encodeClaudeProjectPath(projectPath: string): string {
-	return projectPath.replace(/[/.]/g, '-');
-}
 
 function calculateCost(
 	inputTokens: number,

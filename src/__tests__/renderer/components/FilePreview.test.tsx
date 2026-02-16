@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { FilePreview } from '../../../renderer/components/FilePreview';
+import { formatShortcutKeys } from '../../../renderer/utils/shortcutFormatter';
 
 // Mock lucide-react icons
 vi.mock('lucide-react', () => ({
@@ -106,6 +107,27 @@ vi.mock('../../../renderer/components/MermaidRenderer', () => ({
 	MermaidRenderer: () => <div data-testid="mermaid-renderer">Mermaid</div>,
 }));
 
+// Mock CsvTableRenderer
+vi.mock('../../../renderer/components/CsvTableRenderer', () => ({
+	CsvTableRenderer: ({
+		content,
+		searchQuery,
+		delimiter,
+	}: {
+		content: string;
+		searchQuery?: string;
+		delimiter?: string;
+	}) => (
+		<div
+			data-testid="csv-table-renderer"
+			data-search={searchQuery ?? ''}
+			data-delimiter={delimiter ?? ','}
+		>
+			{content.substring(0, 50)}
+		</div>
+	),
+}));
+
 // Mock token counter - getEncoder must return a Promise
 vi.mock('../../../renderer/utils/tokenCounter', () => ({
 	getEncoder: vi.fn(() => Promise.resolve({ encode: () => [1, 2, 3] })),
@@ -114,7 +136,15 @@ vi.mock('../../../renderer/utils/tokenCounter', () => ({
 
 // Mock shortcut formatter
 vi.mock('../../../renderer/utils/shortcutFormatter', () => ({
-	formatShortcutKeys: vi.fn((keys: string) => keys),
+	formatShortcutKeys: vi.fn((keys: string[]) => {
+		const keyMap: Record<string, string> = {
+			Meta: 'Ctrl',
+			Alt: 'Alt',
+			Shift: 'Shift',
+			Control: 'Ctrl',
+		};
+		return keys.map((k: string) => keyMap[k] || k.toUpperCase()).join('+');
+	}),
 	isMacOS: vi.fn(() => false),
 }));
 
@@ -176,7 +206,9 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			const graphButton = screen.getByTitle('View in Document Graph (⌘⇧G)');
+			const graphButton = screen.getByTitle(
+				`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
+			);
 			expect(graphButton).toBeInTheDocument();
 			expect(screen.getByTestId('gitgraph-icon')).toBeInTheDocument();
 		});
@@ -191,7 +223,9 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			const graphButton = screen.getByTitle('View in Document Graph (⌘⇧G)');
+			const graphButton = screen.getByTitle(
+				`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
+			);
 			fireEvent.click(graphButton);
 
 			expect(onOpenInGraph).toHaveBeenCalledOnce();
@@ -205,7 +239,11 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(screen.queryByTitle('View in Document Graph (⌘⇧G)')).not.toBeInTheDocument();
+			expect(
+				screen.queryByTitle(
+					`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
+				)
+			).not.toBeInTheDocument();
 		});
 
 		it('does not show Document Graph button for non-markdown files', () => {
@@ -218,7 +256,11 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(screen.queryByTitle('View in Document Graph (⌘⇧G)')).not.toBeInTheDocument();
+			expect(
+				screen.queryByTitle(
+					`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
+				)
+			).not.toBeInTheDocument();
 		});
 
 		it('shows Document Graph button for uppercase .MD extension', () => {
@@ -231,7 +273,9 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(screen.getByTitle('View in Document Graph (⌘⇧G)')).toBeInTheDocument();
+			expect(
+				screen.getByTitle(`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`)
+			).toBeInTheDocument();
 		});
 	});
 
@@ -259,12 +303,7 @@ describe('FilePreview', () => {
 		});
 
 		it('hides Open in Default App button for SSH remote sessions', () => {
-			render(
-				<FilePreview
-					{...defaultProps}
-					sshRemoteId="remote-host-1"
-				/>
-			);
+			render(<FilePreview {...defaultProps} sshRemoteId="remote-host-1" />);
 
 			expect(screen.queryByTitle('Open in Default App')).not.toBeInTheDocument();
 		});
@@ -284,13 +323,7 @@ describe('FilePreview', () => {
 			});
 			window.maestro.fs.stat = mockStat;
 
-			render(
-				<FilePreview
-					{...defaultProps}
-					lastModified={1000}
-					onReloadFile={onReloadFile}
-				/>
-			);
+			render(<FilePreview {...defaultProps} lastModified={1000} onReloadFile={onReloadFile} />);
 
 			// Banner should not be visible initially
 			expect(screen.queryByText('File changed on disk.')).not.toBeInTheDocument();
@@ -317,13 +350,7 @@ describe('FilePreview', () => {
 				isDirectory: false,
 			});
 
-			render(
-				<FilePreview
-					{...defaultProps}
-					lastModified={1000}
-					onReloadFile={onReloadFile}
-				/>
-			);
+			render(<FilePreview {...defaultProps} lastModified={1000} onReloadFile={onReloadFile} />);
 
 			await act(async () => {
 				vi.advanceTimersByTime(3000);
@@ -349,13 +376,7 @@ describe('FilePreview', () => {
 				isDirectory: false,
 			});
 
-			render(
-				<FilePreview
-					{...defaultProps}
-					lastModified={1000}
-					onReloadFile={vi.fn()}
-				/>
-			);
+			render(<FilePreview {...defaultProps} lastModified={1000} onReloadFile={vi.fn()} />);
 
 			await act(async () => {
 				vi.advanceTimersByTime(3000);
@@ -396,9 +417,7 @@ describe('FilePreview', () => {
 				vi.advanceTimersByTime(3000);
 			});
 
-			expect(
-				screen.getByText(/File changed on disk\. You have unsaved edits/)
-			).toBeInTheDocument();
+			expect(screen.getByText(/File changed on disk\. You have unsaved edits/)).toBeInTheDocument();
 
 			vi.useRealTimers();
 		});
@@ -413,12 +432,7 @@ describe('FilePreview', () => {
 			});
 			window.maestro.fs.stat = mockStat;
 
-			render(
-				<FilePreview
-					{...defaultProps}
-					onReloadFile={vi.fn()}
-				/>
-			);
+			render(<FilePreview {...defaultProps} onReloadFile={vi.fn()} />);
 
 			// Allow the initial file stats fetch to complete
 			await act(async () => {
@@ -1311,6 +1325,71 @@ print("world")
 			expect(onScrollPositionChange).not.toHaveBeenCalled();
 
 			vi.useRealTimers();
+		});
+	});
+
+	describe('CSV file rendering', () => {
+		it('renders CsvTableRenderer for .csv files with comma delimiter', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'data.csv', content: 'Name,Age\nAlice,30', path: '/test/data.csv' }}
+				/>
+			);
+
+			const renderer = screen.getByTestId('csv-table-renderer');
+			expect(renderer).toBeInTheDocument();
+			expect(renderer).toHaveAttribute('data-delimiter', ',');
+		});
+
+		it('renders CsvTableRenderer for .tsv files with tab delimiter', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'data.tsv', content: 'Name\tAge\nAlice\t30', path: '/test/data.tsv' }}
+				/>
+			);
+
+			const renderer = screen.getByTestId('csv-table-renderer');
+			expect(renderer).toBeInTheDocument();
+			expect(renderer).toHaveAttribute('data-delimiter', '\t');
+		});
+
+		it('shows edit button for CSV files', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'data.csv', content: 'Name,Age\nAlice,30', path: '/test/data.csv' }}
+				/>
+			);
+
+			expect(screen.getByTestId('edit-icon')).toBeInTheDocument();
+		});
+
+		it('shows textarea when in edit mode for CSV files', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'data.csv', content: 'Name,Age\nAlice,30', path: '/test/data.csv' }}
+					markdownEditMode={true}
+				/>
+			);
+
+			const textarea = screen.getByRole('textbox');
+			expect(textarea).toBeInTheDocument();
+			expect(textarea).toHaveValue('Name,Age\nAlice,30');
+		});
+
+		it('does not render CsvTableRenderer when in edit mode', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'data.csv', content: 'Name,Age\nAlice,30', path: '/test/data.csv' }}
+					markdownEditMode={true}
+				/>
+			);
+
+			expect(screen.queryByTestId('csv-table-renderer')).not.toBeInTheDocument();
 		});
 	});
 });

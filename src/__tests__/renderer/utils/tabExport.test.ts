@@ -114,9 +114,7 @@ describe('tabExport', () => {
 				const html = generateTabExportHtml(tab, mockSession, mockTheme);
 
 				expect(html).toContain('Session ABC12345');
-				expect(html).toContain(
-					'<title>Session ABC12345 - Maestro Tab Export</title>'
-				);
+				expect(html).toContain('<title>Session ABC12345 - Maestro Tab Export</title>');
 			});
 
 			it('falls back to "New Session" when no name or session ID', () => {
@@ -741,7 +739,7 @@ describe('tabExport', () => {
 				const tab = createMockTab();
 				const html = generateTabExportHtml(tab, mockSession, mockTheme);
 
-				expect(html).toContain('href="https://github.com/pedramamini/Maestro"');
+				expect(html).toContain('href="https://github.com/RunMaestro/Maestro"');
 				expect(html).toContain('GitHub');
 			});
 

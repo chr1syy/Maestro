@@ -752,8 +752,18 @@ describe('useMainKeyboardHandler', () => {
 		function createUnifiedTabContext(overrides: Record<string, unknown> = {}) {
 			const aiTab1 = { id: 'ai-tab-1', name: 'AI Tab 1', logs: [] };
 			const aiTab2 = { id: 'ai-tab-2', name: 'AI Tab 2', logs: [] };
-			const fileTab1 = { id: 'file-tab-1', path: '/test/file1.ts', name: 'file1', extension: '.ts' };
-			const fileTab2 = { id: 'file-tab-2', path: '/test/file2.ts', name: 'file2', extension: '.ts' };
+			const fileTab1 = {
+				id: 'file-tab-1',
+				path: '/test/file1.ts',
+				name: 'file1',
+				extension: '.ts',
+			};
+			const fileTab2 = {
+				id: 'file-tab-2',
+				path: '/test/file2.ts',
+				name: 'file2',
+				extension: '.ts',
+			};
 
 			return createMockContext({
 				activeSession: {
@@ -787,7 +797,9 @@ describe('useMainKeyboardHandler', () => {
 						id: 'session-1',
 						aiTabs: [{ id: 'ai-tab-1', name: 'AI Tab 1', logs: [] }],
 						activeTabId: 'ai-tab-1',
-						filePreviewTabs: [{ id: 'file-tab-1', path: '/test/file.ts', name: 'file', extension: '.ts' }],
+						filePreviewTabs: [
+							{ id: 'file-tab-1', path: '/test/file.ts', name: 'file', extension: '.ts' },
+						],
 						activeFileTabId: 'file-tab-1', // File tab is active
 						unifiedTabOrder: ['ai-tab-1', 'file-tab-1'],
 						inputMode: 'ai',
@@ -1379,6 +1391,74 @@ describe('useMainKeyboardHandler', () => {
 			});
 
 			expect(mockSetChatRawTextMode).not.toHaveBeenCalled();
+		});
+
+		it('should toggle even when a modal layer is open (Cmd+E passes through modals)', () => {
+			const { result } = renderHook(() => useMainKeyboardHandler());
+			const mockSetChatRawTextMode = vi.fn();
+
+			result.current.keyboardHandlerRef.current = createMockContext({
+				isShortcut: (_e: KeyboardEvent, id: string) => id === 'toggleMarkdownMode',
+				chatRawTextMode: false,
+				setChatRawTextMode: mockSetChatRawTextMode,
+				activeFocus: 'main',
+				activeRightTab: 'files',
+				activeBatchRunState: null,
+				hasOpenLayers: () => true,
+				hasOpenModal: () => true,
+				activeSession: {
+					id: 'session-1',
+					activeFileTabId: null,
+					inputMode: 'ai',
+				},
+				recordShortcutUsage: vi.fn().mockReturnValue({ newLevel: null }),
+			});
+
+			act(() => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+					})
+				);
+			});
+
+			expect(mockSetChatRawTextMode).toHaveBeenCalledWith(true);
+		});
+
+		it('should toggle when only overlay layers are open (Cmd+E passes through overlays)', () => {
+			const { result } = renderHook(() => useMainKeyboardHandler());
+			const mockSetChatRawTextMode = vi.fn();
+
+			result.current.keyboardHandlerRef.current = createMockContext({
+				isShortcut: (_e: KeyboardEvent, id: string) => id === 'toggleMarkdownMode',
+				chatRawTextMode: true,
+				setChatRawTextMode: mockSetChatRawTextMode,
+				activeFocus: 'main',
+				activeRightTab: 'files',
+				activeBatchRunState: null,
+				hasOpenLayers: () => true,
+				hasOpenModal: () => false,
+				activeSession: {
+					id: 'session-1',
+					activeFileTabId: null,
+					inputMode: 'ai',
+				},
+				recordShortcutUsage: vi.fn().mockReturnValue({ newLevel: null }),
+			});
+
+			act(() => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+					})
+				);
+			});
+
+			expect(mockSetChatRawTextMode).toHaveBeenCalledWith(false);
 		});
 	});
 });

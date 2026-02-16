@@ -54,7 +54,7 @@ import { getStatusColor, getContextColor, formatActiveTime } from '../utils/them
 import { formatShortcutKeys } from '../utils/shortcutFormatter';
 import { SessionItem } from './SessionItem';
 import { GroupChatList } from './GroupChatList';
-import { useLiveOverlay, useClickOutside } from '../hooks';
+import { useLiveOverlay, useClickOutside, useResizablePanel } from '../hooks';
 import { useGitFileStatus } from '../contexts/GitStatusContext';
 import { useUIStore } from '../stores/uiStore';
 
@@ -441,6 +441,7 @@ interface HamburgerMenuContentProps {
 	setProcessMonitorOpen: (open: boolean) => void;
 	setUsageDashboardOpen: (open: boolean) => void;
 	setSymphonyModalOpen: (open: boolean) => void;
+	setDirectorNotesOpen: (open: boolean) => void;
 	setUpdateCheckModalOpen: (open: boolean) => void;
 	setAboutModalOpen: (open: boolean) => void;
 	setMenuOpen: (open: boolean) => void;
@@ -460,6 +461,7 @@ function HamburgerMenuContent({
 	setProcessMonitorOpen,
 	setUsageDashboardOpen,
 	setSymphonyModalOpen,
+	setDirectorNotesOpen,
 	setUpdateCheckModalOpen,
 	setAboutModalOpen,
 	setMenuOpen,
@@ -698,6 +700,31 @@ function HamburgerMenuContent({
 				>
 					{shortcuts.openSymphony ? formatShortcutKeys(shortcuts.openSymphony.keys) : '⇧⌘Y'}
 				</span>
+			</button>
+			<button
+				onClick={() => {
+					setDirectorNotesOpen(true);
+					setMenuOpen(false);
+				}}
+				className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-white/10 transition-colors text-left"
+			>
+				<ScrollText className="w-5 h-5" style={{ color: theme.colors.accent }} />
+				<div className="flex-1">
+					<div className="text-sm font-medium" style={{ color: theme.colors.textMain }}>
+						Director's Notes
+					</div>
+					<div className="text-xs" style={{ color: theme.colors.textDim }}>
+						Unified history & AI synopsis
+					</div>
+				</div>
+				{shortcuts.directorNotes && (
+					<span
+						className="text-xs font-mono px-1.5 py-0.5 rounded"
+						style={{ backgroundColor: theme.colors.bgActivity, color: theme.colors.textDim }}
+					>
+						{formatShortcutKeys(shortcuts.directorNotes.keys)}
+					</span>
+				)}
 			</button>
 			<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
 			<button
@@ -1051,6 +1078,7 @@ interface SessionListProps {
 	setProcessMonitorOpen: (open: boolean) => void;
 	setUsageDashboardOpen: (open: boolean) => void;
 	setSymphonyModalOpen: (open: boolean) => void;
+	setDirectorNotesOpen: (open: boolean) => void;
 	setQuickActionOpen: (open: boolean) => void;
 	toggleGroup: (groupId: string) => void;
 	handleDragStart: (sessionId: string) => void;
@@ -1174,6 +1202,7 @@ function SessionListInner(props: SessionListProps) {
 		setProcessMonitorOpen,
 		setUsageDashboardOpen,
 		setSymphonyModalOpen,
+		setDirectorNotesOpen,
 		setQuickActionOpen,
 		toggleGroup,
 		handleDragStart,
@@ -1228,10 +1257,23 @@ function SessionListInner(props: SessionListProps) {
 		contextWarningRedThreshold = 80,
 	} = props;
 
-	// Derive whether any session is busy (for wand sparkle animation)
-	const isAnyBusy = useMemo(() => sessions.some((s) => s.state === 'busy'), [sessions]);
+	// Derive whether any session is busy or in auto-run (for wand sparkle animation)
+	const isAnyBusy = useMemo(
+		() => sessions.some((s) => s.state === 'busy') || activeBatchSessionIds.length > 0,
+		[sessions, activeBatchSessionIds]
+	);
 
 	const [sessionFilter, setSessionFilter] = useState('');
+	const { onResizeStart: onSidebarResizeStart, transitionClass: sidebarTransitionClass } =
+		useResizablePanel({
+			width: leftSidebarWidthState,
+			minWidth: 256,
+			maxWidth: 600,
+			settingsKey: 'leftSidebarWidth',
+			setWidth: setLeftSidebarWidthState,
+			side: 'left',
+			externalRef: sidebarContainerRef,
+		});
 	const sessionFilterOpen = useUIStore((s) => s.sessionFilterOpen);
 	const setSessionFilterOpen = useUIStore((s) => s.setSessionFilterOpen);
 	const [preFilterGroupStates, setPreFilterGroupStates] = useState<Map<string, boolean>>(new Map());
@@ -1907,7 +1949,7 @@ function SessionListInner(props: SessionListProps) {
 		<div
 			ref={sidebarContainerRef}
 			tabIndex={0}
-			className={`border-r flex flex-col shrink-0 transition-all duration-300 outline-none relative z-20 ${activeFocus === 'sidebar' && !activeGroupChatId ? 'ring-1 ring-inset' : ''}`}
+			className={`border-r flex flex-col shrink-0 ${sidebarTransitionClass} outline-none relative z-20 ${activeFocus === 'sidebar' && !activeGroupChatId ? 'ring-1 ring-inset' : ''}`}
 			style={
 				{
 					width: leftSidebarOpen ? `${leftSidebarWidthState}px` : '64px',
@@ -1936,32 +1978,7 @@ function SessionListInner(props: SessionListProps) {
 			{leftSidebarOpen && (
 				<div
 					className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 transition-colors z-20"
-					onMouseDown={(e) => {
-						e.preventDefault();
-						const startX = e.clientX;
-						const startWidth = leftSidebarWidthState;
-						let currentWidth = startWidth;
-
-						const handleMouseMove = (e: MouseEvent) => {
-							const delta = e.clientX - startX;
-							currentWidth = Math.max(256, Math.min(600, startWidth + delta));
-							// Direct DOM update during drag for performance (avoids ~60 re-renders/sec)
-							if (sidebarContainerRef?.current) {
-								sidebarContainerRef.current.style.width = `${currentWidth}px`;
-							}
-						};
-
-						const handleMouseUp = () => {
-							// Only update React state once on mouseup
-							setLeftSidebarWidthState(currentWidth);
-							window.maestro.settings.set('leftSidebarWidth', currentWidth);
-							document.removeEventListener('mousemove', handleMouseMove);
-							document.removeEventListener('mouseup', handleMouseUp);
-						};
-
-						document.addEventListener('mousemove', handleMouseMove);
-						document.addEventListener('mouseup', handleMouseUp);
-					}}
+					onMouseDown={onSidebarResizeStart}
 				/>
 			)}
 
@@ -1973,7 +1990,10 @@ function SessionListInner(props: SessionListProps) {
 				{leftSidebarOpen ? (
 					<>
 						<div className="flex items-center gap-2">
-							<Wand2 className={`w-5 h-5${isAnyBusy ? ' wand-sparkle-active' : ''}`} style={{ color: theme.colors.accent }} />
+							<Wand2
+								className={`w-5 h-5${isAnyBusy ? ' wand-sparkle-active' : ''}`}
+								style={{ color: theme.colors.accent }}
+							/>
 							<h1
 								className="font-bold tracking-widest text-lg"
 								style={{ color: theme.colors.textMain }}
@@ -2480,6 +2500,7 @@ function SessionListInner(props: SessionListProps) {
 										setProcessMonitorOpen={setProcessMonitorOpen}
 										setUsageDashboardOpen={setUsageDashboardOpen}
 										setSymphonyModalOpen={setSymphonyModalOpen}
+										setDirectorNotesOpen={setDirectorNotesOpen}
 										setUpdateCheckModalOpen={setUpdateCheckModalOpen}
 										setAboutModalOpen={setAboutModalOpen}
 										setMenuOpen={setMenuOpen}
@@ -2496,7 +2517,10 @@ function SessionListInner(props: SessionListProps) {
 							className="p-2 rounded hover:bg-white/10 transition-colors"
 							title="Menu"
 						>
-							<Wand2 className={`w-6 h-6${isAnyBusy ? ' wand-sparkle-active' : ''}`} style={{ color: theme.colors.accent }} />
+							<Wand2
+								className={`w-6 h-6${isAnyBusy ? ' wand-sparkle-active' : ''}`}
+								style={{ color: theme.colors.accent }}
+							/>
 						</button>
 						{/* Menu Overlay for Collapsed Sidebar */}
 						{menuOpen && (
@@ -2521,6 +2545,7 @@ function SessionListInner(props: SessionListProps) {
 									setProcessMonitorOpen={setProcessMonitorOpen}
 									setUsageDashboardOpen={setUsageDashboardOpen}
 									setSymphonyModalOpen={setSymphonyModalOpen}
+									setDirectorNotesOpen={setDirectorNotesOpen}
 									setUpdateCheckModalOpen={setUpdateCheckModalOpen}
 									setAboutModalOpen={setAboutModalOpen}
 									setMenuOpen={setMenuOpen}

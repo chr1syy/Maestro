@@ -89,6 +89,9 @@ function resetStore() {
 		automaticTabNamingEnabled: true,
 		fileTabAutoRefreshEnabled: false,
 		suppressWindowsWarning: false,
+		directorNotesSettings: { provider: 'claude-code', defaultLookbackDays: 7 },
+		wakatimeApiKey: '',
+		wakatimeEnabled: false,
 	});
 }
 
@@ -183,6 +186,12 @@ describe('settingsStore', () => {
 			expect(state.automaticTabNamingEnabled).toBe(true);
 			expect(state.fileTabAutoRefreshEnabled).toBe(false);
 			expect(state.suppressWindowsWarning).toBe(false);
+			expect(state.directorNotesSettings).toEqual({
+				provider: 'claude-code',
+				defaultLookbackDays: 7,
+			});
+			expect(state.wakatimeApiKey).toBe('');
+			expect(state.wakatimeEnabled).toBe(false);
 		});
 	});
 
@@ -564,6 +573,28 @@ describe('settingsStore', () => {
 				useSettingsStore.getState().setSuppressWindowsWarning(true);
 				expect(useSettingsStore.getState().suppressWindowsWarning).toBe(true);
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('suppressWindowsWarning', true);
+			});
+
+			it('setDirectorNotesSettings updates state and persists', () => {
+				const settings = { provider: 'codex' as const, defaultLookbackDays: 14 };
+				useSettingsStore.getState().setDirectorNotesSettings(settings);
+				expect(useSettingsStore.getState().directorNotesSettings).toEqual(settings);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('directorNotesSettings', settings);
+			});
+
+			it('setWakatimeApiKey updates state and persists', () => {
+				useSettingsStore.getState().setWakatimeApiKey('waka_test_key_123');
+				expect(useSettingsStore.getState().wakatimeApiKey).toBe('waka_test_key_123');
+				expect(window.maestro.settings.set).toHaveBeenCalledWith(
+					'wakatimeApiKey',
+					'waka_test_key_123'
+				);
+			});
+
+			it('setWakatimeEnabled updates state and persists', () => {
+				useSettingsStore.getState().setWakatimeEnabled(true);
+				expect(useSettingsStore.getState().wakatimeEnabled).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('wakatimeEnabled', true);
 			});
 		});
 	});

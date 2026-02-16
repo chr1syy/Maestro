@@ -8,7 +8,7 @@ import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { getContextColor } from '../utils/theme';
 import { formatShortcutKeys } from '../utils/shortcutFormatter';
 import { formatTokensCompact, formatRelativeTime, formatCost } from '../utils/formatters';
-import { calculateContextTokens } from '../utils/contextUsage';
+import { calculateContextDisplay } from '../utils/contextUsage';
 import { getColorBlindExtensionColor } from '../constants/colorblindPalettes';
 
 /** Named session from the store (not currently open) */
@@ -64,26 +64,23 @@ function getTabLastActivity(tab: AITab): number | undefined {
 }
 
 /**
- * Get context usage percentage from usage stats
- * Uses agent-specific calculation (Codex includes output tokens, Claude doesn't)
- *
- * SYNC: Uses calculateContextTokens() from shared/contextUsage.ts
- * See that file for the canonical formula and all locations that must stay in sync.
+ * Get context usage percentage from usage stats.
+ * Uses calculateContextDisplay() which handles accumulated multi-tool token overflow.
  */
 function getContextPercentage(tab: AITab, agentId?: ToolType): number {
 	if (!tab.usageStats) return 0;
 	const { contextWindow } = tab.usageStats;
 	if (!contextWindow || contextWindow === 0) return 0;
-	const contextTokens = calculateContextTokens(
+	return calculateContextDisplay(
 		{
 			inputTokens: tab.usageStats.inputTokens,
 			outputTokens: tab.usageStats.outputTokens,
 			cacheCreationInputTokens: tab.usageStats.cacheCreationInputTokens ?? 0,
 			cacheReadInputTokens: tab.usageStats.cacheReadInputTokens ?? 0,
 		},
+		contextWindow,
 		agentId
-	);
-	return Math.min(100, Math.round((contextTokens / contextWindow) * 100));
+	).percentage;
 }
 
 /**
@@ -832,10 +829,7 @@ export function TabSwitcherModal({
 												style={{ backgroundColor: theme.colors.success }}
 											/>
 										) : (
-											<FileText
-												className="w-3.5 h-3.5"
-												style={{ color: theme.colors.textDim }}
-											/>
+											<FileText className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 										)}
 									</div>
 
@@ -847,12 +841,8 @@ export function TabSwitcherModal({
 											<span
 												className="text-[9px] px-1 py-0.5 rounded font-semibold uppercase flex-shrink-0"
 												style={{
-													backgroundColor: isSelected
-														? 'rgba(255,255,255,0.2)'
-														: extColors.bg,
-													color: isSelected
-														? theme.colors.accentForeground
-														: extColors.text,
+													backgroundColor: isSelected ? 'rgba(255,255,255,0.2)' : extColors.bg,
+													color: isSelected ? theme.colors.accentForeground : extColors.text,
 												}}
 											>
 												{tab.extension.replace(/^\./, '').toUpperCase()}
@@ -982,7 +972,7 @@ export function TabSwitcherModal({
 						{filteredItems.length}{' '}
 						{viewMode === 'open' ? 'tabs' : viewMode === 'starred' ? 'starred' : 'sessions'}
 					</span>
-					<span>↑↓ navigate • Enter select • ⌘1-9 quick select</span>
+					<span>{`↑↓ navigate • Enter select • ${formatShortcutKeys(['Meta'])}1-9 quick select`}</span>
 				</div>
 			</div>
 		</div>
