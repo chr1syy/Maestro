@@ -1161,6 +1161,11 @@ function MaestroConsoleInner() {
 				session = { ...session, projectRoot: session.cwd };
 			}
 
+			// Migration: default autoRunFolderPath for sessions that don't have one
+			if (!session.autoRunFolderPath && session.projectRoot) {
+				session = { ...session, autoRunFolderPath: `${session.projectRoot}/${AUTO_RUN_FOLDER_NAME}` };
+			}
+
 			// Migration: ensure fileTreeAutoRefreshInterval is set (default 180s for legacy sessions)
 			if (session.fileTreeAutoRefreshInterval == null) {
 				console.warn(
@@ -7191,6 +7196,16 @@ You are taking over this conversation. Based on the context above, provide a bri
 					if (s.id !== activeSession.id) return s;
 					// Find the tab to get its agentSessionId for persistence
 					const tab = s.aiTabs.find((t) => t.id === renameTabId);
+					const oldName = tab?.name;
+
+					window.maestro.logger.log('info', `Tab renamed: "${oldName || '(auto)'}" → "${newName || '(cleared)'}"`, 'TabNaming', {
+						tabId: renameTabId,
+						sessionId: activeSession.id,
+						agentSessionId: tab?.agentSessionId,
+						oldName,
+						newName: newName || null,
+					});
+
 					if (tab?.agentSessionId) {
 						// Persist name to agent session metadata (async, fire and forget)
 						// Use projectRoot (not cwd) for consistent session storage access
@@ -7198,16 +7213,38 @@ You are taking over this conversation. Based on the context above, provide a bri
 						if (agentId === 'claude-code') {
 							window.maestro.claude
 								.updateSessionName(s.projectRoot, tab.agentSessionId, newName || '')
-								.catch((err) => console.error('Failed to persist tab name:', err));
+								.catch((err) => {
+									window.maestro.logger.log('error', 'Failed to persist tab name to Claude session storage', 'TabNaming', {
+										tabId: renameTabId,
+										agentSessionId: tab.agentSessionId,
+										error: String(err),
+									});
+								});
 						} else {
 							window.maestro.agentSessions
 								.setSessionName(agentId, s.projectRoot, tab.agentSessionId, newName || null)
-								.catch((err) => console.error('Failed to persist tab name:', err));
+								.catch((err) => {
+									window.maestro.logger.log('error', 'Failed to persist tab name to agent session storage', 'TabNaming', {
+										tabId: renameTabId,
+										agentSessionId: tab.agentSessionId,
+										agentType: agentId,
+										error: String(err),
+									});
+								});
 						}
 						// Also update past history entries with this agentSessionId
 						window.maestro.history
 							.updateSessionName(tab.agentSessionId, newName || '')
-							.catch((err) => console.error('Failed to update history session names:', err));
+							.catch((err) => {
+								window.maestro.logger.log('warn', 'Failed to update history session names', 'TabNaming', {
+									agentSessionId: tab.agentSessionId,
+									error: String(err),
+								});
+							});
+					} else {
+						window.maestro.logger.log('info', 'Tab renamed (no agentSessionId, skipping persistence)', 'TabNaming', {
+							tabId: renameTabId,
+						});
 					}
 					return {
 						...s,
@@ -7934,6 +7971,8 @@ You are taking over this conversation. Based on the context above, provide a bri
 				customProviderPath,
 				// Per-session SSH remote config (takes precedence over agent-level SSH config)
 				sessionSshRemoteConfig,
+				// Default Auto Run folder path (user can change later)
+				autoRunFolderPath: `${workingDir}/${AUTO_RUN_FOLDER_NAME}`,
 			};
 			setSessions((prev) => [...prev, newSession]);
 			setActiveSessionId(newId);
