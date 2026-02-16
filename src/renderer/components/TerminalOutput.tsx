@@ -1599,9 +1599,17 @@ export const TerminalOutput = memo(
 				{/* Prose styles for markdown rendering - injected once at container level for performance */}
 				<style>{proseStyles}</style>
 				{/* Native scroll log list */}
+				{/* overflow-anchor: disabled in AI mode when auto-scroll is off to prevent
+				    browser from automatically keeping viewport pinned to bottom on new content */}
 				<div
 					ref={scrollContainerRef}
 					className="flex-1 overflow-y-auto scrollbar-thin"
+					style={{
+						overflowAnchor:
+							session.inputMode === 'ai' && (!autoScrollAiMode || autoScrollPaused)
+								? 'none'
+								: undefined,
+					}}
 					onScroll={handleScroll}
 				>
 					{/* Log entries */}

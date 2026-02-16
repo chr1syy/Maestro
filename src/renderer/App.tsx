@@ -12706,6 +12706,8 @@ You are taking over this conversation. Based on the context above, provide a bri
 							setCrashReportingEnabled={setCrashReportingEnabled}
 							customAICommands={customAICommands}
 							setCustomAICommands={setCustomAICommands}
+							autoScrollAiMode={autoScrollAiMode}
+							setAutoScrollAiMode={setAutoScrollAiMode}
 							initialTab={settingsTab}
 							hasNoAgents={hasNoAgents}
 							onThemeImportError={(msg) => setFlashNotification(msg)}

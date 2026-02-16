@@ -279,6 +279,8 @@ interface SettingsModalProps {
 	setCrashReportingEnabled: (value: boolean) => void;
 	customAICommands: CustomAICommand[];
 	setCustomAICommands: (commands: CustomAICommand[]) => void;
+	autoScrollAiMode: boolean;
+	setAutoScrollAiMode: (value: boolean) => void;
 	initialTab?:
 		| 'general'
 		| 'display'
@@ -329,9 +331,6 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 		// Automatic tab naming settings
 		automaticTabNamingEnabled,
 		setAutomaticTabNamingEnabled,
-		// Auto-scroll in AI mode
-		autoScrollAiMode,
-		setAutoScrollAiMode,
 		// Director's Notes settings
 		directorNotesSettings,
 		setDirectorNotesSettings,
@@ -1485,8 +1484,8 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 								sectionLabel="Auto-scroll AI Output"
 								title="Auto-scroll AI output"
 								description="Automatically scroll to the bottom when new AI output arrives. When disabled, a floating button appears for new messages."
-								checked={autoScrollAiMode}
-								onChange={setAutoScrollAiMode}
+								checked={props.autoScrollAiMode}
+								onChange={props.setAutoScrollAiMode}
 								theme={theme}
 							/>
 
