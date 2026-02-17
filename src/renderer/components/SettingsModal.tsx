@@ -344,7 +344,15 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 	} = useSettings();
 
 	const [activeTab, setActiveTab] = useState<
-		'general' | 'display' | 'llm' | 'shortcuts' | 'theme' | 'notifications' | 'aicommands' | 'ssh' | 'encore'
+		| 'general'
+		| 'display'
+		| 'llm'
+		| 'shortcuts'
+		| 'theme'
+		| 'notifications'
+		| 'aicommands'
+		| 'ssh'
+		| 'encore'
 	>('general');
 	const [systemFonts, setSystemFonts] = useState<string[]>([]);
 	const [customFonts, setCustomFonts] = useState<string[]>([]);
@@ -389,7 +397,9 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 	const [dnIsConfigExpanded, setDnIsConfigExpanded] = useState(false);
 	const [dnCustomPath, setDnCustomPath] = useState(directorNotesSettings.customPath || '');
 	const [dnCustomArgs, setDnCustomArgs] = useState(directorNotesSettings.customArgs || '');
-	const [dnCustomEnvVars, setDnCustomEnvVars] = useState<Record<string, string>>(directorNotesSettings.customEnvVars || {});
+	const [dnCustomEnvVars, setDnCustomEnvVars] = useState<Record<string, string>>(
+		directorNotesSettings.customEnvVars || {}
+	);
 	const [dnAgentConfig, setDnAgentConfig] = useState<Record<string, any>>({});
 	const [dnAvailableModels, setDnAvailableModels] = useState<string[]>([]);
 	const [dnLoadingModels, setDnLoadingModels] = useState(false);
@@ -397,7 +407,10 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 	const dnAgentConfigRef = useRef<Record<string, any>>({});
 
 	// WakaTime CLI check and API key validation state
-	const [wakatimeCliStatus, setWakatimeCliStatus] = useState<{ available: boolean; version?: string } | null>(null);
+	const [wakatimeCliStatus, setWakatimeCliStatus] = useState<{
+		available: boolean;
+		version?: string;
+	} | null>(null);
 	const [wakatimeKeyValid, setWakatimeKeyValid] = useState<boolean | null>(null);
 	const [wakatimeKeyValidating, setWakatimeKeyValidating] = useState(false);
 
@@ -408,7 +421,8 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 		let cancelled = false;
 		let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-		window.maestro.wakatime.checkCli()
+		window.maestro.wakatime
+			.checkCli()
 			.then((status) => {
 				if (cancelled) return;
 				setWakatimeCliStatus(status);
@@ -416,9 +430,14 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 				if (!status.available) {
 					retryTimer = setTimeout(() => {
 						if (!cancelled) {
-							window.maestro.wakatime.checkCli()
-								.then((retryStatus) => { if (!cancelled) setWakatimeCliStatus(retryStatus); })
-								.catch(() => { if (!cancelled) setWakatimeCliStatus({ available: false }); });
+							window.maestro.wakatime
+								.checkCli()
+								.then((retryStatus) => {
+									if (!cancelled) setWakatimeCliStatus(retryStatus);
+								})
+								.catch(() => {
+									if (!cancelled) setWakatimeCliStatus({ available: false });
+								});
 						}
 					}, 3000);
 				}
@@ -429,14 +448,22 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 				// Also retry on error, in case CLI is being installed
 				retryTimer = setTimeout(() => {
 					if (!cancelled) {
-						window.maestro.wakatime.checkCli()
-							.then((retryStatus) => { if (!cancelled) setWakatimeCliStatus(retryStatus); })
-							.catch(() => { if (!cancelled) setWakatimeCliStatus({ available: false }); });
+						window.maestro.wakatime
+							.checkCli()
+							.then((retryStatus) => {
+								if (!cancelled) setWakatimeCliStatus(retryStatus);
+							})
+							.catch(() => {
+								if (!cancelled) setWakatimeCliStatus({ available: false });
+							});
 					}
 				}, 3000);
 			});
 
-		return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+		return () => {
+			cancelled = true;
+			if (retryTimer) clearTimeout(retryTimer);
+		};
 	}, [isOpen, wakatimeEnabled]);
 
 	// Reset validation state when API key changes
@@ -510,15 +537,20 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 		if (!isOpen || activeTab !== 'encore') return;
 		let cancelled = false;
 		setDnIsDetecting(true);
-		window.maestro.agents.detect().then((agents) => {
-			if (cancelled) return;
-			const available = agents.filter((a: AgentConfig) => a.available && !a.hidden);
-			setDnDetectedAgents(available);
-			setDnIsDetecting(false);
-		}).catch(() => {
-			if (!cancelled) setDnIsDetecting(false);
-		});
-		return () => { cancelled = true; };
+		window.maestro.agents
+			.detect()
+			.then((agents) => {
+				if (cancelled) return;
+				const available = agents.filter((a: AgentConfig) => a.available && !a.hidden);
+				setDnDetectedAgents(available);
+				setDnIsDetecting(false);
+			})
+			.catch(() => {
+				if (!cancelled) setDnIsDetecting(false);
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [isOpen, activeTab]);
 
 	// Sync local Director's Notes custom config state from settings when Encore tab opens
@@ -543,9 +575,13 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 			const agent = dnDetectedAgents.find((a) => a.id === agentId);
 			if (agent?.capabilities?.supportsModelSelection) {
 				setDnLoadingModels(true);
-				window.maestro.agents.getModels(agentId).then((models) => {
-					setDnAvailableModels(models);
-				}).catch(() => {}).finally(() => setDnLoadingModels(false));
+				window.maestro.agents
+					.getModels(agentId)
+					.then((models) => {
+						setDnAvailableModels(models);
+					})
+					.catch(() => {})
+					.finally(() => setDnLoadingModels(false));
 			}
 		}
 	}, [dnIsConfigExpanded, directorNotesSettings.provider, dnDetectedAgents]);
@@ -614,8 +650,27 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 				| 'ssh'
 				| 'encore'
 			> = FEATURE_FLAGS.LLM_SETTINGS
-				? ['general', 'display', 'llm', 'shortcuts', 'theme', 'notifications', 'aicommands', 'ssh', 'encore']
-				: ['general', 'display', 'shortcuts', 'theme', 'notifications', 'aicommands', 'ssh', 'encore'];
+				? [
+						'general',
+						'display',
+						'llm',
+						'shortcuts',
+						'theme',
+						'notifications',
+						'aicommands',
+						'ssh',
+						'encore',
+					]
+				: [
+						'general',
+						'display',
+						'shortcuts',
+						'theme',
+						'notifications',
+						'aicommands',
+						'ssh',
+						'encore',
+					];
 			const currentIndex = tabs.indexOf(activeTab);
 
 			if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === '[') {
@@ -1088,7 +1143,9 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 					<button
 						onClick={() => setActiveTab('encore')}
 						className={`px-4 py-4 text-sm font-bold border-b-2 ${activeTab === 'encore' ? 'border-indigo-500' : 'border-transparent'} flex items-center gap-2`}
-						style={{ color: activeTab === 'encore' ? theme.colors.textMain : theme.colors.textDim }}
+						style={{
+							color: activeTab === 'encore' ? theme.colors.textMain : theme.colors.textDim,
+						}}
 						tabIndex={-1}
 						title="Encore Features"
 					>
@@ -1986,7 +2043,10 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 									{/* WakaTime Integration */}
 									<div className="flex items-center justify-between">
 										<div>
-											<p className="text-sm flex items-center gap-2" style={{ color: theme.colors.textMain }}>
+											<p
+												className="text-sm flex items-center gap-2"
+												style={{ color: theme.colors.textMain }}
+											>
 												<Timer className="w-3.5 h-3.5 opacity-60" />
 												Enable WakaTime tracking
 											</p>
@@ -2040,7 +2100,8 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 														if (wakatimeApiKey) {
 															setWakatimeKeyValidating(true);
 															setWakatimeKeyValid(null);
-															window.maestro.wakatime.validateApiKey(wakatimeApiKey)
+															window.maestro.wakatime
+																.validateApiKey(wakatimeApiKey)
 																.then((result) => setWakatimeKeyValid(result.valid))
 																.catch(() => setWakatimeKeyValid(false))
 																.finally(() => setWakatimeKeyValidating(false));
@@ -2070,7 +2131,8 @@ export const SettingsModal = memo(function SettingsModal(props: SettingsModalPro
 												)}
 											</div>
 											<p className="text-[10px] mt-1.5 opacity-50">
-												Get your API key from wakatime.com/settings/api-key. Keys are stored locally in ~/.maestro/settings.json.
+												Get your API key from wakatime.com/settings/api-key. Keys are stored locally
+												in ~/.maestro/settings.json.
 											</p>
 										</div>
 									)}
