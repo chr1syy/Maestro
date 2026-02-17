@@ -102,7 +102,6 @@ import {
 	// Agent
 	useAgentSessionManagement,
 	useAgentExecution,
-	useAgentErrorRecovery,
 	useAgentCapabilities,
 	useMergeSessionWithSessions,
 	useSendToAgentWithSessions,
@@ -123,6 +122,8 @@ import {
 	useTabHandlers,
 	// Group chat handlers
 	useGroupChatHandlers,
+	// Modal handlers
+	useModalHandlers,
 } from './hooks';
 import type { TabCompletionSuggestion, TabCompletionFilter } from './hooks';
 import { useMainPanelProps, useSessionListProps, useRightPanelProps } from './hooks/props';
@@ -167,7 +168,6 @@ import type {
 	BatchRunState,
 	SpecKitCommand,
 	OpenSpecCommand,
-	LeaderboardRegistration,
 	CustomAICommand,
 	ThinkingMode,
 } from './types';
@@ -187,7 +187,6 @@ import {
 	navigateToLastUnifiedTab,
 	navigateToNextUnifiedTab,
 	navigateToPrevUnifiedTab,
-	getInitialRenameValue,
 	hasActiveWizard,
 } from './utils/tabHelpers';
 import { shouldOpenExternally, flattenTree } from './utils/fileExplorer';
@@ -221,10 +220,14 @@ function MaestroConsoleInner() {
 		setEditAgentModalOpen,
 		editAgentSession,
 		setEditAgentSession,
+		// Delete Agent Modal
+		deleteAgentModalOpen,
+		setDeleteAgentModalOpen,
+		deleteAgentSession,
+		setDeleteAgentSession,
 		// Shortcuts Help Modal
 		shortcutsHelpOpen,
 		setShortcutsHelpOpen,
-		setShortcutsSearchQuery,
 		// Quick Actions Modal
 		quickActionOpen,
 		setQuickActionOpen,
@@ -232,14 +235,8 @@ function MaestroConsoleInner() {
 		setQuickActionInitialMode,
 		// Lightbox Modal
 		lightboxImage,
-		setLightboxImage,
 		lightboxImages,
-		setLightboxImages,
-		setLightboxSource,
-		lightboxIsGroupChat,
 		lightboxAllowDelete,
-		setLightboxIsGroupChat,
-		setLightboxAllowDelete,
 		// About Modal
 		aboutModalOpen,
 		setAboutModalOpen,
@@ -248,7 +245,6 @@ function MaestroConsoleInner() {
 		setUpdateCheckModalOpen,
 		// Leaderboard Registration Modal
 		leaderboardRegistrationOpen,
-		setLeaderboardRegistrationOpen,
 		// Standing Ovation Overlay
 		standingOvationData,
 		setStandingOvationData,
@@ -321,7 +317,6 @@ function MaestroConsoleInner() {
 		setActiveAgentSessionId,
 		// Execution Queue Browser Modal
 		queueBrowserOpen,
-		setQueueBrowserOpen,
 		// Batch Runner Modal
 		batchRunnerModalOpen,
 		setBatchRunnerModalOpen,
@@ -337,8 +332,6 @@ function MaestroConsoleInner() {
 		wizardResumeState,
 		setWizardResumeState,
 		// Agent Error Modal
-		agentErrorModalSessionId,
-		setAgentErrorModalSessionId,
 		// Worktree Modals
 		worktreeConfigModalOpen,
 		setWorktreeConfigModalOpen,
@@ -347,7 +340,6 @@ function MaestroConsoleInner() {
 		createWorktreeSession,
 		setCreateWorktreeSession,
 		createPRModalOpen,
-		setCreatePRModalOpen,
 		createPRSession,
 		setCreatePRSession,
 		deleteWorktreeModalOpen,
@@ -498,7 +490,6 @@ function MaestroConsoleInner() {
 		setAutoRunStats,
 		recordAutoRunComplete,
 		updateAutoRunProgress,
-		acknowledgeBadge,
 		getUnacknowledgedBadgeLevel,
 		usageStats,
 		updateUsageStats,
@@ -522,7 +513,6 @@ function MaestroConsoleInner() {
 
 		keyboardMasteryStats,
 		recordShortcutUsage,
-		acknowledgeKeyboardMasteryLevel,
 		getUnacknowledgedKeyboardMasteryLevel,
 
 		// Document Graph & Stats settings
@@ -853,9 +843,8 @@ function MaestroConsoleInner() {
 	const tabGistContent = useTabStore((s) => s.tabGistContent);
 	const fileGistUrls = useTabStore((s) => s.fileGistUrls);
 
-	// Delete Agent Modal State
-	const [deleteAgentModalOpen, setDeleteAgentModalOpen] = useState(false);
-	const [deleteAgentSession, setDeleteAgentSession] = useState<Session | null>(null);
+	// Note: Delete Agent Modal State is now managed by modalStore (Zustand)
+	// See useModalActions() destructuring above for deleteAgentModalOpen / deleteAgentSession
 
 	// Note: Git Diff State, Tour Overlay State, and Git Log Viewer State are from modalStore
 
@@ -865,95 +854,8 @@ function MaestroConsoleInner() {
 	// Note: All modal states are now managed by modalStore (Zustand)
 	// See useModalActions() destructuring above for modal states
 
-	// Stable callbacks for memoized modals (prevents re-renders from callback reference changes)
-	// NOTE: These must be declared AFTER the state they reference
-	const handleCloseGitDiff = useCallback(() => setGitDiffPreview(null), []);
-	const handleCloseGitLog = useCallback(() => setGitLogOpen(false), []);
-	const handleCloseSettings = useCallback(() => setSettingsModalOpen(false), []);
-	const handleCloseDebugPackage = useCallback(() => setDebugPackageModalOpen(false), []);
-
-	// AppInfoModals stable callbacks
-	const handleCloseShortcutsHelp = useCallback(() => setShortcutsHelpOpen(false), []);
-	const handleCloseAboutModal = useCallback(() => setAboutModalOpen(false), []);
-	const handleCloseUpdateCheckModal = useCallback(() => setUpdateCheckModalOpen(false), []);
-	const handleCloseProcessMonitor = useCallback(() => setProcessMonitorOpen(false), []);
-	const handleCloseLogViewer = useCallback(() => setLogViewerOpen(false), []);
-
-	// Confirm modal close handler
-	const handleCloseConfirmModal = useCallback(() => setConfirmModalOpen(false), []);
-
-	// Delete agent modal handlers
-	const handleCloseDeleteAgentModal = useCallback(() => {
-		setDeleteAgentModalOpen(false);
-		setDeleteAgentSession(null);
-	}, []);
-
-	// Quit confirm modal handlers
-	const handleConfirmQuit = useCallback(() => {
-		setQuitConfirmModalOpen(false);
-		window.maestro.app.confirmQuit();
-	}, []);
-
-	const handleCancelQuit = useCallback(() => {
-		setQuitConfirmModalOpen(false);
-		window.maestro.app.cancelQuit();
-	}, []);
-
-	// Keyboard mastery level-up callback
-	const onKeyboardMasteryLevelUp = useCallback((level: number) => {
-		setPendingKeyboardMasteryLevel(level);
-	}, []);
-
-	// Handle keyboard mastery celebration close
-	const handleKeyboardMasteryCelebrationClose = useCallback(() => {
-		if (pendingKeyboardMasteryLevel !== null) {
-			acknowledgeKeyboardMasteryLevel(pendingKeyboardMasteryLevel);
-		}
-		setPendingKeyboardMasteryLevel(null);
-	}, [pendingKeyboardMasteryLevel, acknowledgeKeyboardMasteryLevel]);
-
-	// Handle standing ovation close
-	const handleStandingOvationClose = useCallback(() => {
-		if (standingOvationData) {
-			// Mark badge as acknowledged when user clicks "Take a Bow"
-			acknowledgeBadge(standingOvationData.badge.level);
-		}
-		setStandingOvationData(null);
-	}, [standingOvationData, acknowledgeBadge]);
-
-	// Handle first run celebration close
-	const handleFirstRunCelebrationClose = useCallback(() => {
-		setFirstRunCelebrationData(null);
-	}, []);
-
-	// Handle open leaderboard registration
-	const handleOpenLeaderboardRegistration = useCallback(() => {
-		setLeaderboardRegistrationOpen(true);
-	}, []);
-
-	// Handle open leaderboard registration from About modal (closes About first)
-	const handleOpenLeaderboardRegistrationFromAbout = useCallback(() => {
-		setAboutModalOpen(false);
-		setLeaderboardRegistrationOpen(true);
-	}, []);
-
-	// AppSessionModals stable callbacks
-	const handleCloseNewInstanceModal = useCallback(() => {
-		setNewInstanceModalOpen(false);
-		setDuplicatingSessionId(null);
-	}, [setDuplicatingSessionId]);
-	const handleCloseEditAgentModal = useCallback(() => {
-		setEditAgentModalOpen(false);
-		setEditAgentSession(null);
-	}, []);
-	const handleCloseRenameSessionModal = useCallback(() => {
-		setRenameInstanceModalOpen(false);
-		setRenameInstanceSessionId(null);
-	}, []);
-	const handleCloseRenameTabModal = useCallback(() => {
-		setRenameTabModalOpen(false);
-		setRenameTabId(null);
-	}, []);
+	// Note: Modal close/open handlers are now provided by useModalHandlers() hook
+	// See the destructured handlers below (handleCloseGitDiff, handleCloseGitLog, etc.)
 
 	// Note: All modal states (confirmation, rename, queue browser, batch runner, etc.)
 	// are now managed by modalStore - see useModalActions() destructuring above
@@ -983,25 +885,6 @@ function MaestroConsoleInner() {
 		setDocumentTaskCounts: setAutoRunDocumentTaskCounts,
 	} = useBatchStore.getState();
 
-	// Restore focus when LogViewer closes to ensure global hotkeys work
-	useEffect(() => {
-		// When LogViewer closes, restore focus to main container or input
-		if (!logViewerOpen) {
-			setTimeout(() => {
-				// Try to focus input first, otherwise focus document body to ensure hotkeys work
-				if (inputRef.current) {
-					inputRef.current.focus();
-				} else if (terminalOutputRef.current) {
-					terminalOutputRef.current.focus();
-				} else {
-					// Blur any focused element to let global handlers work
-					(document.activeElement as HTMLElement)?.blur();
-					document.body.focus();
-				}
-			}, 50);
-		}
-	}, [logViewerOpen]);
-
 	// ProcessMonitor navigation handlers
 	const handleProcessMonitorNavigateToSession = useCallback(
 		(sessionId: string, tabId?: string) => {
@@ -1014,17 +897,6 @@ function MaestroConsoleInner() {
 			}
 		},
 		[setActiveSessionId, setSessions]
-	);
-
-	// LogViewer shortcut handler
-	const handleLogViewerShortcutUsed = useCallback(
-		(shortcutId: string) => {
-			const result = recordShortcutUsage(shortcutId);
-			if (result.newLevel !== null) {
-				onKeyboardMasteryLevelUp(result.newLevel);
-			}
-		},
-		[recordShortcutUsage, onKeyboardMasteryLevelUp]
 	);
 
 	// Sync toast settings to notificationStore
@@ -2161,6 +2033,83 @@ function MaestroConsoleInner() {
 		handleCloseGroupChatInfo,
 	} = useGroupChatHandlers();
 
+	// --- MODAL HANDLERS (open/close, error recovery, lightbox, celebrations) ---
+	const {
+		errorSession,
+		recoveryActions,
+		handleCloseGitDiff,
+		handleCloseGitLog,
+		handleCloseSettings,
+		handleCloseDebugPackage,
+		handleCloseShortcutsHelp,
+		handleCloseAboutModal,
+		handleCloseUpdateCheckModal,
+		handleCloseProcessMonitor,
+		handleCloseLogViewer,
+		handleCloseConfirmModal,
+		handleCloseDeleteAgentModal,
+		handleCloseNewInstanceModal,
+		handleCloseEditAgentModal,
+		handleCloseRenameSessionModal,
+		handleCloseRenameTabModal,
+		handleConfirmQuit,
+		handleCancelQuit,
+		onKeyboardMasteryLevelUp,
+		handleKeyboardMasteryCelebrationClose,
+		handleStandingOvationClose,
+		handleFirstRunCelebrationClose,
+		handleOpenLeaderboardRegistration,
+		handleOpenLeaderboardRegistrationFromAbout,
+		handleCloseLeaderboardRegistration,
+		handleSaveLeaderboardRegistration,
+		handleLeaderboardOptOut,
+		handleCloseAgentErrorModal,
+		handleShowAgentErrorModal,
+		handleClearAgentError,
+		handleOpenQueueBrowser,
+		handleOpenTabSearch,
+		handleOpenPromptComposer,
+		handleOpenFuzzySearch,
+		handleOpenCreatePR,
+		handleOpenAboutModal,
+		handleOpenBatchRunner,
+		handleOpenMarketplace,
+		handleEditAgent,
+		handleOpenCreatePRSession,
+		handleStartTour,
+		handleSetLightboxImage,
+		handleCloseLightbox,
+		handleNavigateLightbox,
+		handleDeleteLightboxImage,
+		handleCloseAutoRunSetup,
+		handleCloseBatchRunner,
+		handleCloseTabSwitcher,
+		handleCloseFileSearch,
+		handleClosePromptComposer,
+		handleCloseCreatePRModal,
+		handleCloseSendToAgent,
+		handleCloseQueueBrowser,
+		handleCloseRenameGroupModal,
+		handleQuickActionsRenameTab,
+		handleQuickActionsOpenTabSwitcher,
+		handleQuickActionsStartTour,
+		handleQuickActionsEditAgent,
+		handleQuickActionsOpenMergeSession,
+		handleQuickActionsOpenSendToAgent,
+		handleQuickActionsOpenCreatePR,
+	} = useModalHandlers(inputRef);
+
+	// LogViewer shortcut handler (must be after useModalHandlers which provides onKeyboardMasteryLevelUp)
+	const handleLogViewerShortcutUsed = useCallback(
+		(shortcutId: string) => {
+			const result = recordShortcutUsage(shortcutId);
+			if (result.newLevel !== null) {
+				onKeyboardMasteryLevelUp(result.newLevel);
+			}
+		},
+		[recordShortcutUsage, onKeyboardMasteryLevelUp]
+	);
+
 	// --- APP HANDLERS (drag, file, folder operations) ---
 	const {
 		handleImageDragEnter,
@@ -2221,67 +2170,6 @@ function MaestroConsoleInner() {
 
 	// PERF: Memoize hasNoAgents check for SettingsModal (only depends on session count)
 	const hasNoAgents = useMemo(() => sessions.length === 0, [sessions.length]);
-
-	// Get the session with the active error (for AgentErrorModal)
-	const errorSession = useMemo(
-		() =>
-			agentErrorModalSessionId ? sessions.find((s) => s.id === agentErrorModalSessionId) : null,
-		[agentErrorModalSessionId, sessions]
-	);
-
-	// Handler to close the agent error modal without clearing the error
-	const handleCloseAgentErrorModal = useCallback(() => {
-		setAgentErrorModalSessionId(null);
-	}, []);
-
-	// Error recovery handlers — delegate state mutation + IPC to agentStore,
-	// keep UI side-effects (focus input, close modal) here in App.tsx.
-	const handleClearAgentError = useCallback((sessionId: string, tabId?: string) => {
-		useAgentStore.getState().clearAgentError(sessionId, tabId);
-		setAgentErrorModalSessionId(null);
-	}, []);
-
-	const handleStartNewSessionAfterError = useCallback(
-		(sessionId: string) => {
-			useAgentStore.getState().startNewSessionAfterError(sessionId, {
-				saveToHistory: defaultSaveToHistory,
-				showThinking: defaultShowThinking,
-			});
-			setAgentErrorModalSessionId(null);
-			setTimeout(() => inputRef.current?.focus(), 0);
-		},
-		[defaultSaveToHistory, defaultShowThinking]
-	);
-
-	const handleRetryAfterError = useCallback((sessionId: string) => {
-		useAgentStore.getState().retryAfterError(sessionId);
-		setAgentErrorModalSessionId(null);
-		setTimeout(() => inputRef.current?.focus(), 0);
-	}, []);
-
-	const handleRestartAgentAfterError = useCallback(async (sessionId: string) => {
-		await useAgentStore.getState().restartAgentAfterError(sessionId);
-		setAgentErrorModalSessionId(null);
-		setTimeout(() => inputRef.current?.focus(), 0);
-	}, []);
-
-	const handleAuthenticateAfterError = useCallback((sessionId: string) => {
-		useAgentStore.getState().authenticateAfterError(sessionId);
-		setAgentErrorModalSessionId(null);
-		setTimeout(() => inputRef.current?.focus(), 0);
-	}, []);
-
-	// Use the agent error recovery hook to get recovery actions
-	const { recoveryActions } = useAgentErrorRecovery({
-		error: errorSession?.agentError,
-		agentId: errorSession?.toolType || 'claude-code',
-		sessionId: errorSession?.id || '',
-		onNewSession: errorSession ? () => handleStartNewSessionAfterError(errorSession.id) : undefined,
-		onRetry: errorSession ? () => handleRetryAfterError(errorSession.id) : undefined,
-		onClearError: errorSession ? () => handleClearAgentError(errorSession.id) : undefined,
-		onRestartAgent: errorSession ? () => handleRestartAgentAfterError(errorSession.id) : undefined,
-		onAuthenticate: errorSession ? () => handleAuthenticateAfterError(errorSession.id) : undefined,
-	});
 
 	// Tab completion hook for terminal mode
 	const { getSuggestions: getTabCompletionSuggestions } = useTabCompletion(activeSession);
@@ -2490,19 +2378,6 @@ function MaestroConsoleInner() {
 
 	// --- STABLE HANDLERS FOR APP AGENT MODALS ---
 
-	// LeaderboardRegistrationModal handlers
-	const handleCloseLeaderboardRegistration = useCallback(() => {
-		setLeaderboardRegistrationOpen(false);
-	}, []);
-
-	const handleSaveLeaderboardRegistration = useCallback((registration: LeaderboardRegistration) => {
-		setLeaderboardRegistration(registration);
-	}, []);
-
-	const handleLeaderboardOptOut = useCallback(() => {
-		setLeaderboardRegistration(null);
-	}, []);
-
 	// Sync autorun stats from server (for new device installations)
 	const handleSyncAutoRunStats = useCallback(
 		(stats: {
@@ -2574,11 +2449,6 @@ function MaestroConsoleInner() {
 		setTransferSourceAgent(null);
 		setTransferTargetAgent(null);
 	}, [resetTransfer]);
-
-	// SendToAgentModal handlers
-	const handleCloseSendToAgent = useCallback(() => {
-		setSendToAgentModalOpen(false);
-	}, []);
 
 	const handleSendToAgent = useCallback(
 		async (targetSessionId: string, options: SendToAgentOptions) => {
@@ -3293,10 +3163,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		);
 	}, []);
 
-	const handleOpenQueueBrowser = useCallback(() => {
-		setQueueBrowserOpen(true);
-	}, []);
-
 	const handleMainPanelInputBlur = useCallback(() => {
 		// Access current values via refs to avoid dependencies
 		const currentIsAiMode =
@@ -3321,41 +3187,12 @@ You are taking over this conversation. Based on the context above, provide a bri
 		[setStagedImages]
 	);
 
-	const handleOpenTabSearch = useCallback(() => {
-		setTabSwitcherOpen(true);
-	}, []);
-
-	const handleOpenPromptComposer = useCallback(() => {
-		setPromptComposerOpen(true);
-	}, []);
-
-	const handleOpenFuzzySearch = useCallback(() => {
-		setFuzzyFileSearchOpen(true);
-	}, []);
-
 	const handleOpenWorktreeConfig = useCallback(() => {
 		setWorktreeConfigModalOpen(true);
 	}, []);
 
-	const handleOpenCreatePR = useCallback(() => {
-		setCreatePRModalOpen(true);
-	}, []);
-
-	const handleOpenAboutModal = useCallback(() => {
-		setAboutModalOpen(true);
-	}, []);
-
 	const handleFocusFileInGraph = useFileExplorerStore.getState().focusFileInGraph;
 	const handleOpenLastDocumentGraph = useFileExplorerStore.getState().openLastDocumentGraph;
-
-	// PERF: Memoized callbacks for SessionList props - these were inline arrow functions
-	const handleEditAgent = useCallback((session: Session) => {
-		setEditAgentSession(session);
-	}, []);
-
-	const handleOpenCreatePRSession = useCallback((session: Session) => {
-		setCreatePRSession(session);
-	}, []);
 
 	const handleQuickCreateWorktree = useCallback((session: Session) => {
 		setCreateWorktreeSession(session);
@@ -3376,11 +3213,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 				s.id === sessionId ? { ...s, worktreesExpanded: !(s.worktreesExpanded ?? true) } : s
 			)
 		);
-	}, []);
-
-	const handleStartTour = useCallback(() => {
-		setTourFromWizard(false);
-		setTourOpen(true);
 	}, []);
 
 	// PERF: Memoized callbacks for MainPanel file preview navigation
@@ -3537,15 +3369,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		if (!activeTab?.agentError) return;
 		handleClearAgentError(currentSession.id, activeTab.id);
 	}, [handleClearAgentError]);
-
-	// Memoized handler for showing agent error modal
-	const handleShowAgentErrorModal = useCallback(() => {
-		const currentSession = sessionsRef.current.find((s) => s.id === activeSessionIdRef.current);
-		if (!currentSession) return;
-		const activeTab = currentSession.aiTabs.find((t) => t.id === currentSession.activeTabId);
-		if (!activeTab?.agentError) return;
-		setAgentErrorModalSessionId(currentSession.id);
-	}, []);
 
 	// Note: spawnBackgroundSynopsisRef and spawnAgentWithPromptRef are now updated in useAgentExecution hook
 
@@ -5145,16 +4968,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		};
 	}, [sessions.some((s) => s.worktreeParentPath), defaultSaveToHistory]); // Only re-run when legacy sessions exist/don't exist
 
-	// Handler to open batch runner modal
-	const handleOpenBatchRunner = useCallback(() => {
-		setBatchRunnerModalOpen(true);
-	}, []);
-
-	// Handler to open marketplace modal
-	const handleOpenMarketplace = useCallback(() => {
-		setMarketplaceModalOpen(true);
-	}, [setMarketplaceModalOpen]);
-
 	// Handler for switching to autorun tab - shows setup modal if no folder configured
 	const handleSetActiveRightTab = useCallback(
 		(tab: RightPanelTab) => {
@@ -5322,28 +5135,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 			);
 		},
 		[setActiveSessionId]
-	);
-
-	// Handler to open lightbox with optional context images for navigation
-	// source: 'staged' allows deletion, 'history' is read-only
-	const handleSetLightboxImage = useCallback(
-		(image: string | null, contextImages?: string[], source: 'staged' | 'history' = 'history') => {
-			// Set lightbox context data before opening
-			setLightboxIsGroupChat(activeGroupChatId !== null);
-			setLightboxAllowDelete(source === 'staged');
-
-			setLightboxImage(image);
-			setLightboxImages(contextImages || []);
-			setLightboxSource(source);
-		},
-		[
-			activeGroupChatId,
-			setLightboxIsGroupChat,
-			setLightboxAllowDelete,
-			setLightboxImage,
-			setLightboxImages,
-			setLightboxSource,
-		]
 	);
 
 	// --- SESSION SORTING ---
@@ -5557,13 +5348,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 			});
 		}
 	}, [activeSessionId, activeSession?.activeTabId]); // Track session and tab changes
-
-	// Reset shortcuts search when modal closes
-	useEffect(() => {
-		if (!shortcutsHelpOpen) {
-			setShortcutsSearchQuery('');
-		}
-	}, [shortcutsHelpOpen]);
 
 	// Helper to count tasks in document content
 	const countTasksInContent = useCallback(
@@ -7900,10 +7684,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		setCreateGroupModalOpen(false);
 		setPendingMoveToGroupSessionId(null); // Clear pending move on close
 	}, [setCreateGroupModalOpen]);
-	const handleCloseRenameGroupModal = useCallback(() => {
-		setRenameGroupModalOpen(false);
-	}, []);
-
 	// Handler for when a new group is created - move pending session to it
 	const handleGroupCreated = useCallback(
 		(groupId: string) => {
@@ -8437,11 +8217,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		[createWorktreeSession, defaultSaveToHistory]
 	);
 
-	const handleCloseCreatePRModal = useCallback(() => {
-		setCreatePRModalOpen(false);
-		setCreatePRSession(null);
-	}, []);
-
 	const handlePRCreated = useCallback(
 		async (prDetails: PRDetails) => {
 			const session = createPRSession || activeSession;
@@ -8498,48 +8273,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		setSessions((prev) => prev.filter((s) => s.id !== deleteWorktreeSession.id));
 	}, [deleteWorktreeSession]);
 
-	// AppUtilityModals stable callbacks
-	const handleCloseLightbox = useCallback(() => {
-		setLightboxImage(null);
-		setLightboxImages([]);
-		setLightboxSource('history');
-		setLightboxIsGroupChat(false);
-		setLightboxAllowDelete(false);
-		// Return focus to input after closing carousel
-		setTimeout(() => inputRef.current?.focus(), 0);
-	}, [
-		setLightboxImage,
-		setLightboxImages,
-		setLightboxSource,
-		setLightboxIsGroupChat,
-		setLightboxAllowDelete,
-	]);
-	const handleNavigateLightbox = useCallback(
-		(img: string) => setLightboxImage(img),
-		[setLightboxImage]
-	);
-	const handleDeleteLightboxImage = useCallback(
-		(img: string) => {
-			// Use lightboxIsGroupChat from store to check which staged images to update
-			if (lightboxIsGroupChat) {
-				setGroupChatStagedImages((prev) => prev.filter((i) => i !== img));
-			} else {
-				setStagedImages((prev) => prev.filter((i) => i !== img));
-			}
-			// Also update lightboxImages so the lightbox navigation stays in sync
-			// (lightboxImages is a snapshot taken when the lightbox opened, so it gets stale on deletion)
-			setLightboxImages(lightboxImages.filter((i) => i !== img));
-		},
-		[
-			setStagedImages,
-			setLightboxImages,
-			lightboxImages,
-			lightboxIsGroupChat,
-			setGroupChatStagedImages,
-		]
-	);
-	const handleCloseAutoRunSetup = useCallback(() => setAutoRunSetupModalOpen(false), []);
-	const handleCloseBatchRunner = useCallback(() => setBatchRunnerModalOpen(false), []);
 	const handleSaveBatchPrompt = useCallback(
 		(prompt: string) => {
 			if (!activeSession) return;
@@ -8558,7 +8291,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		},
 		[activeSession]
 	);
-	const handleCloseTabSwitcher = useCallback(() => setTabSwitcherOpen(false), []);
 	const handleUtilityTabSelect = useCallback(
 		(tabId: string) => {
 			if (!activeSession) return;
@@ -8591,7 +8323,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		},
 		[handleResumeSession, setActiveFocus]
 	);
-	const handleCloseFileSearch = useCallback(() => setFuzzyFileSearchOpen(false), []);
 	const handleFileSearchSelect = useCallback(
 		(file: FlatFileItem) => {
 			// Preview the file directly (handleFileClick expects relative path)
@@ -8601,10 +8332,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		},
 		[handleFileClick]
 	);
-	const handleClosePromptComposer = useCallback(() => {
-		setPromptComposerOpen(false);
-		setTimeout(() => inputRef.current?.focus(), 0);
-	}, []);
 	const handlePromptComposerSubmit = useCallback(
 		(value: string) => {
 			if (activeGroupChatId) {
@@ -8721,17 +8448,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 	);
 
 	// QuickActionsModal stable callbacks
-	const handleQuickActionsRenameTab = useCallback(() => {
-		if (activeSession?.inputMode === 'ai' && activeSession.activeTabId) {
-			const activeTab = activeSession.aiTabs?.find((t) => t.id === activeSession.activeTabId);
-			// Only allow rename if tab has an active Claude session
-			if (activeTab?.agentSessionId) {
-				setRenameTabId(activeTab.id);
-				setRenameTabInitialName(getInitialRenameValue(activeTab));
-				setRenameTabModalOpen(true);
-			}
-		}
-	}, [activeSession, getInitialRenameValue]);
 	const handleQuickActionsToggleReadOnlyMode = useCallback(() => {
 		if (activeSession?.inputMode === 'ai' && activeSession.activeTabId) {
 			setSessions((prev) =>
@@ -8778,11 +8494,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 			);
 		}
 	}, [activeSession]);
-	const handleQuickActionsOpenTabSwitcher = useCallback(() => {
-		if (activeSession?.inputMode === 'ai' && activeSession.aiTabs) {
-			setTabSwitcherOpen(true);
-		}
-	}, [activeSession]);
 	const handleQuickActionsRefreshGitFileState = useCallback(async () => {
 		if (activeSessionId) {
 			// Refresh file tree, branches/tags, and history
@@ -8822,18 +8533,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		setMarkdownEditMode,
 		setChatRawTextMode,
 	]);
-	const handleQuickActionsStartTour = useCallback(() => {
-		setTourFromWizard(false);
-		setTourOpen(true);
-	}, []);
-	const handleQuickActionsEditAgent = useCallback((session: Session) => {
-		setEditAgentSession(session);
-	}, []);
-	const handleQuickActionsOpenMergeSession = useCallback(() => setMergeSessionModalOpen(true), []);
-	const handleQuickActionsOpenSendToAgent = useCallback(() => setSendToAgentModalOpen(true), []);
-	const handleQuickActionsOpenCreatePR = useCallback((session: Session) => {
-		setCreatePRSession(session);
-	}, []);
 	const handleQuickActionsSummarizeAndContinue = useCallback(
 		() => handleSummarizeAndContinue(),
 		[handleSummarizeAndContinue]
@@ -8856,7 +8555,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		rightPanelRef.current?.openAutoRunResetTasksModal();
 	}, []);
 
-	const handleCloseQueueBrowser = useCallback(() => setQueueBrowserOpen(false), []);
 	const handleRemoveQueueItem = useCallback((sessionId: string, itemId: string) => {
 		setSessions((prev) =>
 			prev.map((s) => {
@@ -11069,7 +10767,6 @@ You are taking over this conversation. Based on the context above, provide a bri
  * Phase 5: Auto Run state now lives in batchStore (Zustand) — no context wrapper needed
  * Phase 6: Session state now lives in sessionStore (Zustand) — no context wrapper needed
  * Phase 7: InlineWizardProvider - inline /wizard command state management
- * See refactor-details-2.md for full plan.
  */
 export default function MaestroConsole() {
 	return (
