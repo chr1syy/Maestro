@@ -2302,7 +2302,7 @@ describe('SettingsModal', () => {
 					await vi.advanceTimersByTimeAsync(50);
 				});
 
-				expect(screen.getByText(/unified view of your work across all Maestro sessions/)).toBeInTheDocument();
+				expect(screen.getByText(/Unified history view and AI-generated synopsis across all sessions/)).toBeInTheDocument();
 				expect(screen.getByText(/AI agent used to generate synopsis summaries/)).toBeInTheDocument();
 				expect(screen.getByText(/How far back to look when generating notes/)).toBeInTheDocument();
 			});
