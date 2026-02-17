@@ -205,7 +205,6 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 					config.shell ||
 					(config.toolType === 'terminal' ? settingsStore.get('defaultShell', 'zsh') : undefined);
 				let shellArgsStr: string | undefined;
-				let shellEnvVars: Record<string, string> | undefined;
 
 				// Load global shell environment variables for ALL process types (terminals and agents)
 				//
@@ -241,9 +240,8 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 						shellToUse = customShellPath.trim();
 						logger.debug('Using custom shell path for terminal', LOG_CONTEXT, { customShellPath });
 					}
-					// Load additional shell args and env vars
+					// Load additional shell args (env vars are loaded globally for both terminals and agents)
 					shellArgsStr = settingsStore.get('shellArgs', '');
-					shellEnvVars = globalShellEnvVars;
 				}
 
 				// Extract session ID from args for logging (supports both --resume and --session flags)
