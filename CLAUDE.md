@@ -8,7 +8,7 @@ This guide has been split into focused sub-documents for progressive disclosure:
 
 | Document | Description |
 |----------|-------------|
-| [[CLAUDE-PATTERNS.md]] | Core implementation patterns (process management, settings, modals, themes, Auto Run, SSH) |
+| [[CLAUDE-PATTERNS.md]] | Core implementation patterns (process management, settings, modals, themes, Auto Run, SSH, Encore Features) |
 | [[CLAUDE-IPC.md]] | IPC API surface (`window.maestro.*` namespaces) |
 | [[CLAUDE-PERFORMANCE.md]] | Performance best practices (React optimization, debouncing, batching) |
 | [[CLAUDE-WIZARD.md]] | Onboarding Wizard, Inline Wizard, and Tour System |
