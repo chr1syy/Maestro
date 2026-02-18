@@ -21,7 +21,17 @@ export class PtySpawner {
 	 * Spawn a PTY process for a session
 	 */
 	spawn(config: ProcessConfig): SpawnResult {
-		const { sessionId, toolType, cwd, command, args, shell, shellArgs, shellEnvVars } = config;
+		const {
+			sessionId,
+			toolType,
+			cwd,
+			command,
+			args,
+			shell,
+			shellArgs,
+			shellEnvVars,
+			customEnvVars,
+		} = config;
 
 		const isTerminal = toolType === 'terminal';
 		const isWindows = process.platform === 'win32';
@@ -88,7 +98,7 @@ export class PtySpawner {
 				// For AI agents in PTY mode: use same env building logic as child processes
 				// This ensures tilde expansion (~/ paths), Electron var stripping, and consistent
 				// global shell environment variable handling across all spawner types
-				ptyEnv = buildChildProcessEnv(undefined, false, shellEnvVars);
+				ptyEnv = buildChildProcessEnv(customEnvVars, false, shellEnvVars);
 			}
 
 			const ptyProcess = pty.spawn(ptyCommand, ptyArgs, {

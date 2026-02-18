@@ -151,7 +151,7 @@ Priority 3: Process Environment
 
 **Example 1: Global Variable (No Override)**
 
-```
+```env
 Global: DEBUG=maestro:*
 Session: (not set)
 
@@ -160,7 +160,7 @@ Result: DEBUG=maestro:*
 
 **Example 2: Session Overrides Global**
 
-```
+```env
 Global:  API_KEY=global-key
 Session: API_KEY=session-key
 
@@ -169,7 +169,7 @@ Result: API_KEY=session-key
 
 **Example 3: Multiple Variables (Mixed Levels)**
 
-```
+```env
 Global:  API_KEY=key123
 Global:  DEBUG=on
 Session: DEBUG=off
@@ -179,11 +179,11 @@ Result: API_KEY=key123, DEBUG=off
 
 **Example 4: Path Expansion**
 
-```
+```env
 Global: WORKSPACE_PATH=~/my-workspace
 
 Result: WORKSPACE_PATH=/Users/john/my-workspace (expanded)
-        (Same behavior on Windows with home directory)
+         (Same behavior on Windows with home directory)
 ```
 
 ---
@@ -306,7 +306,7 @@ spawn(command, args, { env });
 
 **Persistence Path**:
 
-```
+```json
 electron-store
   → shellEnvVars: {
       "API_KEY": "sk-proj-xxxxx",
