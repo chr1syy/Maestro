@@ -2381,6 +2381,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 				draftPrUrl?: string;
 				autoRunPath?: string;
 				error?: string;
+				errorCode?: string;
 			}> => {
 				const {
 					contributionId,
@@ -2395,11 +2396,11 @@ This PR will be updated automatically when the Auto Run completes.`;
 				// Validate inputs
 				const slugValidation = validateRepoSlug(repoSlug);
 				if (!slugValidation.valid) {
-					return { success: false, error: slugValidation.error };
+					return { success: false, error: slugValidation.error, errorCode: 'INVALID_REPO' };
 				}
 
 				if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
-					return { success: false, error: 'Invalid issue number' };
+					return { success: false, error: 'Invalid issue number', errorCode: 'INVALID_ISSUE' };
 				}
 
 				// Validate document paths
@@ -2412,6 +2413,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 								return {
 									success: false,
 									error: `External document URL must use HTTPS: ${doc.path}`,
+									errorCode: 'INVALID_DOC_URL',
 								};
 							}
 							// Allow GitHub domains for external documents (attachments, raw content, etc.)
@@ -2426,15 +2428,24 @@ This PR will be updated automatically when the Auto Run completes.`;
 								return {
 									success: false,
 									error: `External document URL must be from GitHub: ${doc.path}`,
+									errorCode: 'UNTRUSTED_DOC_HOST',
 								};
 							}
 						} catch {
-							return { success: false, error: `Invalid external document URL: ${doc.path}` };
+							return {
+								success: false,
+								error: `Invalid external document URL: ${doc.path}`,
+								errorCode: 'INVALID_DOC_URL',
+							};
 						}
 					} else {
 						// Check repo-relative paths for path traversal
 						if (doc.path.includes('..') || doc.path.startsWith('/')) {
-							return { success: false, error: `Invalid document path: ${doc.path}` };
+							return {
+								success: false,
+								error: `Invalid document path: ${doc.path}`,
+								errorCode: 'PATH_TRAVERSAL',
+							};
 						}
 					}
 				}
@@ -2442,12 +2453,18 @@ This PR will be updated automatically when the Auto Run completes.`;
 				// Check gh CLI authentication (needed later for PR creation)
 				const authCheck = await checkGhAuthentication();
 				if (!authCheck.authenticated) {
-					return { success: false, error: authCheck.error };
+					return { success: false, error: authCheck.error, errorCode: 'GH_AUTH_FAILED' };
 				}
 
 				try {
+					logger.info(
+						`[Symphony] startContribution starting for issue #${issueNumber}`,
+						LOG_CONTEXT
+					);
+
 					// 1. Create branch and checkout
 					const branchName = generateBranchName(issueNumber);
+					logger.info(`[Symphony] Creating branch ${branchName}`, LOG_CONTEXT);
 					const branchResult = await createBranch(localPath, branchName);
 					if (!branchResult.success) {
 						logger.error('Failed to create branch', LOG_CONTEXT, {
@@ -2455,8 +2472,13 @@ This PR will be updated automatically when the Auto Run completes.`;
 							branchName,
 							error: branchResult.error,
 						});
-						return { success: false, error: `Failed to create branch: ${branchResult.error}` };
+						return {
+							success: false,
+							error: `Failed to create branch: ${branchResult.error}`,
+							errorCode: 'BRANCH_FAILED',
+						};
 					}
+					logger.info('[Symphony] Branch created successfully', LOG_CONTEXT);
 
 					// 2. Set up Auto Run documents directory
 					// External docs (GitHub attachments) go to cache dir to avoid polluting the repo
@@ -2467,11 +2489,29 @@ This PR will be updated automatically when the Auto Run completes.`;
 						contributionId,
 						'docs'
 					);
-					await fs.mkdir(symphonyDocsDir, { recursive: true });
+					logger.info('[Symphony] Setting up Auto Run docs directory', LOG_CONTEXT);
+					try {
+						await fs.mkdir(symphonyDocsDir, { recursive: true });
+						logger.info(
+							`[Symphony] Auto Run docs directory ready at ${symphonyDocsDir}`,
+							LOG_CONTEXT
+						);
+					} catch (e) {
+						logger.error('Failed to create docs directory', LOG_CONTEXT, {
+							path: symphonyDocsDir,
+							error: e instanceof Error ? e.message : String(e),
+						});
+						return {
+							success: false,
+							error: `Failed to create docs directory: ${e instanceof Error ? e.message : String(e)}`,
+							errorCode: 'MKDIR_FAILED',
+						};
+					}
 
 					// Track resolved document paths for Auto Run
 					const resolvedDocs: { name: string; path: string; isExternal: boolean }[] = [];
 
+					logger.info(`[Symphony] Processing ${documentPaths.length} documents`, LOG_CONTEXT);
 					for (const doc of documentPaths) {
 						if (doc.isExternal) {
 							// Download external file (GitHub attachment) to cache directory
@@ -2526,28 +2566,46 @@ This PR will be updated automatically when the Auto Run completes.`;
 							}
 						}
 					}
+					logger.info(
+						`[Symphony] Resolved ${resolvedDocs.length}/${documentPaths.length} documents`,
+						LOG_CONTEXT
+					);
 
 					// 3. Write contribution metadata for later PR creation
 					const metadataPath = path.join(symphonyDocsDir, '..', 'metadata.json');
-					await fs.writeFile(
-						metadataPath,
-						JSON.stringify(
-							{
-								contributionId,
-								sessionId,
-								repoSlug,
-								issueNumber,
-								issueTitle,
-								branchName,
-								localPath,
-								resolvedDocs,
-								startedAt: new Date().toISOString(),
-								prCreated: false,
-							},
-							null,
-							2
-						)
-					);
+					logger.info('[Symphony] Writing contribution metadata', LOG_CONTEXT);
+					try {
+						await fs.writeFile(
+							metadataPath,
+							JSON.stringify(
+								{
+									contributionId,
+									sessionId,
+									repoSlug,
+									issueNumber,
+									issueTitle,
+									branchName,
+									localPath,
+									resolvedDocs,
+									startedAt: new Date().toISOString(),
+									prCreated: false,
+								},
+								null,
+								2
+							)
+						);
+						logger.info('[Symphony] Metadata written successfully', LOG_CONTEXT);
+					} catch (e) {
+						logger.error('Failed to write metadata', LOG_CONTEXT, {
+							path: metadataPath,
+							error: e instanceof Error ? e.message : String(e),
+						});
+						return {
+							success: false,
+							error: `Failed to write metadata: ${e instanceof Error ? e.message : String(e)}`,
+							errorCode: 'METADATA_WRITE_FAILED',
+						};
+					}
 
 					// 4. Determine Auto Run path (use cache dir if we have external docs, otherwise repo path)
 					const hasExternalDocs = resolvedDocs.some((d) => d.isExternal);
@@ -2563,6 +2621,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 
 					const baseBranch = await getDefaultBranch(localPath);
 					const commitMsg = `[Symphony] Start contribution for #${issueNumber}`;
+					logger.info('[Symphony] Creating empty commit', LOG_CONTEXT);
 					const emptyCommitResult = await execFileNoThrow(
 						'git',
 						['commit', '--allow-empty', '-m', commitMsg],
@@ -2582,6 +2641,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 						draftPrNumber = undefined;
 						draftPrUrl = undefined;
 					} else if (emptyCommitResult.exitCode === 0) {
+						logger.info('[Symphony] Empty commit created (if prCreated=true next)', LOG_CONTEXT);
 						const prTitle = `[WIP] Symphony: ${issueTitle} (#${issueNumber})`;
 						const prBody = `## Maestro Symphony Contribution
 
@@ -2594,17 +2654,26 @@ Working on #${issueNumber} via [Maestro Symphony](https://runmaestro.ai).
 
 This PR will be updated automatically when the Auto Run completes.`;
 
+						logger.info(`[Symphony] Creating draft PR for #${issueNumber}`, LOG_CONTEXT);
 						const prResult = await createDraftPR(localPath, baseBranch, prTitle, prBody);
 						if (prResult.success) {
 							draftPrNumber = prResult.prNumber;
 							draftPrUrl = prResult.prUrl;
 
 							// Update metadata with PR info
-							const metaContent = JSON.parse(await fs.readFile(metadataPath, 'utf-8'));
-							metaContent.prCreated = true;
-							metaContent.draftPrNumber = draftPrNumber;
-							metaContent.draftPrUrl = draftPrUrl;
-							await fs.writeFile(metadataPath, JSON.stringify(metaContent, null, 2));
+							logger.info('[Symphony] Updating metadata with PR info', LOG_CONTEXT);
+							try {
+								const metaContent = JSON.parse(await fs.readFile(metadataPath, 'utf-8'));
+								metaContent.prCreated = true;
+								metaContent.draftPrNumber = draftPrNumber;
+								metaContent.draftPrUrl = draftPrUrl;
+								await fs.writeFile(metadataPath, JSON.stringify(metaContent, null, 2));
+							} catch (e) {
+								logger.error('Failed to update metadata with PR info', LOG_CONTEXT, {
+									error: e instanceof Error ? e.message : String(e),
+								});
+								// Non-fatal: continue even if metadata update fails
+							}
 						} else {
 							logger.warn('Failed to create draft PR, continuing without claim', LOG_CONTEXT, {
 								contributionId,
@@ -2619,19 +2688,37 @@ This PR will be updated automatically when the Auto Run completes.`;
 					}
 
 					// 6. Broadcast status update
+					logger.info('[Symphony] Broadcasting contributionStarted', LOG_CONTEXT);
 					const mainWindow = getMainWindow?.();
-					if (isWebContentsAvailable(mainWindow)) {
-						mainWindow.webContents.send('symphony:contributionStarted', {
-							contributionId,
-							sessionId,
-							branchName,
-							autoRunPath,
-							draftPrNumber,
-							draftPrUrl,
-						});
+					if (!isWebContentsAvailable(mainWindow)) {
+						logger.warn('[Symphony] Main window not available for broadcast', LOG_CONTEXT);
+					} else {
+						try {
+							mainWindow.webContents.send('symphony:contributionStarted', {
+								contributionId,
+								sessionId,
+								branchName,
+								autoRunPath,
+								draftPrNumber,
+								draftPrUrl,
+							});
+							logger.info(
+								`[Symphony] Broadcast sent: contributionStarted for ${contributionId}`,
+								LOG_CONTEXT
+							);
+						} catch (e) {
+							logger.error(
+								`[Symphony] Broadcast failed: ${e instanceof Error ? e.message : String(e)}`,
+								LOG_CONTEXT,
+								{
+									error: e,
+								}
+							);
+							// Non-fatal: broadcast failure doesn't prevent the handler from returning success
+						}
 					}
 
-					logger.info('Symphony contribution started', LOG_CONTEXT, {
+					logger.info('[Symphony] Contribution setup completed successfully', LOG_CONTEXT, {
 						contributionId,
 						sessionId,
 						branchName,
@@ -2652,6 +2739,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 					return {
 						success: false,
 						error: error instanceof Error ? error.message : 'Unknown error',
+						errorCode: 'UNKNOWN',
 					};
 				}
 			}

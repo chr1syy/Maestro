@@ -309,6 +309,7 @@ export function createSymphonyApi() {
 			draftPrUrl?: string;
 			autoRunPath?: string;
 			error?: string;
+			errorCode?: string;
 		}> => ipcRenderer.invoke('symphony:startContribution', params),
 
 		createDraftPR: (params: {

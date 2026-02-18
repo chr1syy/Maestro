@@ -68,6 +68,7 @@ export interface UseSymphonyReturn {
 		draftPrNumber?: number;
 		draftPrUrl?: string;
 		error?: string;
+		errorCode?: string;
 	}>;
 	cancelContribution: (contributionId: string, cleanup?: boolean) => Promise<{ success: boolean }>;
 	finalizeContribution: (contributionId: string) => Promise<{
@@ -287,6 +288,7 @@ export function useSymphony(): UseSymphonyReturn {
 			draftPrNumber?: number;
 			draftPrUrl?: string;
 			error?: string;
+			errorCode?: string;
 		}> => {
 			try {
 				// Generate contribution ID
@@ -307,6 +309,7 @@ export function useSymphony(): UseSymphonyReturn {
 					return {
 						success: false,
 						error: cloneResult.error ?? 'Failed to clone repository',
+						errorCode: 'CLONE_FAILED',
 					};
 				}
 
@@ -325,6 +328,7 @@ export function useSymphony(): UseSymphonyReturn {
 					return {
 						success: false,
 						error: startResult.error ?? 'Failed to start contribution',
+						errorCode: (startResult as any).errorCode ?? 'UNKNOWN',
 					};
 				}
 
@@ -341,6 +345,7 @@ export function useSymphony(): UseSymphonyReturn {
 				return {
 					success: false,
 					error: err instanceof Error ? err.message : 'Failed to start contribution',
+					errorCode: 'UNKNOWN',
 				};
 			}
 		},
