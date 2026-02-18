@@ -591,6 +591,140 @@ describe('execFile.ts', () => {
 				expect(capturedOptions.timeout).toBe(30000);
 			});
 
+			it('should timeout after specified duration', async () => {
+				const error = new Error('Command timed out') as any;
+				error.code = 'ETIMEDOUT';
+				error.killed = true;
+				error.stdout = '';
+				error.stderr = '';
+
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], _options: any, callback?: any) => {
+						// Simulate timeout error
+						if (callback) {
+							callback(error, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				const { execFileNoThrow } = await import('../../../main/utils/execFile');
+				const result = await execFileNoThrow('slow-clone', [], '/cwd', { timeout: 1000 });
+
+				expect(typeof result.exitCode).toBe('object');
+				expect((result.exitCode as ExecErrorContext).code).toBe('ETIMEDOUT');
+				expect((result.exitCode as ExecErrorContext).isTimeout).toBe(true);
+				expect((result.exitCode as ExecErrorContext).detail).toContain('timed out');
+			});
+
+			it('should complete before timeout if command is fast', async () => {
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], _options: any, callback?: any) => {
+						if (callback) {
+							callback(null, 'success output', '');
+						}
+						return {} as any;
+					}
+				);
+
+				const { execFileNoThrow } = await import('../../../main/utils/execFile');
+				const result = await execFileNoThrow('fast-cmd', [], '/cwd', { timeout: 5000 });
+
+				expect(result.exitCode).toBe(0);
+				expect(result.stdout).toBe('success output');
+			});
+
+			it('should classify different error types correctly', async () => {
+				const { execFileNoThrow } = await import('../../../main/utils/execFile');
+
+				// Test ENOENT (not found)
+				let error = new Error('not found') as any;
+				error.code = 'ENOENT';
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], _options: any, callback?: any) => {
+						if (callback) {
+							callback(error, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				let result = await execFileNoThrow('missing-cmd');
+				expect((result.exitCode as ExecErrorContext).code).toBe('ENOENT');
+				expect((result.exitCode as ExecErrorContext).isTimeout).toBe(false);
+
+				// Test EACCES (permission denied)
+				error = new Error('permission denied') as any;
+				error.code = 'EACCES';
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], _options: any, callback?: any) => {
+						if (callback) {
+							callback(error, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				result = await execFileNoThrow('/restricted/cmd');
+				expect((result.exitCode as ExecErrorContext).code).toBe('EACCES');
+				expect((result.exitCode as ExecErrorContext).isPermission).toBe(true);
+
+				// Test ETIMEDOUT
+				error = new Error('timeout') as any;
+				error.code = 'ETIMEDOUT';
+				error.killed = true;
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], _options: any, callback?: any) => {
+						if (callback) {
+							callback(error, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				result = await execFileNoThrow('slow-cmd', [], undefined, { timeout: 1000 });
+				expect((result.exitCode as ExecErrorContext).code).toBe('ETIMEDOUT');
+				expect((result.exitCode as ExecErrorContext).isTimeout).toBe(true);
+			});
+
+			it('should adjust timeout for Windows platform', async () => {
+				// Mock platform as win32
+				const originalPlatform = process.platform;
+				Object.defineProperty(process, 'platform', {
+					value: 'win32',
+					writable: true,
+					configurable: true,
+				});
+
+				let capturedOptions: any;
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], options: any, callback?: any) => {
+						capturedOptions = options;
+						if (callback) {
+							callback(null, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				try {
+					const { execFileNoThrow } = await import('../../../main/utils/execFile');
+					// When git clone is executed on Windows without explicit timeout
+					// it should get the Windows default of 120s
+					await execFileNoThrow('git', ['clone', 'https://repo.git', '/path']);
+
+					// Verify timeout is adjusted for Windows (120s = 120000ms)
+					expect(capturedOptions.timeout).toBe(120000);
+				} finally {
+					// Restore original platform
+					Object.defineProperty(process, 'platform', {
+						value: originalPlatform,
+						writable: true,
+						configurable: true,
+					});
+				}
+			});
+
 			it('should handle timeout error with ETIMEDOUT', async () => {
 				const error = new Error('Command timed out') as any;
 				error.code = 'ETIMEDOUT';
