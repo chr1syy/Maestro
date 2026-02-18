@@ -80,9 +80,9 @@ function isSkippableBranch(branch: string | null | undefined): boolean {
 	return branch === 'main' || branch === 'master' || branch === 'HEAD';
 }
 
-/** Normalize file path for comparison: convert backslashes to forward slashes and remove trailing slashes. */
-function normalizePath(path: string): string {
-	return path.replace(/\\/g, '/').replace(/\/+$/, '');
+/** Normalize file path for comparison: convert backslashes to forward slashes, collapse duplicate slashes, and remove trailing slash. */
+function normalizePath(p: string): string {
+	return p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
 }
 
 /**
@@ -419,6 +419,13 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 			// we must fall back to sessionSshRemoteConfig.remoteId. See CLAUDE.md "SSH Remote Sessions".
 			const sshRemoteId = getSshRemoteId(activeSession);
 
+			// Mark path BEFORE creating on disk so the file watcher never races ahead of the ref.
+			// Without this, a slow fetchGitInfo (>500ms debounce) lets the chokidar event fire while
+			// the ref is still empty, causing a duplicate session from the watcher.
+			const normalizedCreatedPath = normalizePath(worktreePath);
+			recentlyCreatedWorktreePathsRef.current.add(normalizedCreatedPath);
+			setTimeout(() => recentlyCreatedWorktreePathsRef.current.delete(normalizedCreatedPath), 10000);
+
 			try {
 				// Create the worktree via git (pass SSH remote ID for remote sessions)
 				const result = await window.maestro.git.worktreeSetup(
@@ -429,6 +436,8 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 				);
 
 				if (!result.success) {
+					// Creation failed — remove from ref so the path isn't permanently blocked
+					recentlyCreatedWorktreePathsRef.current.delete(normalizedCreatedPath);
 					throw new Error(result.error || 'Failed to create worktree');
 				}
 
@@ -444,10 +453,6 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 					defaultShowThinking: showThink,
 					...gitInfo,
 				});
-
-				// Mark path so the file watcher discovery handler skips it
-				recentlyCreatedWorktreePathsRef.current.add(worktreePath);
-				setTimeout(() => recentlyCreatedWorktreePathsRef.current.delete(worktreePath), 10000);
 
 				// Single setSessions call: add child + expand parent (avoids transient state + extra IPC write)
 				useSessionStore
@@ -498,6 +503,13 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 		// we must fall back to sessionSshRemoteConfig.remoteId. See CLAUDE.md "SSH Remote Sessions".
 		const sshRemoteId = getSshRemoteId(createWtSession);
 
+		// Mark path BEFORE creating on disk so the file watcher never races ahead of the ref.
+		// Without this, a slow fetchGitInfo (>500ms debounce) lets the chokidar event fire while
+		// the ref is still empty, causing a duplicate session from the watcher.
+		const normalizedCreatedPath = normalizePath(worktreePath);
+		recentlyCreatedWorktreePathsRef.current.add(normalizedCreatedPath);
+		setTimeout(() => recentlyCreatedWorktreePathsRef.current.delete(normalizedCreatedPath), 10000);
+
 		// Create the worktree via git (pass SSH remote ID for remote sessions)
 		const result = await window.maestro.git.worktreeSetup(
 			createWtSession.cwd,
@@ -507,6 +519,8 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 		);
 
 		if (!result.success) {
+			// Creation failed — remove from ref so the path isn't permanently blocked
+			recentlyCreatedWorktreePathsRef.current.delete(normalizedCreatedPath);
 			throw new Error(result.error || 'Failed to create worktree');
 		}
 
@@ -522,10 +536,6 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 			defaultShowThinking: showThink,
 			...gitInfo,
 		});
-
-		// Mark path so the file watcher discovery handler skips it
-		recentlyCreatedWorktreePathsRef.current.add(worktreePath);
-		setTimeout(() => recentlyCreatedWorktreePathsRef.current.delete(worktreePath), 10000);
 
 		// Single setSessions call: add child + expand parent + save config (avoids transient state + extra IPC writes)
 		const needsConfig = !createWtSession.worktreeConfig?.basePath;
@@ -698,7 +708,8 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 			const { sessionId, worktree } = data;
 
 			// Skip worktrees that were just manually created (prevents duplicate UI entries)
-			if (recentlyCreatedWorktreePathsRef.current.has(worktree.path)) {
+			// Normalize path for cross-platform comparison (chokidar may emit backslashes on Windows)
+			if (recentlyCreatedWorktreePathsRef.current.has(normalizePath(worktree.path))) {
 				return;
 			}
 
