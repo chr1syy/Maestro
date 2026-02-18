@@ -130,6 +130,8 @@ beforeEach(() => {
 		activeSessionId: '',
 	} as any);
 
+	useUIStore.setState({ outputSearchOpen: false });
+
 	useSettingsStore.setState({
 		enterToSendAI: true,
 		enterToSendTerminal: true,
