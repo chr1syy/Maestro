@@ -436,6 +436,14 @@ function FileExplorerPanelInner(props: FileExplorerPanelProps) {
 	} | null>(null);
 	const [isDeleting, setIsDeleting] = useState(false);
 
+	// Get platform-specific label for reveal action
+	const revealLabel = useMemo(() => {
+		if (typeof window !== 'undefined' && window.maestro?.os?.platform === 'win32') {
+			return 'Reveal in Explorer';
+		}
+		return 'Reveal in Finder';
+	}, []);
+
 	// Close context menu when clicking outside
 	useClickOutside(
 		contextMenuRef,
@@ -1444,14 +1452,14 @@ function FileExplorerPanelInner(props: FileExplorerPanelProps) {
 								<span>Copy Path</span>
 							</button>
 
-							{/* Reveal in Finder option */}
+							{/* Reveal in Finder / Explorer option */}
 							<button
 								onClick={handleOpenInExplorer}
 								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
 								style={{ color: theme.colors.textMain }}
 							>
 								<ExternalLink className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-								<span>Reveal in Finder</span>
+								<span>{revealLabel}</span>
 							</button>
 
 							{/* Divider before destructive actions */}

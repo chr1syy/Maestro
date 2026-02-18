@@ -736,8 +736,8 @@ export function useWorktreeHandlers(): WorktreeHandlersReturn {
 			});
 
 			useSessionStore.getState().setSessions((prev) => {
-				// Double-check to avoid duplicates
-				if (prev.some((s) => s.cwd === worktree.path)) return prev;
+				// Double-check to avoid duplicates (normalize paths for comparison)
+				if (prev.some((s) => s.cwd.replace(/\/+$/, '') === normalizedWorktreePath)) return prev;
 				return [...prev, worktreeSession];
 			});
 
