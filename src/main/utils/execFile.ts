@@ -6,20 +6,108 @@ const execFileAsync = promisify(execFile);
 
 export interface ExecOptions {
 	input?: string; // Content to write to stdin
+	timeout?: number; // Timeout in milliseconds
+	env?: NodeJS.ProcessEnv; // Environment variables
 }
 
 // Maximum buffer size for command output (10MB)
 const EXEC_MAX_BUFFER = 10 * 1024 * 1024;
 
+// Default timeout values (in milliseconds)
+const DEFAULT_TIMEOUT_MS = 60000; // 60 seconds
+const WINDOWS_DEFAULT_TIMEOUT_MS = 120000; // 120 seconds on Windows
+
+export interface ExecErrorContext {
+	code: string; // Error code: numeric exit code as string, 'ETIMEDOUT', 'ENOENT', 'EACCES', 'EPERM', 'SIGTERM', 'SIGKILL', etc.
+	detail: string; // Human-readable detail about the error
+	isTimeout: boolean; // true if error was due to timeout
+	isPermission: boolean; // true if error was permission-related
+	signal?: string; // Signal name if process was killed
+}
+
 export interface ExecResult {
 	stdout: string;
 	stderr: string;
 	/**
-	 * The exit code of the process.
-	 * - A number (0 for success, non-zero for failure) when the process ran and exited
-	 * - A string error code ('ENOENT', 'EPERM', 'EACCES', etc.) when the process couldn't be spawned
+	 * The exit code or error classification of the process.
+	 * - A number (0 for success, 1-255 for exit code) when the process ran and exited
+	 * - An error context object when an error occurs
 	 */
-	exitCode: number | string;
+	exitCode: number | ExecErrorContext;
+}
+
+/**
+ * Create an error context from spawn or exec errors
+ */
+function createErrorContext(error: any, isTimeout: boolean = false): ExecErrorContext {
+	const isPermissionError = error?.code === 'EACCES' || error?.code === 'EPERM';
+
+	if (isTimeout) {
+		return {
+			code: 'ETIMEDOUT',
+			detail: 'Command timed out',
+			isTimeout: true,
+			isPermission: false,
+		};
+	}
+
+	if (error?.code === 'ENOENT') {
+		return {
+			code: 'ENOENT',
+			detail: 'Command not found',
+			isTimeout: false,
+			isPermission: false,
+		};
+	}
+
+	if (error?.code === 'EACCES') {
+		return {
+			code: 'EACCES',
+			detail: 'Permission denied',
+			isTimeout: false,
+			isPermission: true,
+		};
+	}
+
+	if (error?.code === 'EPERM') {
+		return {
+			code: 'EPERM',
+			detail: 'Operation not permitted',
+			isTimeout: false,
+			isPermission: true,
+		};
+	}
+
+	if (error?.signal) {
+		return {
+			code: error.signal,
+			detail: `Process killed by signal ${error.signal}`,
+			isTimeout: false,
+			isPermission: false,
+			signal: error.signal,
+		};
+	}
+
+	return {
+		code: error?.code || 'UNKNOWN',
+		detail: error?.message || 'Unknown error',
+		isTimeout: false,
+		isPermission: isPermissionError,
+	};
+}
+
+/**
+ * Get the effective timeout for a command based on platform and command type
+ */
+function getEffectiveTimeout(_command: string, override?: number): number {
+	// If explicit timeout is provided, use it
+	if (override !== undefined) {
+		return override;
+	}
+
+	// Windows gets a longer default timeout
+	const isWindows = process.platform === 'win32';
+	return isWindows ? WINDOWS_DEFAULT_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
 }
 
 /**
@@ -47,7 +135,18 @@ export function needsWindowsShell(command: string): boolean {
 	// This prevents issues like % being interpreted as environment variables on Windows
 	// Extract basename to handle full paths like 'C:\Program Files\Git\bin\git'
 	// Use regex to handle both Unix (/) and Windows (\) path separators
-	const knownExeCommands = new Set(['git', 'node', 'npm', 'npx', 'yarn', 'pnpm', 'python', 'python3', 'pip', 'pip3']);
+	const knownExeCommands = new Set([
+		'git',
+		'node',
+		'npm',
+		'npx',
+		'yarn',
+		'pnpm',
+		'python',
+		'python3',
+		'pip',
+		'pip3',
+	]);
 	const commandBaseName = lowerCommand.split(/[\\/]/).pop() || lowerCommand;
 	if (knownExeCommands.has(commandBaseName)) {
 		return false;
@@ -68,7 +167,7 @@ export function needsWindowsShell(command: string): boolean {
  * @param command - The command to execute
  * @param args - Arguments to pass to the command
  * @param cwd - Working directory for the command
- * @param options - Additional options (input for stdin, env for environment)
+ * @param options - Additional options (input for stdin, timeout for timeout, env for environment)
  */
 export async function execFileNoThrow(
 	command: string,
@@ -79,11 +178,15 @@ export async function execFileNoThrow(
 	// Handle backward compatibility: options can be env (old signature) or ExecOptions (new)
 	let env: NodeJS.ProcessEnv | undefined;
 	let input: string | undefined;
+	let timeout: number | undefined;
 
 	if (options) {
-		if ('input' in options) {
+		if ('input' in options || 'timeout' in options || 'env' in options) {
 			// New signature with ExecOptions
-			input = options.input;
+			const opts = options as ExecOptions;
+			input = opts.input;
+			timeout = opts.timeout;
+			env = opts.env;
 		} else {
 			// Old signature with just env
 			env = options as NodeJS.ProcessEnv;
@@ -92,8 +195,10 @@ export async function execFileNoThrow(
 
 	// If input is provided, use spawn instead of execFile to write to stdin
 	if (input !== undefined) {
-		return execFileWithInput(command, args, cwd, input);
+		return execFileWithInput(command, args, cwd, input, timeout);
 	}
+
+	const effectiveTimeout = getEffectiveTimeout(command, timeout);
 
 	try {
 		// On Windows, some commands need shell execution
@@ -101,13 +206,16 @@ export async function execFileNoThrow(
 		const isWindows = process.platform === 'win32';
 		const useShell = isWindows && needsWindowsShell(command);
 
-		const { stdout, stderr } = await execFileAsync(command, args, {
+		const execPromise = execFileAsync(command, args, {
 			cwd,
 			env,
 			encoding: 'utf8',
 			maxBuffer: EXEC_MAX_BUFFER,
 			shell: useShell,
+			timeout: effectiveTimeout,
 		});
+
+		const { stdout, stderr } = await execPromise;
 
 		return {
 			stdout,
@@ -115,12 +223,35 @@ export async function execFileNoThrow(
 			exitCode: 0,
 		};
 	} catch (error: any) {
-		// execFile throws on non-zero exit codes
+		// Check if it's a timeout error
+		const isTimeout = error?.code === 'ETIMEDOUT' || error?.killed === true;
+
+		if (isTimeout) {
+			// Log timeout
+			console.error(`[execFile] Command "${command}" timed out after ${effectiveTimeout}ms`);
+			return {
+				stdout: error.stdout || '',
+				stderr: error.stderr || '',
+				exitCode: createErrorContext(error, true),
+			};
+		}
+
+		// Check for spawn/exec errors (command not found, permission denied, etc.)
+		if (typeof error?.code === 'string' && ['ENOENT', 'EACCES', 'EPERM'].includes(error.code)) {
+			return {
+				stdout: error.stdout || '',
+				stderr: error.stderr || error.message || '',
+				exitCode: createErrorContext(error),
+			};
+		}
+
+		// Normal exit code error (process ran but exited with non-zero code)
 		// Use ?? instead of || to correctly handle exit code 0 (which is falsy but valid)
+		const exitCode = error.code ?? error.status ?? 1;
 		return {
 			stdout: error.stdout || '',
 			stderr: error.stderr || error.message || '',
-			exitCode: error.code ?? 1,
+			exitCode: typeof exitCode === 'number' ? exitCode : 1,
 		};
 	}
 }
@@ -133,8 +264,11 @@ async function execFileWithInput(
 	command: string,
 	args: string[],
 	cwd: string | undefined,
-	input: string
+	input: string,
+	timeout?: number
 ): Promise<ExecResult> {
+	const effectiveTimeout = getEffectiveTimeout(command, timeout);
+
 	return new Promise((resolve) => {
 		const isWindows = process.platform === 'win32';
 		const useShell = isWindows && needsWindowsShell(command);
@@ -147,6 +281,24 @@ async function execFileWithInput(
 
 		let stdout = '';
 		let stderr = '';
+		let timeoutHandle: NodeJS.Timeout | null = null;
+		let isResolved = false;
+
+		// Set up timeout
+		if (effectiveTimeout > 0) {
+			timeoutHandle = setTimeout(() => {
+				if (!isResolved) {
+					isResolved = true;
+					console.error(`[execFile] Command "${command}" timed out after ${effectiveTimeout}ms`);
+					child.kill('SIGTERM');
+					resolve({
+						stdout,
+						stderr,
+						exitCode: createErrorContext({ code: 'ETIMEDOUT' }, true),
+					});
+				}
+			}, effectiveTimeout);
+		}
 
 		child.stdout?.on('data', (data) => {
 			stdout += data.toString();
@@ -157,19 +309,45 @@ async function execFileWithInput(
 		});
 
 		child.on('close', (code) => {
-			resolve({
-				stdout,
-				stderr,
-				exitCode: code ?? 1,
-			});
+			if (!isResolved) {
+				isResolved = true;
+				if (timeoutHandle) {
+					clearTimeout(timeoutHandle);
+				}
+				resolve({
+					stdout,
+					stderr,
+					exitCode: code ?? 1,
+				});
+			}
 		});
 
 		child.on('error', (err) => {
-			resolve({
-				stdout: '',
-				stderr: err.message,
-				exitCode: 1,
-			});
+			if (!isResolved) {
+				isResolved = true;
+				if (timeoutHandle) {
+					clearTimeout(timeoutHandle);
+				}
+
+				// Check if it's a spawn error
+				const anyErr = err as any;
+				if (
+					typeof anyErr?.code === 'string' &&
+					['ENOENT', 'EACCES', 'EPERM'].includes(anyErr.code)
+				) {
+					resolve({
+						stdout: '',
+						stderr: anyErr.message,
+						exitCode: createErrorContext(anyErr),
+					});
+				} else {
+					resolve({
+						stdout: '',
+						stderr: anyErr.message,
+						exitCode: 1,
+					});
+				}
+			}
 		});
 
 		// Write input to stdin and close it

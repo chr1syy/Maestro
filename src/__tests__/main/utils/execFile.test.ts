@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ExecResult } from '../../../main/utils/execFile';
+import type { ExecResult, ExecErrorContext } from '../../../main/utils/execFile';
 
 // Create mock function
 const mockExecFile = vi.fn();
@@ -329,7 +329,11 @@ describe('execFile.ts', () => {
 				const { execFileNoThrow } = await import('../../../main/utils/execFile');
 				const result = await execFileNoThrow('nonexistent');
 
-				expect(result.exitCode).toBe('ENOENT');
+				expect(typeof result.exitCode).toBe('object');
+				expect((result.exitCode as ExecErrorContext).code).toBe('ENOENT');
+				expect((result.exitCode as ExecErrorContext).detail).toBe('Command not found');
+				expect((result.exitCode as ExecErrorContext).isPermission).toBe(false);
+				expect((result.exitCode as ExecErrorContext).isTimeout).toBe(false);
 				expect(result.stderr).toBe('spawn nonexistent ENOENT');
 			});
 
@@ -351,7 +355,11 @@ describe('execFile.ts', () => {
 				const { execFileNoThrow } = await import('../../../main/utils/execFile');
 				const result = await execFileNoThrow('/restricted/cmd');
 
-				expect(result.exitCode).toBe('EPERM');
+				expect(typeof result.exitCode).toBe('object');
+				expect((result.exitCode as ExecErrorContext).code).toBe('EPERM');
+				expect((result.exitCode as ExecErrorContext).detail).toBe('Operation not permitted');
+				expect((result.exitCode as ExecErrorContext).isPermission).toBe(true);
+				expect((result.exitCode as ExecErrorContext).isTimeout).toBe(false);
 				expect(result.stderr).toBe('Permission denied');
 			});
 		});
@@ -561,6 +569,71 @@ describe('execFile.ts', () => {
 				await execFileNoThrow('cmd');
 
 				expect(capturedOptions.encoding).toBe('utf8');
+			});
+		});
+
+		describe('timeout support', () => {
+			it('should accept timeout option and pass it to execFile', async () => {
+				let capturedOptions: any;
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], options: any, callback?: any) => {
+						capturedOptions = options;
+						if (callback) {
+							callback(null, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				const { execFileNoThrow } = await import('../../../main/utils/execFile');
+				await execFileNoThrow('cmd', [], '/cwd', { timeout: 30000 });
+
+				expect(capturedOptions.timeout).toBe(30000);
+			});
+
+			it('should handle timeout error with ETIMEDOUT', async () => {
+				const error = new Error('Command timed out') as any;
+				error.code = 'ETIMEDOUT';
+				error.killed = true;
+				error.stdout = 'partial output';
+				error.stderr = '';
+
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], _options: any, callback?: any) => {
+						if (callback) {
+							callback(error, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				const { execFileNoThrow } = await import('../../../main/utils/execFile');
+				const result = await execFileNoThrow('slow-cmd', [], '/cwd', { timeout: 5000 });
+
+				expect(typeof result.exitCode).toBe('object');
+				expect((result.exitCode as ExecErrorContext).code).toBe('ETIMEDOUT');
+				expect((result.exitCode as ExecErrorContext).isTimeout).toBe(true);
+				expect((result.exitCode as ExecErrorContext).isPermission).toBe(false);
+			});
+
+			it('should support timeout in ExecOptions with env', async () => {
+				let capturedOptions: any;
+				mockExecFile.mockImplementation(
+					(_cmd: string, _args: readonly string[], options: any, callback?: any) => {
+						capturedOptions = options;
+						if (callback) {
+							callback(null, '', '');
+						}
+						return {} as any;
+					}
+				);
+
+				const { execFileNoThrow } = await import('../../../main/utils/execFile');
+				const customEnv = { MY_VAR: 'value' };
+				await execFileNoThrow('cmd', [], '/cwd', { timeout: 60000, env: customEnv });
+
+				expect(capturedOptions.timeout).toBe(60000);
+				expect(capturedOptions.env).toBe(customEnv);
 			});
 		});
 	});

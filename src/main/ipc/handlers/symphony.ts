@@ -588,7 +588,26 @@ async function cloneRepository(
 ): Promise<{ success: boolean; error?: string }> {
 	logger.info('Cloning repository', LOG_CONTEXT, { repoUrl, targetPath });
 
-	const result = await execFileNoThrow('git', ['clone', '--depth=1', repoUrl, targetPath]);
+	const result = await execFileNoThrow(
+		'git',
+		['clone', '--depth=1', repoUrl, targetPath],
+		undefined,
+		{
+			timeout: 180000, // 3 minutes for clone operations
+		}
+	);
+
+	// Check for timeout error
+	if (typeof result.exitCode === 'object' && result.exitCode.isTimeout) {
+		logger.error('Repository clone timed out', LOG_CONTEXT, {
+			repoUrl,
+			timeout: '180s',
+		});
+		return {
+			success: false,
+			error: `Git clone timed out after 3 minutes. Check network connectivity or try a smaller repository.`,
+		};
+	}
 
 	if (result.exitCode !== 0) {
 		return { success: false, error: result.stderr };
@@ -604,7 +623,20 @@ async function createBranch(
 	repoPath: string,
 	branchName: string
 ): Promise<{ success: boolean; error?: string }> {
-	const result = await execFileNoThrow('git', ['checkout', '-b', branchName], repoPath);
+	logger.info('Creating branch', LOG_CONTEXT, { branchName });
+
+	const result = await execFileNoThrow('git', ['checkout', '-b', branchName], repoPath, {
+		timeout: 30000, // 30 seconds for branch creation
+	});
+
+	// Check for timeout error
+	if (typeof result.exitCode === 'object' && result.exitCode.isTimeout) {
+		logger.error('Branch creation timed out', LOG_CONTEXT, { branchName, timeout: '30s' });
+		return {
+			success: false,
+			error: `Git branch creation timed out after 30 seconds`,
+		};
+	}
 
 	if (result.exitCode !== 0) {
 		return { success: false, error: result.stderr };
@@ -617,7 +649,10 @@ async function createBranch(
  * Check if gh CLI is authenticated.
  */
 async function checkGhAuthentication(): Promise<{ authenticated: boolean; error?: string }> {
-	const result = await execFileNoThrow('gh', ['auth', 'status'], undefined, getExpandedEnv());
+	const result = await execFileNoThrow('gh', ['auth', 'status'], undefined, {
+		env: getExpandedEnv(),
+		timeout: 30000, // 30 seconds for auth check
+	});
 	if (result.exitCode !== 0) {
 		// gh auth status outputs to stderr even on success for some info
 		const output = result.stderr + result.stdout;
@@ -647,7 +682,8 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 	const result = await execFileNoThrow(
 		'git',
 		['symbolic-ref', 'refs/remotes/origin/HEAD'],
-		repoPath
+		repoPath,
+		{ timeout: 30000 } // 30 seconds
 	);
 	if (result.exitCode === 0) {
 		// Output is like "refs/remotes/origin/main"
@@ -659,7 +695,8 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 	const checkResult = await execFileNoThrow(
 		'git',
 		['ls-remote', '--heads', 'origin', 'main'],
-		repoPath
+		repoPath,
+		{ timeout: 30000 } // 30 seconds
 	);
 	if (checkResult.exitCode === 0 && checkResult.stdout.includes('refs/heads/main')) {
 		return 'main';
@@ -668,7 +705,8 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 	const masterCheck = await execFileNoThrow(
 		'git',
 		['ls-remote', '--heads', 'origin', 'master'],
-		repoPath
+		repoPath,
+		{ timeout: 30000 } // 30 seconds
 	);
 	if (masterCheck.exitCode === 0 && masterCheck.stdout.includes('refs/heads/master')) {
 		return 'master';
@@ -697,7 +735,8 @@ async function createDraftPR(
 	const branchResult = await execFileNoThrow(
 		'git',
 		['rev-parse', '--abbrev-ref', 'HEAD'],
-		repoPath
+		repoPath,
+		{ timeout: 30000 } // 30 seconds
 	);
 	const branchName = branchResult.stdout.trim();
 	if (!branchName || branchResult.exitCode !== 0) {
@@ -705,7 +744,18 @@ async function createDraftPR(
 	}
 
 	// First push the branch
-	const pushResult = await execFileNoThrow('git', ['push', '-u', 'origin', branchName], repoPath);
+	const pushResult = await execFileNoThrow('git', ['push', '-u', 'origin', branchName], repoPath, {
+		timeout: 60000, // 60 seconds for push
+	});
+
+	// Check for timeout error
+	if (typeof pushResult.exitCode === 'object' && pushResult.exitCode.isTimeout) {
+		logger.error('Git push timed out', LOG_CONTEXT, { branchName, timeout: '60s' });
+		return {
+			success: false,
+			error: `Git push timed out after 60 seconds. Check network connectivity.`,
+		};
+	}
 
 	if (pushResult.exitCode !== 0) {
 		return { success: false, error: `Failed to push: ${pushResult.stderr}` };
@@ -728,8 +778,24 @@ async function createDraftPR(
 			body,
 		],
 		repoPath,
-		getExpandedEnv()
+		{ env: getExpandedEnv(), timeout: 60000 } // 60 seconds for PR creation
 	);
+
+	// Check for timeout error
+	if (typeof prResult.exitCode === 'object' && prResult.exitCode.isTimeout) {
+		logger.error('PR creation timed out', LOG_CONTEXT, {
+			branchName,
+			baseBranch,
+			timeout: '60s',
+		});
+		// If PR creation failed after push, try to delete the remote branch
+		logger.warn('PR creation timed out, attempting to clean up remote branch', LOG_CONTEXT);
+		await execFileNoThrow('git', ['push', 'origin', '--delete', branchName], repoPath);
+		return {
+			success: false,
+			error: `PR creation timed out after 60 seconds. Branch has been cleaned up.`,
+		};
+	}
 
 	if (prResult.exitCode !== 0) {
 		// If PR creation failed after push, try to delete the remote branch
@@ -757,7 +823,7 @@ async function markPRReady(
 		'gh',
 		['pr', 'ready', String(prNumber)],
 		repoPath,
-		getExpandedEnv()
+		{ env: getExpandedEnv(), timeout: 30000 } // 30 seconds
 	);
 
 	if (result.exitCode !== 0) {
@@ -882,7 +948,7 @@ This pull request was created using [Maestro Symphony](https://runmaestro.ai/sym
 		'gh',
 		['pr', 'comment', String(prNumber), '--body', commentBody],
 		repoPath,
-		getExpandedEnv()
+		{ env: getExpandedEnv(), timeout: 30000 } // 30 seconds
 	);
 
 	if (result.exitCode !== 0) {
@@ -2500,10 +2566,22 @@ This PR will be updated automatically when the Auto Run completes.`;
 					const emptyCommitResult = await execFileNoThrow(
 						'git',
 						['commit', '--allow-empty', '-m', commitMsg],
-						localPath
+						localPath,
+						{ timeout: 30000 } // 30 seconds for commit
 					);
 
-					if (emptyCommitResult.exitCode === 0) {
+					// Check for timeout error
+					if (
+						typeof emptyCommitResult.exitCode === 'object' &&
+						emptyCommitResult.exitCode.isTimeout
+					) {
+						logger.error('Git commit timed out', LOG_CONTEXT, {
+							issueNumber,
+							timeout: '30s',
+						});
+						draftPrNumber = undefined;
+						draftPrUrl = undefined;
+					} else if (emptyCommitResult.exitCode === 0) {
 						const prTitle = `[WIP] Symphony: ${issueTitle} (#${issueNumber})`;
 						const prBody = `## Maestro Symphony Contribution
 
@@ -2656,7 +2734,8 @@ This PR will be updated automatically when the Auto Run completes.`;
 				const commitCheckResult = await execFileNoThrow(
 					'git',
 					['rev-list', '--count', `${baseBranch}..HEAD`],
-					localPath
+					localPath,
+					{ timeout: 30000 } // 30 seconds
 				);
 
 				const commitCount = parseInt(commitCheckResult.stdout.trim(), 10) || 0;
