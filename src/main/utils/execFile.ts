@@ -199,12 +199,16 @@ export async function execFileNoThrow(
 	}
 
 	const effectiveTimeout = getEffectiveTimeout(command, timeout);
+	const isWindows = process.platform === 'win32';
+	const useShell = isWindows && needsWindowsShell(command);
+
+	console.log(`[execFile] Executing: ${command} ${args.join(' ')} (cwd: ${cwd || 'default'})`);
+	console.log(`[execFile] Platform: ${process.platform}, shell: ${useShell}`);
 
 	try {
 		// On Windows, some commands need shell execution
 		// This is safe because we're executing a specific file path, not user input
-		const isWindows = process.platform === 'win32';
-		const useShell = isWindows && needsWindowsShell(command);
+		console.log('[execFile] Starting command execution...');
 
 		const execPromise = execFileAsync(command, args, {
 			cwd,
@@ -217,6 +221,7 @@ export async function execFileNoThrow(
 
 		const { stdout, stderr } = await execPromise;
 
+		console.log(`[execFile] Command succeeded (exitCode: 0, stdout: ${stdout.length} bytes)`);
 		return {
 			stdout,
 			stderr,
@@ -228,7 +233,9 @@ export async function execFileNoThrow(
 
 		if (isTimeout) {
 			// Log timeout
-			console.error(`[execFile] Command "${command}" timed out after ${effectiveTimeout}ms`);
+			console.error(
+				`[execFile] Command failed (code: ETIMEDOUT, message: Command timed out after ${effectiveTimeout}ms)`
+			);
 			return {
 				stdout: error.stdout || '',
 				stderr: error.stderr || '',
@@ -238,6 +245,9 @@ export async function execFileNoThrow(
 
 		// Check for spawn/exec errors (command not found, permission denied, etc.)
 		if (typeof error?.code === 'string' && ['ENOENT', 'EACCES', 'EPERM'].includes(error.code)) {
+			console.error(
+				`[execFile] Command failed (code: ${error.code}, message: ${error.message || 'Unknown error'})`
+			);
 			return {
 				stdout: error.stdout || '',
 				stderr: error.stderr || error.message || '',
@@ -248,6 +258,9 @@ export async function execFileNoThrow(
 		// Normal exit code error (process ran but exited with non-zero code)
 		// Use ?? instead of || to correctly handle exit code 0 (which is falsy but valid)
 		const exitCode = error.code ?? error.status ?? 1;
+		console.error(
+			`[execFile] Command failed (code: ${exitCode}, message: ${error.message || error.stderr || 'Unknown error'})`
+		);
 		return {
 			stdout: error.stdout || '',
 			stderr: error.stderr || error.message || '',
@@ -268,11 +281,12 @@ async function execFileWithInput(
 	timeout?: number
 ): Promise<ExecResult> {
 	const effectiveTimeout = getEffectiveTimeout(command, timeout);
+	const isWindows = process.platform === 'win32';
+	const useShell = isWindows && needsWindowsShell(command);
+
+	console.log(`[execFile] Spawning process: ${command} with stdin input`);
 
 	return new Promise((resolve) => {
-		const isWindows = process.platform === 'win32';
-		const useShell = isWindows && needsWindowsShell(command);
-
 		const child = spawn(command, args, {
 			cwd,
 			shell: useShell,
@@ -289,7 +303,9 @@ async function execFileWithInput(
 			timeoutHandle = setTimeout(() => {
 				if (!isResolved) {
 					isResolved = true;
-					console.error(`[execFile] Command "${command}" timed out after ${effectiveTimeout}ms`);
+					console.error(
+						`[execFile] Command failed (code: ETIMEDOUT, message: Command timed out after ${effectiveTimeout}ms)`
+					);
 					child.kill('SIGTERM');
 					resolve({
 						stdout,
@@ -301,11 +317,15 @@ async function execFileWithInput(
 		}
 
 		child.stdout?.on('data', (data) => {
-			stdout += data.toString();
+			const chunk = data.toString();
+			stdout += chunk;
+			console.log(`[execFile] stdout chunk received (${chunk.length} bytes)`);
 		});
 
 		child.stderr?.on('data', (data) => {
-			stderr += data.toString();
+			const chunk = data.toString();
+			stderr += chunk;
+			console.log(`[execFile] stderr chunk received (${chunk.length} bytes)`);
 		});
 
 		child.on('close', (code) => {
@@ -314,6 +334,7 @@ async function execFileWithInput(
 				if (timeoutHandle) {
 					clearTimeout(timeoutHandle);
 				}
+				console.log(`[execFile] Process closed with code ${code}`);
 				resolve({
 					stdout,
 					stderr,
@@ -335,12 +356,18 @@ async function execFileWithInput(
 					typeof anyErr?.code === 'string' &&
 					['ENOENT', 'EACCES', 'EPERM'].includes(anyErr.code)
 				) {
+					console.error(
+						`[execFile] Command failed (code: ${anyErr.code}, message: ${anyErr.message})`
+					);
 					resolve({
 						stdout: '',
 						stderr: anyErr.message,
 						exitCode: createErrorContext(anyErr),
 					});
 				} else {
+					console.error(
+						`[execFile] Command failed (code: SPAWN_ERROR, message: ${anyErr.message})`
+					);
 					resolve({
 						stdout: '',
 						stderr: anyErr.message,

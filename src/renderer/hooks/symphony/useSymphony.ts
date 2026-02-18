@@ -290,22 +290,38 @@ export function useSymphony(): UseSymphonyReturn {
 			error?: string;
 			errorCode?: string;
 		}> => {
+			const methodStartTime = Date.now();
 			try {
+				console.log(
+					`[Symphony] useSymphony.startContribution starting for ${repo.slug}#${issue.number}`
+				);
+
 				// Generate contribution ID
 				const timestamp = Date.now().toString(36);
 				const random = Math.random().toString(36).substring(2, 8);
 				const contributionId = `contrib_${timestamp}_${random}`;
+				console.log(`[Symphony] Generated contributionId: ${contributionId}`);
 
 				// Determine local path for the clone
 				const localPath = workingDirectory || `/tmp/symphony/${repo.name}-${contributionId}`;
+				console.log(`[Symphony] Local path determined: ${localPath}`);
 
 				// Step 1: Clone the repository
+				console.log(`[Symphony] Calling cloneRepo for ${repo.url}`);
+				const cloneStartTime = Date.now();
 				const cloneResult = await window.maestro.symphony.cloneRepo({
 					repoUrl: repo.url,
 					localPath,
 				});
+				const cloneElapsed = Date.now() - cloneStartTime;
+				console.log(
+					`[Symphony] cloneRepo completed in ${cloneElapsed}ms, success=${cloneResult.success}`
+				);
 
 				if (!cloneResult.success) {
+					console.log(
+						`[Symphony] Clone failed with error: ${cloneResult.error ?? 'Unknown error'}`
+					);
 					return {
 						success: false,
 						error: cloneResult.error ?? 'Failed to clone repository',
@@ -314,6 +330,8 @@ export function useSymphony(): UseSymphonyReturn {
 				}
 
 				// Step 2: Start contribution (creates branch, sets up docs, opens draft PR to claim issue)
+				console.log(`[Symphony] Calling startContribution with contributionId=${contributionId}`);
+				const startStartTime = Date.now();
 				const startResult = await window.maestro.symphony.startContribution({
 					contributionId,
 					sessionId,
@@ -323,8 +341,15 @@ export function useSymphony(): UseSymphonyReturn {
 					localPath,
 					documentPaths: issue.documentPaths,
 				});
+				const startElapsed = Date.now() - startStartTime;
+				console.log(
+					`[Symphony] startContribution IPC completed in ${startElapsed}ms, success=${startResult.success}`
+				);
 
 				if (!startResult.success) {
+					console.log(
+						`[Symphony] startContribution failed with error: ${startResult.error ?? 'Unknown error'}`
+					);
 					return {
 						success: false,
 						error: startResult.error ?? 'Failed to start contribution',
@@ -332,7 +357,14 @@ export function useSymphony(): UseSymphonyReturn {
 					};
 				}
 
+				console.log('[Symphony] Refreshing Symphony state');
 				await fetchSymphonyState();
+
+				const totalElapsed = Date.now() - methodStartTime;
+				console.log(
+					`[Symphony] useSymphony.startContribution returning: success=true, contributionId=${contributionId}, totalTime=${totalElapsed}ms`
+				);
+
 				return {
 					success: true,
 					contributionId,
@@ -342,9 +374,17 @@ export function useSymphony(): UseSymphonyReturn {
 					draftPrUrl: startResult.draftPrUrl,
 				};
 			} catch (err) {
+				const totalElapsed = Date.now() - methodStartTime;
+				const errorMessage = err instanceof Error ? err.message : 'Failed to start contribution';
+				console.error(
+					`[Symphony] useSymphony.startContribution threw exception after ${totalElapsed}ms: ${errorMessage}`
+				);
+				if (err instanceof Error) {
+					console.error('[Symphony] Stack trace:', err.stack);
+				}
 				return {
 					success: false,
-					error: err instanceof Error ? err.message : 'Failed to start contribution',
+					error: errorMessage,
 					errorCode: 'UNKNOWN',
 				};
 			}

@@ -1497,14 +1497,15 @@ export function SymphonyModal({
 				return { success: false, error: 'No repository or issue selected' };
 			}
 
-			setIsStarting(true);
 			const startTime = Date.now();
+			console.log(`[Symphony] handleCreateAgent called with agentType="${config.agentType}"`);
+			setIsStarting(true);
+			console.log('[Symphony] Setting isStarting=true');
 
 			try {
 				console.log(
-					`[Symphony] Starting contribution setup for ${config.repo.slug}#${config.issue.number}`
+					`[Symphony] Calling startContribution for ${config.repo.slug} issue #${config.issue.number}`
 				);
-				console.log('[Symphony] Step 1/3: Cloning repository');
 
 				const result = await startContribution(
 					config.repo,
@@ -1514,11 +1515,13 @@ export function SymphonyModal({
 					config.workingDirectory // Pass the working directory for cloning
 				);
 
-				const cloneElapsed = Date.now() - startTime;
-				console.log(`[Symphony] Step 1/3 completed: Clone finished in ${cloneElapsed}ms`);
+				const elapsed = Date.now() - startTime;
+				console.log(
+					`[Symphony] startContribution resolved in ${elapsed}ms, success=${result.success}`
+				);
 
 				if (result.success && result.contributionId) {
-					console.log('[Symphony] Step 2/3: Preparing UI state');
+					console.log('[Symphony] Contribution successful, calling onStartContribution');
 
 					// Close the agent dialog
 					setShowAgentDialog(false);
@@ -1526,7 +1529,9 @@ export function SymphonyModal({
 					setActiveTab('active');
 					handleBack();
 
-					console.log('[Symphony] Step 3/3: Notifying parent component');
+					console.log(
+						`[Symphony] Contribution data: contributionId=${result.contributionId}, branchName=${result.branchName}`
+					);
 
 					// Notify parent with all data needed to create the session
 					try {
@@ -1546,6 +1551,8 @@ export function SymphonyModal({
 							customEnvVars: config.customEnvVars,
 						});
 
+						console.log('[Symphony] onStartContribution completed');
+
 						const totalElapsed = Date.now() - startTime;
 						console.log(
 							`[Symphony] Contribution setup completed successfully in ${totalElapsed}ms`
@@ -1554,21 +1561,22 @@ export function SymphonyModal({
 						return { success: true };
 					} catch (err) {
 						const parentError = err instanceof Error ? err.message : 'Parent callback failed';
-						console.error('[Symphony] Step 3/3 failed: Parent notification error:', err);
+						console.error('[Symphony] Failed to call onStartContribution:', err);
 						return { success: false, error: `Setup failed at notification step: ${parentError}` };
 					}
 				}
 
 				const failureReason = result.error ?? 'Failed to start contribution';
-				console.error(`[Symphony] Contribution setup failed: ${failureReason}`);
+				console.error(`[Symphony] Contribution failed: ${failureReason}`);
 				return { success: false, error: failureReason };
 			} catch (err) {
 				const elapsed = Date.now() - startTime;
 				const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-				console.error(`[Symphony] Contribution setup error after ${elapsed}ms:`, err);
+				console.error(`[Symphony] Contribution error after ${elapsed}ms:`, err);
 				return { success: false, error: errorMessage };
 			} finally {
 				setIsStarting(false);
+				console.log('[Symphony] Setting isStarting=false');
 			}
 		},
 		[selectedRepo, selectedIssue, startContribution, onStartContribution, handleBack]

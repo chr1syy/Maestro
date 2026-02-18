@@ -115,6 +115,9 @@ export function AgentCreationDialog({
 	// Reset all state when dialog opens
 	useEffect(() => {
 		if (isOpen) {
+			console.log(
+				`[Symphony] AgentCreationDialog opened, generating defaults for ${repo.slug}#${issue.number}`
+			);
 			// Reset error state
 			setError(null);
 			setIsCreating(false);
@@ -127,13 +130,22 @@ export function AgentCreationDialog({
 				window.maestro.fs
 					.homeDir()
 					.then((homeDir) => {
+						console.log(`[Symphony] Home directory resolved to ${homeDir}`);
 						setWorkingDirectory(`${homeDir}/Maestro-Symphony/${owner}-${repoName}`);
+						console.log(
+							`[Symphony] Working directory set to ${homeDir}/Maestro-Symphony/${owner}-${repoName}`
+						);
 					})
 					.catch(() => {
 						// Fallback to tilde (will be expanded in process-manager)
 						setWorkingDirectory(`~/Maestro-Symphony/${owner}-${repoName}`);
+						console.log(
+							`[Symphony] Working directory fallback to ~/Maestro-Symphony/${owner}-${repoName}`
+						);
 					});
 			}
+		} else {
+			console.log('[Symphony] AgentCreationDialog closed');
 		}
 	}, [isOpen, repo, issue]);
 
@@ -242,7 +254,9 @@ export function AgentCreationDialog({
 		setError(null);
 
 		const startTime = Date.now();
-		console.log('[Symphony] Agent creation started');
+		console.log(
+			`[Symphony] Creating agent: sessionName="${sessionName.trim()}", agentType="${selectedAgent}"`
+		);
 
 		// Create a timeout promise that rejects after 5 minutes
 		const timeoutPromise = new Promise<never>((_, reject) => {
@@ -255,6 +269,7 @@ export function AgentCreationDialog({
 		});
 
 		try {
+			console.log('[Symphony] Calling onCreateAgent, awaiting response...');
 			const result = await Promise.race([
 				onCreateAgent({
 					agentType: selectedAgent,
@@ -271,18 +286,22 @@ export function AgentCreationDialog({
 			]);
 
 			const elapsed = Date.now() - startTime;
-			console.log(`[Symphony] Agent creation completed in ${elapsed}ms`);
+			console.log(`[Symphony] onCreateAgent resolved successfully in ${elapsed}ms`);
 
 			if (!result.success) {
 				const errorMsg = result.error ?? 'Failed to create agent session';
-				console.error('[Symphony] Creation failed:', errorMsg);
+				console.error(`[Symphony] onCreateAgent returned error: ${errorMsg}`);
 				setError(errorMsg);
 			}
 			// On success, parent will close dialog
 		} catch (err) {
 			const elapsed = Date.now() - startTime;
 			const errorMessage = err instanceof Error ? err.message : 'Failed to create agent';
-			console.error(`[Symphony] Agent creation failed after ${elapsed}ms:`, err);
+			console.error(`[Symphony] onCreateAgent threw exception after ${elapsed}ms: ${errorMessage}`);
+			if (err instanceof Error) {
+				console.error('[Symphony] Stack trace:', err.stack);
+			}
+			console.error('[Symphony] Full error object:', err);
 			setError(errorMessage);
 		} finally {
 			setIsCreating(false);

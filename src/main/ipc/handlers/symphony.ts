@@ -586,8 +586,10 @@ async function cloneRepository(
 	repoUrl: string,
 	targetPath: string
 ): Promise<{ success: boolean; error?: string }> {
-	logger.info('Cloning repository', LOG_CONTEXT, { repoUrl, targetPath });
+	const startTime = Date.now();
+	logger.info(`[Symphony] cloneRepository starting: ${repoUrl} → ${targetPath}`, LOG_CONTEXT);
 
+	logger.info(`[Symphony] Executing: git clone --depth=1 ${repoUrl} ${targetPath}`, LOG_CONTEXT);
 	const result = await execFileNoThrow(
 		'git',
 		['clone', '--depth=1', repoUrl, targetPath],
@@ -596,12 +598,16 @@ async function cloneRepository(
 			timeout: 180000, // 3 minutes for clone operations
 		}
 	);
+	const elapsed = Date.now() - startTime;
+
+	logger.info(`[Symphony] git clone exited with code ${result.exitCode}`, LOG_CONTEXT);
 
 	// Check for timeout error
 	if (typeof result.exitCode === 'object' && result.exitCode.isTimeout) {
 		logger.error('Repository clone timed out', LOG_CONTEXT, {
 			repoUrl,
 			timeout: '180s',
+			elapsed,
 		});
 		return {
 			success: false,
@@ -610,9 +616,12 @@ async function cloneRepository(
 	}
 
 	if (result.exitCode !== 0) {
+		const errorMsg = result.stderr ? result.stderr.slice(0, 500) : 'Unknown error';
+		logger.error(`[Symphony] Clone failed: ${errorMsg}`, LOG_CONTEXT, { elapsed });
 		return { success: false, error: result.stderr };
 	}
 
+	logger.info(`[Symphony] Repository cloned successfully (${elapsed}ms)`, LOG_CONTEXT);
 	return { success: true };
 }
 
@@ -623,15 +632,23 @@ async function createBranch(
 	repoPath: string,
 	branchName: string
 ): Promise<{ success: boolean; error?: string }> {
-	logger.info('Creating branch', LOG_CONTEXT, { branchName });
+	const startTime = Date.now();
+	logger.info(
+		`[Symphony] createBranch starting: creating ${branchName} in ${repoPath}`,
+		LOG_CONTEXT
+	);
 
+	logger.info(`[Symphony] Executing: git checkout -b ${branchName}`, LOG_CONTEXT);
 	const result = await execFileNoThrow('git', ['checkout', '-b', branchName], repoPath, {
 		timeout: 30000, // 30 seconds for branch creation
 	});
+	const elapsed = Date.now() - startTime;
+
+	logger.info(`[Symphony] git checkout exited with code ${result.exitCode}`, LOG_CONTEXT);
 
 	// Check for timeout error
 	if (typeof result.exitCode === 'object' && result.exitCode.isTimeout) {
-		logger.error('Branch creation timed out', LOG_CONTEXT, { branchName, timeout: '30s' });
+		logger.error('Branch creation timed out', LOG_CONTEXT, { branchName, timeout: '30s', elapsed });
 		return {
 			success: false,
 			error: `Git branch creation timed out after 30 seconds`,
@@ -639,9 +656,11 @@ async function createBranch(
 	}
 
 	if (result.exitCode !== 0) {
+		logger.error(`[Symphony] Branch creation failed: ${result.stderr}`, LOG_CONTEXT, { elapsed });
 		return { success: false, error: result.stderr };
 	}
 
+	logger.info(`[Symphony] Branch created successfully (${elapsed}ms)`, LOG_CONTEXT);
 	return { success: true };
 }
 
@@ -2383,6 +2402,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 				error?: string;
 				errorCode?: string;
 			}> => {
+				const handlerStartTime = Date.now();
 				const {
 					contributionId,
 					sessionId,
@@ -2463,14 +2483,17 @@ This PR will be updated automatically when the Auto Run completes.`;
 					);
 
 					// 1. Create branch and checkout
+					const branchStartTime = Date.now();
 					const branchName = generateBranchName(issueNumber);
 					logger.info(`[Symphony] Creating branch ${branchName}`, LOG_CONTEXT);
 					const branchResult = await createBranch(localPath, branchName);
+					const branchElapsed = Date.now() - branchStartTime;
 					if (!branchResult.success) {
 						logger.error('Failed to create branch', LOG_CONTEXT, {
 							localPath,
 							branchName,
 							error: branchResult.error,
+							elapsed: branchElapsed,
 						});
 						return {
 							success: false,
@@ -2478,11 +2501,12 @@ This PR will be updated automatically when the Auto Run completes.`;
 							errorCode: 'BRANCH_FAILED',
 						};
 					}
-					logger.info('[Symphony] Branch created successfully', LOG_CONTEXT);
+					logger.info(`[Symphony] Branch created successfully (${branchElapsed}ms)`, LOG_CONTEXT);
 
 					// 2. Set up Auto Run documents directory
 					// External docs (GitHub attachments) go to cache dir to avoid polluting the repo
 					// Repo-internal docs are referenced in place
+					const docsStartTime = Date.now();
 					const symphonyDocsDir = path.join(
 						getSymphonyDir(app),
 						'contributions',
@@ -2512,6 +2536,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 					const resolvedDocs: { name: string; path: string; isExternal: boolean }[] = [];
 
 					logger.info(`[Symphony] Processing ${documentPaths.length} documents`, LOG_CONTEXT);
+					const docProcessStartTime = Date.now();
 					for (const doc of documentPaths) {
 						if (doc.isExternal) {
 							// Download external file (GitHub attachment) to cache directory
@@ -2566,8 +2591,9 @@ This PR will be updated automatically when the Auto Run completes.`;
 							}
 						}
 					}
+					const docProcessElapsed = Date.now() - docProcessStartTime;
 					logger.info(
-						`[Symphony] Resolved ${resolvedDocs.length}/${documentPaths.length} documents`,
+						`[Symphony] Resolved ${resolvedDocs.length}/${documentPaths.length} documents (${docProcessElapsed}ms)`,
 						LOG_CONTEXT
 					);
 
@@ -2619,6 +2645,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 					let draftPrNumber: number | undefined;
 					let draftPrUrl: string | undefined;
 
+					const commitStartTime = Date.now();
 					const baseBranch = await getDefaultBranch(localPath);
 					const commitMsg = `[Symphony] Start contribution for #${issueNumber}`;
 					logger.info('[Symphony] Creating empty commit', LOG_CONTEXT);
@@ -2628,6 +2655,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 						localPath,
 						{ timeout: 30000 } // 30 seconds for commit
 					);
+					const commitElapsed = Date.now() - commitStartTime;
 
 					// Check for timeout error
 					if (
@@ -2637,11 +2665,12 @@ This PR will be updated automatically when the Auto Run completes.`;
 						logger.error('Git commit timed out', LOG_CONTEXT, {
 							issueNumber,
 							timeout: '30s',
+							elapsed: commitElapsed,
 						});
 						draftPrNumber = undefined;
 						draftPrUrl = undefined;
 					} else if (emptyCommitResult.exitCode === 0) {
-						logger.info('[Symphony] Empty commit created (if prCreated=true next)', LOG_CONTEXT);
+						logger.info(`[Symphony] Empty commit created (${commitElapsed}ms)`, LOG_CONTEXT);
 						const prTitle = `[WIP] Symphony: ${issueTitle} (#${issueNumber})`;
 						const prBody = `## Maestro Symphony Contribution
 
@@ -2655,10 +2684,16 @@ Working on #${issueNumber} via [Maestro Symphony](https://runmaestro.ai).
 This PR will be updated automatically when the Auto Run completes.`;
 
 						logger.info(`[Symphony] Creating draft PR for #${issueNumber}`, LOG_CONTEXT);
+						const prStartTime = Date.now();
 						const prResult = await createDraftPR(localPath, baseBranch, prTitle, prBody);
+						const prElapsed = Date.now() - prStartTime;
 						if (prResult.success) {
 							draftPrNumber = prResult.prNumber;
 							draftPrUrl = prResult.prUrl;
+							logger.info(
+								`[Symphony] Draft PR created successfully (${prElapsed}ms): #${draftPrNumber}`,
+								LOG_CONTEXT
+							);
 
 							// Update metadata with PR info
 							logger.info('[Symphony] Updating metadata with PR info', LOG_CONTEXT);
@@ -2678,12 +2713,14 @@ This PR will be updated automatically when the Auto Run completes.`;
 							logger.warn('Failed to create draft PR, continuing without claim', LOG_CONTEXT, {
 								contributionId,
 								error: prResult.error,
+								elapsed: prElapsed,
 							});
 						}
 					} else {
 						logger.warn('Empty commit failed, continuing without draft PR', LOG_CONTEXT, {
 							contributionId,
 							error: emptyCommitResult.stderr,
+							elapsed: commitElapsed,
 						});
 					}
 
@@ -2718,6 +2755,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 						}
 					}
 
+					const totalElapsed = Date.now() - handlerStartTime;
 					logger.info('[Symphony] Contribution setup completed successfully', LOG_CONTEXT, {
 						contributionId,
 						sessionId,
@@ -2725,6 +2763,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 						documentCount: resolvedDocs.length,
 						hasExternalDocs,
 						draftPrNumber,
+						totalTime: totalElapsed,
 					});
 
 					return {
@@ -2735,7 +2774,18 @@ This PR will be updated automatically when the Auto Run completes.`;
 						draftPrUrl,
 					};
 				} catch (error) {
-					logger.error('Symphony contribution failed', LOG_CONTEXT, { error });
+					const totalElapsed = Date.now() - handlerStartTime;
+					logger.error('Symphony contribution failed', LOG_CONTEXT, {
+						error,
+						elapsed: totalElapsed,
+						errorObject:
+							error instanceof Error
+								? {
+										message: error.message,
+										stack: error.stack,
+									}
+								: error,
+					});
 					return {
 						success: false,
 						error: error instanceof Error ? error.message : 'Unknown error',

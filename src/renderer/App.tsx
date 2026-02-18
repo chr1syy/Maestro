@@ -8818,12 +8818,15 @@ You are taking over this conversation. Based on the context above, provide a bri
 								setSymphonyModalOpen(false);
 							}}
 							onStartContribution={async (data: SymphonyContributionData) => {
-								console.log('[Symphony] Creating session for contribution:', data);
+								console.log(
+									`[Symphony] App.onStartContribution called with contributionId=${data.contributionId}`
+								);
 
 								// Get agent definition
+								console.log(`[Symphony] Looking up agent: ${data.agentType}`);
 								const agent = await window.maestro.agents.get(data.agentType);
 								if (!agent) {
-									console.error(`Agent not found: ${data.agentType}`);
+									console.error(`[Symphony] Agent not found: ${data.agentType}`);
 									notifyToast({
 										type: 'error',
 										title: 'Symphony Error',
@@ -8831,8 +8834,10 @@ You are taking over this conversation. Based on the context above, provide a bri
 									});
 									return;
 								}
+								console.log(`[Symphony] Agent found: ${agent.name}`);
 
 								// Validate uniqueness
+								console.log(`[Symphony] Validating session: ${data.sessionName}`);
 								const validation = validateNewSession(
 									data.sessionName,
 									data.localPath,
@@ -8840,7 +8845,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 									sessions
 								);
 								if (!validation.valid) {
-									console.error(`Session validation failed: ${validation.error}`);
+									console.error(`[Symphony] Session validation failed: ${validation.error}`);
 									notifyToast({
 										type: 'error',
 										title: 'Session Creation Failed',
@@ -8848,15 +8853,19 @@ You are taking over this conversation. Based on the context above, provide a bri
 									});
 									return;
 								}
+								console.log('[Symphony] Session validation passed');
 
 								const newId = generateId();
 								const initialTabId = generateId();
 
 								// Check git repo status
+								console.log(`[Symphony] Checking if ${data.localPath} is git repo`);
 								const isGitRepo = await gitService.isRepo(data.localPath);
 								let gitBranches: string[] | undefined;
 								let gitTags: string[] | undefined;
 								let gitRefsCacheTime: number | undefined;
+
+								console.log(`[Symphony] Git repo check: isGitRepo=${isGitRepo}`);
 
 								if (isGitRepo) {
 									[gitBranches, gitTags] = await Promise.all([
@@ -8864,6 +8873,9 @@ You are taking over this conversation. Based on the context above, provide a bri
 										gitService.getTags(data.localPath),
 									]);
 									gitRefsCacheTime = Date.now();
+									console.log(
+										`[Symphony] Fetched ${gitBranches?.length || 0} branches and ${gitTags?.length || 0} tags`
+									);
 								}
 
 								// Create initial tab
@@ -8881,6 +8893,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 								};
 
 								// Create session with Symphony metadata
+								console.log(`[Symphony] Creating new session: ${newId}`);
 								const newSession: Session = {
 									id: newId,
 									name: data.sessionName,
@@ -8945,12 +8958,14 @@ You are taking over this conversation. Based on the context above, provide a bri
 								};
 
 								setSessions((prev) => [...prev, newSession]);
+								console.log('[Symphony] Session added to state');
 								setActiveSessionId(newId);
 								setSymphonyModalOpen(false);
 
 								// Register active contribution in Symphony persistent state
 								// This makes it show up in the Active tab of the Symphony modal
 								// Use a timeout to ensure registration completes or fails gracefully
+								console.log(`[Symphony] Registering active contribution: ${data.contributionId}`);
 								const registrationTimeout = new Promise<void>((resolve) => {
 									setTimeout(() => {
 										console.warn('[Symphony] Registration timeout - proceeding anyway');
@@ -8976,7 +8991,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 									registrationTimeout,
 								])
 									.then(() => {
-										console.log(`[Symphony] Contribution registered in session ${newId}`);
+										console.log('[Symphony] Active contribution registered successfully');
 									})
 									.catch((err: unknown) => {
 										console.error('[Symphony] Failed to register active contribution:', err);
@@ -9001,6 +9016,9 @@ You are taking over this conversation. Based on the context above, provide a bri
 
 								// Auto-start batch run with all contribution documents
 								if (data.autoRunPath && data.issue.documentPaths.length > 0) {
+									console.log(
+										`[Symphony] Starting batch Auto Run with ${data.issue.documentPaths.length} documents`
+									);
 									const batchConfig: BatchRunConfig = {
 										documents: data.issue.documentPaths.map((doc) => ({
 											id: generateId(),
@@ -9022,6 +9040,8 @@ You are taking over this conversation. Based on the context above, provide a bri
 										startBatchRun(newId, batchConfig, data.autoRunPath!);
 									}, 500);
 								}
+
+								console.log('[Symphony] Symphony session creation completed successfully');
 							}}
 						/>
 					</Suspense>
