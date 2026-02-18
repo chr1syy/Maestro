@@ -55,7 +55,7 @@ function buildNodeVersionManagerPathLines(): string[] {
 		'if [ -d "$_nvm_dir" ]; then',
 		'  [ -d "$_nvm_dir/current/bin" ] && PATH="$_nvm_dir/current/bin:$PATH"',
 		'  if [ -d "$_nvm_dir/versions/node" ]; then',
-		'    for _v in $(ls "$_nvm_dir/versions/node/" 2>/dev/null | sort -V | tac); do',
+		'    for _v in $(ls "$_nvm_dir/versions/node/" 2>/dev/null | sort -rV); do',
 		'      [ -d "$_nvm_dir/versions/node/$_v/bin" ] && PATH="$_nvm_dir/versions/node/$_v/bin:$PATH"',
 		'    done',
 		'  fi',
@@ -65,7 +65,7 @@ function buildNodeVersionManagerPathLines(): string[] {
 		'  if [ -d "$_fnm_dir" ]; then',
 		'    [ -d "$_fnm_dir/aliases/default/bin" ] && PATH="$_fnm_dir/aliases/default/bin:$PATH"',
 		'    if [ -d "$_fnm_dir/node-versions" ]; then',
-		'      for _v in $(ls -r "$_fnm_dir/node-versions/" 2>/dev/null); do',
+		'      for _v in $(ls "$_fnm_dir/node-versions/" 2>/dev/null | sort -rV); do',
 		'        [ -d "$_fnm_dir/node-versions/$_v/installation/bin" ] && PATH="$_fnm_dir/node-versions/$_v/installation/bin:$PATH"',
 		'      done',
 		'    fi',
@@ -104,7 +104,7 @@ function buildNodeVersionManagerPathSnippet(): string {
 		'if [ -d "$_nvm_dir" ]; then ' +
 			'[ -d "$_nvm_dir/current/bin" ] && PATH="$_nvm_dir/current/bin:$PATH"; ' +
 			'if [ -d "$_nvm_dir/versions/node" ]; then ' +
-			'for _v in $(ls "$_nvm_dir/versions/node/" 2>/dev/null | sort -V | tac); do ' +
+			'for _v in $(ls "$_nvm_dir/versions/node/" 2>/dev/null | sort -rV); do ' +
 			'[ -d "$_nvm_dir/versions/node/$_v/bin" ] && PATH="$_nvm_dir/versions/node/$_v/bin:$PATH"; ' +
 			'done; ' +
 			'fi; ' +
@@ -114,7 +114,7 @@ function buildNodeVersionManagerPathSnippet(): string {
 			'if [ -d "$_fnm_dir" ]; then ' +
 			'[ -d "$_fnm_dir/aliases/default/bin" ] && PATH="$_fnm_dir/aliases/default/bin:$PATH"; ' +
 			'if [ -d "$_fnm_dir/node-versions" ]; then ' +
-			'for _v in $(ls -r "$_fnm_dir/node-versions/" 2>/dev/null); do ' +
+			'for _v in $(ls "$_fnm_dir/node-versions/" 2>/dev/null | sort -rV); do ' +
 			'[ -d "$_fnm_dir/node-versions/$_v/installation/bin" ] && PATH="$_fnm_dir/node-versions/$_v/installation/bin:$PATH"; ' +
 			'done; ' +
 			'fi; ' +
