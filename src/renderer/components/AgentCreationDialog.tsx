@@ -22,6 +22,8 @@ import {
 	FolderOpen,
 	ChevronRight,
 	RefreshCw,
+	Copy,
+	RotateCcw,
 } from 'lucide-react';
 import type { Theme, AgentConfig } from '../types';
 import type { RegisteredRepository, SymphonyIssue } from '../../shared/symphony-types';
@@ -239,25 +241,49 @@ export function AgentCreationDialog({
 		setIsCreating(true);
 		setError(null);
 
+		const startTime = Date.now();
+		console.log('[Symphony] Agent creation started');
+
+		// Create a timeout promise that rejects after 5 minutes
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			setTimeout(
+				() => {
+					reject(new Error('Creation took too long (check network/git availability)'));
+				},
+				5 * 60 * 1000
+			); // 5 minutes
+		});
+
 		try {
-			const result = await onCreateAgent({
-				agentType: selectedAgent,
-				sessionName: sessionName.trim(),
-				workingDirectory,
-				repo,
-				issue,
-				customPath: customAgentPaths[selectedAgent] || undefined,
-				customArgs: customAgentArgs[selectedAgent] || undefined,
-				customEnvVars: customAgentEnvVars[selectedAgent] || undefined,
-				agentConfig: agentConfigs[selectedAgent] || undefined,
-			});
+			const result = await Promise.race([
+				onCreateAgent({
+					agentType: selectedAgent,
+					sessionName: sessionName.trim(),
+					workingDirectory,
+					repo,
+					issue,
+					customPath: customAgentPaths[selectedAgent] || undefined,
+					customArgs: customAgentArgs[selectedAgent] || undefined,
+					customEnvVars: customAgentEnvVars[selectedAgent] || undefined,
+					agentConfig: agentConfigs[selectedAgent] || undefined,
+				}),
+				timeoutPromise,
+			]);
+
+			const elapsed = Date.now() - startTime;
+			console.log(`[Symphony] Agent creation completed in ${elapsed}ms`);
 
 			if (!result.success) {
-				setError(result.error ?? 'Failed to create agent session');
+				const errorMsg = result.error ?? 'Failed to create agent session';
+				console.error('[Symphony] Creation failed:', errorMsg);
+				setError(errorMsg);
 			}
 			// On success, parent will close dialog
 		} catch (err) {
-			setError(err instanceof Error ? err.message : 'Failed to create agent');
+			const elapsed = Date.now() - startTime;
+			const errorMessage = err instanceof Error ? err.message : 'Failed to create agent';
+			console.error(`[Symphony] Agent creation failed after ${elapsed}ms:`, err);
+			setError(errorMessage);
 		} finally {
 			setIsCreating(false);
 		}
@@ -589,11 +615,45 @@ export function AgentCreationDialog({
 
 					{/* Error display */}
 					{error && (
-						<div
-							className="p-3 rounded-lg text-sm"
-							style={{ backgroundColor: '#cc331120', color: '#cc3311' }}
-						>
-							{error}
+						<div className="p-3 rounded-lg space-y-3" style={{ backgroundColor: '#cc331120' }}>
+							<div>
+								<p className="text-xs font-semibold mb-1" style={{ color: '#cc3311' }}>
+									Error
+								</p>
+								<p
+									className="text-sm whitespace-pre-wrap break-words font-mono"
+									style={{ color: '#cc3311' }}
+								>
+									{error}
+								</p>
+								<p className="text-xs mt-2" style={{ color: '#cc3311' }}>
+									{new Date().toLocaleTimeString()}
+								</p>
+							</div>
+							<div className="flex gap-2">
+								<button
+									onClick={() => {
+										navigator.clipboard.writeText(error).catch(console.error);
+									}}
+									className="flex items-center gap-1 px-2 py-1.5 rounded text-xs font-medium hover:bg-white/10 transition-colors"
+									style={{ color: '#cc3311' }}
+									title="Copy error to clipboard"
+								>
+									<Copy className="w-3.5 h-3.5" />
+									Copy Error
+								</button>
+								<button
+									onClick={() => {
+										setError(null);
+									}}
+									className="flex items-center gap-1 px-2 py-1.5 rounded text-xs font-medium hover:bg-white/10 transition-colors"
+									style={{ color: '#cc3311' }}
+									title="Clear error and retry"
+								>
+									<RotateCcw className="w-3.5 h-3.5" />
+									Retry
+								</button>
+							</div>
 						</div>
 					)}
 				</div>

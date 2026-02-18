@@ -8950,8 +8950,16 @@ You are taking over this conversation. Based on the context above, provide a bri
 
 								// Register active contribution in Symphony persistent state
 								// This makes it show up in the Active tab of the Symphony modal
-								window.maestro.symphony
-									.registerActive({
+								// Use a timeout to ensure registration completes or fails gracefully
+								const registrationTimeout = new Promise<void>((resolve) => {
+									setTimeout(() => {
+										console.warn('[Symphony] Registration timeout - proceeding anyway');
+										resolve();
+									}, 5000); // 5 second timeout
+								});
+
+								Promise.race([
+									window.maestro.symphony.registerActive({
 										contributionId: data.contributionId,
 										sessionId: newId,
 										repoSlug: data.repo.slug,
@@ -8964,6 +8972,11 @@ You are taking over this conversation. Based on the context above, provide a bri
 										agentType: data.agentType,
 										draftPrNumber: data.draftPrNumber,
 										draftPrUrl: data.draftPrUrl,
+									}),
+									registrationTimeout,
+								])
+									.then(() => {
+										console.log(`[Symphony] Contribution registered in session ${newId}`);
 									})
 									.catch((err: unknown) => {
 										console.error('[Symphony] Failed to register active contribution:', err);
