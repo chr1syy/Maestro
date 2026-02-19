@@ -85,6 +85,7 @@ import {
 	useSummarizeAndContinue,
 	// Git
 	useFileTreeManagement,
+	useFileExplorerEffects,
 	// Remote
 	useRemoteIntegration,
 	useRemoteHandlers,
@@ -169,8 +170,6 @@ import {
 	navigateToPrevUnifiedTab,
 	hasActiveWizard,
 } from './utils/tabHelpers';
-import { shouldOpenExternally, flattenTree } from './utils/fileExplorer';
-import type { FileNode } from './types/fileTree';
 import { validateNewSession } from './utils/sessionValidation';
 import { formatLogsForClipboard } from './utils/contextExtractor';
 import { getSlashCommandDescription } from './constants/app';
@@ -625,7 +624,7 @@ function MaestroConsoleInner() {
 		setSelectedSidebarIndex,
 	} = useUIStore.getState();
 
-	const { setSelectedFileIndex, setFileTreeFilter, setFileTreeFilterOpen, setFlatFileList } =
+	const { setSelectedFileIndex, setFileTreeFilter, setFileTreeFilterOpen } =
 		useFileExplorerStore.getState();
 
 	// --- GROUP CHAT STATE (now in groupChatStore) ---
@@ -699,7 +698,6 @@ function MaestroConsoleInner() {
 
 	// File Explorer State (reads from fileExplorerStore)
 	const filePreviewLoading = useFileExplorerStore((s) => s.filePreviewLoading);
-	const flatFileList = useFileExplorerStore((s) => s.flatFileList);
 	const isGraphViewOpen = useFileExplorerStore((s) => s.isGraphViewOpen);
 	const graphFocusFilePath = useFileExplorerStore((s) => s.graphFocusFilePath);
 	const lastGraphFocusFilePath = useFileExplorerStore((s) => s.lastGraphFocusFilePath);
@@ -789,7 +787,7 @@ function MaestroConsoleInner() {
 	const sidebarContainerRef = useRef<HTMLDivElement>(null);
 	const fileTreeContainerRef = useRef<HTMLDivElement>(null);
 	const fileTreeFilterInputRef = useRef<HTMLInputElement>(null);
-	const fileTreeKeyboardNavRef = useRef(false); // Track if selection change came from keyboard
+	const fileTreeKeyboardNavRef = useRef(false); // Shared between useInputHandlers and useFileExplorerEffects
 	const rightPanelRef = useRef<RightPanelHandle>(null);
 	const mainPanelRef = useRef<MainPanelHandle>(null);
 
@@ -1547,55 +1545,6 @@ function MaestroConsoleInner() {
 
 	const handleFocusFileInGraph = useFileExplorerStore.getState().focusFileInGraph;
 	const handleOpenLastDocumentGraph = useFileExplorerStore.getState().openLastDocumentGraph;
-
-	// PERF: Memoized callbacks for MainPanel file preview navigation
-	// These were inline arrow functions causing MainPanel re-renders on every keystroke
-	// Updated to use file tabs (handleOpenFileTab) instead of legacy preview overlay
-	const handleMainPanelFileClick = useCallback(
-		async (relativePath: string, options?: { openInNewTab?: boolean }) => {
-			const currentSession = sessionsRef.current.find((s) => s.id === activeSessionIdRef.current);
-			if (!currentSession) return;
-			const filename = relativePath.split('/').pop() || relativePath;
-
-			// Get SSH remote ID
-			const sshRemoteId =
-				currentSession.sshRemoteId || currentSession.sessionSshRemoteConfig?.remoteId || undefined;
-
-			// Check if file should be opened externally (PDF, etc.)
-			if (!sshRemoteId && shouldOpenExternally(filename)) {
-				const fullPath = `${currentSession.fullPath}/${relativePath}`;
-				window.maestro.shell.openExternal(`file://${fullPath}`);
-				return;
-			}
-
-			try {
-				const fullPath = `${currentSession.fullPath}/${relativePath}`;
-				// Fetch content and stat in parallel for efficiency
-				const [content, stat] = await Promise.all([
-					window.maestro.fs.readFile(fullPath, sshRemoteId),
-					window.maestro.fs.stat(fullPath, sshRemoteId).catch(() => null), // stat is optional, don't fail if unavailable
-				]);
-				const lastModified = stat?.modifiedAt ? new Date(stat.modifiedAt).getTime() : undefined;
-				// Open file in a tab:
-				// - openInNewTab=true (Cmd/Ctrl+Click): create new tab adjacent to current
-				// - openInNewTab=false (regular click): replace current tab content
-				handleOpenFileTab(
-					{
-						path: fullPath,
-						name: filename,
-						content,
-						sshRemoteId,
-						lastModified,
-					},
-					{ openInNewTab: options?.openInNewTab ?? false } // Default to replacing current tab for in-content links
-				);
-				setActiveFocus('main');
-			} catch (error) {
-				console.error('[onFileClick] Failed to read file:', error);
-			}
-		},
-		[handleOpenFileTab]
-	);
 
 	const handleCopyContext = useCallback((tabId: string) => {
 		const currentSession = sessionsRef.current.find((s) => s.id === activeSessionIdRef.current);
@@ -2721,16 +2670,7 @@ function MaestroConsoleInner() {
 	// NOTE: Main keyboard handler is now provided by useMainKeyboardHandler hook
 	// NOTE: Sync selectedSidebarIndex with activeSessionId is now handled by useKeyboardNavigation hook
 
-	// Restore file tree scroll position when switching sessions
-	useEffect(() => {
-		if (
-			activeSession &&
-			fileTreeContainerRef.current &&
-			activeSession.fileExplorerScrollPos !== undefined
-		) {
-			fileTreeContainerRef.current.scrollTop = activeSession.fileExplorerScrollPos;
-		}
-	}, [activeSessionId]); // Only restore on session switch, not on scroll position changes
+	// NOTE: File tree scroll restore is now handled by useFileExplorerEffects hook (Phase 2.6)
 
 	// Navigation history tracking — provided by useSessionLifecycle hook (Phase 2H)
 
@@ -4237,6 +4177,20 @@ function MaestroConsoleInner() {
 		sshRemoteHonorGitignore: settings.sshRemoteHonorGitignore,
 	});
 
+	// --- FILE EXPLORER EFFECTS ---
+	// Extracted hook for file explorer side effects and keyboard navigation (Phase 2.6)
+	const { stableFileTree, handleMainPanelFileClick } = useFileExplorerEffects({
+		sessionsRef,
+		activeSessionIdRef,
+		fileTreeContainerRef,
+		fileTreeKeyboardNavRef,
+		filteredFileTree,
+		tabCompletionOpen,
+		toggleFolder,
+		handleFileClick,
+		handleOpenFileTab,
+	});
+
 	// --- GROUP MANAGEMENT ---
 	// Extracted hook for group CRUD operations (toggle, rename, create, drag-drop)
 	const {
@@ -4795,213 +4749,8 @@ function MaestroConsoleInner() {
 		setAutoScrollAiMode,
 	};
 
-	// Update flat file list when active session's tree, expanded folders, filter, or hidden files setting changes
-	useEffect(() => {
-		if (!activeSession || !activeSession.fileExplorerExpanded) {
-			setFlatFileList([]);
-			return;
-		}
-		const expandedSet = new Set(activeSession.fileExplorerExpanded);
-
-		// Apply hidden files filter to match FileExplorerPanel's display
-		const filterHiddenFiles = (nodes: FileNode[]): FileNode[] => {
-			if (showHiddenFiles) return nodes;
-			return nodes
-				.filter((node) => !node.name.startsWith('.'))
-				.map((node) => ({
-					...node,
-					children: node.children ? filterHiddenFiles(node.children) : undefined,
-				}));
-		};
-
-		// Use filteredFileTree when available (it returns the full tree when no filter is active)
-		// Then apply hidden files filter to match what FileExplorerPanel displays
-		const displayTree = filterHiddenFiles(filteredFileTree);
-		const newFlatList = flattenTree(displayTree, expandedSet);
-
-		// Preserve selection identity: track the selected item by path, not index.
-		// When folders expand/collapse, the flat list shifts — re-locate the selected item.
-		const { flatFileList: oldList, selectedFileIndex: oldIndex } = useFileExplorerStore.getState();
-		const selectedPath = oldList[oldIndex]?.fullPath;
-		if (selectedPath) {
-			const newIndex = newFlatList.findIndex((item) => item.fullPath === selectedPath);
-			if (newIndex >= 0) {
-				setSelectedFileIndex(newIndex);
-			} else {
-				// Item no longer visible (inside collapsed folder) — clamp to valid range
-				setSelectedFileIndex(Math.min(oldIndex, Math.max(0, newFlatList.length - 1)));
-			}
-		}
-
-		setFlatFileList(newFlatList);
-	}, [activeSession?.fileExplorerExpanded, filteredFileTree, showHiddenFiles]);
-
-	// Handle pending jump path from /jump command
-	useEffect(() => {
-		if (!activeSession || activeSession.pendingJumpPath === undefined || flatFileList.length === 0)
-			return;
-
-		const jumpPath = activeSession.pendingJumpPath;
-
-		// Find the target index
-		let targetIndex = 0;
-
-		if (jumpPath === '') {
-			// Jump to root - select first item
-			targetIndex = 0;
-		} else {
-			// Find the folder in the flat list and select it directly
-			const folderIndex = flatFileList.findIndex(
-				(item) => item.fullPath === jumpPath && item.isFolder
-			);
-
-			if (folderIndex !== -1) {
-				// Select the folder itself (not its first child)
-				targetIndex = folderIndex;
-			}
-			// If folder not found, stay at 0
-		}
-
-		fileTreeKeyboardNavRef.current = true; // Scroll to jumped file
-		setSelectedFileIndex(targetIndex);
-
-		// Clear the pending jump path
-		setSessions((prev) =>
-			prev.map((s) => (s.id === activeSession.id ? { ...s, pendingJumpPath: undefined } : s))
-		);
-	}, [activeSession?.pendingJumpPath, flatFileList, activeSession?.id]);
-
-	// Scroll to selected file item when selection changes via keyboard
-	useEffect(() => {
-		// Only scroll when selection changed via keyboard navigation, not mouse click
-		if (!fileTreeKeyboardNavRef.current) return;
-		fileTreeKeyboardNavRef.current = false; // Reset flag after handling
-
-		// Allow scroll when:
-		// 1. Right panel is focused on files tab (normal keyboard navigation)
-		// 2. Tab completion is open and files tab is visible (sync from tab completion)
-		const shouldScroll =
-			(activeFocus === 'right' && activeRightTab === 'files') ||
-			(tabCompletionOpen && activeRightTab === 'files');
-		if (!shouldScroll) return;
-
-		// Use requestAnimationFrame to ensure DOM is updated
-		requestAnimationFrame(() => {
-			const container = fileTreeContainerRef.current;
-			if (!container) return;
-
-			// Find the selected element
-			const selectedElement = container.querySelector(
-				`[data-file-index="${selectedFileIndex}"]`
-			) as HTMLElement;
-
-			if (selectedElement) {
-				// Use scrollIntoView with center alignment to avoid sticky header overlap
-				selectedElement.scrollIntoView({
-					behavior: 'auto', // Immediate scroll
-					block: 'center', // Center in viewport to avoid sticky header at top
-					inline: 'nearest',
-				});
-			}
-		});
-	}, [selectedFileIndex, activeFocus, activeRightTab, flatFileList, tabCompletionOpen]);
-
-	// File Explorer keyboard navigation
-	useEffect(() => {
-		const handleFileExplorerKeys = (e: KeyboardEvent) => {
-			// Skip when a modal is open (let textarea/input in modal handle arrow keys)
-			if (hasOpenModal()) return;
-
-			// Only handle when right panel is focused and on files tab
-			if (activeFocus !== 'right' || activeRightTab !== 'files' || flatFileList.length === 0)
-				return;
-
-			const expandedFolders = new Set(activeSession?.fileExplorerExpanded || []);
-
-			// Cmd+Arrow: jump to top/bottom
-			if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowUp') {
-				e.preventDefault();
-				fileTreeKeyboardNavRef.current = true;
-				setSelectedFileIndex(0);
-			} else if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowDown') {
-				e.preventDefault();
-				fileTreeKeyboardNavRef.current = true;
-				setSelectedFileIndex(flatFileList.length - 1);
-			}
-			// Option+Arrow: page up/down (move by 10 items)
-			else if (e.altKey && e.key === 'ArrowUp') {
-				e.preventDefault();
-				fileTreeKeyboardNavRef.current = true;
-				setSelectedFileIndex((prev) => Math.max(0, prev - 10));
-			} else if (e.altKey && e.key === 'ArrowDown') {
-				e.preventDefault();
-				fileTreeKeyboardNavRef.current = true;
-				setSelectedFileIndex((prev) => Math.min(flatFileList.length - 1, prev + 10));
-			}
-			// Regular Arrow: move one item
-			else if (e.key === 'ArrowUp') {
-				e.preventDefault();
-				fileTreeKeyboardNavRef.current = true;
-				setSelectedFileIndex((prev) => Math.max(0, prev - 1));
-			} else if (e.key === 'ArrowDown') {
-				e.preventDefault();
-				fileTreeKeyboardNavRef.current = true;
-				setSelectedFileIndex((prev) => Math.min(flatFileList.length - 1, prev + 1));
-			} else if (e.key === 'ArrowLeft') {
-				e.preventDefault();
-				const selectedItem = flatFileList[selectedFileIndex];
-				if (selectedItem?.isFolder && expandedFolders.has(selectedItem.fullPath)) {
-					// If selected item is an expanded folder, collapse it
-					toggleFolder(selectedItem.fullPath, activeSessionId, setSessions);
-				} else if (selectedItem) {
-					// If selected item is a file or collapsed folder, collapse parent folder
-					const parentPath = selectedItem.fullPath.substring(
-						0,
-						selectedItem.fullPath.lastIndexOf('/')
-					);
-					if (parentPath && expandedFolders.has(parentPath)) {
-						toggleFolder(parentPath, activeSessionId, setSessions);
-						// Move selection to parent folder
-						const parentIndex = flatFileList.findIndex((item) => item.fullPath === parentPath);
-						if (parentIndex >= 0) {
-							fileTreeKeyboardNavRef.current = true;
-							setSelectedFileIndex(parentIndex);
-						}
-					}
-				}
-			} else if (e.key === 'ArrowRight') {
-				e.preventDefault();
-				const selectedItem = flatFileList[selectedFileIndex];
-				if (selectedItem?.isFolder && !expandedFolders.has(selectedItem.fullPath)) {
-					toggleFolder(selectedItem.fullPath, activeSessionId, setSessions);
-				}
-			} else if (e.key === 'Enter') {
-				e.preventDefault();
-				const selectedItem = flatFileList[selectedFileIndex];
-				if (selectedItem) {
-					if (selectedItem.isFolder) {
-						toggleFolder(selectedItem.fullPath, activeSessionId, setSessions);
-					} else {
-						handleFileClick(selectedItem, selectedItem.fullPath);
-					}
-				}
-			}
-		};
-
-		window.addEventListener('keydown', handleFileExplorerKeys);
-		return () => window.removeEventListener('keydown', handleFileExplorerKeys);
-	}, [
-		activeFocus,
-		activeRightTab,
-		flatFileList,
-		selectedFileIndex,
-		activeSession?.fileExplorerExpanded,
-		activeSessionId,
-		setSessions,
-		toggleFolder,
-		handleFileClick,
-		hasOpenModal,
-	]);
+	// NOTE: File explorer effects (flat file list, pending jump path, scroll, keyboard nav) are
+	// now handled by useFileExplorerEffects hook (Phase 2.6)
 
 	// ============================================================================
 	// MEMOIZED WIZARD HANDLERS FOR PROPS HOOKS
@@ -5123,10 +4872,7 @@ function MaestroConsoleInner() {
 	// to prevent re-evaluating 50-100+ props on every state change.
 	// ============================================================================
 
-	// Stable fileTree reference - prevents FilePreview re-renders during agent activity.
-	// Without this, activeSession?.fileTree || [] creates a new empty array on every render
-	// when fileTree is undefined, and a new reference whenever activeSession updates.
-	const stableFileTree = useMemo(() => activeSession?.fileTree || [], [activeSession?.fileTree]);
+	// NOTE: stableFileTree is now provided by useFileExplorerEffects hook (Phase 2.6)
 
 	// Bind user's context warning thresholds to getContextColor so the header bar
 	// colors match the bottom warning sash thresholds from settings.
