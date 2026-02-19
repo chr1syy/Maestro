@@ -194,6 +194,7 @@ export function LightboxModal({
 			)}
 			<img
 				src={image}
+				alt="Expanded image preview"
 				className="max-w-[90%] max-h-[90%] rounded shadow-2xl"
 				onClick={(e) => e.stopPropagation()}
 			/>

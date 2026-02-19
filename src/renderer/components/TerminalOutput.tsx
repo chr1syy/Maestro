@@ -433,6 +433,7 @@ const LogItemComponent = memo(
 								<img
 									key={imgIdx}
 									src={img}
+									alt={`Terminal output image ${imgIdx + 1}`}
 									className="h-20 rounded border cursor-zoom-in shrink-0"
 									style={{ objectFit: 'contain', maxWidth: '200px' }}
 									onClick={() => setLightboxImage(img, log.images, 'history')}

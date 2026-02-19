@@ -290,6 +290,7 @@ export function PromptComposerModal({
 							<div key={idx} className="relative group shrink-0">
 								<img
 									src={img}
+									alt={`Prompt composer staged image ${idx + 1}`}
 									className="h-16 rounded border cursor-pointer hover:opacity-80 transition-opacity"
 									style={{
 										borderColor: theme.colors.border,
