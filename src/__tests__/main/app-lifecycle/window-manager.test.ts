@@ -141,6 +141,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			expect(windowManager).toHaveProperty('createWindow');
@@ -160,6 +162,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			const result = windowManager.createWindow();
@@ -180,6 +184,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -200,6 +206,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -219,6 +227,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -238,6 +248,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -257,6 +269,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -275,6 +289,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -295,6 +311,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -324,6 +342,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -346,6 +366,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -373,6 +395,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -396,6 +420,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -415,6 +441,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -443,6 +471,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -469,6 +499,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -495,6 +527,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
@@ -521,6 +555,8 @@ describe('app-lifecycle/window-manager', () => {
 				preloadPath: '/path/to/preload.js',
 				rendererPath: '/path/to/index.html',
 				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
 			});
 
 			windowManager.createWindow();
