@@ -38,7 +38,7 @@ import {
 	AUTO_RUN_FOLDER_NAME,
 } from './components/Wizard';
 import { TourOverlay } from './components/Wizard/tour';
-import { CONDUCTOR_BADGES, getBadgeForTime } from './constants/conductorBadges';
+import { CONDUCTOR_BADGES } from './constants/conductorBadges';
 import { EmptyStateView } from './components/EmptyStateView';
 import { DeleteAgentConfirmModal } from './components/DeleteAgentConfirmModal';
 
@@ -72,7 +72,7 @@ import { GroupChatRightPanel } from './components/GroupChatRightPanel';
 // Import custom hooks
 import {
 	// Batch processing
-	useBatchProcessor,
+	useBatchHandlers,
 	useBatchedSessionUpdates,
 	type PreviousUIState,
 	// Settings
@@ -169,8 +169,6 @@ import type {
 	AITab,
 	QueuedItem,
 	BatchRunConfig,
-	AgentError,
-	BatchRunState,
 	CustomAICommand,
 	ThinkingMode,
 } from './types';
@@ -252,7 +250,6 @@ function MaestroConsoleInner() {
 		setStandingOvationData,
 		// First Run Celebration
 		firstRunCelebrationData,
-		setFirstRunCelebrationData,
 		// Log Viewer
 		logViewerOpen,
 		setLogViewerOpen,
@@ -287,7 +284,6 @@ function MaestroConsoleInner() {
 		confirmModalDestructive,
 		// Quit Confirmation Modal
 		quitConfirmModalOpen,
-		setQuitConfirmModalOpen,
 		// Rename Instance Modal
 		renameInstanceModalOpen,
 		setRenameInstanceModalOpen,
@@ -482,15 +478,11 @@ function MaestroConsoleInner() {
 		globalStats,
 		updateGlobalStats,
 		autoRunStats,
-		setAutoRunStats,
-		recordAutoRunComplete,
 		updateAutoRunProgress,
 		usageStats,
 		updateUsageStats,
 		tourCompleted: _tourCompleted,
 		setTourCompleted,
-		firstAutoRunCompleted,
-		setFirstAutoRunCompleted,
 		recordWizardStart,
 		recordWizardComplete,
 		recordWizardAbandon,
@@ -499,7 +491,6 @@ function MaestroConsoleInner() {
 		recordTourComplete,
 		recordTourSkip,
 		leaderboardRegistration,
-		setLeaderboardRegistration,
 		isLeaderboardRegistered,
 
 		contextManagementSettings,
@@ -877,20 +868,8 @@ function MaestroConsoleInner() {
 		((sessionId: string, item: QueuedItem) => Promise<void>) | null
 	>(null);
 
-	// Refs for batch processor error handling (Phase 5.10)
-	// These are populated after useBatchProcessor is called and used in the agent error handler
-	const pauseBatchOnErrorRef = useRef<
-		| ((
-				sessionId: string,
-				error: AgentError,
-				documentIndex: number,
-				taskDescription?: string
-		  ) => void)
-		| null
-	>(null);
-	const getBatchStateRef = useRef<((sessionId: string) => BatchRunState) | null>(null);
-
 	// Note: thinkingChunkBufferRef and thinkingChunkRafIdRef moved into useAgentListeners hook
+	// Note: pauseBatchOnErrorRef and getBatchStateRef moved into useBatchHandlers hook
 
 	// Expose notifyToast to window for debugging/testing
 	useEffect(() => {
@@ -1286,35 +1265,7 @@ function MaestroConsoleInner() {
 		setSessions,
 	});
 
-	// Quit confirmation handler - shows modal when trying to quit with busy agents or active auto-runs
-	useEffect(() => {
-		// Guard against window.maestro not being defined yet (production timing)
-		if (!window.maestro?.app?.onQuitConfirmationRequest) {
-			return;
-		}
-		const unsubscribe = window.maestro.app.onQuitConfirmationRequest(() => {
-			// Get all busy AI sessions (agents that are actively thinking)
-			const busyAgents = sessions.filter(
-				(s) => s.state === 'busy' && s.busySource === 'ai' && s.toolType !== 'terminal'
-			);
-
-			// Check for active auto-runs (batch processor may be between tasks with agent idle)
-			const hasActiveAutoRuns = sessions.some((s) => {
-				const batchState = getBatchStateRef.current?.(s.id);
-				return batchState?.isRunning;
-			});
-
-			if (busyAgents.length === 0 && !hasActiveAutoRuns) {
-				// No busy agents and no active auto-runs, confirm quit immediately
-				window.maestro.app.confirmQuit();
-			} else {
-				// Show quit confirmation modal
-				setQuitConfirmModalOpen(true);
-			}
-		});
-
-		return unsubscribe;
-	}, [sessions]);
+	// Note: Quit confirmation effect moved into useBatchHandlers hook
 
 	// Theme styles hook - manages CSS variables and scrollbar fade animations
 	useThemeStyles({
@@ -1464,30 +1415,6 @@ function MaestroConsoleInner() {
 	});
 
 	// --- STABLE HANDLERS FOR APP AGENT MODALS ---
-
-	// Sync autorun stats from server (for new device installations)
-	const handleSyncAutoRunStats = useCallback(
-		(stats: {
-			cumulativeTimeMs: number;
-			totalRuns: number;
-			currentBadgeLevel: number;
-			longestRunMs: number;
-			longestRunTimestamp: number;
-		}) => {
-			setAutoRunStats({
-				...autoRunStats,
-				cumulativeTimeMs: stats.cumulativeTimeMs,
-				totalRuns: stats.totalRuns,
-				currentBadgeLevel: stats.currentBadgeLevel,
-				longestRunMs: stats.longestRunMs,
-				longestRunTimestamp: stats.longestRunTimestamp,
-				// Also update badge tracking to match synced level
-				lastBadgeUnlockLevel: stats.currentBadgeLevel,
-				lastAcknowledgedBadgeLevel: stats.currentBadgeLevel,
-			});
-		},
-		[autoRunStats, setAutoRunStats]
-	);
 
 	// MergeSessionModal handlers
 	const handleCloseMergeSession = useCallback(() => {
@@ -2212,6 +2139,28 @@ You are taking over this conversation. Based on the context above, provide a bri
 		}
 	}, [activeSession?.id, handleResumeSession]);
 
+	// --- BATCH HANDLERS (Auto Run processing, quit confirmation, error handling) ---
+	const {
+		startBatchRun,
+		getBatchState,
+		handleStopBatchRun,
+		handleKillBatchRun,
+		handleSkipCurrentDocument,
+		handleResumeAfterError,
+		handleAbortBatchOnError,
+		activeBatchSessionIds,
+		currentSessionBatchState,
+		activeBatchRunState,
+		pauseBatchOnErrorRef,
+		getBatchStateRef,
+		handleSyncAutoRunStats,
+	} = useBatchHandlers({
+		spawnAgentForSession,
+		rightPanelRef,
+		processQueuedItemRef,
+		handleClearAgentError,
+	});
+
 	// --- AGENT IPC LISTENERS ---
 	// Extracted hook for all window.maestro.process.onXxx listeners
 	// (onData, onExit, onSessionId, onSlashCommands, onStderr, onCommandExit,
@@ -2433,344 +2382,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 	}, [handleClearAgentError]);
 
 	// Note: spawnBackgroundSynopsisRef and spawnAgentWithPromptRef are now updated in useAgentExecution hook
-
-	// Initialize batch processor (supports parallel batches per session)
-	const {
-		batchRunStates: _batchRunStates,
-		getBatchState,
-		activeBatchSessionIds,
-		startBatchRun,
-		stopBatchRun,
-		killBatchRun,
-		// Error handling (Phase 5.10)
-		pauseBatchOnError,
-		skipCurrentDocument,
-		resumeAfterError,
-		abortBatchOnError,
-	} = useBatchProcessor({
-		sessions,
-		groups,
-		onUpdateSession: (sessionId, updates) => {
-			setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ...updates } : s)));
-		},
-		onSpawnAgent: spawnAgentForSession,
-		onAddHistoryEntry: async (entry) => {
-			await window.maestro.history.add({
-				...entry,
-				id: generateId(),
-			});
-			// Refresh history panel to show the new entry
-			rightPanelRef.current?.refreshHistoryPanel();
-		},
-		// TTS settings for speaking synopsis after each auto-run task
-		audioFeedbackEnabled,
-		audioFeedbackCommand,
-		// Pass autoRunStats for achievement progress in final summary
-		autoRunStats,
-		onComplete: (info) => {
-			// Find group name for the session
-			const session = sessions.find((s) => s.id === info.sessionId);
-			const sessionGroup = session?.groupId ? groups.find((g) => g.id === session.groupId) : null;
-			const groupName = sessionGroup?.name || 'Ungrouped';
-
-			// Determine toast type and message based on completion status
-			const toastType = info.wasStopped
-				? 'warning'
-				: info.completedTasks === info.totalTasks
-					? 'success'
-					: 'info';
-
-			// Build message
-			let message: string;
-			if (info.wasStopped) {
-				message = `Stopped after completing ${info.completedTasks} of ${info.totalTasks} tasks`;
-			} else if (info.completedTasks === info.totalTasks) {
-				message = `All ${info.totalTasks} ${
-					info.totalTasks === 1 ? 'task' : 'tasks'
-				} completed successfully`;
-			} else {
-				message = `Completed ${info.completedTasks} of ${info.totalTasks} tasks`;
-			}
-
-			notifyToast({
-				type: toastType,
-				title: 'Auto-Run Complete',
-				message,
-				group: groupName,
-				project: info.sessionName,
-				taskDuration: info.elapsedTimeMs,
-				sessionId: info.sessionId,
-			});
-
-			// Record achievement and check for badge unlocks
-			if (info.elapsedTimeMs > 0) {
-				const { newBadgeLevel, isNewRecord } = recordAutoRunComplete(info.elapsedTimeMs);
-
-				// Check for first Auto Run celebration (takes priority over standing ovation)
-				if (!firstAutoRunCompleted) {
-					// This is the user's first Auto Run completion!
-					setFirstAutoRunCompleted(true);
-					// Small delay to let the toast appear first
-					setTimeout(() => {
-						setFirstRunCelebrationData({
-							elapsedTimeMs: info.elapsedTimeMs,
-							completedTasks: info.completedTasks,
-							totalTasks: info.totalTasks,
-						});
-					}, 500);
-				}
-				// Show Standing Ovation overlay for new badges or records (only if not showing first run)
-				else if (newBadgeLevel !== null || isNewRecord) {
-					const badge =
-						newBadgeLevel !== null
-							? CONDUCTOR_BADGES.find((b) => b.level === newBadgeLevel)
-							: CONDUCTOR_BADGES.find((b) => b.level === autoRunStats.currentBadgeLevel);
-
-					if (badge) {
-						// Small delay to let the toast appear first
-						setTimeout(() => {
-							setStandingOvationData({
-								badge,
-								isNewRecord,
-								recordTimeMs: isNewRecord ? info.elapsedTimeMs : autoRunStats.longestRunMs,
-							});
-						}, 500);
-					}
-				}
-
-				// Submit to leaderboard if registered and email confirmed
-				if (isLeaderboardRegistered && leaderboardRegistration) {
-					// Calculate updated stats after this run (simulating what recordAutoRunComplete updated)
-					const updatedCumulativeTimeMs = autoRunStats.cumulativeTimeMs + info.elapsedTimeMs;
-					const updatedTotalRuns = autoRunStats.totalRuns + 1;
-					const updatedLongestRunMs = Math.max(autoRunStats.longestRunMs || 0, info.elapsedTimeMs);
-					const updatedBadge = getBadgeForTime(updatedCumulativeTimeMs);
-					const updatedBadgeLevel = updatedBadge?.level || 0;
-					const updatedBadgeName = updatedBadge?.name || 'No Badge Yet';
-
-					// Format longest run date
-					let longestRunDate: string | undefined;
-					if (isNewRecord) {
-						longestRunDate = new Date().toISOString().split('T')[0];
-					} else if (autoRunStats.longestRunTimestamp > 0) {
-						longestRunDate = new Date(autoRunStats.longestRunTimestamp).toISOString().split('T')[0];
-					}
-
-					// Submit to leaderboard in background (only if we have an auth token)
-					if (!leaderboardRegistration.authToken) {
-						console.warn('Leaderboard submission skipped: no auth token');
-					} else {
-						// Auto Run completion submission: Use delta mode for multi-device aggregation
-						// API behavior:
-						// - If deltaMs > 0 is present: Server adds deltaMs to running total (delta mode)
-						// - If only cumulativeTimeMs (no deltaMs): Server replaces value (legacy mode)
-						// We send deltaMs to trigger delta mode, ensuring proper aggregation across devices.
-						window.maestro.leaderboard
-							.submit({
-								email: leaderboardRegistration.email,
-								displayName: leaderboardRegistration.displayName,
-								githubUsername: leaderboardRegistration.githubUsername,
-								twitterHandle: leaderboardRegistration.twitterHandle,
-								linkedinHandle: leaderboardRegistration.linkedinHandle,
-								badgeLevel: updatedBadgeLevel,
-								badgeName: updatedBadgeName,
-								// Legacy fields (server ignores when deltaMs is present)
-								cumulativeTimeMs: updatedCumulativeTimeMs,
-								totalRuns: updatedTotalRuns,
-								longestRunMs: updatedLongestRunMs,
-								longestRunDate,
-								currentRunMs: info.elapsedTimeMs,
-								theme: activeThemeId,
-								authToken: leaderboardRegistration.authToken,
-								// Delta mode: Server adds these to running totals
-								deltaMs: info.elapsedTimeMs,
-								deltaRuns: 1,
-								// Client's local total for discrepancy detection
-								clientTotalTimeMs: updatedCumulativeTimeMs,
-							})
-							.then((result) => {
-								if (result.success) {
-									// Update last submission timestamp
-									setLeaderboardRegistration({
-										...leaderboardRegistration,
-										lastSubmissionAt: Date.now(),
-										emailConfirmed: !result.requiresConfirmation,
-									});
-
-									// Show ranking notification if available
-									if (result.ranking) {
-										const { cumulative, longestRun } = result.ranking;
-										let message = '';
-
-										// Build cumulative ranking message
-										if (cumulative.previousRank === null) {
-											// New entry
-											message = `You're ranked #${cumulative.rank} of ${cumulative.total}!`;
-										} else if (cumulative.improved) {
-											// Moved up
-											const spotsUp = cumulative.previousRank - cumulative.rank;
-											message = `You moved up ${spotsUp} spot${
-												spotsUp > 1 ? 's' : ''
-											}! Now #${cumulative.rank} (was #${cumulative.previousRank})`;
-										} else if (cumulative.rank === cumulative.previousRank) {
-											// Holding steady
-											message = `You're holding steady at #${cumulative.rank}`;
-										} else {
-											// Dropped (shouldn't happen often, but handle it)
-											message = `You're now #${cumulative.rank} of ${cumulative.total}`;
-										}
-
-										// Add longest run info if it's a new record or improved
-										if (longestRun && isNewRecord) {
-											message += ` | New personal best! #${longestRun.rank} on longest runs!`;
-										}
-
-										notifyToast({
-											type: 'success',
-											title: 'Leaderboard Updated',
-											message,
-										});
-									}
-
-									// Sync local stats from server response (Gap 1 fix for multi-device aggregation)
-									if (result.serverTotals) {
-										const serverCumulativeMs = result.serverTotals.cumulativeTimeMs;
-										// Only update if server has more data (aggregated from other devices)
-										if (serverCumulativeMs > updatedCumulativeTimeMs) {
-											handleSyncAutoRunStats({
-												cumulativeTimeMs: serverCumulativeMs,
-												totalRuns: result.serverTotals.totalRuns,
-												// Recalculate badge level from server cumulative time
-												currentBadgeLevel: getBadgeForTime(serverCumulativeMs)?.level ?? 0,
-												// Keep local longest run (server might not return this in submit response)
-												longestRunMs: updatedLongestRunMs,
-												longestRunTimestamp: autoRunStats.longestRunTimestamp,
-											});
-										}
-									}
-								}
-								// Silent failure - don't bother the user if submission fails
-							})
-							.catch(() => {
-								// Silent failure - leaderboard submission is not critical
-							});
-					}
-				}
-			}
-		},
-		onPRResult: (info) => {
-			// Find group name for the session
-			const session = sessions.find((s) => s.id === info.sessionId);
-			const sessionGroup = session?.groupId ? groups.find((g) => g.id === session.groupId) : null;
-			const groupName = sessionGroup?.name || 'Ungrouped';
-
-			if (info.success) {
-				// PR created successfully - show success toast with PR URL
-				notifyToast({
-					type: 'success',
-					title: 'PR Created',
-					message: info.prUrl || 'Pull request created successfully',
-					group: groupName,
-					project: info.sessionName,
-					sessionId: info.sessionId,
-				});
-			} else {
-				// PR creation failed - show warning (not error, since the auto-run itself succeeded)
-				notifyToast({
-					type: 'warning',
-					title: 'PR Creation Failed',
-					message: info.error || 'Failed to create pull request',
-					group: groupName,
-					project: info.sessionName,
-					sessionId: info.sessionId,
-				});
-			}
-		},
-		// Process queued items after batch completion/stop
-		// This ensures pending user messages are processed after Auto Run ends
-		onProcessQueueAfterCompletion: (sessionId) => {
-			const session = sessionsRef.current.find((s) => s.id === sessionId);
-			if (session && session.executionQueue.length > 0 && processQueuedItemRef.current) {
-				// Pop first item and process it
-				const [nextItem, ...remainingQueue] = session.executionQueue;
-
-				// Update session state: set to busy, pop first item from queue
-				setSessions((prev) =>
-					prev.map((s) => {
-						if (s.id !== sessionId) return s;
-
-						const targetTab = s.aiTabs.find((tab) => tab.id === nextItem.tabId) || getActiveTab(s);
-						if (!targetTab) {
-							return {
-								...s,
-								state: 'busy' as SessionState,
-								busySource: 'ai',
-								executionQueue: remainingQueue,
-								thinkingStartTime: Date.now(),
-							};
-						}
-
-						// For message items, add a log entry to the target tab
-						let updatedAiTabs = s.aiTabs;
-						if (nextItem.type === 'message' && nextItem.text) {
-							const logEntry: LogEntry = {
-								id: generateId(),
-								timestamp: Date.now(),
-								source: 'user',
-								text: nextItem.text,
-								images: nextItem.images,
-							};
-							updatedAiTabs = s.aiTabs.map((tab) =>
-								tab.id === targetTab.id
-									? {
-											...tab,
-											logs: [...tab.logs, logEntry],
-											state: 'busy' as const,
-										}
-									: tab
-							);
-						}
-
-						return {
-							...s,
-							state: 'busy' as SessionState,
-							busySource: 'ai',
-							aiTabs: updatedAiTabs,
-							activeTabId: targetTab.id,
-							executionQueue: remainingQueue,
-							thinkingStartTime: Date.now(),
-						};
-					})
-				);
-
-				// Process the item after state update
-				processQueuedItemRef.current(sessionId, nextItem);
-			}
-		},
-	});
-
-	// Update refs for batch processor error handling (Phase 5.10)
-	// These are used by the agent error handler which runs in a useEffect with empty deps
-	pauseBatchOnErrorRef.current = pauseBatchOnError;
-	getBatchStateRef.current = getBatchState;
-
-	// Get batch state for the current session - used for locking the AutoRun editor
-	// This is session-specific so users can edit docs in other sessions while one runs
-	// Quick Win 4: Memoized to prevent unnecessary re-calculations
-	const currentSessionBatchState = useMemo(() => {
-		return activeSession ? getBatchState(activeSession.id) : null;
-	}, [activeSession, getBatchState]);
-
-	// Get batch state for display - prioritize the session with an active batch run,
-	// falling back to the active session's state. This ensures AutoRun progress is
-	// displayed correctly regardless of which tab/session the user is viewing.
-	// Quick Win 4: Memoized to prevent unnecessary re-calculations
-	const activeBatchRunState = useMemo(() => {
-		if (activeBatchSessionIds.length > 0) {
-			return getBatchState(activeBatchSessionIds[0]);
-		}
-		return activeSession ? getBatchState(activeSession.id) : getBatchState('');
-	}, [activeBatchSessionIds, activeSession, getBatchState]);
 
 	// Inline wizard context for /wizard command
 	// This manages the state for the inline wizard that creates/iterates on Auto Run documents
@@ -3717,77 +3328,6 @@ You are taking over this conversation. Based on the context above, provide a bri
 		},
 		[activeSession]
 	);
-
-	// Handler to stop batch run (with confirmation)
-	// If targetSessionId is provided, stops that specific session's batch run.
-	// Otherwise, falls back to active session, then first active batch run.
-	const handleStopBatchRun = useCallback(
-		(targetSessionId?: string) => {
-			// Use provided targetSessionId, or fall back to active session, or first active batch
-			const sessionId =
-				targetSessionId ??
-				activeSession?.id ??
-				(activeBatchSessionIds.length > 0 ? activeBatchSessionIds[0] : undefined);
-			console.log(
-				'[App:handleStopBatchRun] targetSessionId:',
-				targetSessionId,
-				'resolved sessionId:',
-				sessionId
-			);
-			if (!sessionId) return;
-			const session = sessions.find((s) => s.id === sessionId);
-			const agentName = session?.name || 'this session';
-			useModalStore.getState().openModal('confirm', {
-				message: `Stop Auto Run for "${agentName}" after the current task completes?`,
-				onConfirm: () => {
-					console.log(
-						'[App:handleStopBatchRun] Confirmation callback executing for sessionId:',
-						sessionId
-					);
-					stopBatchRun(sessionId);
-				},
-			});
-		},
-		[activeBatchSessionIds, activeSession, sessions, stopBatchRun]
-	);
-
-	// Handler to force kill a batch run (process killed immediately, no waiting)
-	// Confirmation is handled by the calling component's own modal
-	const handleKillBatchRun = useCallback(
-		async (sessionId: string) => {
-			console.log('[App:handleKillBatchRun] Force killing sessionId:', sessionId);
-			await killBatchRun(sessionId);
-		},
-		[killBatchRun]
-	);
-
-	// Error handling callbacks for Auto Run (Phase 5.10)
-	const handleSkipCurrentDocument = useCallback(() => {
-		const sessionId =
-			activeBatchSessionIds.length > 0 ? activeBatchSessionIds[0] : activeSession?.id;
-		if (!sessionId) return;
-		skipCurrentDocument(sessionId);
-		// Clear the session error state as well
-		handleClearAgentError(sessionId);
-	}, [activeBatchSessionIds, activeSession, skipCurrentDocument, handleClearAgentError]);
-
-	const handleResumeAfterError = useCallback(() => {
-		const sessionId =
-			activeBatchSessionIds.length > 0 ? activeBatchSessionIds[0] : activeSession?.id;
-		if (!sessionId) return;
-		resumeAfterError(sessionId);
-		// Clear the session error state as well
-		handleClearAgentError(sessionId);
-	}, [activeBatchSessionIds, activeSession, resumeAfterError, handleClearAgentError]);
-
-	const handleAbortBatchOnError = useCallback(() => {
-		const sessionId =
-			activeBatchSessionIds.length > 0 ? activeBatchSessionIds[0] : activeSession?.id;
-		if (!sessionId) return;
-		abortBatchOnError(sessionId);
-		// Clear the session error state as well
-		handleClearAgentError(sessionId);
-	}, [activeBatchSessionIds, activeSession, abortBatchOnError, handleClearAgentError]);
 
 	// Handler for toast navigation - switches to session and optionally to a specific tab
 	const handleToastSessionClick = useCallback(
