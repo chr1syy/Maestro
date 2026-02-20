@@ -468,8 +468,14 @@ svg.wand-sparkle-active path:nth-child(8) { animation-delay: 1.2s; }
 .header-cost-widget,
 .header-uuid-pill,
 .header-context-widget,
-.header-git-branch-text {
+.header-git-branch-text,
+.header-git-status-full {
   display: flex;
+}
+
+/* Git status compact mode hidden by default (shown at narrow widths) */
+.header-git-status-compact {
+  display: none;
 }
 
 /* At narrower widths, progressively hide elements */
@@ -486,7 +492,15 @@ svg.wand-sparkle-active path:nth-child(8) { animation-delay: 1.2s; }
   }
 }
 
-/* Below 550px: Hide git widget details (show compact) - handled by component */
+/* Below 550px: Show compact git status (file count only), hide full breakdown */
+@container header (max-width: 550px) {
+  .header-git-status-full {
+    display: none;
+  }
+  .header-git-status-compact {
+    display: flex;
+  }
+}
 
 /* Below 500px: Hide git branch text, show icon only */
 @container header (max-width: 500px) {
@@ -531,26 +545,36 @@ svg.wand-sparkle-active path:nth-child(8) { animation-delay: 1.2s; }
   }
 }
 
+/* Below 730px in auto-mode: Show compact git status */
+@container header (max-width: 730px) {
+  .header-container.header-auto-mode .header-git-status-full {
+    display: none;
+  }
+  .header-container.header-auto-mode .header-git-status-compact {
+    display: flex;
+  }
+}
+
 @container header (max-width: 680px) {
-  .header-auto-mode .header-git-branch-text {
+  .header-container.header-auto-mode .header-git-branch-text {
     display: none;
   }
 }
 
 @container header (max-width: 580px) {
-  .header-auto-mode .header-uuid-pill {
+  .header-container.header-auto-mode .header-uuid-pill {
     display: none;
   }
 }
 
 @container header (max-width: 530px) {
-  .header-auto-mode .header-cost-widget {
+  .header-container.header-auto-mode .header-cost-widget {
     display: none;
   }
 }
 
 @container header (max-width: 480px) {
-  .header-auto-mode .header-session-name {
+  .header-container.header-auto-mode .header-session-name {
     display: none;
   }
 }
