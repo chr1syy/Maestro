@@ -1,5 +1,10 @@
 import { useCallback } from 'react';
 import type { Session, BatchRunConfig } from '../../types';
+import { useSessionStore } from '../../stores/sessionStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { gitService } from '../../services/git';
+import { notifyToast } from '../../stores/notificationStore';
+import { buildWorktreeSession } from '../../utils/worktreeSession';
 
 /**
  * Tree node structure for Auto Run document tree
@@ -41,7 +46,7 @@ export interface UseAutoRunHandlersReturn {
 	/** Handle folder selection from Auto Run setup modal */
 	handleAutoRunFolderSelected: (folderPath: string) => Promise<void>;
 	/** Start a batch run with the given configuration */
-	handleStartBatchRun: (config: BatchRunConfig) => void;
+	handleStartBatchRun: (config: BatchRunConfig) => Promise<void>;
 	/** Get the number of unchecked tasks in a document */
 	getDocumentTaskCount: (filename: string) => Promise<number>;
 	/** Handle content changes in the Auto Run editor */
@@ -75,6 +80,98 @@ export interface UseAutoRunHandlersReturn {
 function getSshRemoteId(session: Session | null): string | undefined {
 	if (!session) return undefined;
 	return session.sshRemoteId || session.sessionSshRemoteConfig?.remoteId || undefined;
+}
+
+/**
+ * Spawn a worktree agent session and prepare config for dispatch.
+ * Handles both 'create-new' (creates worktree on disk first) and
+ * 'existing-closed' (worktree already on disk, just needs a session).
+ *
+ * Returns the new session ID, or null if an error occurred (toast shown).
+ */
+async function spawnWorktreeAgentAndDispatch(
+	parentSession: Session,
+	config: BatchRunConfig
+): Promise<string | null> {
+	const sshRemoteId = getSshRemoteId(parentSession);
+	const target = config.worktreeTarget!;
+	let worktreePath: string;
+	let branchName: string;
+
+	if (target.mode === 'create-new') {
+		// Step 1: Resolve worktree path
+		const basePath =
+			parentSession.worktreeConfig?.basePath ||
+			parentSession.cwd.replace(/\/[^/]+$/, '') + '/worktrees';
+		worktreePath = basePath + '/' + target.newBranchName;
+		branchName = target.newBranchName!;
+
+		// Step 2: Create worktree on disk
+		const result = await window.maestro.git.worktreeSetup(
+			parentSession.cwd,
+			worktreePath,
+			branchName,
+			sshRemoteId
+		);
+		if (!result.success) {
+			notifyToast({
+				type: 'error',
+				title: 'Failed to Create Worktree',
+				message: result.error || 'Unknown error',
+			});
+			return null;
+		}
+	} else {
+		// existing-closed: worktree already on disk
+		worktreePath = target.worktreePath!;
+		branchName = worktreePath.split('/').pop() || 'worktree';
+	}
+
+	// Step 3: Fetch git info for the worktree
+	let gitBranches: string[] | undefined;
+	try {
+		gitBranches = await gitService.getBranches(worktreePath, sshRemoteId);
+	} catch {
+		// Non-fatal — git info is nice-to-have
+	}
+
+	// Determine current branch from fetched branches or fallback
+	if (!branchName && gitBranches && gitBranches.length > 0) {
+		branchName = gitBranches[0];
+	}
+
+	// Step 4: Build the session
+	const { defaultSaveToHistory, defaultShowThinking } = useSettingsStore.getState();
+	const newSession = buildWorktreeSession({
+		parentSession,
+		path: worktreePath,
+		branch: branchName,
+		name: branchName,
+		gitBranches,
+		defaultSaveToHistory,
+		defaultShowThinking,
+	});
+
+	// Step 5: Add session to store and expand parent's worktrees
+	useSessionStore.getState().setSessions((prev) => [
+		...prev.map((s) =>
+			s.id === parentSession.id ? { ...s, worktreesExpanded: true } : s
+		),
+		newSession,
+	]);
+
+	// Step 6: Populate config.worktree for PR creation if requested
+	if (target.createPROnCompletion) {
+		config.worktree = {
+			enabled: true,
+			path: worktreePath,
+			branchName,
+			createPROnCompletion: true,
+			prTargetBranch: target.baseBranch || 'main',
+		};
+	}
+
+	return newSession.id;
 }
 
 /**
@@ -187,7 +284,7 @@ export function useAutoRunHandlers(
 
 	// Handler to start batch run from modal with multi-document support
 	const handleStartBatchRun = useCallback(
-		(config: BatchRunConfig) => {
+		async (config: BatchRunConfig) => {
 			window.maestro.logger.log('info', 'handleStartBatchRun called', 'AutoRunHandlers', {
 				hasActiveSession: !!activeSession,
 				sessionId: activeSession?.id,
@@ -210,12 +307,31 @@ export function useAutoRunHandlers(
 			let targetSessionId = activeSession.id;
 			if (config.worktreeTarget?.mode === 'existing-open' && config.worktreeTarget.sessionId) {
 				targetSessionId = config.worktreeTarget.sessionId;
-			} else if (config.worktreeTarget?.mode === 'create-new') {
-				// TODO (Phase 2): Spawn new worktree agent and use its session ID
-				console.warn('[AutoRunHandlers] create-new worktree mode not yet implemented, falling back to active session');
-			} else if (config.worktreeTarget?.mode === 'existing-closed') {
-				// TODO (Phase 2): Open closed worktree as agent and use its session ID
-				console.warn('[AutoRunHandlers] existing-closed worktree mode not yet implemented, falling back to active session');
+			} else if (
+				config.worktreeTarget?.mode === 'create-new' ||
+				config.worktreeTarget?.mode === 'existing-closed'
+			) {
+				// Spawn a worktree agent and dispatch to it
+				try {
+					const newSessionId = await spawnWorktreeAgentAndDispatch(
+						activeSession,
+						config
+					);
+					if (!newSessionId) return; // Error already shown via toast
+					targetSessionId = newSessionId;
+				} catch (err) {
+					window.maestro.logger.log(
+						'error',
+						`Failed to spawn worktree agent: ${err instanceof Error ? err.message : String(err)}`,
+						'AutoRunHandlers'
+					);
+					notifyToast({
+						type: 'error',
+						title: 'Worktree Error',
+						message: err instanceof Error ? err.message : String(err),
+					});
+					return;
+				}
 			}
 
 			window.maestro.logger.log('info', 'Starting batch run', 'AutoRunHandlers', {
