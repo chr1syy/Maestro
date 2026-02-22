@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import React from 'react';
 import { WorktreeRunSection } from '../../../renderer/components/WorktreeRunSection';
 import type { Theme, Session } from '../../../renderer/types';
+import { gitService } from '../../../renderer/services/git';
 
 // Mock gitService
 vi.mock('../../../renderer/services/git', () => ({
@@ -82,7 +83,7 @@ describe('WorktreeRunSection', () => {
 		mockOnOpenWorktreeConfig = vi.fn();
 	});
 
-	it('shows configure link when worktreeConfig is not set', () => {
+	it('shows configure link and no toggle when worktreeConfig is not set', () => {
 		const session = createMockSession({ worktreeConfig: undefined });
 		render(
 			<WorktreeRunSection
@@ -95,9 +96,11 @@ describe('WorktreeRunSection', () => {
 			/>
 		);
 		expect(screen.getByText(/Configure Worktrees/)).toBeTruthy();
+		// Toggle button should NOT render
+		expect(screen.queryByText('Run in Worktree')).toBeNull();
 	});
 
-	it('shows toggle button when worktreeConfig is set', () => {
+	it('shows toggle in off state with no selector when worktreeTarget is null', () => {
 		const session = createMockSession();
 		render(
 			<WorktreeRunSection
@@ -110,6 +113,8 @@ describe('WorktreeRunSection', () => {
 			/>
 		);
 		expect(screen.getByText('Run in Worktree')).toBeTruthy();
+		// Selector dropdown should NOT be visible when toggle is off
+		expect(screen.queryByRole('combobox')).toBeNull();
 	});
 
 	it('scans for available worktrees when toggle is enabled', async () => {
@@ -325,5 +330,333 @@ describe('WorktreeRunSection', () => {
 		await waitFor(() => {
 			expect(scanMock).toHaveBeenCalledWith('/project/worktrees', 'ssh-remote-1');
 		});
+	});
+
+	it('shows selector dropdown when worktreeTarget is non-null (toggle on)', () => {
+		const session = createMockSession();
+		const child = createWorktreeChild();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, child]}
+				worktreeTarget={{ mode: 'existing-open', sessionId: child.id, createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Selector should be visible
+		expect(screen.getAllByRole('combobox').length).toBeGreaterThanOrEqual(1);
+	});
+
+	it('lists open worktree agents as options', () => {
+		const session = createMockSession();
+		const child1 = createWorktreeChild({ id: 'child-1', name: 'Agent Alpha', worktreeBranch: 'branch-a' });
+		const child2 = createWorktreeChild({ id: 'child-2', name: 'Agent Beta', worktreeBranch: 'branch-b' });
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, child1, child2]}
+				worktreeTarget={{ mode: 'existing-open', sessionId: 'child-1', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Both children should be listed as options
+		const options = screen.getAllByRole('option');
+		const optionTexts = options.map((o) => o.textContent);
+		expect(optionTexts.some((t) => t?.includes('Agent Alpha') && t?.includes('branch-a'))).toBe(true);
+		expect(optionTexts.some((t) => t?.includes('Agent Beta') && t?.includes('branch-b'))).toBe(true);
+	});
+
+	it('disables busy agents and shows busy suffix', () => {
+		const session = createMockSession();
+		const idleChild = createWorktreeChild({ id: 'child-idle', name: 'Idle Agent', state: 'idle', worktreeBranch: 'idle-branch' });
+		const busyChild = createWorktreeChild({ id: 'child-busy', name: 'Busy Agent', state: 'busy', worktreeBranch: 'busy-branch' });
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, idleChild, busyChild]}
+				worktreeTarget={{ mode: 'existing-open', sessionId: 'child-idle', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		const options = screen.getAllByRole('option');
+		const busyOption = options.find((o) => (o as HTMLOptionElement).value === 'child-busy') as HTMLOptionElement;
+		expect(busyOption).toBeTruthy();
+		expect(busyOption.disabled).toBe(true);
+		expect(busyOption.textContent).toContain('— busy');
+
+		const idleOption = options.find((o) => (o as HTMLOptionElement).value === 'child-idle') as HTMLOptionElement;
+		expect(idleOption).toBeTruthy();
+		expect(idleOption.disabled).toBe(false);
+		expect(idleOption.textContent).not.toContain('— busy');
+	});
+
+	it('shows base branch dropdown and branch name input when Create New Worktree is selected', async () => {
+		const session = createMockSession();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		const { rerender } = render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={{ mode: 'create-new', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Select "Create New Worktree" from the dropdown
+		const select = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
+		await act(async () => {
+			fireEvent.change(select, { target: { value: '__create_new__' } });
+		});
+
+		// Wait for branches to load
+		await waitFor(() => {
+			// Base branch dropdown should appear (second combobox)
+			const comboboxes = screen.getAllByRole('combobox');
+			expect(comboboxes.length).toBe(2); // main selector + base branch selector
+		});
+
+		// Branch name input should appear
+		expect(screen.getByDisplayValue(/auto-run-/)).toBeTruthy();
+		expect(screen.getByText('Base Branch')).toBeTruthy();
+		expect(screen.getByText('Branch Name')).toBeTruthy();
+	});
+
+	it('auto-generates branch name from selected base branch', async () => {
+		const session = createMockSession();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+		vi.mocked(gitService.getBranches).mockResolvedValue(['main', 'develop', 'feature/xyz']);
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={{ mode: 'create-new', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Select "Create New Worktree"
+		const select = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
+		await act(async () => {
+			fireEvent.change(select, { target: { value: '__create_new__' } });
+		});
+
+		// Wait for branch data to load
+		await waitFor(() => {
+			expect(screen.getAllByRole('combobox').length).toBe(2);
+		});
+
+		// Should auto-populate with a name derived from the first (default) branch
+		const mmdd = `${String(new Date().getMonth() + 1).padStart(2, '0')}${String(new Date().getDate()).padStart(2, '0')}`;
+		expect(screen.getByDisplayValue(`auto-run-main-${mmdd}`)).toBeTruthy();
+
+		// Change base branch to 'develop' and verify name updates
+		const baseBranchSelect = screen.getAllByRole('combobox')[1] as HTMLSelectElement;
+		await act(async () => {
+			fireEvent.change(baseBranchSelect, { target: { value: 'develop' } });
+		});
+
+		expect(screen.getByDisplayValue(`auto-run-develop-${mmdd}`)).toBeTruthy();
+	});
+
+	it('updates createPROnCompletion when PR checkbox is toggled', async () => {
+		const session = createMockSession();
+		const child = createWorktreeChild();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		// Start with toggle off, then toggle on to set internal selectedValue
+		const { rerender } = render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, child]}
+				worktreeTarget={null}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Click toggle to turn on — this sets internal selectedValue
+		const toggle = screen.getByText('Run in Worktree');
+		await act(async () => {
+			fireEvent.click(toggle);
+		});
+
+		// Rerender with the worktreeTarget that would have been set by the parent
+		const lastCall = mockOnWorktreeTargetChange.mock.calls[mockOnWorktreeTargetChange.mock.calls.length - 1][0];
+		mockOnWorktreeTargetChange.mockClear();
+
+		rerender(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, child]}
+				worktreeTarget={lastCall}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Now click the PR checkbox label text
+		const prLabel = screen.getByText('Automatically create PR when complete');
+		await act(async () => {
+			fireEvent.click(prLabel);
+		});
+
+		// Should have called onWorktreeTargetChange with createPROnCompletion: true
+		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith(
+			expect.objectContaining({ createPROnCompletion: true })
+		);
+	});
+
+	it('emits correct WorktreeRunTarget for existing-open mode', () => {
+		const session = createMockSession();
+		const child = createWorktreeChild({ id: 'child-1' });
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, child]}
+				worktreeTarget={{ mode: 'existing-open', sessionId: 'child-1', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Select the existing-open child via dropdown
+		const select = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
+		fireEvent.change(select, { target: { value: 'child-1' } });
+
+		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith({
+			mode: 'existing-open',
+			sessionId: 'child-1',
+			createPROnCompletion: false,
+		});
+	});
+
+	it('calls onWorktreeTargetChange(null) when toggle is turned off', () => {
+		const session = createMockSession();
+		const child = createWorktreeChild();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, child]}
+				worktreeTarget={{ mode: 'existing-open', sessionId: child.id, createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Click the toggle to turn off
+		const toggle = screen.getByText('Run in Worktree');
+		fireEvent.click(toggle);
+
+		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith(null);
+	});
+
+	it('clicking toggle on with available children selects first idle child', () => {
+		const session = createMockSession();
+		const busyChild = createWorktreeChild({ id: 'child-busy', state: 'busy', name: 'Busy' });
+		const idleChild = createWorktreeChild({ id: 'child-idle', state: 'idle', name: 'Idle' });
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session, busyChild, idleChild]}
+				worktreeTarget={null}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Click the toggle to turn on
+		const toggle = screen.getByText('Run in Worktree');
+		fireEvent.click(toggle);
+
+		// Should select the first idle child, not the busy one
+		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith({
+			mode: 'existing-open',
+			sessionId: 'child-idle',
+			createPROnCompletion: false,
+		});
+	});
+
+	it('clicking toggle on with no idle children selects create-new', () => {
+		const session = createMockSession();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={null}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Click the toggle to turn on — no children exist
+		const toggle = screen.getByText('Run in Worktree');
+		fireEvent.click(toggle);
+
+		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith({
+			mode: 'create-new',
+			createPROnCompletion: false,
+		});
+	});
+
+	it('calls onOpenWorktreeConfig when configure link is clicked', () => {
+		const session = createMockSession({ worktreeConfig: undefined });
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={null}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		fireEvent.click(screen.getByText(/Configure Worktrees/));
+		expect(mockOnOpenWorktreeConfig).toHaveBeenCalledOnce();
 	});
 });
