@@ -1093,7 +1093,6 @@ export function useAgentListeners(deps: UseAgentListenersDeps): void {
 				}
 			}
 			deps.batchedUpdater.updateCycleTokens(actualSessionId, usageStats.outputTokens);
-
 		});
 
 		// ================================================================
