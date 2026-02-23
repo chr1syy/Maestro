@@ -421,8 +421,6 @@ function MaestroConsoleInner() {
 		setMarkdownEditMode,
 		chatRawTextMode,
 		setChatRawTextMode,
-		showHiddenFiles,
-		setShowHiddenFiles,
 		terminalWidth,
 		setTerminalWidth,
 		logLevel,
@@ -598,7 +596,6 @@ function MaestroConsoleInner() {
 	const bookmarksCollapsed = useUIStore((s) => s.bookmarksCollapsed);
 	const groupChatsExpanded = useUIStore((s) => s.groupChatsExpanded);
 	const showUnreadOnly = useUIStore((s) => s.showUnreadOnly);
-	const selectedFileIndex = useFileExplorerStore((s) => s.selectedFileIndex);
 	const fileTreeFilter = useFileExplorerStore((s) => s.fileTreeFilter);
 	const fileTreeFilterOpen = useFileExplorerStore((s) => s.fileTreeFilterOpen);
 	const editingGroupId = useUIStore((s) => s.editingGroupId);
@@ -628,8 +625,7 @@ function MaestroConsoleInner() {
 		setSelectedSidebarIndex,
 	} = useUIStore.getState();
 
-	const { setSelectedFileIndex, setFileTreeFilter, setFileTreeFilterOpen } =
-		useFileExplorerStore.getState();
+	const { setFileTreeFilterOpen } = useFileExplorerStore.getState();
 
 	// --- GROUP CHAT STATE (now in groupChatStore) ---
 
@@ -744,8 +740,6 @@ function MaestroConsoleInner() {
 	// Content is per-session in session.autoRunContent
 	const autoRunDocumentList = useBatchStore((s) => s.documentList);
 	const autoRunDocumentTree = useBatchStore((s) => s.documentTree);
-	const autoRunIsLoadingDocuments = useBatchStore((s) => s.isLoadingDocuments);
-	const autoRunDocumentTaskCounts = useBatchStore((s) => s.documentTaskCounts);
 	const {
 		setDocumentList: setAutoRunDocumentList,
 		setDocumentTree: setAutoRunDocumentTree,
@@ -5273,57 +5267,17 @@ function MaestroConsoleInner() {
 	});
 
 	const rightPanelProps = useRightPanelProps({
-		// Session & Theme
-		activeSession,
+		// Theme (computed externally from settingsStore + themeId)
 		theme,
-		shortcuts,
-
-		// Panel state
-		rightPanelOpen,
-		rightPanelWidth,
-
-		// Tab state
-		activeRightTab,
-
-		// Focus management
-		activeFocus,
-
-		// File explorer state
-		fileTreeFilter,
-		fileTreeFilterOpen,
-		filteredFileTree,
-		selectedFileIndex,
-		showHiddenFiles,
-
-		// Auto Run state
-		autoRunDocumentList,
-		autoRunDocumentTree,
-		autoRunIsLoadingDocuments,
-		autoRunDocumentTaskCounts,
-
-		// Batch processing (convert null to undefined for component props)
-		activeBatchRunState: activeBatchRunState ?? undefined,
-		currentSessionBatchState: currentSessionBatchState ?? undefined,
-
-		// Document Graph
-		lastGraphFocusFilePath: lastGraphFocusFilePath || undefined,
 
 		// Refs
 		fileTreeContainerRef,
 		fileTreeFilterInputRef,
 
-		// Setters
-		setRightPanelOpen,
-		setRightPanelWidth,
-		setActiveFocus,
-		setFileTreeFilter,
-		setFileTreeFilterOpen,
-		setSelectedFileIndex,
-		setShowHiddenFiles,
-		setSessions,
-
-		// Handlers
+		// Tab handler (custom logic: checks autorun folder before switching)
 		handleSetActiveRightTab,
+
+		// File explorer handlers
 		toggleFolder,
 		handleFileClick,
 		expandAllFolders,
@@ -5342,7 +5296,8 @@ function MaestroConsoleInner() {
 		handleAutoRunRefresh,
 		handleAutoRunOpenSetup,
 
-		// Batch processing handlers
+		// Batch processing (computed by useBatchHandlers, not a raw store field)
+		currentSessionBatchState: currentSessionBatchState ?? undefined,
 		handleOpenBatchRunner,
 		handleStopBatchRun,
 		handleKillBatchRun,
