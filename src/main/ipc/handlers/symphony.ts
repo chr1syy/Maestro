@@ -861,7 +861,7 @@ async function createDraftPR(
 		return {
 			success: false,
 			error: `Failed to create PR: ${prResult.stderr}`,
-			exitCode: prResult.exitCode,
+			exitCode: typeof prResult.exitCode === 'number' ? prResult.exitCode : undefined,
 		};
 	}
 
