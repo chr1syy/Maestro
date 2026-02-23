@@ -567,25 +567,26 @@ export function SshRemoteModal({
 								)}
 								<ChevronDown className="w-4 h-4" style={{ color: theme.colors.textDim }} />
 							</button>
-								{showSshConfigDropdown && (
-									<div
-										className="absolute top-full left-0 right-0 mt-1 rounded border shadow-lg z-10"
-										style={{
-											backgroundColor: theme.colors.bgMain,
-											borderColor: theme.colors.border,
-										}}
-										onKeyDown={handleDropdownKeyDown}
-										role="listbox"
-										aria-label="SSH config hosts"
-									>
+							{showSshConfigDropdown && (
+								<div
+									className="absolute top-full left-0 right-0 mt-1 rounded border shadow-lg z-10 outline-none"
+									style={{
+										backgroundColor: theme.colors.bgMain,
+										borderColor: theme.colors.border,
+									}}
+									onKeyDown={handleDropdownKeyDown}
+									role="listbox"
+									aria-label="SSH config hosts"
+									tabIndex={0}
+								>
 									{/* Filter input */}
 									<div className="p-2 border-b" style={{ borderColor: theme.colors.border }}>
-											<input
-												ref={filterInputRef}
-												type="text"
-												value={sshConfigFilter}
-												onChange={(e) => handleSshConfigFilterChange(e.target.value)}
-												onKeyDown={handleDropdownKeyDown}
+										<input
+											ref={filterInputRef}
+											type="text"
+											value={sshConfigFilter}
+											onChange={(e) => handleSshConfigFilterChange(e.target.value)}
+											onKeyDown={handleDropdownKeyDown}
 											placeholder="Type to filter..."
 											className="w-full px-2 py-1 rounded text-sm bg-transparent outline-none"
 											style={{
@@ -718,15 +719,15 @@ export function SshRemoteModal({
 					helperText="Leave empty to use SSH config or ssh-agent"
 				/>
 
-					{/* Environment Variables */}
-					<div>
-						<div className="flex items-center justify-between mb-2">
-							<div
-								className="text-xs font-bold opacity-70 uppercase"
-								style={{ color: theme.colors.textMain }}
-							>
-								Environment Variables (optional)
-							</div>
+				{/* Environment Variables */}
+				<div>
+					<div className="flex items-center justify-between mb-2">
+						<div
+							className="text-xs font-bold opacity-70 uppercase"
+							style={{ color: theme.colors.textMain }}
+						>
+							Environment Variables (optional)
+						</div>
 						<button
 							type="button"
 							onClick={addEnvVar}

@@ -144,28 +144,28 @@ function SwipeableHistoryItem({
 				overflow: 'hidden',
 			}}
 		>
-				{/* Delete action button (revealed on swipe left) */}
-				{onDelete && (
-					<button
-						type="button"
-						style={{
-							position: 'absolute',
-							top: 0,
+			{/* Delete action button (revealed on swipe left) */}
+			{onDelete && (
+				<button
+					type="button"
+					style={{
+						position: 'absolute',
+						top: 0,
 						right: 0,
 						bottom: 1, // Account for border
 						width: `${DELETE_ACTION_WIDTH}px`,
 						display: 'flex',
 						alignItems: 'center',
 						justifyContent: 'center',
-							backgroundColor: '#ef4444',
-							cursor: 'pointer',
-							opacity: showDeleteAction || offsetX < -20 ? 1 : 0,
-							transition: 'opacity 0.15s ease',
-							border: 'none',
-						}}
-						onClick={handleDeleteTap}
-						aria-label="Delete command"
-					>
+						backgroundColor: '#ef4444',
+						cursor: 'pointer',
+						opacity: showDeleteAction || offsetX < -20 ? 1 : 0,
+						transition: 'opacity 0.15s ease',
+						border: 'none',
+					}}
+					onClick={handleDeleteTap}
+					aria-label="Delete command"
+				>
 					<svg
 						width="20"
 						height="20"
@@ -179,14 +179,14 @@ function SwipeableHistoryItem({
 						<polyline points="3 6 5 6 21 6" />
 						<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
 					</svg>
-					</button>
-				)}
+				</button>
+			)}
 
-				{/* Swipeable item content */}
-				<button
-					type="button"
-					{...swipeHandlers}
-					onClick={handleTap}
+			{/* Swipeable item content */}
+			<button
+				type="button"
+				{...swipeHandlers}
+				onClick={handleTap}
 				onTouchStart={(e) => {
 					swipeHandlers.onTouchStart(e);
 					onLongPressStart(entry.id);
@@ -209,12 +209,12 @@ function SwipeableHistoryItem({
 					transition: isSwiping ? 'none' : 'transform 0.3s ease, background-color 0.15s ease',
 					transform: `translateX(${translateX}px)`,
 					WebkitTapHighlightColor: 'transparent',
-						borderBottom: `1px solid ${colors.border}`,
-						touchAction: 'pan-y',
-						border: 'none',
-						width: '100%',
-					}}
-				>
+					border: 'none',
+					borderBottom: `1px solid ${colors.border}`,
+					touchAction: 'pan-y',
+					width: '100%',
+				}}
+			>
 				{/* Mode indicator icon */}
 				<div
 					style={{
@@ -298,10 +298,10 @@ function SwipeableHistoryItem({
 						‹
 					</div>
 				)}
-				</button>
-			</div>
-		);
-	}
+			</button>
+		</div>
+	);
+}
 
 /**
  * CommandHistoryDrawer component
@@ -389,21 +389,21 @@ export function CommandHistoryDrawer({
 			const velocity = dragOffset / duration;
 
 			// Check for flick gesture
-				if (velocity > FLICK_VELOCITY_THRESHOLD) {
-					// Fast flick down - close
-					closeDrawer();
-					triggerHaptic(HAPTIC_PATTERNS.tap);
-				} else if (dragOffset > maxDrawerHeight * SNAP_THRESHOLD) {
-					// Dragged past threshold - close
-					closeDrawer();
-					triggerHaptic(HAPTIC_PATTERNS.tap);
-				}
+			if (velocity > FLICK_VELOCITY_THRESHOLD) {
+				// Fast flick down - close
+				closeDrawer();
+				triggerHaptic(HAPTIC_PATTERNS.tap);
+			} else if (dragOffset > maxDrawerHeight * SNAP_THRESHOLD) {
+				// Dragged past threshold - close
+				closeDrawer();
+				triggerHaptic(HAPTIC_PATTERNS.tap);
+			}
 
-				// Reset drag offset with animation
-				setDragOffset(0);
-			},
-			[closeDrawer, dragOffset, maxDrawerHeight]
-		);
+			// Reset drag offset with animation
+			setDragOffset(0);
+		},
+		[closeDrawer, dragOffset, maxDrawerHeight]
+	);
 
 	/**
 	 * Handle command item tap
@@ -477,28 +477,28 @@ export function CommandHistoryDrawer({
 	}
 
 	return (
-			<>
-				{/* Backdrop overlay */}
-				<button
-					type="button"
-					tabIndex={-1}
-					onClick={handleBackdropTap}
-					style={{
-						position: 'fixed',
+		<>
+			{/* Backdrop overlay */}
+			<button
+				type="button"
+				tabIndex={-1}
+				onClick={handleBackdropTap}
+				style={{
+					position: 'fixed',
 					top: 0,
 					left: 0,
 					right: 0,
 					bottom: 0,
 					backgroundColor: 'rgba(0, 0, 0, 0.5)',
-						opacity: isOpen ? 1 - dragOffset / maxDrawerHeight : 0,
-						transition: isDragging.current ? 'none' : 'opacity 0.3s ease',
-						zIndex: 199,
-						pointerEvents: isOpen ? 'auto' : 'none',
-						border: 'none',
-						padding: 0,
-					}}
-					aria-label="Close command history drawer"
-				/>
+					opacity: isOpen ? 1 - dragOffset / maxDrawerHeight : 0,
+					transition: isDragging.current ? 'none' : 'opacity 0.3s ease',
+					zIndex: 199,
+					pointerEvents: isOpen ? 'auto' : 'none',
+					border: 'none',
+					padding: 0,
+				}}
+				aria-label="Close command history drawer"
+			/>
 
 			{/* Drawer container */}
 			<div

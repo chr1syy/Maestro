@@ -414,7 +414,7 @@ function DocumentSelectorModal({
 		<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[10000]">
 			<button
 				type="button"
-				className="absolute inset-0"
+				className="absolute inset-0 outline-none"
 				tabIndex={-1}
 				onClick={onClose}
 				aria-label="Close document selector"
@@ -812,12 +812,12 @@ export function DocumentsPanel({
 		resetDragState();
 	}, [performDropOperation, resetDragState]);
 
-		return (
-			<div className="mb-6">
-				<div className="flex items-center justify-between mb-3">
-					<div className="text-xs font-bold uppercase" style={{ color: theme.colors.textDim }}>
-						Documents to Run
-					</div>
+	return (
+		<div className="mb-6">
+			<div className="flex items-center justify-between mb-3">
+				<div className="text-xs font-bold uppercase" style={{ color: theme.colors.textDim }}>
+					Documents to Run
+				</div>
 				<button
 					onClick={handleOpenDocSelector}
 					className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-white/10 transition-colors"
@@ -1195,11 +1195,11 @@ export function DocumentsPanel({
 								className="flex items-center rounded-lg border overflow-hidden"
 								style={{ borderColor: theme.colors.border }}
 							>
-									{/* Infinity Toggle */}
-									<button
-										onClick={() => {
-											setMaxLoops(null);
-										}}
+								{/* Infinity Toggle */}
+								<button
+									onClick={() => {
+										setMaxLoops(null);
+									}}
 									className={`px-2.5 py-1 text-xs font-medium transition-colors ${
 										!showMaxLoopsSlider ? 'bg-white/10' : 'hover:bg-white/5'
 									}`}
@@ -1210,12 +1210,12 @@ export function DocumentsPanel({
 								>
 									<span className="text-xl leading-none">∞</span>
 								</button>
-									{/* Max Toggle */}
-									<button
-										onClick={() => {
-											if (maxLoops === null) {
-												setMaxLoops(5);
-											}
+								{/* Max Toggle */}
+								<button
+									onClick={() => {
+										if (maxLoops === null) {
+											setMaxLoops(5);
+										}
 									}}
 									className={`px-2.5 py-1 text-xs font-medium transition-colors border-l ${
 										showMaxLoopsSlider ? 'bg-white/10' : 'hover:bg-white/5'

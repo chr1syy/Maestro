@@ -424,31 +424,31 @@ const LogItemComponent = memo(
 							/>
 						</div>
 					)}
-						{log.images && log.images.length > 0 && (
-							<div
-								className="flex gap-2 mb-2 overflow-x-auto scrollbar-thin"
-								style={{ overscrollBehavior: 'contain' }}
-							>
-								{log.images.map((img, imgIdx) => (
-									<img
-										key={img}
-										src={img}
-										alt={`Terminal output image ${imgIdx + 1}`}
-										className="h-20 rounded border cursor-zoom-in shrink-0"
-										style={{ objectFit: 'contain', maxWidth: '200px' }}
-										role="button"
-										tabIndex={0}
-										onClick={() => setLightboxImage(img, log.images, 'history')}
-										onKeyDown={(e) => {
-											if (e.key === 'Enter' || e.key === ' ') {
-												e.preventDefault();
-												setLightboxImage(img, log.images, 'history');
-											}
-										}}
-									/>
-								))}
-							</div>
-						)}
+					{log.images && log.images.length > 0 && (
+						<div
+							className="flex gap-2 mb-2 overflow-x-auto scrollbar-thin"
+							style={{ overscrollBehavior: 'contain' }}
+						>
+							{log.images.map((img, imgIdx) => (
+								<img
+									key={img}
+									src={img}
+									alt={`Terminal output image ${imgIdx + 1}`}
+									className="h-20 rounded border cursor-zoom-in shrink-0 outline-none focus:ring-2 focus:ring-accent"
+									style={{ objectFit: 'contain', maxWidth: '200px' }}
+									role="button"
+									tabIndex={0}
+									onClick={() => setLightboxImage(img, log.images, 'history')}
+									onKeyDown={(e) => {
+										if (e.key === 'Enter' || e.key === ' ') {
+											e.preventDefault();
+											setLightboxImage(img, log.images, 'history');
+										}
+									}}
+								/>
+							))}
+						</div>
+					)}
 					{log.source === 'stderr' && (
 						<div className="mb-2">
 							<span
@@ -951,10 +951,10 @@ LogItemComponent.displayName = 'LogItemComponent';
 
 // Separate component for elapsed time to prevent re-renders of the entire list
 const ElapsedTimeDisplay = memo(
-		({ thinkingStartTime, textColor }: { thinkingStartTime: number; textColor: string }) => {
-			const [elapsedSeconds, setElapsedSeconds] = useState(
-				() => Math.floor((Date.now() - thinkingStartTime) / 1000)
-			);
+	({ thinkingStartTime, textColor }: { thinkingStartTime: number; textColor: string }) => {
+		const [elapsedSeconds, setElapsedSeconds] = useState(() =>
+			Math.floor((Date.now() - thinkingStartTime) / 1000)
+		);
 
 		useEffect(() => {
 			// Update every second
@@ -1409,7 +1409,13 @@ export const TerminalOutput = memo(
 					scrollSaveTimerRef.current = null;
 				}, 200);
 			}
-		}, [activeTabId, filteredLogs.length, onScrollPositionChange, onAtBottomChange, autoScrollAiMode]);
+		}, [
+			activeTabId,
+			filteredLogs.length,
+			onScrollPositionChange,
+			onAtBottomChange,
+			autoScrollAiMode,
+		]);
 
 		// PERF: Throttle at 16ms (60fps) instead of 4ms to reduce state updates during scroll
 		const handleScroll = useThrottledCallback(handleScrollInner, 16);
@@ -1540,8 +1546,8 @@ export const TerminalOutput = memo(
 			});
 
 			observer.observe(container, {
-				childList: true,   // New/removed DOM nodes (new log entries, tool events)
-				subtree: true,     // Watch all descendants, not just direct children
+				childList: true, // New/removed DOM nodes (new log entries, tool events)
+				subtree: true, // Watch all descendants, not just direct children
 				characterData: true, // Text node mutations (thinking stream text growth)
 			});
 
@@ -1606,13 +1612,13 @@ export const TerminalOutput = memo(
 
 		const isAutoScrollActive = autoScrollAiMode && !autoScrollPaused;
 
-			return (
-				<div
-					ref={terminalOutputRef}
-					tabIndex={0}
-					role="region"
-					aria-label="Terminal output"
-					className="terminal-output flex-1 flex flex-col overflow-hidden transition-colors outline-none relative"
+		return (
+			<div
+				ref={terminalOutputRef}
+				tabIndex={0}
+				role="region"
+				aria-label="Terminal output"
+				className="terminal-output flex-1 flex flex-col overflow-hidden transition-colors outline-none relative"
 				style={{
 					backgroundColor:
 						session.inputMode === 'ai' ? theme.colors.bgMain : theme.colors.bgActivity,
@@ -1688,12 +1694,12 @@ export const TerminalOutput = memo(
 								isAIMode ? 'Filter output... (Esc to close)' : 'Search output... (Esc to close)'
 							}
 							className="w-full px-3 py-2 rounded border bg-transparent outline-none text-sm"
-								style={{
-									borderColor: theme.colors.accent,
-									color: theme.colors.textMain,
-									backgroundColor: theme.colors.bgSidebar,
-								}}
-							/>
+							style={{
+								borderColor: theme.colors.accent,
+								color: theme.colors.textMain,
+								backgroundColor: theme.colors.bgSidebar,
+							}}
+						/>
 					</div>
 				)}
 				{/* Prose styles for markdown rendering - injected once at container level for performance */}
@@ -1803,43 +1809,62 @@ export const TerminalOutput = memo(
 
 				{/* Auto-scroll toggle — positioned opposite AI response side (AI mode only) */}
 				{/* Visible when: not at bottom (dimmed, click to pin) OR pinned at bottom (accent, click to unpin) */}
-				{session.inputMode === 'ai' && setAutoScrollAiMode && (!isAtBottom || isAutoScrollActive) && (
-					<button
-						onClick={() => {
-							if (isAutoScrollActive && isAtBottom) {
-								// Currently pinned at bottom — unpin
-								setAutoScrollAiMode(false);
-							} else {
-								// Not pinned — jump to bottom and pin
-								setAutoScrollPaused(false);
-								setAutoScrollAiMode(true);
-								setHasNewMessages(false);
-								setNewMessageCount(0);
-								if (scrollContainerRef.current) {
-									scrollContainerRef.current.scrollTo({
-										top: scrollContainerRef.current.scrollHeight,
-										behavior: 'smooth',
-									});
+				{session.inputMode === 'ai' &&
+					setAutoScrollAiMode &&
+					(!isAtBottom || isAutoScrollActive) && (
+						<button
+							onClick={() => {
+								if (isAutoScrollActive && isAtBottom) {
+									// Currently pinned at bottom — unpin
+									setAutoScrollAiMode(false);
+								} else {
+									// Not pinned — jump to bottom and pin
+									setAutoScrollPaused(false);
+									setAutoScrollAiMode(true);
+									setHasNewMessages(false);
+									setNewMessageCount(0);
+									if (scrollContainerRef.current) {
+										scrollContainerRef.current.scrollTo({
+											top: scrollContainerRef.current.scrollHeight,
+											behavior: 'smooth',
+										});
+									}
 								}
+							}}
+							className={`absolute bottom-4 ${userMessageAlignment === 'right' ? 'left-6' : 'right-6'} flex items-center gap-2 px-3 py-2 rounded-full shadow-lg transition-all hover:scale-105 z-20`}
+							style={{
+								backgroundColor: isAutoScrollActive
+									? theme.colors.accent
+									: hasNewMessages
+										? theme.colors.accent
+										: theme.colors.bgSidebar,
+								color: isAutoScrollActive
+									? theme.colors.accentForeground
+									: hasNewMessages
+										? theme.colors.accentForeground
+										: theme.colors.textDim,
+								border: `1px solid ${isAutoScrollActive || hasNewMessages ? 'transparent' : theme.colors.border}`,
+								animation:
+									hasNewMessages && !isAutoScrollActive
+										? 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite'
+										: undefined,
+							}}
+							title={
+								isAutoScrollActive
+									? 'Auto-scroll ON (click to unpin)'
+									: hasNewMessages
+										? 'New messages (click to pin to bottom)'
+										: 'Scroll to bottom (click to pin)'
 							}
-						}}
-						className={`absolute bottom-4 ${userMessageAlignment === 'right' ? 'left-6' : 'right-6'} flex items-center gap-2 px-3 py-2 rounded-full shadow-lg transition-all hover:scale-105 z-20`}
-						style={{
-							backgroundColor: isAutoScrollActive ? theme.colors.accent : hasNewMessages ? theme.colors.accent : theme.colors.bgSidebar,
-							color: isAutoScrollActive ? theme.colors.accentForeground : hasNewMessages ? theme.colors.accentForeground : theme.colors.textDim,
-							border: `1px solid ${isAutoScrollActive || hasNewMessages ? 'transparent' : theme.colors.border}`,
-							animation: hasNewMessages && !isAutoScrollActive ? 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' : undefined,
-						}}
-						title={isAutoScrollActive ? 'Auto-scroll ON (click to unpin)' : hasNewMessages ? 'New messages (click to pin to bottom)' : 'Scroll to bottom (click to pin)'}
-					>
-						<ArrowDown className="w-4 h-4" />
-						{newMessageCount > 0 && !isAutoScrollActive && (
-							<span className="text-xs font-bold">
-								{newMessageCount > 99 ? '99+' : newMessageCount}
-							</span>
-						)}
-					</button>
-				)}
+						>
+							<ArrowDown className="w-4 h-4" />
+							{newMessageCount > 0 && !isAutoScrollActive && (
+								<span className="text-xs font-bold">
+									{newMessageCount > 99 ? '99+' : newMessageCount}
+								</span>
+							)}
+						</button>
+					)}
 
 				{/* Copied to Clipboard Notification */}
 				{showCopiedNotification && (

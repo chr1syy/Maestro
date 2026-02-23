@@ -48,7 +48,12 @@ const OVERVIEW_SECTIONS = [
 	'activity-heatmap',
 	'duration-trends',
 ] as const;
-const AGENTS_SECTIONS = ['session-stats', 'agent-efficiency', 'agent-comparison', 'agent-usage'] as const;
+const AGENTS_SECTIONS = [
+	'session-stats',
+	'agent-efficiency',
+	'agent-comparison',
+	'agent-usage',
+] as const;
 const ACTIVITY_SECTIONS = ['activity-heatmap', 'weekday-comparison', 'duration-trends'] as const;
 const AUTORUN_SECTIONS = ['autorun-stats', 'tasks-by-hour', 'longest-autoruns'] as const;
 
@@ -145,7 +150,7 @@ export function UsageDashboardModal({
 	defaultTimeRange = 'week',
 	sessions = EMPTY_SESSIONS,
 }: UsageDashboardModalProps) {
-	const [timeRange, setTimeRange] = useState<StatsTimeRange>('week');
+	const [timeRange, setTimeRange] = useState<StatsTimeRange>(defaultTimeRange);
 	const [viewMode, setViewMode] = useState<ViewMode>('overview');
 	const [data, setData] = useState<StatsAggregation | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -485,10 +490,14 @@ export function UsageDashboardModal({
 	if (!isOpen) return null;
 
 	return (
-		<div
-			className="fixed inset-0 modal-overlay flex items-center justify-center z-[9999] animate-in fade-in duration-100"
-		>
-			<button type="button" className="absolute inset-0" tabIndex={-1} onClick={onClose} aria-label="Close usage dashboard" />
+		<div className="fixed inset-0 modal-overlay flex items-center justify-center z-[9999] animate-in fade-in duration-100">
+			<button
+				type="button"
+				className="absolute inset-0"
+				tabIndex={-1}
+				onClick={onClose}
+				aria-label="Close usage dashboard"
+			/>
 			<div
 				ref={containerRef}
 				tabIndex={-1}
@@ -632,11 +641,11 @@ export function UsageDashboardModal({
 					onKeyDown={handleTabKeyDown}
 					data-testid="view-mode-tabs"
 				>
-						{VIEW_MODE_TABS.map((tab) => (
-							<button
-								key={tab.value}
-								onClick={() => switchViewMode(tab.value)}
-								className="px-4 py-2 rounded-lg text-sm font-medium transition-colors outline-none"
+					{VIEW_MODE_TABS.map((tab) => (
+						<button
+							key={tab.value}
+							onClick={() => switchViewMode(tab.value)}
+							className="px-4 py-2 rounded-lg text-sm font-medium transition-colors outline-none"
 							style={{
 								backgroundColor:
 									viewMode === tab.value ? `${theme.colors.accent}20` : 'transparent',
@@ -728,7 +737,12 @@ export function UsageDashboardModal({
 										data-testid="section-summary-cards"
 									>
 										<ChartErrorBoundary theme={theme} chartName="Summary Cards">
-											<SummaryCards data={data} theme={theme} columns={layout.summaryCardsCols} sessions={sessions} />
+											<SummaryCards
+												data={data}
+												theme={theme}
+												columns={layout.summaryCardsCols}
+												sessions={sessions}
+											/>
 										</ChartErrorBoundary>
 									</div>
 
@@ -1145,10 +1159,7 @@ export function UsageDashboardModal({
 										data-testid="section-tasks-by-hour"
 									>
 										<ChartErrorBoundary theme={theme} chartName="Tasks by Hour">
-											<TasksByHourChart
-												timeRange={timeRange}
-												theme={theme}
-											/>
+											<TasksByHourChart timeRange={timeRange} theme={theme} />
 										</ChartErrorBoundary>
 									</div>
 
@@ -1170,10 +1181,7 @@ export function UsageDashboardModal({
 										data-testid="section-longest-autoruns"
 									>
 										<ChartErrorBoundary theme={theme} chartName="Longest Auto Runs">
-											<LongestAutoRunsTable
-												timeRange={timeRange}
-												theme={theme}
-											/>
+											<LongestAutoRunsTable timeRange={timeRange} theme={theme} />
 										</ChartErrorBoundary>
 									</div>
 								</>
