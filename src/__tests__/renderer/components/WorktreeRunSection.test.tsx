@@ -103,7 +103,7 @@ describe('WorktreeRunSection', () => {
 		expect(toggleButton.className).toContain('opacity-40');
 		expect(toggleButton.className).toContain('cursor-not-allowed');
 		// Configure link should also render
-		expect(screen.getByText(/Configure Worktrees/)).toBeTruthy();
+		expect(screen.getByText(/Configure →/)).toBeTruthy();
 	});
 
 	it('treats session as configured when legacy worktreeParentPath is set', () => {
@@ -129,7 +129,7 @@ describe('WorktreeRunSection', () => {
 		const toggleButton = toggle.closest('button')!;
 		expect(toggleButton.disabled).toBe(false);
 		// Configure link should NOT appear
-		expect(screen.queryByText(/Configure Worktrees/)).toBeNull();
+		expect(screen.queryByText(/Configure →/)).toBeNull();
 	});
 
 	it('treats session as configured when child worktree sessions exist', () => {
@@ -152,7 +152,7 @@ describe('WorktreeRunSection', () => {
 		const toggle = screen.getByText('Run in Worktree');
 		const toggleButton = toggle.closest('button')!;
 		expect(toggleButton.disabled).toBe(false);
-		expect(screen.queryByText(/Configure Worktrees/)).toBeNull();
+		expect(screen.queryByText(/Configure →/)).toBeNull();
 	});
 
 	it('shows toggle in off state with no selector when worktreeTarget is null', () => {
@@ -495,7 +495,40 @@ describe('WorktreeRunSection', () => {
 		// Branch name input should appear
 		expect(screen.getByDisplayValue(/auto-run-/)).toBeTruthy();
 		expect(screen.getByText('Base Branch')).toBeTruthy();
-		expect(screen.getByText('Branch Name')).toBeTruthy();
+		expect(screen.getByText('Worktree Branch Name')).toBeTruthy();
+	});
+
+	it('defaults to current branch as base branch', async () => {
+		const session = createMockSession();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+		// Current branch is 'develop', not main
+		(window.maestro.git as Record<string, unknown>).branch = vi.fn().mockResolvedValue({ stdout: 'develop' });
+		vi.mocked(gitService.getBranches).mockResolvedValue(['main', 'develop', 'feature/xyz']);
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={{ mode: 'create-new', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		const select = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
+		await act(async () => {
+			fireEvent.change(select, { target: { value: '__create_new__' } });
+		});
+
+		await waitFor(() => {
+			expect(screen.getAllByRole('combobox').length).toBe(2);
+		});
+
+		// Should default to current branch 'develop', not 'main'
+		const mmdd = `${String(new Date().getMonth() + 1).padStart(2, '0')}${String(new Date().getDate()).padStart(2, '0')}`;
+		expect(screen.getByDisplayValue(`auto-run-develop-${mmdd}`)).toBeTruthy();
 	});
 
 	it('auto-generates branch name from selected base branch', async () => {
@@ -642,9 +675,8 @@ describe('WorktreeRunSection', () => {
 		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith(null);
 	});
 
-	it('clicking toggle on with available children selects first idle child', () => {
+	it('clicking toggle on always defaults to create-new mode', () => {
 		const session = createMockSession();
-		const busyChild = createWorktreeChild({ id: 'child-busy', state: 'busy', name: 'Busy' });
 		const idleChild = createWorktreeChild({ id: 'child-idle', state: 'idle', name: 'Idle' });
 		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
 		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
@@ -653,7 +685,7 @@ describe('WorktreeRunSection', () => {
 			<WorktreeRunSection
 				theme={theme}
 				activeSession={session}
-				sessions={[session, busyChild, idleChild]}
+				sessions={[session, idleChild]}
 				worktreeTarget={null}
 				onWorktreeTargetChange={mockOnWorktreeTargetChange}
 				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
@@ -664,15 +696,14 @@ describe('WorktreeRunSection', () => {
 		const toggle = screen.getByText('Run in Worktree');
 		fireEvent.click(toggle);
 
-		// Should select the first idle child, not the busy one
+		// Should always default to create-new, even when idle children exist
 		expect(mockOnWorktreeTargetChange).toHaveBeenCalledWith({
-			mode: 'existing-open',
-			sessionId: 'child-idle',
+			mode: 'create-new',
 			createPROnCompletion: false,
 		});
 	});
 
-	it('clicking toggle on with no idle children selects create-new', () => {
+	it('clicking toggle on with no children also selects create-new', () => {
 		const session = createMockSession();
 		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
 		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
@@ -711,7 +742,7 @@ describe('WorktreeRunSection', () => {
 			/>
 		);
 
-		fireEvent.click(screen.getByText(/Configure Worktrees/));
+		fireEvent.click(screen.getByText(/Configure →/));
 		expect(mockOnOpenWorktreeConfig).toHaveBeenCalledOnce();
 	});
 
@@ -836,7 +867,7 @@ describe('WorktreeRunSection', () => {
 
 		// Wait for branch inputs to appear
 		await waitFor(() => {
-			expect(screen.getByText('Branch Name')).toBeTruthy();
+			expect(screen.getByText('Worktree Branch Name')).toBeTruthy();
 		});
 
 		// Clear the branch name input
@@ -852,6 +883,41 @@ describe('WorktreeRunSection', () => {
 	// -----------------------------------------------------------------------
 	// UX Polish: Info icon, state indicator, path preview, keyboard nav
 	// -----------------------------------------------------------------------
+
+	it('shows description text in off state and "Enabled" badge in on state', () => {
+		const session = createMockSession();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+
+		const { rerender } = render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={null}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		// Off state should show description
+		expect(screen.getByText('Dispatch to a separate worktree')).toBeTruthy();
+		expect(screen.queryByText('Enabled')).toBeNull();
+
+		// On state should show "Enabled"
+		rerender(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				sessions={[session]}
+				worktreeTarget={{ mode: 'create-new', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+		expect(screen.getByText('Enabled')).toBeTruthy();
+		expect(screen.queryByText('Dispatch to a separate worktree')).toBeNull();
+	});
 
 	it('renders info icon with tooltip next to the toggle button', () => {
 		const session = createMockSession();
@@ -924,7 +990,7 @@ describe('WorktreeRunSection', () => {
 
 		// Wait for branch inputs to load
 		await waitFor(() => {
-			expect(screen.getByText('Branch Name')).toBeTruthy();
+			expect(screen.getByText('Worktree Branch Name')).toBeTruthy();
 		});
 
 		// Path preview should show basePath/branchName
@@ -958,7 +1024,7 @@ describe('WorktreeRunSection', () => {
 		});
 
 		await waitFor(() => {
-			expect(screen.getByText('Branch Name')).toBeTruthy();
+			expect(screen.getByText('Worktree Branch Name')).toBeTruthy();
 		});
 
 		// Clear branch name

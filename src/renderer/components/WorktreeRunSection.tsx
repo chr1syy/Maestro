@@ -45,16 +45,24 @@ export function WorktreeRunSection({
 
 	const sshRemoteId = activeSession.sshRemoteId || activeSession.sessionSshRemoteConfig?.remoteId || undefined;
 
-	// Fetch branches when "Create New Worktree" is selected
+	// Fetch branches (and current branch) when "Create New Worktree" is selected
 	useEffect(() => {
 		if (selectedValue !== '__create_new__') return;
 
 		let cancelled = false;
 		setBranchLoadError(false);
-		gitService.getBranches(activeSession.cwd).then((result) => {
+
+		Promise.all([
+			gitService.getBranches(activeSession.cwd),
+			window.maestro.git.branch(activeSession.cwd, sshRemoteId),
+		]).then(([result, branchResult]) => {
 			if (cancelled) return;
-			// Sort so main/master appears first
+			const currentBranch = branchResult.stdout?.trim() || '';
+
+			// Sort: current branch first, then main/master, then alphabetical
 			const sorted = [...result].sort((a, b) => {
+				if (a === currentBranch && b !== currentBranch) return -1;
+				if (a !== currentBranch && b === currentBranch) return 1;
 				const aIsMain = a === 'main' || a === 'master';
 				const bIsMain = b === 'main' || b === 'master';
 				if (aIsMain && !bIsMain) return -1;
@@ -63,9 +71,10 @@ export function WorktreeRunSection({
 			});
 			setBranches(sorted);
 			if (sorted.length > 0 && !baseBranch) {
-				setBaseBranch(sorted[0]);
+				const defaultBranch = sorted[0]; // current branch (or main/master fallback)
+				setBaseBranch(defaultBranch);
 				const mmdd = `${String(new Date().getMonth() + 1).padStart(2, '0')}${String(new Date().getDate()).padStart(2, '0')}`;
-				setNewBranchName(`auto-run-${sorted[0]}-${mmdd}`);
+				setNewBranchName(`auto-run-${defaultBranch}-${mmdd}`);
 			}
 		}).catch(() => {
 			if (!cancelled) {
@@ -183,26 +192,14 @@ export function WorktreeRunSection({
 			setSelectedValue('');
 			onWorktreeTargetChange(null);
 		} else {
-			// Turning on — select first available worktree child if any
-			const firstAvailable = worktreeChildren.find(
-				(s) => s.state !== 'busy' && s.state !== 'connecting'
-			);
-			const defaultValue = firstAvailable?.id || '__create_new__';
-			setSelectedValue(defaultValue);
-			if (defaultValue === '__create_new__') {
-				onWorktreeTargetChange({
-					mode: 'create-new',
-					createPROnCompletion: createPROnCompletion,
-				});
-			} else {
-				onWorktreeTargetChange({
-					mode: 'existing-open',
-					sessionId: defaultValue,
-					createPROnCompletion: createPROnCompletion,
-				});
-			}
+			// Turning on — always default to "Create New Worktree"
+			setSelectedValue('__create_new__');
+			onWorktreeTargetChange({
+				mode: 'create-new',
+				createPROnCompletion: createPROnCompletion,
+			});
 		}
-	}, [isEnabled, worktreeChildren, createPROnCompletion, onWorktreeTargetChange]);
+	}, [isEnabled, createPROnCompletion, onWorktreeTargetChange]);
 
 	const handleSelectChange = useCallback(
 		(e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -237,66 +234,80 @@ export function WorktreeRunSection({
 	}, [activeSession.worktreeConfig?.basePath, selectedValue, newBranchName]);
 
 	return (
-		<div className="mb-6 flex flex-col gap-3">
-			{/* Toggle with info icon */}
-			<div className="flex items-center gap-2 self-start">
-				<button
-					onClick={isConfigured ? handleToggle : undefined}
-					disabled={!isConfigured}
-					className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors ${
-						!isConfigured
-							? 'opacity-40 cursor-not-allowed'
-							: isEnabled
-								? 'border-accent'
-								: 'border-border hover:bg-white/5'
-					}`}
+		<div
+			className="mb-6 rounded-lg border transition-colors"
+			style={{
+				borderColor: isEnabled && isConfigured ? theme.colors.accent + '40' : theme.colors.border,
+				backgroundColor: isEnabled && isConfigured ? theme.colors.accent + '08' : 'transparent',
+			}}
+		>
+			{/* Header row — always visible */}
+			<button
+				onClick={isConfigured ? handleToggle : undefined}
+				disabled={!isConfigured}
+				className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg transition-colors ${
+					!isConfigured
+						? 'opacity-40 cursor-not-allowed'
+						: 'cursor-pointer hover:bg-white/5'
+				}`}
+			>
+				<GitBranch
+					className="w-3.5 h-3.5 shrink-0"
 					style={{
-						borderColor: isEnabled && isConfigured ? theme.colors.accent : theme.colors.border,
-						backgroundColor: isEnabled && isConfigured
-							? theme.colors.accent + '15'
-							: 'transparent',
+						color: isEnabled && isConfigured
+							? theme.colors.accent
+							: theme.colors.textDim,
+					}}
+				/>
+				<span
+					className="text-xs font-medium"
+					style={{
+						color: isEnabled && isConfigured
+							? theme.colors.accent
+							: theme.colors.textMain,
 					}}
 				>
-					<GitBranch
-						className="w-3.5 h-3.5"
-						style={{
-							color: isEnabled && isConfigured
-								? theme.colors.accent
-								: theme.colors.textDim,
-						}}
-					/>
+					Run in Worktree
+				</span>
+				{!isConfigured && (
 					<span
-						className="text-xs font-medium"
-						style={{
-							color: isEnabled && isConfigured
-								? theme.colors.accent
-								: theme.colors.textMain,
+						className="text-[11px] ml-auto"
+						style={{ color: theme.colors.textDim }}
+						onClick={(e) => {
+							e.stopPropagation();
+							onOpenWorktreeConfig();
 						}}
 					>
-						Run in Worktree
+						<span className="hover:underline cursor-pointer" style={{ color: theme.colors.accent }}>
+							Configure →
+						</span>
 					</span>
-				</button>
-				<span title="Dispatch this Auto Run to a separate worktree agent instead of the current one">
-					<Info
-						className="w-3.5 h-3.5 shrink-0"
+				)}
+				{isConfigured && !isEnabled && (
+					<span
+						className="text-[11px] ml-auto"
 						style={{ color: theme.colors.textDim }}
-					/>
-				</span>
-			</div>
-
-			{/* Configure prompt when worktrees aren't set up */}
-			{!isConfigured && (
-				<span
-					className="text-xs cursor-pointer hover:underline pl-1"
-					style={{ color: theme.colors.accent }}
-					onClick={onOpenWorktreeConfig}
-				>
-					Configure Worktrees to enable this feature →
-				</span>
-			)}
+					>
+						Dispatch to a separate worktree
+					</span>
+				)}
+				{isConfigured && isEnabled && (
+					<span
+						className="text-[11px] ml-auto font-medium"
+						style={{ color: theme.colors.accent }}
+					>
+						Enabled
+					</span>
+				)}
+				<Info
+					className="w-3.5 h-3.5 shrink-0"
+					style={{ color: theme.colors.textDim, opacity: 0.5 }}
+					title="Dispatch this Auto Run to a separate worktree agent instead of the current one"
+				/>
+			</button>
 
 			{isConfigured && isEnabled && (
-				<div className="flex flex-col gap-3 animate-slide-down">
+				<div className="flex flex-col gap-3 animate-slide-down px-3 pb-3">
 					{/* Agent selector */}
 					<select
 						value={selectedValue}
@@ -419,7 +430,7 @@ export function WorktreeRunSection({
 									className="text-xs"
 									style={{ color: theme.colors.textDim }}
 								>
-									Branch Name
+									Worktree Branch Name
 								</span>
 								<input
 									type="text"

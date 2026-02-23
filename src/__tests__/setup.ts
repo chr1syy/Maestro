@@ -228,6 +228,7 @@ const mockMaestro = {
 		onExit: vi.fn().mockReturnValue(() => {}),
 	},
 	git: {
+		branch: vi.fn().mockResolvedValue({ stdout: 'main' }),
 		status: vi.fn().mockResolvedValue({ files: [], branch: 'main', stdout: '' }),
 		diff: vi.fn().mockResolvedValue(''),
 		isRepo: vi.fn().mockResolvedValue(true),

@@ -623,9 +623,6 @@ export function BatchRunnerModal(props: BatchRunnerModalProps) {
 						onRefreshDocuments={onRefreshDocuments}
 					/>
 
-					{/* Divider */}
-					<div className="border-t mb-6" style={{ borderColor: theme.colors.border }} />
-
 					{/* Run in Worktree Section */}
 					{activeSession && (
 						<WorktreeRunSection
@@ -637,9 +634,6 @@ export function BatchRunnerModal(props: BatchRunnerModalProps) {
 							onOpenWorktreeConfig={handleOpenWorktreeConfig}
 						/>
 					)}
-
-					{/* Divider */}
-					<div className="border-t mb-6" style={{ borderColor: theme.colors.border }} />
 
 					{/* Agent Prompt Section */}
 					<div className="flex flex-col gap-2">
