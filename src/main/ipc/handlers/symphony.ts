@@ -317,6 +317,10 @@ const MAX_BODY_SIZE = 1024 * 1024;
  * Supports both repository-relative paths and GitHub attachment links.
  */
 function parseDocumentPaths(body: string): DocumentReference[] {
+	logger.debug('Parsing document references from issue body', LOG_CONTEXT, {
+		bodyLength: body.length,
+	});
+
 	// Guard against extremely large bodies that could cause performance issues
 	if (body.length > MAX_BODY_SIZE) {
 		logger.warn('Issue body too large, truncating for document parsing', LOG_CONTEXT, {
@@ -334,6 +338,7 @@ function parseDocumentPaths(body: string): DocumentReference[] {
 
 	// First, check for markdown links (GitHub attachments)
 	let match;
+	let externalCount = 0;
 	while ((match = markdownLinkPattern.exec(body)) !== null) {
 		const filename = match[1];
 		const url = match[2];
@@ -346,11 +351,17 @@ function parseDocumentPaths(body: string): DocumentReference[] {
 					path: url,
 					isExternal: true,
 				});
+				externalCount++;
+				logger.debug('Found external document reference', LOG_CONTEXT, {
+					filename,
+					isGitHub: url.includes('github.com'),
+				});
 			}
 		}
 	}
 
 	// Then check for repo-relative paths using existing patterns
+	let repoDocCount = 0;
 	for (const pattern of DOCUMENT_PATH_PATTERNS) {
 		// Reset lastIndex for global regex
 		pattern.lastIndex = 0;
@@ -366,10 +377,21 @@ function parseDocumentPaths(body: string): DocumentReference[] {
 						path: docPath,
 						isExternal: false,
 					});
+					repoDocCount++;
+					logger.debug('Found repo-relative document reference', LOG_CONTEXT, {
+						filename,
+						docPath,
+					});
 				}
 			}
 		}
 	}
+
+	logger.debug('Document path parsing complete', LOG_CONTEXT, {
+		totalDocuments: docs.size,
+		externalDocuments: externalCount,
+		repoDocuments: repoDocCount,
+	});
 
 	return Array.from(docs.values());
 }
@@ -449,10 +471,16 @@ async function fetchStarCounts(repoSlugs: string[]): Promise<Record<string, numb
  * Fetch GitHub issues with runmaestro.ai label for a repository.
  */
 async function fetchIssues(repoSlug: string): Promise<SymphonyIssue[]> {
-	logger.info(`Fetching issues for ${repoSlug}`, LOG_CONTEXT);
+	logger.info(`Fetching issues for ${repoSlug}`, LOG_CONTEXT, {
+		label: SYMPHONY_ISSUE_LABEL,
+	});
 
 	try {
 		const url = `${GITHUB_API_BASE}/repos/${repoSlug}/issues?labels=${encodeURIComponent(SYMPHONY_ISSUE_LABEL)}&state=open`;
+		logger.debug('GitHub API request', LOG_CONTEXT, {
+			url: `${GITHUB_API_BASE}/repos/${repoSlug}/issues...`,
+		});
+
 		const response = await fetch(url, {
 			headers: {
 				Accept: 'application/vnd.github.v3+json',
@@ -461,6 +489,11 @@ async function fetchIssues(repoSlug: string): Promise<SymphonyIssue[]> {
 		});
 
 		if (!response.ok) {
+			logger.error('GitHub API returned error status', LOG_CONTEXT, {
+				status: response.status,
+				statusText: response.statusText,
+				url: `${GITHUB_API_BASE}/repos/${repoSlug}/issues...`,
+			});
 			throw new SymphonyError(`Failed to fetch issues: ${response.status}`, 'github_api');
 		}
 
@@ -476,30 +509,53 @@ async function fetchIssues(repoSlug: string): Promise<SymphonyIssue[]> {
 			labels: Array<{ name: string; color: string }>;
 		}>;
 
+		logger.debug('Raw issues received from GitHub', LOG_CONTEXT, {
+			issueCount: rawIssues.length,
+		});
+
 		// Transform to SymphonyIssue format (initially all as available)
-		const issues: SymphonyIssue[] = rawIssues.map((issue) => ({
-			number: issue.number,
-			title: issue.title,
-			body: issue.body || '',
-			url: issue.url,
-			htmlUrl: issue.html_url,
-			author: issue.user.login,
-			createdAt: issue.created_at,
-			updatedAt: issue.updated_at,
-			documentPaths: parseDocumentPaths(issue.body || ''),
-			labels: (issue.labels || [])
-				.filter((l) => l.name !== SYMPHONY_ISSUE_LABEL)
-				.map((l) => ({ name: l.name, color: l.color })),
-			status: 'available' as IssueStatus,
-		}));
+		const issues: SymphonyIssue[] = rawIssues.map((issue) => {
+			const documentPaths = parseDocumentPaths(issue.body || '');
+			logger.debug('Issue transformed', LOG_CONTEXT, {
+				issueNumber: issue.number,
+				documentCount: documentPaths.length,
+			});
+			return {
+				number: issue.number,
+				title: issue.title,
+				body: issue.body || '',
+				url: issue.url,
+				htmlUrl: issue.html_url,
+				author: issue.user.login,
+				createdAt: issue.created_at,
+				updatedAt: issue.updated_at,
+				documentPaths,
+				labels: (issue.labels || [])
+					.filter((l) => l.name !== SYMPHONY_ISSUE_LABEL)
+					.map((l) => ({ name: l.name, color: l.color })),
+				status: 'available' as IssueStatus,
+			};
+		});
+
+		logger.debug('Starting PR status enrichment', LOG_CONTEXT, {
+			issueCount: issues.length,
+			repoSlug,
+		});
 
 		// Fetch linked PRs to determine actual status
 		// Use GitHub's search API to find draft PRs that mention each issue
 		await enrichIssuesWithPRStatus(repoSlug, issues);
 
-		logger.info(`Fetched ${issues.length} issues for ${repoSlug}`, LOG_CONTEXT);
+		logger.info(`Fetched ${issues.length} issues for ${repoSlug}`, LOG_CONTEXT, {
+			availableCount: issues.filter((i) => i.status === 'available').length,
+			inProgressCount: issues.filter((i) => i.status === 'in_progress').length,
+		});
 		return issues;
 	} catch (error) {
+		logger.error('Error fetching issues', LOG_CONTEXT, {
+			repoSlug,
+			error: error instanceof Error ? error.message : String(error),
+		});
 		if (error instanceof SymphonyError) throw error;
 		throw new SymphonyError(
 			`Failed to fetch issues: ${error instanceof Error ? error.message : String(error)}`,
@@ -586,14 +642,19 @@ async function cloneRepository(
 	repoUrl: string,
 	targetPath: string
 ): Promise<{ success: boolean; error?: string }> {
-	logger.info('Cloning repository', LOG_CONTEXT, { repoUrl, targetPath });
+	logger.info('Cloning repository', LOG_CONTEXT, { repoUrl: 'provided', targetPath: 'provided' });
 
 	const result = await execFileNoThrow('git', ['clone', '--depth=1', repoUrl, targetPath]);
 
 	if (result.exitCode !== 0) {
+		logger.error('Repository clone failed', LOG_CONTEXT, {
+			exitCode: result.exitCode,
+			stderr: result.stderr,
+		});
 		return { success: false, error: result.stderr };
 	}
 
+	logger.info('Repository cloned successfully', LOG_CONTEXT, { targetPath: 'provided' });
 	return { success: true };
 }
 
@@ -604,12 +665,19 @@ async function createBranch(
 	repoPath: string,
 	branchName: string
 ): Promise<{ success: boolean; error?: string }> {
+	logger.debug('Creating new branch', LOG_CONTEXT, { branchName });
 	const result = await execFileNoThrow('git', ['checkout', '-b', branchName], repoPath);
 
 	if (result.exitCode !== 0) {
+		logger.error('Failed to create branch', LOG_CONTEXT, {
+			branchName,
+			exitCode: result.exitCode,
+			stderr: result.stderr,
+		});
 		return { success: false, error: result.stderr };
 	}
 
+	logger.debug('Branch created and checked out successfully', LOG_CONTEXT, { branchName });
 	return { success: true };
 }
 
@@ -617,11 +685,16 @@ async function createBranch(
  * Check if gh CLI is authenticated.
  */
 async function checkGhAuthentication(): Promise<{ authenticated: boolean; error?: string }> {
+	logger.debug('Checking GitHub CLI authentication', LOG_CONTEXT);
 	const result = await execFileNoThrow('gh', ['auth', 'status'], undefined, getExpandedEnv());
 	if (result.exitCode !== 0) {
 		// gh auth status outputs to stderr even on success for some info
 		const output = result.stderr + result.stdout;
+		logger.debug('GitHub CLI authentication check returned non-zero', LOG_CONTEXT, {
+			exitCode: result.exitCode,
+		});
 		if (output.includes('not logged in') || output.includes('no accounts')) {
+			logger.warn('GitHub CLI not authenticated', LOG_CONTEXT);
 			return {
 				authenticated: false,
 				error: 'GitHub CLI is not authenticated. Run "gh auth login" to authenticate.',
@@ -629,13 +702,16 @@ async function checkGhAuthentication(): Promise<{ authenticated: boolean; error?
 		}
 		// If gh CLI is not installed
 		if (output.includes('command not found') || output.includes('not recognized')) {
+			logger.error('GitHub CLI not found', LOG_CONTEXT);
 			return {
 				authenticated: false,
 				error: 'GitHub CLI (gh) is not installed. Install it from https://cli.github.com/',
 			};
 		}
+		logger.error('GitHub CLI error', LOG_CONTEXT, { output });
 		return { authenticated: false, error: `GitHub CLI error: ${output}` };
 	}
+	logger.debug('GitHub CLI authentication verified', LOG_CONTEXT);
 	return { authenticated: true };
 }
 
@@ -643,6 +719,7 @@ async function checkGhAuthentication(): Promise<{ authenticated: boolean; error?
  * Get the default branch of a repository.
  */
 async function getDefaultBranch(repoPath: string): Promise<string> {
+	logger.debug('Determining default branch for repository', LOG_CONTEXT);
 	// Try to get the default branch from remote
 	const result = await execFileNoThrow(
 		'git',
@@ -652,9 +729,13 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 	if (result.exitCode === 0) {
 		// Output is like "refs/remotes/origin/main"
 		const branch = result.stdout.trim().replace('refs/remotes/origin/', '');
-		if (branch) return branch;
+		if (branch) {
+			logger.debug('Default branch determined from remote', LOG_CONTEXT, { branch });
+			return branch;
+		}
 	}
 
+	logger.debug('Checking for common branch names', LOG_CONTEXT);
 	// Fallback: try common branch names
 	const checkResult = await execFileNoThrow(
 		'git',
@@ -662,6 +743,7 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 		repoPath
 	);
 	if (checkResult.exitCode === 0 && checkResult.stdout.includes('refs/heads/main')) {
+		logger.debug('Found main branch', LOG_CONTEXT);
 		return 'main';
 	}
 
@@ -671,10 +753,12 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 		repoPath
 	);
 	if (masterCheck.exitCode === 0 && masterCheck.stdout.includes('refs/heads/master')) {
+		logger.debug('Found master branch', LOG_CONTEXT);
 		return 'master';
 	}
 
 	// Default to main if we can't determine
+	logger.debug('Defaulting to main branch', LOG_CONTEXT);
 	return 'main';
 }
 
@@ -686,14 +770,28 @@ async function createDraftPR(
 	baseBranch: string,
 	title: string,
 	body: string
-): Promise<{ success: boolean; prUrl?: string; prNumber?: number; error?: string }> {
+): Promise<{
+	success: boolean;
+	prUrl?: string;
+	prNumber?: number;
+	exitCode?: number;
+	error?: string;
+}> {
+	logger.debug('Starting draft PR creation workflow', LOG_CONTEXT, { baseBranch });
+
 	// Check gh authentication first
+	logger.debug('Verifying GitHub CLI authentication for PR creation', LOG_CONTEXT);
 	const authCheck = await checkGhAuthentication();
 	if (!authCheck.authenticated) {
+		logger.error('GitHub CLI authentication failed during PR creation', LOG_CONTEXT, {
+			error: authCheck.error,
+		});
 		return { success: false, error: authCheck.error };
 	}
+	logger.debug('GitHub CLI authentication verified for PR creation', LOG_CONTEXT);
 
 	// Get current branch name
+	logger.debug('Determining current branch name', LOG_CONTEXT);
 	const branchResult = await execFileNoThrow(
 		'git',
 		['rev-parse', '--abbrev-ref', 'HEAD'],
@@ -701,17 +799,35 @@ async function createDraftPR(
 	);
 	const branchName = branchResult.stdout.trim();
 	if (!branchName || branchResult.exitCode !== 0) {
+		logger.error('Failed to determine current branch', LOG_CONTEXT, {
+			exitCode: branchResult.exitCode,
+			stderr: branchResult.stderr,
+		});
 		return { success: false, error: 'Failed to determine current branch' };
 	}
+	logger.debug('Current branch determined', LOG_CONTEXT, { branchName });
 
 	// First push the branch
+	logger.info('Pushing branch to remote origin', LOG_CONTEXT, { branchName, baseBranch });
 	const pushResult = await execFileNoThrow('git', ['push', '-u', 'origin', branchName], repoPath);
 
 	if (pushResult.exitCode !== 0) {
+		logger.error('Failed to push branch to remote', LOG_CONTEXT, {
+			branchName,
+			exitCode: pushResult.exitCode,
+			stderr: pushResult.stderr,
+		});
 		return { success: false, error: `Failed to push: ${pushResult.stderr}` };
 	}
+	logger.info('Branch pushed to remote successfully', LOG_CONTEXT, { branchName });
 
 	// Create draft PR using gh CLI (use --head to explicitly specify the branch)
+	logger.info('Creating draft PR via GitHub CLI', LOG_CONTEXT, {
+		branchName,
+		baseBranch,
+		titleLength: title.length,
+	});
+
 	const prResult = await execFileNoThrow(
 		'gh',
 		[
@@ -732,16 +848,34 @@ async function createDraftPR(
 	);
 
 	if (prResult.exitCode !== 0) {
+		logger.error('Failed to create draft PR', LOG_CONTEXT, {
+			branchName,
+			exitCode: prResult.exitCode,
+			stderr: prResult.stderr,
+		});
 		// If PR creation failed after push, try to delete the remote branch
-		logger.warn('PR creation failed, attempting to clean up remote branch', LOG_CONTEXT);
+		logger.warn('PR creation failed, attempting to clean up remote branch', LOG_CONTEXT, {
+			branchName,
+		});
 		await execFileNoThrow('git', ['push', 'origin', '--delete', branchName], repoPath);
-		return { success: false, error: `Failed to create PR: ${prResult.stderr}` };
+		return {
+			success: false,
+			error: `Failed to create PR: ${prResult.stderr}`,
+			exitCode: prResult.exitCode,
+		};
 	}
 
 	// Parse PR URL from output
 	const prUrl = prResult.stdout.trim();
+	logger.debug('Parsing PR number from GitHub CLI output', LOG_CONTEXT, { prUrl: 'provided' });
 	const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
 	const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : undefined;
+
+	logger.info('Draft PR created successfully', LOG_CONTEXT, {
+		prNumber,
+		prUrl: 'provided',
+		branchName,
+	});
 
 	return { success: true, prUrl, prNumber };
 }
@@ -753,6 +887,8 @@ async function markPRReady(
 	repoPath: string,
 	prNumber: number
 ): Promise<{ success: boolean; error?: string }> {
+	logger.info('Marking PR as ready for review', LOG_CONTEXT, { prNumber });
+
 	const result = await execFileNoThrow(
 		'gh',
 		['pr', 'ready', String(prNumber)],
@@ -761,9 +897,15 @@ async function markPRReady(
 	);
 
 	if (result.exitCode !== 0) {
+		logger.error('Failed to mark PR as ready', LOG_CONTEXT, {
+			prNumber,
+			exitCode: result.exitCode,
+			stderr: result.stderr,
+		});
 		return { success: false, error: result.stderr };
 	}
 
+	logger.info('PR marked as ready successfully', LOG_CONTEXT, { prNumber });
 	return { success: true };
 }
 
@@ -1029,6 +1171,7 @@ export function registerSymphonyHandlers({
 		createIpcHandler(
 			handlerOpts('getRegistry'),
 			async (forceRefresh?: boolean): Promise<Omit<GetRegistryResponse, 'success'>> => {
+				logger.debug('symphony:getRegistry called', LOG_CONTEXT, { forceRefresh });
 				const cache = await readCache(app);
 
 				// Check cache validity
@@ -1037,18 +1180,36 @@ export function registerSymphonyHandlers({
 					cache?.registry &&
 					isCacheValid(cache.registry.fetchedAt, REGISTRY_CACHE_TTL_MS)
 				) {
+					const cacheAge = Date.now() - cache.registry.fetchedAt;
+					logger.debug('Registry cache hit', LOG_CONTEXT, {
+						cacheAge: `${Math.round(cacheAge / 1000)}s`,
+						repoCount: cache.registry.data.repositories.length,
+					});
 					const enriched = await enrichWithStars(cache.registry.data, cache, false);
 					return {
 						registry: enriched,
 						fromCache: true,
-						cacheAge: Date.now() - cache.registry.fetchedAt,
+						cacheAge,
 					};
 				}
 
+				logger.debug('Registry cache miss or expired, fetching fresh data', LOG_CONTEXT, {
+					forceRefresh,
+					cacheExists: !!cache?.registry,
+				});
+
 				// Fetch fresh data
 				try {
+					logger.info('Fetching registry from GitHub', LOG_CONTEXT, {
+						url: SYMPHONY_REGISTRY_URL,
+					});
 					const registry = await fetchRegistry();
+					logger.debug('Registry fetched successfully', LOG_CONTEXT, {
+						repositoryCount: registry.repositories.length,
+					});
+
 					const enriched = await enrichWithStars(registry, cache, !!forceRefresh);
+					logger.debug('Registry enriched with star counts', LOG_CONTEXT);
 
 					// Update cache (enriched registry includes stars on repo objects,
 					// but the canonical star data lives in cache.stars)
@@ -1061,20 +1222,25 @@ export function registerSymphonyHandlers({
 						issues: cache?.issues ?? {},
 					};
 					await writeCache(app, newCache);
+					logger.debug('Registry cache updated', LOG_CONTEXT);
 
 					return {
 						registry: enriched,
 						fromCache: false,
 					};
 				} catch (error) {
-					logger.warn('Failed to fetch Symphony registry from GitHub', LOG_CONTEXT, { error });
+					logger.warn('Failed to fetch Symphony registry from GitHub', LOG_CONTEXT, {
+						error: error instanceof Error ? error.message : String(error),
+						url: SYMPHONY_REGISTRY_URL,
+					});
 
 					// Fallback to expired cache if available (better than showing nothing)
 					if (cache?.registry) {
 						const cacheAge = Date.now() - cache.registry.fetchedAt;
-						logger.info(
-							`Using expired cache as fallback (age: ${Math.round(cacheAge / 1000)}s)`,
-							LOG_CONTEXT
+						logger.warn(
+							`Using expired registry cache as fallback (age: ${Math.round(cacheAge / 1000)}s)`,
+							LOG_CONTEXT,
+							{ repoCount: cache.registry.data.repositories.length }
 						);
 						const enriched = await enrichWithStars(cache.registry.data, cache, false);
 						return {
@@ -1084,6 +1250,7 @@ export function registerSymphonyHandlers({
 						};
 					}
 
+					logger.error('No cache available for fallback, throwing error', LOG_CONTEXT);
 					// No cache available - re-throw to show error to user
 					throw error;
 				}
@@ -1102,21 +1269,42 @@ export function registerSymphonyHandlers({
 				repoSlug: string,
 				forceRefresh?: boolean
 			): Promise<Omit<GetIssuesResponse, 'success'>> => {
+				logger.debug('symphony:getIssues called', LOG_CONTEXT, { repoSlug, forceRefresh });
 				const cache = await readCache(app);
 
 				// Check cache
 				const cached = cache?.issues?.[repoSlug];
 				if (!forceRefresh && cached && isCacheValid(cached.fetchedAt, ISSUES_CACHE_TTL_MS)) {
+					const cacheAge = Date.now() - cached.fetchedAt;
+					logger.debug('Issues cache hit', LOG_CONTEXT, {
+						repoSlug,
+						cacheAge: `${Math.round(cacheAge / 1000)}s`,
+						issueCount: cached.data.length,
+					});
 					return {
 						issues: cached.data,
 						fromCache: true,
-						cacheAge: Date.now() - cached.fetchedAt,
+						cacheAge,
 					};
 				}
 
+				logger.debug('Issues cache miss or expired, fetching fresh data', LOG_CONTEXT, {
+					repoSlug,
+					forceRefresh,
+					cacheExists: !!cached,
+				});
+
 				// Fetch fresh
 				try {
+					logger.info(
+						`Fetching issues for repository ${repoSlug} with label ${SYMPHONY_ISSUE_LABEL}`,
+						LOG_CONTEXT
+					);
 					const issues = await fetchIssues(repoSlug);
+					logger.debug('Issues fetched successfully', LOG_CONTEXT, {
+						repoSlug,
+						issueCount: issues.length,
+					});
 
 					// Update cache
 					const newCache: SymphonyCache = {
@@ -1131,6 +1319,7 @@ export function registerSymphonyHandlers({
 						},
 					};
 					await writeCache(app, newCache);
+					logger.debug('Issues cache updated', LOG_CONTEXT, { repoSlug });
 
 					return {
 						issues,
@@ -1139,15 +1328,16 @@ export function registerSymphonyHandlers({
 				} catch (error) {
 					logger.warn('Failed to fetch Symphony issues from GitHub', LOG_CONTEXT, {
 						repoSlug,
-						error,
+						error: error instanceof Error ? error.message : String(error),
 					});
 
 					// Fallback to expired cache if available (better than showing nothing)
 					if (cached?.data) {
 						const cacheAge = Date.now() - cached.fetchedAt;
-						logger.info(
+						logger.warn(
 							`Using expired issues cache as fallback (age: ${Math.round(cacheAge / 1000)}s)`,
-							LOG_CONTEXT
+							LOG_CONTEXT,
+							{ repoSlug, issueCount: cached.data.length }
 						);
 						return {
 							issues: cached.data,
@@ -1156,6 +1346,9 @@ export function registerSymphonyHandlers({
 						};
 					}
 
+					logger.error('No cache available for fallback, throwing error', LOG_CONTEXT, {
+						repoSlug,
+					});
 					// No cache available - re-throw to show error to user
 					throw error;
 				}
@@ -2269,23 +2462,55 @@ This PR will be updated automatically when the Auto Run completes.`;
 			}): Promise<{ success: boolean; error?: string }> => {
 				const { repoUrl, localPath } = params;
 
+				logger.info('symphony:cloneRepo called', LOG_CONTEXT, {
+					repoUrl: 'provided',
+					localPath: 'provided',
+				});
+
 				// Validate GitHub URL
+				logger.debug('Validating GitHub repository URL', LOG_CONTEXT);
 				const urlValidation = validateGitHubUrl(repoUrl);
 				if (!urlValidation.valid) {
+					logger.warn('GitHub URL validation failed', LOG_CONTEXT, {
+						error: urlValidation.error,
+					});
 					return { success: false, error: urlValidation.error };
 				}
+				logger.debug('GitHub URL validation passed', LOG_CONTEXT);
 
 				// Ensure parent directory exists
+				logger.debug('Creating parent directory for clone', LOG_CONTEXT, {
+					localPath: 'provided',
+				});
 				const parentDir = path.dirname(localPath);
-				await fs.mkdir(parentDir, { recursive: true });
+				try {
+					await fs.mkdir(parentDir, { recursive: true });
+					logger.debug('Parent directory created', LOG_CONTEXT);
+				} catch (e) {
+					logger.error('Failed to create parent directory', LOG_CONTEXT, {
+						error: e instanceof Error ? e.message : String(e),
+					});
+					return {
+						success: false,
+						error: `Failed to create directory: ${e instanceof Error ? e.message : 'unknown error'}`,
+					};
+				}
 
 				// Clone with depth=1 for speed
+				logger.info('Starting shallow clone of repository', LOG_CONTEXT, {
+					repoUrl: 'github.com/...',
+				});
 				const result = await cloneRepository(repoUrl, localPath);
 				if (!result.success) {
+					logger.error('Repository clone failed', LOG_CONTEXT, {
+						error: result.error,
+					});
 					return { success: false, error: `Clone failed: ${result.error}` };
 				}
 
-				logger.info('Repository cloned for Symphony session', LOG_CONTEXT, { localPath });
+				logger.info('Repository cloned successfully for Symphony session', LOG_CONTEXT, {
+					localPath: 'cloned',
+				});
 				return { success: true };
 			}
 		)
@@ -2326,23 +2551,51 @@ This PR will be updated automatically when the Auto Run completes.`;
 					documentPaths,
 				} = params;
 
+				logger.info('symphony:startContribution called', LOG_CONTEXT, {
+					contributionId,
+					sessionId,
+					repoSlug,
+					issueNumber,
+					issueTitle,
+					documentCount: documentPaths.length,
+					localPath: localPath ? 'provided' : 'missing',
+				});
+
 				// Validate inputs
+				logger.debug('Validating contribution parameters', LOG_CONTEXT, {
+					repoSlug,
+					issueNumber,
+				});
+
 				const slugValidation = validateRepoSlug(repoSlug);
 				if (!slugValidation.valid) {
+					logger.warn('Repository slug validation failed', LOG_CONTEXT, {
+						repoSlug,
+						error: slugValidation.error,
+					});
 					return { success: false, error: slugValidation.error };
 				}
 
 				if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+					logger.warn('Invalid issue number', LOG_CONTEXT, { issueNumber });
 					return { success: false, error: 'Invalid issue number' };
 				}
 
 				// Validate document paths
+				logger.debug('Validating document paths', LOG_CONTEXT, {
+					documentCount: documentPaths.length,
+				});
+
 				for (const doc of documentPaths) {
 					if (doc.isExternal) {
 						// Validate external URLs are from trusted domains (GitHub)
 						try {
 							const parsed = new URL(doc.path);
 							if (parsed.protocol !== 'https:') {
+								logger.warn('External document URL not HTTPS', LOG_CONTEXT, {
+									docName: doc.name,
+									url: doc.path,
+								});
 								return {
 									success: false,
 									error: `External document URL must use HTTPS: ${doc.path}`,
@@ -2357,30 +2610,61 @@ This PR will be updated automatically when the Auto Run completes.`;
 								'camo.githubusercontent.com',
 							];
 							if (!allowedHosts.includes(parsed.hostname)) {
+								logger.warn('External document URL not from allowed host', LOG_CONTEXT, {
+									docName: doc.name,
+									hostname: parsed.hostname,
+								});
 								return {
 									success: false,
 									error: `External document URL must be from GitHub: ${doc.path}`,
 								};
 							}
-						} catch {
+							logger.debug('External document URL validated', LOG_CONTEXT, {
+								docName: doc.name,
+								hostname: parsed.hostname,
+							});
+						} catch (e) {
+							logger.warn('Failed to parse external document URL', LOG_CONTEXT, {
+								docName: doc.name,
+								url: doc.path,
+								error: e instanceof Error ? e.message : String(e),
+							});
 							return { success: false, error: `Invalid external document URL: ${doc.path}` };
 						}
 					} else {
 						// Check repo-relative paths for path traversal
 						if (doc.path.includes('..') || doc.path.startsWith('/')) {
+							logger.warn('Document path has path traversal attempt', LOG_CONTEXT, {
+								docName: doc.name,
+								docPath: doc.path,
+							});
 							return { success: false, error: `Invalid document path: ${doc.path}` };
 						}
+						logger.debug('Repo-relative document path validated', LOG_CONTEXT, {
+							docName: doc.name,
+							docPath: doc.path,
+						});
 					}
 				}
 
 				// Check gh CLI authentication (needed later for PR creation)
+				logger.debug('Checking GitHub CLI authentication', LOG_CONTEXT);
 				const authCheck = await checkGhAuthentication();
 				if (!authCheck.authenticated) {
+					logger.error('GitHub CLI authentication check failed', LOG_CONTEXT, {
+						error: authCheck.error,
+					});
 					return { success: false, error: authCheck.error };
 				}
+				logger.debug('GitHub CLI authentication verified', LOG_CONTEXT);
 
 				try {
 					// 1. Create branch and checkout
+					logger.info('Creating branch for contribution', LOG_CONTEXT, {
+						branchName: `symphony/issue-${issueNumber}-*`,
+						issueNumber,
+					});
+
 					const branchName = generateBranchName(issueNumber);
 					const branchResult = await createBranch(localPath, branchName);
 					if (!branchResult.success) {
@@ -2391,10 +2675,16 @@ This PR will be updated automatically when the Auto Run completes.`;
 						});
 						return { success: false, error: `Failed to create branch: ${branchResult.error}` };
 					}
+					logger.info('Branch created successfully', LOG_CONTEXT, { branchName });
 
 					// 2. Set up Auto Run documents directory
 					// External docs (GitHub attachments) go to cache dir to avoid polluting the repo
 					// Repo-internal docs are referenced in place
+					logger.info('Setting up AutoRun documents directory', LOG_CONTEXT, {
+						contributionId,
+						documentCount: documentPaths.length,
+					});
+
 					const symphonyDocsDir = path.join(
 						getSymphonyDir(app),
 						'contributions',
@@ -2402,9 +2692,16 @@ This PR will be updated automatically when the Auto Run completes.`;
 						'docs'
 					);
 					await fs.mkdir(symphonyDocsDir, { recursive: true });
+					logger.debug('AutoRun documents directory created', LOG_CONTEXT, {
+						symphonyDocsDir,
+					});
 
 					// Track resolved document paths for Auto Run
 					const resolvedDocs: { name: string; path: string; isExternal: boolean }[] = [];
+
+					logger.info('Starting document resolution', LOG_CONTEXT, {
+						totalDocuments: documentPaths.length,
+					});
 
 					for (const doc of documentPaths) {
 						if (doc.isExternal) {
@@ -2414,12 +2711,14 @@ This PR will be updated automatically when the Auto Run completes.`;
 								logger.info('Downloading external document', LOG_CONTEXT, {
 									name: doc.name,
 									url: doc.path,
+									destination: 'cache',
 								});
 								const response = await fetch(doc.path);
 								if (!response.ok) {
-									logger.warn('Failed to download document', LOG_CONTEXT, {
+									logger.warn('Failed to download document - HTTP error', LOG_CONTEXT, {
 										name: doc.name,
 										status: response.status,
+										statusText: response.statusText,
 									});
 									continue;
 								}
@@ -2428,20 +2727,29 @@ This PR will be updated automatically when the Auto Run completes.`;
 								logger.info('Downloaded document to cache', LOG_CONTEXT, {
 									name: doc.name,
 									to: destPath,
+									size: `${buffer.byteLength} bytes`,
 								});
 								resolvedDocs.push({ name: doc.name, path: destPath, isExternal: true });
 							} catch (e) {
-								logger.warn('Failed to download document', LOG_CONTEXT, {
+								logger.warn('Failed to download document - error', LOG_CONTEXT, {
 									name: doc.name,
+									url: doc.path,
 									error: e instanceof Error ? e.message : String(e),
 								});
 							}
 						} else {
 							// Repo-internal doc - verify it exists and reference in place
+							logger.debug('Processing repo-internal document', LOG_CONTEXT, {
+								name: doc.name,
+								relativePath: doc.path,
+							});
+
 							const resolvedSource = path.resolve(localPath, doc.path);
 							if (!resolvedSource.startsWith(localPath)) {
 								logger.error('Attempted path traversal in document path', LOG_CONTEXT, {
 									docPath: doc.path,
+									resolved: resolvedSource,
+									localPath,
 								});
 								continue;
 							}
@@ -2455,13 +2763,25 @@ This PR will be updated automatically when the Auto Run completes.`;
 							} catch (e) {
 								logger.warn('Document not found in repo', LOG_CONTEXT, {
 									docPath: doc.path,
+									resolved: resolvedSource,
 									error: e instanceof Error ? e.message : String(e),
 								});
 							}
 						}
 					}
 
+					logger.info('Document resolution complete', LOG_CONTEXT, {
+						resolvedDocuments: resolvedDocs.length,
+						externalDocs: resolvedDocs.filter((d) => d.isExternal).length,
+						repoDocs: resolvedDocs.filter((d) => !d.isExternal).length,
+					});
+
 					// 3. Write contribution metadata for later PR creation
+					logger.debug('Writing contribution metadata', LOG_CONTEXT, {
+						contributionId,
+						metadataPath: `${symphonyDocsDir}/../metadata.json`,
+					});
+
 					const metadataPath = path.join(symphonyDocsDir, '..', 'metadata.json');
 					await fs.writeFile(
 						metadataPath,
@@ -2482,6 +2802,7 @@ This PR will be updated automatically when the Auto Run completes.`;
 							2
 						)
 					);
+					logger.debug('Contribution metadata written', LOG_CONTEXT);
 
 					// 4. Determine Auto Run path (use cache dir if we have external docs, otherwise repo path)
 					const hasExternalDocs = resolvedDocs.some((d) => d.isExternal);
@@ -2491,12 +2812,30 @@ This PR will be updated automatically when the Auto Run completes.`;
 							? path.dirname(resolvedDocs[0].path)
 							: localPath;
 
+					logger.info('AutoRun path determined', LOG_CONTEXT, {
+						hasExternalDocs,
+						autoRunPath: 'determined',
+					});
+
 					// 5. Create empty commit, push branch, and open draft PR to claim the issue
+					logger.info('Starting PR creation workflow', LOG_CONTEXT, {
+						contributionId,
+						issueNumber,
+					});
+
 					let draftPrNumber: number | undefined;
 					let draftPrUrl: string | undefined;
 
 					const baseBranch = await getDefaultBranch(localPath);
+					logger.debug('Default branch determined', LOG_CONTEXT, {
+						baseBranch,
+					});
+
 					const commitMsg = `[Symphony] Start contribution for #${issueNumber}`;
+					logger.debug('Creating empty commit', LOG_CONTEXT, {
+						commitMsg,
+					});
+
 					const emptyCommitResult = await execFileNoThrow(
 						'git',
 						['commit', '--allow-empty', '-m', commitMsg],
@@ -2504,6 +2843,8 @@ This PR will be updated automatically when the Auto Run completes.`;
 					);
 
 					if (emptyCommitResult.exitCode === 0) {
+						logger.info('Empty commit created successfully', LOG_CONTEXT);
+
 						const prTitle = `[WIP] Symphony: ${issueTitle} (#${issueNumber})`;
 						const prBody = `## Maestro Symphony Contribution
 
@@ -2516,17 +2857,28 @@ Working on #${issueNumber} via [Maestro Symphony](https://runmaestro.ai).
 
 This PR will be updated automatically when the Auto Run completes.`;
 
+						logger.info('Attempting to create draft PR', LOG_CONTEXT, {
+							issueNumber,
+							repoSlug,
+						});
+
 						const prResult = await createDraftPR(localPath, baseBranch, prTitle, prBody);
 						if (prResult.success) {
 							draftPrNumber = prResult.prNumber;
 							draftPrUrl = prResult.prUrl;
+							logger.info('Draft PR created successfully', LOG_CONTEXT, {
+								draftPrNumber,
+								draftPrUrl,
+							});
 
 							// Update metadata with PR info
+							logger.debug('Updating contribution metadata with PR info', LOG_CONTEXT);
 							const metaContent = JSON.parse(await fs.readFile(metadataPath, 'utf-8'));
 							metaContent.prCreated = true;
 							metaContent.draftPrNumber = draftPrNumber;
 							metaContent.draftPrUrl = draftPrUrl;
 							await fs.writeFile(metadataPath, JSON.stringify(metaContent, null, 2));
+							logger.debug('Contribution metadata updated with PR info', LOG_CONTEXT);
 						} else {
 							logger.warn('Failed to create draft PR, continuing without claim', LOG_CONTEXT, {
 								contributionId,
@@ -2536,11 +2888,17 @@ This PR will be updated automatically when the Auto Run completes.`;
 					} else {
 						logger.warn('Empty commit failed, continuing without draft PR', LOG_CONTEXT, {
 							contributionId,
-							error: emptyCommitResult.stderr,
+							exitCode: emptyCommitResult.exitCode,
+							stderr: emptyCommitResult.stderr,
 						});
 					}
 
 					// 6. Broadcast status update
+					logger.debug('Broadcasting contribution started event', LOG_CONTEXT, {
+						contributionId,
+						sessionId,
+					});
+
 					const mainWindow = getMainWindow?.();
 					if (isWebContentsAvailable(mainWindow)) {
 						mainWindow.webContents.send('symphony:contributionStarted', {
@@ -2551,15 +2909,19 @@ This PR will be updated automatically when the Auto Run completes.`;
 							draftPrNumber,
 							draftPrUrl,
 						});
+						logger.debug('Event broadcast sent successfully', LOG_CONTEXT);
+					} else {
+						logger.warn('Main window not available for broadcasting event', LOG_CONTEXT);
 					}
 
-					logger.info('Symphony contribution started', LOG_CONTEXT, {
+					logger.info('Symphony contribution started successfully', LOG_CONTEXT, {
 						contributionId,
 						sessionId,
 						branchName,
 						documentCount: resolvedDocs.length,
 						hasExternalDocs,
 						draftPrNumber,
+						draftPrUrl: draftPrUrl ? 'created' : 'not created',
 					});
 
 					return {
@@ -2570,7 +2932,11 @@ This PR will be updated automatically when the Auto Run completes.`;
 						draftPrUrl,
 					};
 				} catch (error) {
-					logger.error('Symphony contribution failed', LOG_CONTEXT, { error });
+					logger.error('Symphony contribution failed', LOG_CONTEXT, {
+						contributionId,
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
 					return {
 						success: false,
 						error: error instanceof Error ? error.message : 'Unknown error',
@@ -2598,7 +2964,11 @@ This PR will be updated automatically when the Auto Run completes.`;
 			}> => {
 				const { contributionId } = params;
 
+				logger.info('symphony:createDraftPR called', LOG_CONTEXT, { contributionId });
+
 				// Read contribution metadata
+				logger.debug('Reading contribution metadata', LOG_CONTEXT, { contributionId });
+
 				const metadataPath = path.join(
 					getSymphonyDir(app),
 					'contributions',
@@ -2621,19 +2991,26 @@ This PR will be updated automatically when the Auto Run completes.`;
 				try {
 					const content = await fs.readFile(metadataPath, 'utf-8');
 					metadata = JSON.parse(content);
+					logger.debug('Contribution metadata loaded successfully', LOG_CONTEXT, {
+						contributionId,
+						hasRepoSlug: !!metadata.repoSlug,
+						hasLocalPath: !!metadata.localPath,
+					});
 				} catch (e) {
 					logger.error('Failed to read contribution metadata', LOG_CONTEXT, {
 						contributionId,
-						error: e,
+						metadataPath,
+						error: e instanceof Error ? e.message : String(e),
 					});
 					return { success: false, error: 'Contribution metadata not found' };
 				}
 
 				// Check if PR already created
 				if (metadata.prCreated && metadata.draftPrUrl) {
-					logger.info('Draft PR already exists', LOG_CONTEXT, {
+					logger.info('Draft PR already exists, returning cached info', LOG_CONTEXT, {
 						contributionId,
-						prUrl: metadata.draftPrUrl,
+						draftPrNumber: metadata.draftPrNumber,
+						draftPrUrl: metadata.draftPrUrl,
 					});
 					return {
 						success: true,
@@ -2643,16 +3020,28 @@ This PR will be updated automatically when the Auto Run completes.`;
 				}
 
 				// Check gh CLI authentication
+				logger.debug('Checking GitHub CLI authentication', LOG_CONTEXT);
 				const authCheck = await checkGhAuthentication();
 				if (!authCheck.authenticated) {
+					logger.error('GitHub CLI authentication failed', LOG_CONTEXT, {
+						error: authCheck.error,
+					});
 					return { success: false, error: authCheck.error };
 				}
+				logger.debug('GitHub CLI authentication verified', LOG_CONTEXT);
 
-				const { localPath, issueNumber, issueTitle, sessionId } = metadata;
+				const { localPath, issueNumber, issueTitle, sessionId, repoSlug } = metadata;
 
 				// Check if there are any commits on this branch
 				// Use rev-list to count commits not in the default branch
+				logger.debug('Checking for commits on branch', LOG_CONTEXT, {
+					localPath: 'provided',
+					issueNumber,
+				});
+
 				const baseBranch = await getDefaultBranch(localPath);
+				logger.debug('Default branch identified', LOG_CONTEXT, { baseBranch });
+
 				const commitCheckResult = await execFileNoThrow(
 					'git',
 					['rev-list', '--count', `${baseBranch}..HEAD`],
@@ -2660,18 +3049,29 @@ This PR will be updated automatically when the Auto Run completes.`;
 				);
 
 				const commitCount = parseInt(commitCheckResult.stdout.trim(), 10) || 0;
+				logger.debug('Commit count calculated', LOG_CONTEXT, {
+					commitCount,
+					exitCode: commitCheckResult.exitCode,
+				});
+
 				if (commitCount === 0) {
 					// No commits yet - return success but indicate no PR created
-					logger.info('No commits yet, skipping PR creation', LOG_CONTEXT, { contributionId });
+					logger.info('No commits on branch yet, skipping PR creation', LOG_CONTEXT, {
+						contributionId,
+						issueNumber,
+						baseBranch,
+					});
 					return {
 						success: true,
 						// No PR fields - caller should know PR wasn't created yet
 					};
 				}
 
-				logger.info('Found commits, creating draft PR', LOG_CONTEXT, {
+				logger.info('Commits found on branch, creating draft PR', LOG_CONTEXT, {
 					contributionId,
 					commitCount,
+					issueNumber,
+					repoSlug,
 				});
 
 				// Create PR title and body
@@ -2687,33 +3087,66 @@ Working on #${issueNumber} via [Maestro Symphony](https://runmaestro.ai).
 
 This PR will be updated automatically when the Auto Run completes.`;
 
+				logger.debug('PR title and body prepared', LOG_CONTEXT, {
+					prTitle: 'prepared',
+					issueNumber,
+				});
+
 				// Create draft PR (this also pushes the branch)
+				logger.info('Calling createDraftPR to create draft PR', LOG_CONTEXT, {
+					repoSlug,
+					baseBranch,
+				});
+
 				const prResult = await createDraftPR(localPath, baseBranch, prTitle, prBody);
 				if (!prResult.success) {
 					logger.error('Failed to create draft PR', LOG_CONTEXT, {
 						contributionId,
 						error: prResult.error,
+						exitCode: prResult.exitCode,
 					});
 					return { success: false, error: prResult.error };
 				}
 
+				logger.info('Draft PR created successfully', LOG_CONTEXT, {
+					prNumber: prResult.prNumber,
+					prUrl: prResult.prUrl,
+				});
+
 				// Update metadata with PR info
+				logger.debug('Updating metadata with PR info', LOG_CONTEXT, {
+					prNumber: prResult.prNumber,
+				});
+
 				metadata.prCreated = true;
 				metadata.draftPrNumber = prResult.prNumber;
 				metadata.draftPrUrl = prResult.prUrl;
 				await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
+				logger.debug('Metadata file updated', LOG_CONTEXT);
 
 				// Also update the active contribution in state with PR info
 				// This is critical for checkPRStatuses to find the PR
+				logger.debug('Updating active contribution state with PR info', LOG_CONTEXT, {
+					contributionId,
+				});
+
 				const state = await readState(app);
 				const activeContrib = state.active.find((c) => c.id === contributionId);
 				if (activeContrib) {
+					logger.debug('Active contribution found, updating PR info', LOG_CONTEXT);
 					activeContrib.draftPrNumber = prResult.prNumber;
 					activeContrib.draftPrUrl = prResult.prUrl;
 					await writeState(app, state);
+					logger.debug('State updated with PR info', LOG_CONTEXT);
+				} else {
+					logger.warn('Active contribution not found in state for PR update', LOG_CONTEXT, {
+						contributionId,
+					});
 				}
 
 				// Broadcast PR creation event
+				logger.debug('Broadcasting PR creation event', LOG_CONTEXT, { contributionId });
+
 				const mainWindow = getMainWindow?.();
 				if (isWebContentsAvailable(mainWindow)) {
 					mainWindow.webContents.send('symphony:prCreated', {
@@ -2722,9 +3155,12 @@ This PR will be updated automatically when the Auto Run completes.`;
 						draftPrNumber: prResult.prNumber,
 						draftPrUrl: prResult.prUrl,
 					});
+					logger.debug('PR creation event broadcast sent', LOG_CONTEXT);
+				} else {
+					logger.warn('Main window not available for broadcasting PR creation event', LOG_CONTEXT);
 				}
 
-				logger.info('Draft PR created for Symphony contribution', LOG_CONTEXT, {
+				logger.info('Draft PR creation workflow completed successfully', LOG_CONTEXT, {
 					contributionId,
 					prNumber: prResult.prNumber,
 					prUrl: prResult.prUrl,
