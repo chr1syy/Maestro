@@ -58,7 +58,6 @@
               "keyboard-shortcuts",
               "slash-commands",
               "history",
-              "director-notes",
               "context-management",
               "document-graph",
               "usage-dashboard",
@@ -78,6 +77,14 @@
               "playbook-exchange",
               "speckit-commands",
               "openspec-commands"
+            ]
+          },
+          {
+            "group": "Encore Features",
+            "icon": "flask",
+            "pages": [
+              "encore-features",
+              "director-notes"
             ]
           },
           {
