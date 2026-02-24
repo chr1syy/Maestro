@@ -597,8 +597,6 @@ function MaestroConsoleInner() {
 	const editingGroupId = useUIStore((s) => s.editingGroupId);
 	const editingSessionId = useUIStore((s) => s.editingSessionId);
 	const draggingSessionId = useUIStore((s) => s.draggingSessionId);
-	const outputSearchOpen = useUIStore((s) => s.outputSearchOpen);
-	const outputSearchQuery = useUIStore((s) => s.outputSearchQuery);
 	const flashNotification = useUIStore((s) => s.flashNotification);
 	const successFlashNotification = useUIStore((s) => s.successFlashNotification);
 	const selectedSidebarIndex = useUIStore((s) => s.selectedSidebarIndex);
@@ -613,8 +611,6 @@ function MaestroConsoleInner() {
 		setEditingGroupId,
 		setEditingSessionId,
 		setDraggingSessionId,
-		setOutputSearchOpen,
-		setOutputSearchQuery,
 		setFlashNotification,
 		setSuccessFlashNotification,
 		setSelectedSidebarIndex,
@@ -4905,14 +4901,8 @@ function MaestroConsoleInner() {
 		activeSession,
 		thinkingItems,
 		theme,
-		fontFamily,
 		isMobileLandscape,
-		activeFocus,
-		outputSearchOpen,
-		outputSearchQuery,
 		inputValue,
-		enterToSendAI,
-		enterToSendTerminal,
 		stagedImages,
 		commandHistoryOpen,
 		commandHistoryFilter,
@@ -4921,18 +4911,6 @@ function MaestroConsoleInner() {
 		slashCommands: allSlashCommands,
 		selectedSlashCommandIndex,
 		filePreviewLoading,
-		markdownEditMode,
-		chatRawTextMode,
-		autoScrollAiMode,
-		setAutoScrollAiMode,
-		userMessageAlignment,
-		shortcuts,
-		rightPanelOpen,
-		maxOutputLines,
-		gitDiffPreview,
-		fileTreeFilterOpen,
-		logLevel,
-		logViewerSelectedLevels,
 
 		// Tab completion state
 		tabCompletionOpen,
@@ -4948,7 +4926,6 @@ function MaestroConsoleInner() {
 		selectedAtMentionIndex,
 
 		// Batch run state (convert null to undefined for component props)
-		activeBatchRunState: activeBatchRunState ?? undefined,
 		currentSessionBatchState: currentSessionBatchState ?? undefined,
 
 		// File tree
@@ -4967,11 +4944,6 @@ function MaestroConsoleInner() {
 		// Worktree
 		isWorktreeChild: !!activeSession?.parentSessionId,
 
-		// Context management settings
-		contextWarningsEnabled: contextManagementSettings.contextWarningsEnabled,
-		contextWarningYellowThreshold: contextManagementSettings.contextWarningYellowThreshold,
-		contextWarningRedThreshold: contextManagementSettings.contextWarningRedThreshold,
-
 		// Summarization progress
 		summarizeProgress,
 		summarizeResult,
@@ -4989,24 +4961,12 @@ function MaestroConsoleInner() {
 		ghCliAvailable,
 		hasGist: activeFileTab ? !!fileGistUrls[activeFileTab.path] : false,
 
-		// Unread filter
-		showUnreadOnly,
-
-		// Accessibility
-		colorBlindMode,
-
 		// Setters
-		setLogViewerSelectedLevels,
 		setGitDiffPreview,
 		setLogViewerOpen,
 		setAgentSessionsOpen,
 		setActiveAgentSessionId,
-		setActiveFocus,
-		setOutputSearchOpen,
-		setOutputSearchQuery,
 		setInputValue,
-		setEnterToSendAI,
-		setEnterToSendTerminal,
 		setStagedImages,
 		setCommandHistoryOpen,
 		setCommandHistoryFilter,
@@ -5020,18 +4980,12 @@ function MaestroConsoleInner() {
 		setAtMentionFilter,
 		setAtMentionStartIndex,
 		setSelectedAtMentionIndex,
-		setMarkdownEditMode,
-		setChatRawTextMode,
-		setAboutModalOpen,
-		setRightPanelOpen,
 		setGitLogOpen,
 
 		// Refs
 		inputRef,
 		logsEndRef,
 		terminalOutputRef,
-		fileTreeContainerRef,
-		fileTreeFilterInputRef,
 
 		// Handlers
 		handleResumeSession,
@@ -5045,7 +4999,6 @@ function MaestroConsoleInner() {
 		getContextColor: boundGetContextColor,
 		setActiveSessionId,
 		handleStopBatchRun,
-		showConfirmation,
 		handleDeleteLog,
 		handleRemoveQueuedItem,
 		handleOpenQueueBrowser,
@@ -5141,7 +5094,6 @@ function MaestroConsoleInner() {
 		// Helper functions
 		getActiveTab,
 	});
-
 	const sessionListProps = useSessionListProps({
 		// Theme (computed externally from settingsStore + themeId)
 		theme,
