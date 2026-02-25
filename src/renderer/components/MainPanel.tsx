@@ -853,7 +853,7 @@ export const MainPanel = React.memo(
 						{!isMobileLandscape && (
 							<div
 								ref={headerRef}
-								className={`header-container h-16 border-b flex items-center justify-between px-6 shrink-0 ${isCurrentSessionAutoMode ? 'header-auto-mode' : ''}`}
+								className={`header-container h-16 border-b flex items-center justify-between px-6 shrink-0 relative z-20 ${isCurrentSessionAutoMode ? 'header-auto-mode' : ''}`}
 								style={{
 									borderColor: theme.colors.border,
 									backgroundColor: theme.colors.bgSidebar,
@@ -1538,7 +1538,9 @@ export const MainPanel = React.memo(
 						{/* Show loading state for file tabs (SSH remote file loading) */}
 						{/* Content area: Show FilePreview when file tab is active, otherwise show terminal output */}
 						{/* Skip rendering when loading remote file - loading state takes over entire main area */}
-						{(filePreviewLoading && !activeFileTabId) || activeFileTab?.isLoading ? (
+						{/* Guard: file preview requires AI mode — without this, inputMode='terminal' hides the tab bar but leaves the file preview orphaned */}
+						{activeSession.inputMode === 'ai' &&
+						((filePreviewLoading && !activeFileTabId) || activeFileTab?.isLoading) ? (
 							<div
 								className="flex-1 flex items-center justify-center"
 								style={{ backgroundColor: theme.colors.bgMain }}
@@ -1561,7 +1563,7 @@ export const MainPanel = React.memo(
 									</div>
 								</div>
 							</div>
-						) : activeFileTabId && activeFileTab && memoizedFilePreviewFile ? (
+						) : activeSession.inputMode === 'ai' && activeFileTabId && activeFileTab && memoizedFilePreviewFile ? (
 							// New file tab system - FilePreview rendered as tab content (no close button, tab handles closing)
 							// Note: All props are memoized to prevent unnecessary re-renders that cause image flickering
 							<div

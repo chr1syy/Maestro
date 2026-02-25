@@ -55,7 +55,7 @@ import { useUIStore } from '../stores/uiStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useBatchStore, selectActiveBatchSessionIds } from '../stores/batchStore';
-import { shallow } from 'zustand/shallow';
+import { useShallow } from 'zustand/react/shallow';
 import { useGroupChatStore } from '../stores/groupChatStore';
 import { getModalActions } from '../stores/modalStore';
 
@@ -1103,7 +1103,7 @@ function SessionListInner(props: SessionListProps) {
 	const contextWarningRedThreshold = useSettingsStore(
 		(s) => s.contextManagementSettings.contextWarningRedThreshold
 	);
-	const activeBatchSessionIds = useBatchStore(selectActiveBatchSessionIds, shallow);
+	const activeBatchSessionIds = useBatchStore(useShallow(selectActiveBatchSessionIds));
 	const groupChats = useGroupChatStore((s) => s.groupChats);
 	const activeGroupChatId = useGroupChatStore((s) => s.activeGroupChatId);
 	const groupChatState = useGroupChatStore((s) => s.groupChatState);
@@ -2809,8 +2809,12 @@ function SessionListInner(props: SessionListProps) {
 												? {
 														border: `1.5px solid ${theme.colors.textDim}`,
 														backgroundColor: 'transparent',
+														opacity: activeSessionId === session.id ? 1 : 0.25,
 													}
-												: { backgroundColor: effectiveStatusColor }
+												: {
+														backgroundColor: effectiveStatusColor,
+														opacity: activeSessionId === session.id ? 1 : 0.25,
+													}
 										}
 										title={
 											session.toolType === 'claude-code' && !session.agentSessionId

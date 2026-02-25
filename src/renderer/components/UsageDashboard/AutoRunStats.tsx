@@ -157,11 +157,7 @@ function groupSessionsByDate(
 		.sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export const AutoRunStats = memo(function AutoRunStats({
-	timeRange,
-	theme,
-	columns = 6,
-}: AutoRunStatsProps) {
+export const AutoRunStats = memo(function AutoRunStats({ timeRange, theme, columns = 6 }: AutoRunStatsProps) {
 	const [sessions, setSessions] = useState<AutoRunSession[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
