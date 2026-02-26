@@ -496,9 +496,10 @@ export async function checkBinaryExists(binaryName: string): Promise<BinaryDetec
 		// Use 'which' on Unix-like systems, 'where' on Windows
 		const command = isWindows ? 'where' : 'which';
 
-		// Use expanded PATH to find binaries in common installation locations
-		// This is critical for packaged Electron apps which don't inherit shell env
-		const env = getExpandedEnv();
+		// Use expanded PATH to find binaries in common installation locations.
+		// Prefer shell-provided PATH entries when available (they should be
+		// prioritized). This helps packaged apps locate user-installed tools.
+		const env = await getExpandedEnvWithShell();
 		const result = await execFileNoThrow(command, [binaryName], undefined, env);
 
 		if (result.exitCode === 0 && result.stdout.trim()) {
