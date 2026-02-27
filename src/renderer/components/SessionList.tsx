@@ -443,6 +443,7 @@ function HamburgerMenuContent({
 	setMenuOpen,
 }: HamburgerMenuContentProps) {
 	const shortcuts = useSettingsStore((s) => s.shortcuts);
+	const directorNotesEnabled = useSettingsStore((s) => s.encoreFeatures.directorNotes);
 	const {
 		setShortcutsHelpOpen,
 		setSettingsModalOpen,
@@ -690,7 +691,7 @@ function HamburgerMenuContent({
 					{shortcuts.openSymphony ? formatShortcutKeys(shortcuts.openSymphony.keys) : '⇧⌘Y'}
 				</span>
 			</button>
-			{setDirectorNotesOpen && (
+			{directorNotesEnabled && (
 				<button
 					onClick={() => {
 						setDirectorNotesOpen(true);

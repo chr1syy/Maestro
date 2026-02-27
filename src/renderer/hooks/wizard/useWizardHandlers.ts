@@ -1071,8 +1071,8 @@ export function useWizardHandlers(deps: UseWizardHandlersDeps): UseWizardHandler
 				console.error(`Wizard session validation failed: ${validation.error}`);
 				notifyToast({
 					type: 'error',
-					title: 'Session Creation Failed',
-					message: validation.error || 'Cannot create duplicate session',
+					title: 'Agent Creation Failed',
+					message: validation.error || 'Cannot create duplicate agent',
 				});
 				throw new Error(validation.error || 'Session validation failed');
 			}

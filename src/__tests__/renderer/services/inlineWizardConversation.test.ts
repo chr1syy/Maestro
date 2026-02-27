@@ -322,7 +322,7 @@ describe('inlineWizardConversation', () => {
 			expect(mockKill).not.toHaveBeenCalled();
 
 			// Advance past the 20-min inactivity window (no data since 15-min mark)
-			await vi.advanceTimersByTimeAsync(600000); // 35 minutes total, 20+ min since last data
+			await vi.advanceTimersByTimeAsync(600000); // 40 minutes total, 25+ min since last data
 
 			// Now it should have timed out due to inactivity
 			expect(mockKill).toHaveBeenCalledWith(session.sessionId);

@@ -177,36 +177,23 @@ export function useInterruptHandler(deps: UseInterruptHandlerDeps): UseInterrupt
 					// No queued items, just go to idle and add canceled log to the active tab
 					// Also clear any thinking/tool logs since the process was interrupted
 					const activeTabForCancel = getActiveTab(s);
-					const updatedAiTabsForIdle =
-						canceledLog && activeTabForCancel
-							? s.aiTabs.map((tab) => {
-									if (tab.id === activeTabForCancel.id) {
-										const logsWithoutThinkingOrTools = tab.logs.filter(
-											(log) => log.source !== 'thinking' && log.source !== 'tool'
-										);
-										return {
-											...tab,
-											logs: [...logsWithoutThinkingOrTools, canceledLog],
-											state: 'idle' as const,
-											thinkingStartTime: undefined,
-										};
-									}
-									return tab;
-								})
-							: s.aiTabs.map((tab) => {
-									if (tab.state === 'busy') {
-										const logsWithoutThinkingOrTools = tab.logs.filter(
-											(log) => log.source !== 'thinking' && log.source !== 'tool'
-										);
-										return {
-											...tab,
-											state: 'idle' as const,
-											thinkingStartTime: undefined,
-											logs: logsWithoutThinkingOrTools,
-										};
-									}
-									return tab;
-								});
+					const updatedAiTabsForIdle = s.aiTabs.map((tab) => {
+						if (tab.id === activeTabForCancel?.id || tab.state === 'busy') {
+							const logsWithoutThinkingOrTools = tab.logs.filter(
+								(log) => log.source !== 'thinking' && log.source !== 'tool'
+							);
+							return {
+								...tab,
+								state: 'idle' as const,
+								thinkingStartTime: undefined,
+								logs:
+									canceledLog && tab.id === activeTabForCancel?.id
+										? [...logsWithoutThinkingOrTools, canceledLog]
+										: logsWithoutThinkingOrTools,
+							};
+						}
+						return tab;
+					});
 
 					return {
 						...s,
@@ -221,7 +208,9 @@ export function useInterruptHandler(deps: UseInterruptHandlerDeps): UseInterrupt
 			// Process the queued item after state update
 			if (queuedItemToProcess) {
 				setTimeout(() => {
-					processQueuedItem(queuedItemToProcess!.sessionId, queuedItemToProcess!.item);
+					processQueuedItem(queuedItemToProcess!.sessionId, queuedItemToProcess!.item).catch(
+						(err) => console.error('[useInterruptHandler] Failed to process queued item:', err)
+					);
 				}, 0);
 			}
 		} catch (error) {
@@ -394,7 +383,13 @@ export function useInterruptHandler(deps: UseInterruptHandlerDeps): UseInterrupt
 					// Process the queued item after state update
 					if (queuedItemAfterKill) {
 						setTimeout(() => {
-							processQueuedItem(queuedItemAfterKill!.sessionId, queuedItemAfterKill!.item);
+							processQueuedItem(queuedItemAfterKill!.sessionId, queuedItemAfterKill!.item).catch(
+								(err) =>
+									console.error(
+										'[useInterruptHandler] Failed to process queued item after kill:',
+										err
+									)
+							);
 						}, 0);
 					}
 				} catch (killError: unknown) {

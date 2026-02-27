@@ -160,8 +160,8 @@ export function useSessionCrud(deps: UseSessionCrudDeps): UseSessionCrudReturn {
 					console.error(`Session validation failed: ${validation.error}`);
 					notifyToast({
 						type: 'error',
-						title: 'Session Creation Failed',
-						message: validation.error || 'Cannot create duplicate session',
+						title: 'Agent Creation Failed',
+						message: validation.error || 'Cannot create duplicate agent',
 					});
 					return;
 				}
@@ -384,17 +384,22 @@ export function useSessionCrud(deps: UseSessionCrudDeps): UseSessionCrudReturn {
 			setSessions((prev) => {
 				const updated = prev.map((s) => (s.id === sessId ? { ...s, name: newName } : s));
 				const session = updated.find((s) => s.id === sessId);
-				if (session?.agentSessionId && session.projectRoot) {
+				// Derive provider session ID: prefer session-level (legacy), fall back to active/first aiTab
+				const providerSessionId =
+					session?.agentSessionId ||
+					session?.aiTabs?.find((t) => t.id === session.activeTabId)?.agentSessionId ||
+					session?.aiTabs?.[0]?.agentSessionId;
+				if (providerSessionId && session?.projectRoot) {
 					const agentId = session.toolType || 'claude-code';
 					if (agentId === 'claude-code') {
 						(window as any).maestro.claude
-							.updateSessionName(session.projectRoot, session.agentSessionId, newName)
+							.updateSessionName(session.projectRoot, providerSessionId, newName)
 							.catch((err: Error) =>
 								console.warn('[finishRenamingSession] Failed to sync session name:', err)
 							);
 					} else {
 						(window as any).maestro.agentSessions
-							.setSessionName(agentId, session.projectRoot, session.agentSessionId, newName)
+							.setSessionName(agentId, session.projectRoot, providerSessionId, newName)
 							.catch((err: Error) =>
 								console.warn('[finishRenamingSession] Failed to sync session name:', err)
 							);

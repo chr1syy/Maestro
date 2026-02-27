@@ -1597,14 +1597,18 @@ function MaestroConsoleInner() {
 		const activeTab = getActiveTab(activeSession);
 		if (!activeTab?.autoSendOnActivate) return;
 
+		// Capture intended targets so we can verify they haven't changed after the delay
+		const targetSessionId = activeSession.id;
+		const targetTabId = activeTab.id;
+
 		// Clear the flag first to prevent multiple sends
 		setSessions((prev) =>
 			prev.map((s) => {
-				if (s.id !== activeSession.id) return s;
+				if (s.id !== targetSessionId) return s;
 				return {
 					...s,
 					aiTabs: s.aiTabs.map((tab) =>
-						tab.id === activeTab.id ? { ...tab, autoSendOnActivate: false } : tab
+						tab.id === targetTabId ? { ...tab, autoSendOnActivate: false } : tab
 					),
 				};
 			})
@@ -1612,9 +1616,19 @@ function MaestroConsoleInner() {
 
 		// Trigger the send after a short delay to ensure state is settled
 		// The inputValue and pendingMergedContext are already set on the tab
-		setTimeout(() => {
+		const timeoutId = setTimeout(() => {
+			// Verify the active session/tab still match the originally intended targets
+			const currentSessions = useSessionStore.getState().sessions;
+			const currentSession = currentSessions.find((s) => s.id === targetSessionId);
+			if (!currentSession) return;
+			const currentTab = getActiveTab(currentSession);
+			if (currentSession.id !== activeSessionIdRef.current || currentTab?.id !== targetTabId)
+				return;
+
 			processInput();
 		}, 100);
+
+		return () => clearTimeout(timeoutId);
 	}, [activeSession?.id, activeSession?.activeTabId]);
 
 	// Initialize activity tracker for per-session time tracking
@@ -2404,10 +2418,11 @@ function MaestroConsoleInner() {
 			setTimeout(() => {
 				sessionsWithQueuedItems.forEach((session) => {
 					const firstItem = session.executionQueue[0];
-					console.log(
-						`[App] Processing leftover queued item for session ${session.id}:`,
-						firstItem
-					);
+					console.log(`[App] Processing leftover queued item for session ${session.id}:`, {
+						id: firstItem.id,
+						tabId: firstItem.tabId,
+						queueLength: session.executionQueue.length,
+					});
 
 					// Set session to busy and remove item from queue
 					setSessions((prev) =>
@@ -2443,7 +2458,26 @@ function MaestroConsoleInner() {
 					);
 
 					// Process the item
-					processQueuedItem(session.id, firstItem);
+					processQueuedItem(session.id, firstItem).catch((err) => {
+						console.error(`[App] Failed to process queued item for session ${session.id}:`, err);
+						// Reset session busy state so the queue isn't permanently stuck
+						setSessions((prev) =>
+							prev.map((s) => {
+								if (s.id !== session.id) return s;
+								return {
+									...s,
+									state: 'idle',
+									busySource: undefined,
+									thinkingStartTime: undefined,
+									aiTabs: s.aiTabs.map((tab) =>
+										tab.state === 'busy'
+											? { ...tab, state: 'idle' as const, thinkingStartTime: undefined }
+											: tab
+									),
+								};
+							})
+						);
+					});
 				});
 			}, 500); // Small delay to ensure everything is initialized
 		}
@@ -3882,8 +3916,8 @@ function MaestroConsoleInner() {
 									console.error(`Session validation failed: ${validation.error}`);
 									notifyToast({
 										type: 'error',
-										title: 'Session Creation Failed',
-										message: validation.error || 'Cannot create duplicate session',
+										title: 'Agent Creation Failed',
+										message: validation.error || 'Cannot create duplicate agent',
 									});
 									return;
 								}

@@ -1983,7 +1983,7 @@ describe('useWizardHandlers', () => {
 			expect(notifyToast).toHaveBeenCalledWith(
 				expect.objectContaining({
 					type: 'error',
-					title: 'Session Creation Failed',
+					title: 'Agent Creation Failed',
 				})
 			);
 			consoleSpy.mockRestore();
