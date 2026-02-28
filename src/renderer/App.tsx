@@ -196,7 +196,6 @@ function MaestroConsoleInner() {
 		newInstanceModalOpen,
 		duplicatingSessionId,
 		// Edit Agent Modal
-		editAgentModalOpen,
 		setEditAgentModalOpen,
 		editAgentSession,
 		setEditAgentSession,
@@ -219,14 +218,8 @@ function MaestroConsoleInner() {
 		aboutModalOpen,
 		setAboutModalOpen,
 		// Update Check Modal
-		updateCheckModalOpen,
 		setUpdateCheckModalOpen,
-		// Leaderboard Registration Modal
-		leaderboardRegistrationOpen,
-		// Standing Ovation Overlay
-		standingOvationData,
-		// First Run Celebration
-		firstRunCelebrationData,
+		// standingOvationData, firstRunCelebrationData — now self-sourced in AppOverlays (Tier 1A)
 		// Log Viewer
 		logViewerOpen,
 		setLogViewerOpen,
@@ -234,10 +227,8 @@ function MaestroConsoleInner() {
 		processMonitorOpen,
 		setProcessMonitorOpen,
 		// Usage Dashboard
-		usageDashboardOpen,
 		setUsageDashboardOpen,
-		// Keyboard Mastery Celebration
-		pendingKeyboardMasteryLevel,
+		// pendingKeyboardMasteryLevel — now self-sourced in AppOverlays (Tier 1A)
 		// Playground Panel
 		playgroundOpen,
 		setPlaygroundOpen,
@@ -259,8 +250,6 @@ function MaestroConsoleInner() {
 		setConfirmModalOnConfirm,
 		confirmModalTitle,
 		confirmModalDestructive,
-		// Quit Confirmation Modal
-		quitConfirmModalOpen,
 		// Rename Instance Modal
 		renameInstanceModalOpen,
 		setRenameInstanceModalOpen,
@@ -268,7 +257,6 @@ function MaestroConsoleInner() {
 		setRenameInstanceValue,
 		renameInstanceSessionId,
 		// Rename Tab Modal
-		renameTabModalOpen,
 		setRenameTabModalOpen,
 		renameTabId,
 		setRenameTabId,
@@ -288,13 +276,9 @@ function MaestroConsoleInner() {
 		setAgentSessionsOpen,
 		activeAgentSessionId,
 		setActiveAgentSessionId,
-		// Execution Queue Browser Modal
-		queueBrowserOpen,
 		// Batch Runner Modal
-		batchRunnerModalOpen,
 		setBatchRunnerModalOpen,
 		// Auto Run Setup Modal
-		autoRunSetupModalOpen,
 		setAutoRunSetupModalOpen,
 		// Marketplace Modal
 		marketplaceModalOpen,
@@ -305,36 +289,25 @@ function MaestroConsoleInner() {
 		// setWizardResumeModalOpen, setWizardResumeState — now used in useWizardHandlers (Tier 3D)
 		// Agent Error Modal
 		// Worktree Modals
-		worktreeConfigModalOpen,
-		createWorktreeModalOpen,
 		createWorktreeSession,
-		createPRModalOpen,
 		createPRSession,
 		setCreatePRSession,
-		deleteWorktreeModalOpen,
 		deleteWorktreeSession,
 		// Tab Switcher Modal
-		tabSwitcherOpen,
 		setTabSwitcherOpen,
 		// Fuzzy File Search Modal
-		fuzzyFileSearchOpen,
 		setFuzzyFileSearchOpen,
 		// Prompt Composer Modal
-		promptComposerOpen,
 		setPromptComposerOpen,
 		// Merge Session Modal
-		mergeSessionModalOpen,
 		setMergeSessionModalOpen,
 		// Send to Agent Modal
-		sendToAgentModalOpen,
 		setSendToAgentModalOpen,
 		// Group Chat Modals
-		showNewGroupChatModal,
 		setShowNewGroupChatModal,
 		showDeleteGroupChatModal,
 		showRenameGroupChatModal,
 		showEditGroupChatModal,
-		showGroupChatInfo,
 		// Git Diff Viewer
 		gitDiffPreview,
 		setGitDiffPreview,
@@ -376,76 +349,29 @@ function MaestroConsoleInner() {
 	const settings = useSettings();
 	const {
 		conductorProfile,
-		llmProvider,
-		setLlmProvider,
-		modelSlug,
-		setModelSlug,
-		apiKey,
-		setApiKey,
-		defaultShell,
-		setDefaultShell,
-		customShellPath,
-		setCustomShellPath,
-		shellArgs,
-		setShellArgs,
-		shellEnvVars,
-		setShellEnvVars,
-		ghPath,
-		setGhPath,
 		fontFamily,
-		setFontFamily,
 		fontSize,
-		setFontSize,
 		activeThemeId,
-		setActiveThemeId,
 		customThemeColors,
-		setCustomThemeColors,
-		customThemeBaseId,
-		setCustomThemeBaseId,
 		enterToSendAI,
 		setEnterToSendAI,
-		enterToSendTerminal,
-		setEnterToSendTerminal,
 		defaultSaveToHistory,
-		setDefaultSaveToHistory,
 		defaultShowThinking,
-		setDefaultShowThinking,
 		rightPanelWidth,
 		setRightPanelWidth,
 		markdownEditMode,
 		setMarkdownEditMode,
 		chatRawTextMode,
 		setChatRawTextMode,
-		terminalWidth,
-		setTerminalWidth,
 		logLevel,
-		setLogLevel,
 		logViewerSelectedLevels,
 		setLogViewerSelectedLevels,
-		maxLogBuffer,
-		setMaxLogBuffer,
 		maxOutputLines,
-		setMaxOutputLines,
-		osNotificationsEnabled,
-		setOsNotificationsEnabled,
-		audioFeedbackEnabled,
-		setAudioFeedbackEnabled,
-		audioFeedbackCommand,
-		setAudioFeedbackCommand,
-		toastDuration,
-		setToastDuration,
-		checkForUpdatesOnStartup,
-		setCheckForUpdatesOnStartup,
 		enableBetaUpdates,
 		setEnableBetaUpdates,
-		crashReportingEnabled,
-		setCrashReportingEnabled,
 		shortcuts,
-		setShortcuts,
 		tabShortcuts,
-		setTabShortcuts,
 		customAICommands,
-		setCustomAICommands,
 		totalActiveTimeMs,
 		addTotalActiveTimeMs,
 		autoRunStats,
@@ -461,43 +387,21 @@ function MaestroConsoleInner() {
 		recordTourSkip,
 		leaderboardRegistration,
 		isLeaderboardRegistered,
-
 		contextManagementSettings,
 		updateContextManagementSettings: _updateContextManagementSettings,
-
 		keyboardMasteryStats,
 		recordShortcutUsage,
-
-		// Document Graph & Stats settings
 		colorBlindMode,
 		defaultStatsTimeRange,
 		documentGraphShowExternalLinks,
 		documentGraphMaxNodes,
 		documentGraphPreviewCharLimit,
-
-		// Rendering settings
-		disableConfetti,
-
-		// File tab refresh settings
 		fileTabAutoRefreshEnabled,
-
-		// Window chrome settings
 		useNativeTitleBar,
-
-		// Auto-scroll settings
 		autoScrollAiMode,
 		setAutoScrollAiMode,
-
-		// Message alignment
-		userMessageAlignment,
-		setUserMessageAlignment,
-
-		// Windows warning suppression
 		setSuppressWindowsWarning,
-
-		// Encore Features
 		encoreFeatures,
-		setEncoreFeatures,
 	} = settings;
 
 	// --- KEYBOARD SHORTCUT HELPERS ---
@@ -2529,67 +2433,49 @@ function MaestroConsoleInner() {
 
 				{/* --- UNIFIED MODALS (all modal groups consolidated into AppModals) --- */}
 				<AppModals
-					// Common props
+					// Common props (sessions/groups/groupChats + modal booleans self-sourced from stores — Tier 1B)
 					theme={theme}
-					sessions={sessions}
-					setSessions={setSessions}
-					activeSessionId={activeSessionId}
-					activeSession={activeSession}
-					groups={groups}
-					setGroups={setGroups}
-					groupChats={groupChats}
 					shortcuts={shortcuts}
 					tabShortcuts={tabShortcuts}
 					// AppInfoModals props
-					shortcutsHelpOpen={shortcutsHelpOpen}
 					onCloseShortcutsHelp={handleCloseShortcutsHelp}
 					hasNoAgents={hasNoAgents}
 					keyboardMasteryStats={keyboardMasteryStats}
-					aboutModalOpen={aboutModalOpen}
 					onCloseAboutModal={handleCloseAboutModal}
 					autoRunStats={autoRunStats}
 					usageStats={usageStats}
 					handsOnTimeMs={totalActiveTimeMs}
 					onOpenLeaderboardRegistration={handleOpenLeaderboardRegistrationFromAbout}
 					isLeaderboardRegistered={isLeaderboardRegistered}
-					updateCheckModalOpen={updateCheckModalOpen}
 					onCloseUpdateCheckModal={handleCloseUpdateCheckModal}
-					processMonitorOpen={processMonitorOpen}
 					onCloseProcessMonitor={handleCloseProcessMonitor}
 					onNavigateToSession={handleProcessMonitorNavigateToSession}
 					onNavigateToGroupChat={handleProcessMonitorNavigateToGroupChat}
-					usageDashboardOpen={usageDashboardOpen}
 					onCloseUsageDashboard={() => setUsageDashboardOpen(false)}
 					defaultStatsTimeRange={defaultStatsTimeRange}
 					colorBlindMode={colorBlindMode}
 					// AppConfirmModals props
-					confirmModalOpen={confirmModalOpen}
 					confirmModalMessage={confirmModalMessage}
 					confirmModalOnConfirm={confirmModalOnConfirm}
 					confirmModalTitle={confirmModalTitle}
 					confirmModalDestructive={confirmModalDestructive}
 					onCloseConfirmModal={handleCloseConfirmModal}
-					quitConfirmModalOpen={quitConfirmModalOpen}
 					onConfirmQuit={handleConfirmQuit}
 					onCancelQuit={handleCancelQuit}
 					activeBatchSessionIds={activeBatchSessionIds}
 					// AppSessionModals props
-					newInstanceModalOpen={newInstanceModalOpen}
 					onCloseNewInstanceModal={handleCloseNewInstanceModal}
 					onCreateSession={createNewSession}
 					existingSessions={sessionsForValidation}
 					duplicatingSessionId={duplicatingSessionId}
-					editAgentModalOpen={editAgentModalOpen}
 					onCloseEditAgentModal={handleCloseEditAgentModal}
 					onSaveEditAgent={handleSaveEditAgent}
 					editAgentSession={editAgentSession}
-					renameSessionModalOpen={renameInstanceModalOpen}
 					renameSessionValue={renameInstanceValue}
 					setRenameSessionValue={setRenameInstanceValue}
 					onCloseRenameSessionModal={handleCloseRenameSessionModal}
 					renameSessionTargetId={renameInstanceSessionId}
 					onAfterRename={flushSessionPersistence}
-					renameTabModalOpen={renameTabModalOpen}
 					renameTabId={renameTabId}
 					renameTabInitialName={renameTabInitialName}
 					onCloseRenameTabModal={handleCloseRenameTabModal}
@@ -2598,7 +2484,6 @@ function MaestroConsoleInner() {
 					createGroupModalOpen={createGroupModalOpen}
 					onCloseCreateGroupModal={handleCloseCreateGroupModal}
 					onGroupCreated={handleGroupCreated}
-					renameGroupModalOpen={renameGroupModalOpen}
 					renameGroupId={renameGroupId}
 					renameGroupValue={renameGroupValue}
 					setRenameGroupValue={setRenameGroupValue}
@@ -2606,26 +2491,21 @@ function MaestroConsoleInner() {
 					setRenameGroupEmoji={setRenameGroupEmoji}
 					onCloseRenameGroupModal={handleCloseRenameGroupModal}
 					// AppWorktreeModals props
-					worktreeConfigModalOpen={worktreeConfigModalOpen}
 					onCloseWorktreeConfigModal={handleCloseWorktreeConfigModal}
 					onSaveWorktreeConfig={handleSaveWorktreeConfig}
 					onCreateWorktreeFromConfig={handleCreateWorktreeFromConfig}
 					onDisableWorktreeConfig={handleDisableWorktreeConfig}
-					createWorktreeModalOpen={createWorktreeModalOpen}
 					createWorktreeSession={createWorktreeSession}
 					onCloseCreateWorktreeModal={handleCloseCreateWorktreeModal}
 					onCreateWorktree={handleCreateWorktree}
-					createPRModalOpen={createPRModalOpen}
 					createPRSession={createPRSession}
 					onCloseCreatePRModal={handleCloseCreatePRModal}
 					onPRCreated={handlePRCreated}
-					deleteWorktreeModalOpen={deleteWorktreeModalOpen}
 					deleteWorktreeSession={deleteWorktreeSession}
 					onCloseDeleteWorktreeModal={handleCloseDeleteWorktreeModal}
 					onConfirmDeleteWorktree={handleConfirmDeleteWorktree}
 					onConfirmAndDeleteWorktreeOnDisk={handleConfirmAndDeleteWorktreeOnDisk}
 					// AppUtilityModals props
-					quickActionOpen={quickActionOpen}
 					quickActionInitialMode={quickActionInitialMode}
 					setQuickActionOpen={setQuickActionOpen}
 					setActiveSessionId={setActiveSessionId}
@@ -2679,7 +2559,6 @@ function MaestroConsoleInner() {
 					onOpenGroupChat={handleOpenGroupChat}
 					onCloseGroupChat={handleCloseGroupChat}
 					onDeleteGroupChat={deleteGroupChatWithConfirmation}
-					activeGroupChatId={activeGroupChatId}
 					hasActiveSessionCapability={hasActiveSessionCapability}
 					onOpenMergeSession={handleQuickActionsOpenMergeSession}
 					onOpenSendToAgent={handleQuickActionsOpenSendToAgent}
@@ -2711,12 +2590,9 @@ function MaestroConsoleInner() {
 					gitDiffPreview={gitDiffPreview}
 					gitViewerCwd={gitViewerCwd}
 					onCloseGitDiff={handleCloseGitDiff}
-					gitLogOpen={gitLogOpen}
 					onCloseGitLog={handleCloseGitLog}
-					autoRunSetupModalOpen={autoRunSetupModalOpen}
 					onCloseAutoRunSetup={handleCloseAutoRunSetup}
 					onAutoRunFolderSelected={handleAutoRunFolderSelected}
-					batchRunnerModalOpen={batchRunnerModalOpen}
 					onCloseBatchRunner={handleCloseBatchRunner}
 					onStartBatchRun={handleStartBatchRun}
 					onSaveBatchPrompt={handleSaveBatchPrompt}
@@ -2732,17 +2608,14 @@ function MaestroConsoleInner() {
 					}
 					autoScrollAiMode={autoScrollAiMode}
 					setAutoScrollAiMode={setAutoScrollAiMode}
-					tabSwitcherOpen={tabSwitcherOpen}
 					onCloseTabSwitcher={handleCloseTabSwitcher}
 					onTabSelect={handleUtilityTabSelect}
 					onFileTabSelect={handleUtilityFileTabSelect}
 					onNamedSessionSelect={handleNamedSessionSelect}
-					fuzzyFileSearchOpen={fuzzyFileSearchOpen}
 					filteredFileTree={filteredFileTree}
 					fileExplorerExpanded={activeSession?.fileExplorerExpanded}
 					onCloseFileSearch={handleCloseFileSearch}
 					onFileSearchSelect={handleFileSearchSelect}
-					promptComposerOpen={promptComposerOpen}
 					onClosePromptComposer={handleClosePromptComposer}
 					promptComposerInitialValue={
 						activeGroupChatId
@@ -2784,13 +2657,11 @@ function MaestroConsoleInner() {
 					}
 					promptEnterToSend={enterToSendAI}
 					onPromptToggleEnterToSend={handlePromptToggleEnterToSend}
-					queueBrowserOpen={queueBrowserOpen}
 					onCloseQueueBrowser={handleCloseQueueBrowser}
 					onRemoveQueueItem={handleRemoveQueueItem}
 					onSwitchQueueSession={handleSwitchQueueSession}
 					onReorderQueueItems={handleReorderQueueItems}
 					// AppGroupChatModals props
-					showNewGroupChatModal={showNewGroupChatModal}
 					onCloseNewGroupChatModal={handleCloseNewGroupChatModal}
 					onCreateGroupChat={handleCreateGroupChat}
 					showDeleteGroupChatModal={showDeleteGroupChatModal}
@@ -2802,12 +2673,10 @@ function MaestroConsoleInner() {
 					showEditGroupChatModal={showEditGroupChatModal}
 					onCloseEditGroupChatModal={handleCloseEditGroupChatModal}
 					onUpdateGroupChat={handleUpdateGroupChat}
-					showGroupChatInfo={showGroupChatInfo}
 					groupChatMessages={groupChatMessages}
 					onCloseGroupChatInfo={handleCloseGroupChatInfo}
 					onOpenModeratorSession={handleOpenModeratorSession}
 					// AppAgentModals props
-					leaderboardRegistrationOpen={leaderboardRegistrationOpen}
 					onCloseLeaderboardRegistration={handleCloseLeaderboardRegistration}
 					leaderboardRegistration={leaderboardRegistration}
 					onSaveLeaderboardRegistration={handleSaveLeaderboardRegistration}
@@ -2819,7 +2688,6 @@ function MaestroConsoleInner() {
 					groupChatError={groupChatError}
 					groupChatRecoveryActions={groupChatRecoveryActions}
 					onClearGroupChatError={handleClearGroupChatError}
-					mergeSessionModalOpen={mergeSessionModalOpen}
 					onCloseMergeSession={handleCloseMergeSession}
 					onMerge={handleMerge}
 					transferState={transferState}
@@ -2828,7 +2696,6 @@ function MaestroConsoleInner() {
 					transferTargetAgent={transferTargetAgent}
 					onCancelTransfer={handleCancelTransfer}
 					onCompleteTransfer={handleCompleteTransfer}
-					sendToAgentModalOpen={sendToAgentModalOpen}
 					onCloseSendToAgent={handleCloseSendToAgent}
 					onSendToAgent={handleSendToAgent}
 				/>
@@ -2854,17 +2721,12 @@ function MaestroConsoleInner() {
 				{/* --- CELEBRATION OVERLAYS --- */}
 				<AppOverlays
 					theme={theme}
-					standingOvationData={standingOvationData}
 					cumulativeTimeMs={autoRunStats.cumulativeTimeMs}
 					onCloseStandingOvation={handleStandingOvationClose}
 					onOpenLeaderboardRegistration={handleOpenLeaderboardRegistration}
 					isLeaderboardRegistered={isLeaderboardRegistered}
-					firstRunCelebrationData={firstRunCelebrationData}
 					onCloseFirstRun={handleFirstRunCelebrationClose}
-					pendingKeyboardMasteryLevel={pendingKeyboardMasteryLevel}
 					onCloseKeyboardMastery={handleKeyboardMasteryCelebrationClose}
-					shortcuts={shortcuts}
-					disableConfetti={disableConfetti}
 				/>
 
 				{/* --- DEVELOPER PLAYGROUND --- */}
@@ -3243,74 +3105,6 @@ function MaestroConsoleInner() {
 							onClose={handleCloseSettings}
 							theme={theme}
 							themes={THEMES}
-							activeThemeId={activeThemeId}
-							setActiveThemeId={setActiveThemeId}
-							customThemeColors={customThemeColors}
-							setCustomThemeColors={setCustomThemeColors}
-							customThemeBaseId={customThemeBaseId}
-							setCustomThemeBaseId={setCustomThemeBaseId}
-							llmProvider={llmProvider}
-							setLlmProvider={setLlmProvider}
-							modelSlug={modelSlug}
-							setModelSlug={setModelSlug}
-							apiKey={apiKey}
-							setApiKey={setApiKey}
-							shortcuts={shortcuts}
-							setShortcuts={setShortcuts}
-							tabShortcuts={tabShortcuts}
-							setTabShortcuts={setTabShortcuts}
-							defaultShell={defaultShell}
-							setDefaultShell={setDefaultShell}
-							customShellPath={customShellPath}
-							setCustomShellPath={setCustomShellPath}
-							shellArgs={shellArgs}
-							setShellArgs={setShellArgs}
-							shellEnvVars={shellEnvVars}
-							setShellEnvVars={setShellEnvVars}
-							ghPath={ghPath}
-							setGhPath={setGhPath}
-							enterToSendAI={enterToSendAI}
-							setEnterToSendAI={setEnterToSendAI}
-							enterToSendTerminal={enterToSendTerminal}
-							setEnterToSendTerminal={setEnterToSendTerminal}
-							defaultSaveToHistory={defaultSaveToHistory}
-							setDefaultSaveToHistory={setDefaultSaveToHistory}
-							defaultShowThinking={defaultShowThinking}
-							setDefaultShowThinking={setDefaultShowThinking}
-							fontFamily={fontFamily}
-							setFontFamily={setFontFamily}
-							fontSize={fontSize}
-							setFontSize={setFontSize}
-							terminalWidth={terminalWidth}
-							setTerminalWidth={setTerminalWidth}
-							logLevel={logLevel}
-							setLogLevel={setLogLevel}
-							maxLogBuffer={maxLogBuffer}
-							setMaxLogBuffer={setMaxLogBuffer}
-							maxOutputLines={maxOutputLines}
-							setMaxOutputLines={setMaxOutputLines}
-							osNotificationsEnabled={osNotificationsEnabled}
-							setOsNotificationsEnabled={setOsNotificationsEnabled}
-							audioFeedbackEnabled={audioFeedbackEnabled}
-							setAudioFeedbackEnabled={setAudioFeedbackEnabled}
-							audioFeedbackCommand={audioFeedbackCommand}
-							setAudioFeedbackCommand={setAudioFeedbackCommand}
-							toastDuration={toastDuration}
-							setToastDuration={setToastDuration}
-							checkForUpdatesOnStartup={checkForUpdatesOnStartup}
-							setCheckForUpdatesOnStartup={setCheckForUpdatesOnStartup}
-							enableBetaUpdates={enableBetaUpdates}
-							setEnableBetaUpdates={setEnableBetaUpdates}
-							crashReportingEnabled={crashReportingEnabled}
-							setCrashReportingEnabled={setCrashReportingEnabled}
-							customAICommands={customAICommands}
-							setCustomAICommands={setCustomAICommands}
-							autoScrollAiMode={autoScrollAiMode}
-							setAutoScrollAiMode={setAutoScrollAiMode}
-							userMessageAlignment={userMessageAlignment}
-							setUserMessageAlignment={setUserMessageAlignment}
-							encoreFeatures={encoreFeatures}
-							setEncoreFeatures={setEncoreFeatures}
 							initialTab={settingsTab}
 							hasNoAgents={hasNoAgents}
 							onThemeImportError={(msg) => setFlashNotification(msg)}
