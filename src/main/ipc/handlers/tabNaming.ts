@@ -151,11 +151,8 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 						agentConfigValues.model.includes('/')
 					) {
 						resolvedModelId = agentConfigValues.model.trim();
-					} else if (
-						(agent as any).defaultModel &&
-						typeof (agent as any).defaultModel === 'string'
-					) {
-						resolvedModelId = (agent as any).defaultModel as string;
+					} else if (agent.defaultModel && typeof agent.defaultModel === 'string') {
+						resolvedModelId = agent.defaultModel;
 					}
 
 					// Sanitize resolved model id (remove trailing slashes)
@@ -197,68 +194,54 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 						finalArgsPreview: finalArgs.slice(0, 40),
 					});
 
-					// Determine the canonical CLI model to inject.
-					// resolvedModelId stays stable for logging; cliModelId is what gets injected.
-					// If resolvedModelId has no provider prefix, fall back to agent.defaultModel.
-					// If neither has a provider prefix, still inject the value so the model is
-					// not silently dropped when existing model tokens are stripped.
-					let cliModelId: string | undefined = resolvedModelId;
-					if (
-						cliModelId &&
-						!cliModelId.includes('/') &&
-						(agent as any).defaultModel &&
-						typeof (agent as any).defaultModel === 'string' &&
-						(agent as any).defaultModel.includes('/')
-					) {
-						cliModelId = (agent as any).defaultModel as string;
-					}
-
 					// Canonicalize model flags: strip all existing --model/-m tokens before the
-					// prompt separator, then re-inject the single canonical --model=<value>.
+					// prompt separator, then re-inject the single canonical model flag using the
+					// agent-specific flag style (e.g. Codex uses -m, Claude Code uses --model=).
 					// This must run BEFORE SSH wrapping so the flag ends up inside the remote
 					// agent invocation, not in the SSH wrapper arguments.
-					try {
-						const sepIndex =
-							finalArgs.indexOf('--') >= 0 ? finalArgs.indexOf('--') : finalArgs.length;
-						const prefix = finalArgs.slice(0, sepIndex);
-						const suffix = finalArgs.slice(sepIndex);
+					const sepIndex =
+						finalArgs.indexOf('--') >= 0 ? finalArgs.indexOf('--') : finalArgs.length;
+					const prefix = finalArgs.slice(0, sepIndex);
+					const suffix = finalArgs.slice(sepIndex);
 
-						const filteredPrefix: string[] = [];
-						for (let i = 0; i < prefix.length; i++) {
-							const a = prefix[i];
-							if (typeof a === 'string') {
-								if (a.startsWith('--model=')) {
-									continue; // drop explicit --model=value
-								}
-								if (a === '--model') {
-									i++; // drop flag + value
-									continue;
-								}
-								if (a === '-m' && i + 1 < prefix.length) {
-									i++; // drop short form + value
-									continue;
-								}
+					const filteredPrefix: string[] = [];
+					for (let i = 0; i < prefix.length; i++) {
+						const a = prefix[i];
+						if (typeof a === 'string') {
+							if (a.startsWith('--model=')) {
+								continue; // drop explicit --model=value
 							}
-							filteredPrefix.push(a);
-						}
-
-						// Re-inject the canonical model if we have one.
-						if (cliModelId && typeof cliModelId === 'string') {
-							// Validate: skip empty or trailing-slash-only values
-							const sanitized = cliModelId.replace(/\/+$/, '').trim();
-							if (sanitized) {
-								filteredPrefix.push('--model=' + sanitized);
-								safeDebug('[TabNaming] Injected canonical --model for spawn', {
-									sessionId,
-									model: sanitized,
-								});
+							if (a === '--model') {
+								i++; // drop flag + value
+								continue;
+							}
+							if (a === '-m' && i + 1 < prefix.length) {
+								i++; // drop short form + value
+								continue;
 							}
 						}
-
-						finalArgs = [...filteredPrefix, ...suffix];
-					} catch (err) {
-						// swallow
+						filteredPrefix.push(a);
 					}
+
+					// Re-inject using resolvedModelId directly — it already reflects session >
+					// agent-config > agent-default precedence. Use agent.modelArgs() when available
+					// so each agent gets its own flag style.
+					if (resolvedModelId) {
+						const sanitized = resolvedModelId.replace(/\/+$/, '').trim();
+						if (sanitized) {
+							const modelArgTokens = agent.modelArgs
+								? agent.modelArgs(sanitized)
+								: [`--model=${sanitized}`];
+							filteredPrefix.push(...modelArgTokens);
+							safeDebug('[TabNaming] Injected canonical model flag for spawn', {
+								sessionId,
+								model: sanitized,
+								tokens: modelArgTokens,
+							});
+						}
+					}
+
+					finalArgs = [...filteredPrefix, ...suffix];
 
 					// Determine command and working directory
 					let command = agent.path || agent.command;
@@ -486,12 +469,12 @@ function extractTabName(output: string): string | null {
 	// Split by newlines, periods, or arrow symbols and take meaningful lines
 	const lines = cleaned.split(/[.\n→]/).filter((line) => {
 		const trimmed = line.trim();
-		// Filter out empty lines and lines that look like instructions/examples
-		// Treat lines that start with a quote as example inputs and filter them out.
-		// (Agents sometimes include example quoted names in the prompt.)
-		if (trimmed.startsWith('"') || trimmed.startsWith("'")) return false;
-		// Allow quoted single-line outputs to be cleaned later, but lines that begin
-		// with quotes are typically examples and should be ignored.
+		// Filter out empty lines and lines that look like instructions/examples.
+		// Lines that are fully wrapped in quotes (e.g. "Fix CI flaky tests") are valid
+		// tab name candidates — keep them so the unquoting step below can clean them.
+		// Only discard lines that START with a quote but are not fully wrapped (example inputs).
+		const isWrappedQuoted = /^["'].+["']$/.test(trimmed);
+		if ((trimmed.startsWith('"') || trimmed.startsWith("'")) && !isWrappedQuoted) return false;
 		const unquoted = trimmed.replace(/^['"]+|['"]+$/g, '');
 		return (
 			unquoted.length > 0 &&
