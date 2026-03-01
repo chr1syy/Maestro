@@ -28,6 +28,15 @@ import type { MaestroSettings } from './persistence';
 
 const LOG_CONTEXT = '[TabNaming]';
 
+// Safe debug wrapper to centralize console.debug error isolation
+const safeDebug = (message: string, data?: any) => {
+	try {
+		console.debug(message, data);
+	} catch {
+		// swallow
+	}
+};
+
 /**
  * Helper to create handler options with consistent context
  */
@@ -84,6 +93,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 				userMessage: string;
 				agentType: string;
 				cwd: string;
+				sessionCustomModel?: string;
 				sessionSshRemoteConfig?: {
 					enabled: boolean;
 					remoteId: string | null;
@@ -132,11 +142,8 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 					// Preference: session override -> agent-config model (only if it looks complete) -> agent.defaultModel
 					// Only accept agent-config model when it contains a provider/model (contains a '/')
 					let resolvedModelId: string | undefined;
-					if (
-						typeof (config as any).sessionCustomModel === 'string' &&
-						(config as any).sessionCustomModel.trim()
-					) {
-						resolvedModelId = (config as any).sessionCustomModel.trim();
+					if (typeof config.sessionCustomModel === 'string' && config.sessionCustomModel.trim()) {
+						resolvedModelId = config.sessionCustomModel.trim();
 					} else if (
 						agentConfigValues &&
 						typeof agentConfigValues.model === 'string' &&
@@ -158,17 +165,12 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 					}
 
 					// Debug: log resolved model for tab naming
-					try {
-						// eslint-disable-next-line no-console
-						console.debug('[TabNaming] Resolved model', {
-							sessionId,
-							agentType: config.agentType,
-							agentConfigModel: agentConfigValues.model,
-							resolvedModelId,
-						});
-					} catch (err) {
-						// swallow
-					}
+					safeDebug('[TabNaming] Resolved model', {
+						sessionId,
+						agentType: config.agentType,
+						agentConfigModel: agentConfigValues.model,
+						resolvedModelId,
+					});
 
 					let finalArgs = buildAgentArgs(agent, {
 						baseArgs,
@@ -187,51 +189,82 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 
 					// Debug: log how model was resolved for tab naming requests so we can
 					// verify whether session/agent overrides are applied as expected.
-					try {
-						// eslint-disable-next-line no-console
-						console.debug('[TabNaming] Config resolution', {
-							sessionId,
-							agentType: config.agentType,
-							modelSource: configResolution.modelSource,
-							agentConfigModel: agentConfigValues?.model,
-							finalArgsPreview: finalArgs.slice(0, 40),
-						});
-					} catch (err) {
-						// swallow logging errors
+					safeDebug('[TabNaming] Config resolution', {
+						sessionId,
+						agentType: config.agentType,
+						modelSource: configResolution.modelSource,
+						agentConfigModel: agentConfigValues?.model,
+						finalArgsPreview: finalArgs.slice(0, 40),
+					});
+
+					// Determine the canonical CLI model to inject.
+					// resolvedModelId stays stable for logging; cliModelId is what gets injected.
+					// If resolvedModelId has no provider prefix, fall back to agent.defaultModel.
+					// If neither has a provider prefix, still inject the value so the model is
+					// not silently dropped when existing model tokens are stripped.
+					let cliModelId: string | undefined = resolvedModelId;
+					if (
+						cliModelId &&
+						!cliModelId.includes('/') &&
+						(agent as any).defaultModel &&
+						typeof (agent as any).defaultModel === 'string' &&
+						(agent as any).defaultModel.includes('/')
+					) {
+						cliModelId = (agent as any).defaultModel as string;
 					}
 
-					// Sanitize model flags: avoid passing a --model value that is empty
-					// or looks like a namespace with a trailing slash (e.g. "github-copilot/")
-					// which some agent CLIs treat as invalid and error out.
+					// Canonicalize model flags: strip all existing --model/-m tokens before the
+					// prompt separator, then re-inject the single canonical --model=<value>.
+					// This must run BEFORE SSH wrapping so the flag ends up inside the remote
+					// agent invocation, not in the SSH wrapper arguments.
 					try {
-						const sanitizedArgs: string[] = [];
-						for (let i = 0; i < finalArgs.length; i++) {
-							const a = finalArgs[i];
-							if (a === '--model') {
-								const next = finalArgs[i + 1];
-								if (!next || typeof next !== 'string' || next.trim() === '' || /\/$/.test(next)) {
-									// skip both the flag and the invalid value
-									i++; // advance past the invalid value
-									// eslint-disable-next-line no-console
-									console.debug('[TabNaming] Removed invalid --model flag for tab naming', {
-										sessionId,
-										removedValue: next,
-									});
+						const sepIndex =
+							finalArgs.indexOf('--') >= 0 ? finalArgs.indexOf('--') : finalArgs.length;
+						const prefix = finalArgs.slice(0, sepIndex);
+						const suffix = finalArgs.slice(sepIndex);
+
+						const filteredPrefix: string[] = [];
+						for (let i = 0; i < prefix.length; i++) {
+							const a = prefix[i];
+							if (typeof a === 'string') {
+								if (a.startsWith('--model=')) {
+									continue; // drop explicit --model=value
+								}
+								if (a === '--model') {
+									i++; // drop flag + value
+									continue;
+								}
+								if (a === '-m' && i + 1 < prefix.length) {
+									i++; // drop short form + value
 									continue;
 								}
 							}
-							sanitizedArgs.push(a);
+							filteredPrefix.push(a);
 						}
-						finalArgs = sanitizedArgs;
+
+						// Re-inject the canonical model if we have one.
+						if (cliModelId && typeof cliModelId === 'string') {
+							// Validate: skip empty or trailing-slash-only values
+							const sanitized = cliModelId.replace(/\/+$/, '').trim();
+							if (sanitized) {
+								filteredPrefix.push('--model=' + sanitized);
+								safeDebug('[TabNaming] Injected canonical --model for spawn', {
+									sessionId,
+									model: sanitized,
+								});
+							}
+						}
+
+						finalArgs = [...filteredPrefix, ...suffix];
 					} catch (err) {
-						// ignore sanitization failures
+						// swallow
 					}
 
 					// Determine command and working directory
 					let command = agent.path || agent.command;
 					let cwd = config.cwd;
 					// Start with resolved env vars from config resolution, allow mutation below
-					let customEnvVars: Record<string, string> | undefined =
+					const customEnvVars: Record<string, string> | undefined =
 						configResolution.effectiveCustomEnvVars
 							? { ...configResolution.effectiveCustomEnvVars }
 							: undefined;
@@ -258,8 +291,9 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 							const agentSupportsStreamJson = agent.capabilities?.supportsStreamJsonInput ?? false;
 							if (agentSupportsStreamJson) {
 								// Add --input-format stream-json to args so agent reads from stdin
+								const inputFormatIdx = finalArgs.indexOf('--input-format');
 								const hasStreamJsonInput =
-									finalArgs.includes('--input-format') && finalArgs.includes('stream-json');
+									inputFormatIdx !== -1 && finalArgs[inputFormatIdx + 1] === 'stream-json';
 								if (!hasStreamJsonInput) {
 									finalArgs = [...finalArgs, '--input-format', 'stream-json'];
 								}
@@ -293,134 +327,14 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 					try {
 						const nonStringItems = finalArgs.filter((a) => typeof a !== 'string');
 						if (nonStringItems.length > 0) {
-							// eslint-disable-next-line no-console
-							console.debug('[TabNaming] Removing non-string args before spawn', {
+							safeDebug('[TabNaming] Removing non-string args before spawn', {
 								sessionId,
 								removed: nonStringItems.map((i) => ({ typeof: typeof i, preview: String(i) })),
 							});
 							finalArgs = finalArgs.filter((a) => typeof a === 'string');
 						}
-
-						// Extract model arg value for debugging (if present)
-						const modelIndex = finalArgs.indexOf('--model');
-						if (modelIndex !== -1 && finalArgs.length > modelIndex + 1) {
-							const modelVal = finalArgs[modelIndex + 1];
-							// eslint-disable-next-line no-console
-							console.debug('[TabNaming] Final --model value', {
-								sessionId,
-								value: modelVal,
-								type: typeof modelVal,
-							});
-						}
 					} catch (err) {
 						// swallow safety log errors
-					}
-
-					// Quote model values that contain slashes so they survive shell-based
-					// spawns (PowerShell can interpret unquoted tokens containing slashes).
-					try {
-						// Deduplicate --model flags and ensure exactly one is present before the prompt separator
-						try {
-							const sepIndex =
-								finalArgs.indexOf('--') >= 0 ? finalArgs.indexOf('--') : finalArgs.length;
-							let lastModelVal: string | undefined;
-							for (let i = 0; i < sepIndex; i++) {
-								if (finalArgs[i] === '--model' && finalArgs.length > i + 1) {
-									const cand = finalArgs[i + 1];
-									if (typeof cand === 'string' && cand.trim()) {
-										lastModelVal = cand;
-									}
-								}
-							}
-
-							if (lastModelVal !== undefined) {
-								const newArgs: string[] = [];
-								for (let i = 0; i < sepIndex; i++) {
-									if (finalArgs[i] === '--model') {
-										i++; // skip value
-										continue;
-									}
-									newArgs.push(finalArgs[i]);
-								}
-								// Insert the single canonical model flag
-								newArgs.push('--model', lastModelVal);
-								// Append remaining args (including '--' and prompt)
-								finalArgs = [...newArgs, ...finalArgs.slice(sepIndex)];
-								// eslint-disable-next-line no-console
-								console.debug('[TabNaming] Deduplicated --model flags', {
-									sessionId,
-									canonical: lastModelVal,
-								});
-							}
-						} catch (err) {
-							// ignore dedupe failures
-						}
-						// Convert separate --model <value> pairs into a single --model=<value>
-						// token so shells don't split values. Then enforce a single canonical
-						// CLI model token derived from our resolvedModelId (if available).
-						const rebuilt: string[] = [];
-						for (let i = 0; i < finalArgs.length; i++) {
-							const a = finalArgs[i];
-							if (a === '--model' && i + 1 < finalArgs.length) {
-								const raw = finalArgs[i + 1];
-								const val =
-									typeof raw === 'string' ? raw.replace(/^['\"]|['\"]$/g, '') : String(raw);
-								rebuilt.push(`--model=${val}`);
-								i++; // skip the value
-							} else {
-								rebuilt.push(a);
-							}
-						}
-						finalArgs = rebuilt;
-
-						// Remove any existing model tokens (either --model=... or -m/value)
-						const withoutModel: string[] = [];
-						for (let i = 0; i < finalArgs.length; i++) {
-							const a = finalArgs[i];
-							if (typeof a === 'string' && a.startsWith('--model')) {
-								// skip
-								continue;
-							}
-							if (a === '-m' && i + 1 < finalArgs.length) {
-								i++; // skip short form value
-								continue;
-							}
-							withoutModel.push(a);
-						}
-
-						// If we have a resolvedModelId (from session/agent/default), prefer inserting
-						// it explicitly as a CLI flag to avoid relying on OpenCode config/env.
-						if (resolvedModelId && typeof resolvedModelId === 'string') {
-							// If resolvedModelId doesn't look like provider/model, prefer agent.defaultModel
-							if (
-								!resolvedModelId.includes('/') &&
-								(agent as any).defaultModel &&
-								typeof (agent as any).defaultModel === 'string' &&
-								(agent as any).defaultModel.includes('/')
-							) {
-								resolvedModelId = (agent as any).defaultModel as string;
-							}
-
-							if (resolvedModelId && resolvedModelId.includes('/')) {
-								const modelToken = `--model=${resolvedModelId}`;
-								// Insert before the argument separator `--` if present
-								const sep = withoutModel.indexOf('--');
-								if (sep === -1) {
-									withoutModel.push(modelToken);
-								} else {
-									withoutModel.splice(sep, 0, modelToken);
-								}
-								// eslint-disable-next-line no-console
-								console.debug('[TabNaming] Injected canonical --model for spawn', {
-									sessionId,
-									model: resolvedModelId,
-								});
-							}
-						}
-
-						finalArgs = withoutModel;
-					} catch (err) {
-						// swallow
 					}
 
 					// Create a promise that resolves when we get the tab name
@@ -460,8 +374,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 							// The agent should return just the tab name, but we clean up any extra whitespace/formatting
 							// Log raw output and context to help diagnose generic/low-quality tab names
 							try {
-								// eslint-disable-next-line no-console
-								console.debug('[TabNaming] Raw output before extraction', {
+								safeDebug('[TabNaming] Raw output before extraction', {
 									sessionId,
 									agentType: config.agentType,
 									agentConfigModel: agentConfigValues?.model,
@@ -477,7 +390,6 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 								const genericRegex =
 									/^("|')?\s*(coding task|task tab name|task tab|coding task tab|task name)\b/i;
 								if (genericRegex.test(String(output))) {
-									// eslint-disable-next-line no-console
 									console.warn(
 										'[TabNaming] Agent returned a generic tab name candidate; consider adjusting prompt or model',
 										{
@@ -509,8 +421,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 						try {
 							// Debug: log full finalArgs array and types just before spawn
 							// (kept in console.debug for diagnosis only)
-							// eslint-disable-next-line no-console
-							console.debug('[TabNaming] About to spawn with final args', {
+							safeDebug('[TabNaming] About to spawn with final args', {
 								sessionId,
 								command,
 								cwd,
@@ -576,7 +487,11 @@ function extractTabName(output: string): string | null {
 	const lines = cleaned.split(/[.\n→]/).filter((line) => {
 		const trimmed = line.trim();
 		// Filter out empty lines and lines that look like instructions/examples
-		// Allow quoted single-line outputs (agents often return the name in quotes)
+		// Treat lines that start with a quote as example inputs and filter them out.
+		// (Agents sometimes include example quoted names in the prompt.)
+		if (trimmed.startsWith('"') || trimmed.startsWith("'")) return false;
+		// Allow quoted single-line outputs to be cleaned later, but lines that begin
+		// with quotes are typically examples and should be ignored.
 		const unquoted = trimmed.replace(/^['"]+|['"]+$/g, '');
 		return (
 			unquoted.length > 0 &&

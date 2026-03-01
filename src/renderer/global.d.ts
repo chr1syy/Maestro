@@ -2598,6 +2598,7 @@ interface MaestroAPI {
 			userMessage: string;
 			agentType: string;
 			cwd: string;
+			sessionCustomModel?: string;
 			sessionSshRemoteConfig?: {
 				enabled: boolean;
 				remoteId: string | null;
