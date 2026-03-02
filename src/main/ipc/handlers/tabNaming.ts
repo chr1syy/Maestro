@@ -20,7 +20,7 @@ import {
 } from '../../utils/ipcHandler';
 import { buildAgentArgs, applyAgentConfigOverrides } from '../../utils/agent-args';
 import { getSshRemoteConfig, createSshRemoteStoreAdapter } from '../../utils/ssh-remote-resolver';
-import { buildSshCommand } from '../../utils/ssh-command-builder';
+import { buildSshCommandWithStdin } from '../../utils/ssh-command-builder';
 import { tabNamingPrompt } from '../../../prompts';
 import type { ProcessManager } from '../../process-manager';
 import type { AgentDetector } from '../../agents';
@@ -174,7 +174,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 						prompt: fullPrompt,
 						cwd: config.cwd,
 						readOnlyMode: true, // Always read-only since we're not modifying anything
-						modelId: resolvedModelId,
+						// modelId intentionally omitted — applyAgentConfigOverrides is the single source of model injection
 					});
 
 					// Apply config overrides from store (other overrides such as customArgs/env)
@@ -253,10 +253,10 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 							: undefined;
 
 					// Handle SSH remote execution if configured
-					// IMPORTANT: For SSH, we must send the prompt via stdin to avoid shell escaping issues.
-					// The prompt contains special characters that break when passed through multiple layers
-					// of shell escaping (local spawn -> SSH -> remote zsh -> bash -c).
-					let shouldSendPromptViaStdin = false;
+					// Use stdin-based execution to completely bypass shell escaping issues.
+					// The prompt contains special characters that break when passed through multiple
+					// layers of shell escaping (local spawn -> SSH -> remote bash -c).
+					let sshStdinScript: string | undefined;
 					if (config.sessionSshRemoteConfig?.enabled && config.sessionSshRemoteConfig.remoteId) {
 						const sshStoreAdapter = createSshRemoteStoreAdapter(settingsStore);
 						const sshResult = getSshRemoteConfig(sshStoreAdapter, {
@@ -269,38 +269,17 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 							const remoteCommand = agent.command;
 							const remoteCwd = config.sessionSshRemoteConfig.workingDirOverride || config.cwd;
 
-							// For agents that support stream-json input, use stdin for the prompt
-							// This completely avoids shell escaping issues with multi-layer SSH commands
-							const agentSupportsStreamJson = agent.capabilities?.supportsStreamJsonInput ?? false;
-							if (agentSupportsStreamJson) {
-								// Add --input-format stream-json to args so agent reads from stdin
-								const inputFormatIdx = finalArgs.indexOf('--input-format');
-								const hasStreamJsonInput =
-									inputFormatIdx !== -1 && finalArgs[inputFormatIdx + 1] === 'stream-json';
-								if (!hasStreamJsonInput) {
-									finalArgs = [...finalArgs, '--input-format', 'stream-json'];
-								}
-								shouldSendPromptViaStdin = true;
-								logger.debug(
-									'Using stdin for tab naming prompt in SSH remote execution',
-									LOG_CONTEXT,
-									{
-										sessionId,
-										promptLength: fullPrompt.length,
-										agentSupportsStreamJson,
-									}
-								);
-							}
-
-							const sshCommand = await buildSshCommand(sshResult.config, {
+							const sshCommand = await buildSshCommandWithStdin(sshResult.config, {
 								command: remoteCommand,
 								args: finalArgs,
 								cwd: remoteCwd,
 								env: customEnvVars,
-								useStdin: shouldSendPromptViaStdin,
+								// Pass the prompt via stdin so it's never parsed by any shell layer
+								stdinInput: fullPrompt,
 							});
 							command = sshCommand.command;
 							finalArgs = sshCommand.args;
+							sshStdinScript = sshCommand.stdinScript;
 							// Local cwd is not used for SSH commands - the command runs on remote
 							cwd = process.cwd();
 						}
@@ -400,15 +379,14 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 						processManager.on('exit', onExit);
 
 						// Spawn the process
-						// When using SSH with stdin, pass the flag so ChildProcessSpawner
-						// sends the prompt via stdin instead of command line args
+						// For SSH, sshStdinScript contains the full bash script + prompt
 						// Debug: log full finalArgs array and types just before spawn
 						// (kept in console.debug for diagnosis only)
 						safeDebug('[TabNaming] About to spawn with final args', {
 							sessionId,
 							command,
 							cwd,
-							sendPromptViaStdin: shouldSendPromptViaStdin,
+							hasSshStdinScript: !!sshStdinScript,
 							finalArgsDetail: finalArgs.map((a) => ({ value: a, type: typeof a })),
 						});
 
@@ -420,7 +398,7 @@ export function registerTabNamingHandlers(deps: TabNamingHandlerDependencies): v
 							args: finalArgs,
 							prompt: fullPrompt,
 							customEnvVars,
-							sendPromptViaStdin: shouldSendPromptViaStdin,
+							sshStdinScript,
 						});
 					});
 				} catch (error) {
