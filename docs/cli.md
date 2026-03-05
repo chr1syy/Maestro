@@ -241,5 +241,5 @@ The `send` command always outputs JSON (no `--json` flag needed).
 
 ## Requirements
 
-- At least one AI agent CLI must be installed and in PATH (Claude Code, Codex, or OpenCode)
+- At least one AI agent CLI must be installed and in PATH (Claude Code, Codex, OpenCode, or Factory Droid)
 - Maestro config files must exist (created automatically when you use the GUI)

@@ -328,7 +328,10 @@ export async function detectDroid(
  * Get the resolved Claude command/path for spawning
  * Uses cached path from detectClaude() or falls back to default command
  */
-export function getClaudeCommand(): string {
+export function getClaudeCommand(customPath?: string): string {
+	if (customPath && customPath.trim()) {
+		return customPath;
+	}
 	return cachedClaudePath || CLAUDE_DEFAULT_COMMAND;
 }
 
@@ -336,21 +339,30 @@ export function getClaudeCommand(): string {
  * Get the resolved Codex command/path for spawning
  * Uses cached path from detectCodex() or falls back to default command
  */
-export function getCodexCommand(): string {
+export function getCodexCommand(customPath?: string): string {
+	if (customPath && customPath.trim()) {
+		return customPath;
+	}
 	return cachedCodexPath || CODEX_DEFAULT_COMMAND;
 }
 
 /**
  * Get the resolved OpenCode command/path for spawning
  */
-export function getOpenCodeCommand(): string {
+export function getOpenCodeCommand(customPath?: string): string {
+	if (customPath && customPath.trim()) {
+		return customPath;
+	}
 	return cachedOpenCodePath || OPENCODE_DEFAULT_COMMAND;
 }
 
 /**
  * Get the resolved Factory Droid command/path for spawning
  */
-export function getDroidCommand(): string {
+export function getDroidCommand(customPath?: string): string {
+	if (customPath && customPath.trim()) {
+		return customPath;
+	}
 	return cachedDroidPath || DROID_DEFAULT_COMMAND;
 }
 
@@ -360,28 +372,43 @@ export function getDroidCommand(): string {
 async function spawnClaudeAgent(
 	cwd: string,
 	prompt: string,
-	agentSessionId?: string
+	agentSessionId?: string,
+	overrides?: AgentSpawnOverrides
 ): Promise<AgentResult> {
 	return new Promise((resolve) => {
-		// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
-		// For CLI, we rely on the environment that Maestro itself is running in.
-		// Global shell env vars are primarily used by the desktop app's process manager.
-		const env = buildExpandedEnv();
+		const agentDef = getAgentDefinition('claude-code');
+		const agentConfigValues = getAgentConfigValues('claude-code') as Record<string, any>;
 
-		// Build args: base args + session handling + prompt
-		const args = [...CLAUDE_ARGS];
+		// Build args: base args + session handling (prompt appended after overrides)
+		const baseArgs = [...CLAUDE_ARGS];
 
 		if (agentSessionId) {
 			// Resume an existing session (e.g., for synopsis generation)
-			args.push('--resume', agentSessionId);
+			baseArgs.push('--resume', agentSessionId);
 		} else {
 			// Force a fresh, isolated session for each task execution
 			// This prevents context bleeding between tasks in Auto Run
-			args.push('--session-id', generateUUID());
+			baseArgs.push('--session-id', generateUUID());
 		}
 
-		// Add prompt as positional argument
-		args.push('--', prompt);
+		const { args: resolvedArgs, effectiveCustomEnvVars } = applyAgentConfigOverrides(
+			agentDef,
+			baseArgs,
+			{
+				agentConfigValues,
+				sessionCustomModel: overrides?.customModel,
+				sessionCustomArgs: overrides?.customArgs,
+				sessionCustomEnvVars: overrides?.customEnvVars,
+			}
+		);
+
+		// Add prompt as positional argument after overrides
+		const args = [...resolvedArgs, '--', prompt];
+
+		// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
+		// For CLI, we rely on the environment that Maestro itself is running in.
+		// Global shell env vars are primarily used by the desktop app's process manager.
+		const env = buildExpandedEnv(effectiveCustomEnvVars);
 
 		const options: SpawnOptions = {
 			cwd,
@@ -390,7 +417,7 @@ async function spawnClaudeAgent(
 		};
 
 		// Use the resolved Claude path (from settings or PATH detection)
-		const claudeCommand = getClaudeCommand();
+		const claudeCommand = getClaudeCommand(overrides?.customPath);
 		const child = spawn(claudeCommand, args, options);
 
 		let jsonBuffer = '';
@@ -557,22 +584,37 @@ function resolveAgentInvocation(
 async function spawnCodexAgent(
 	cwd: string,
 	prompt: string,
-	agentSessionId?: string
+	agentSessionId?: string,
+	overrides?: AgentSpawnOverrides
 ): Promise<AgentResult> {
 	return new Promise((resolve) => {
+		const agentDef = getAgentDefinition('codex');
+		const agentConfigValues = getAgentConfigValues('codex') as Record<string, any>;
+
+		const baseArgs = [...CODEX_ARGS];
+		baseArgs.push('-C', cwd);
+
+		if (agentSessionId) {
+			baseArgs.push('resume', agentSessionId);
+		}
+
+		const { args: resolvedArgs, effectiveCustomEnvVars } = applyAgentConfigOverrides(
+			agentDef,
+			baseArgs,
+			{
+				agentConfigValues,
+				sessionCustomModel: overrides?.customModel,
+				sessionCustomArgs: overrides?.customArgs,
+				sessionCustomEnvVars: overrides?.customEnvVars,
+			}
+		);
+
+		const args = [...resolvedArgs, '--', prompt];
+
 		// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
 		// For CLI, we rely on the environment that Maestro itself is running in.
 		// Global shell env vars are primarily used by the desktop app's process manager.
-		const env = buildExpandedEnv();
-
-		const args = [...CODEX_ARGS];
-		args.push('-C', cwd);
-
-		if (agentSessionId) {
-			args.push('resume', agentSessionId);
-		}
-
-		args.push('--', prompt);
+		const env = buildExpandedEnv(effectiveCustomEnvVars);
 
 		const options: SpawnOptions = {
 			cwd,
@@ -580,7 +622,7 @@ async function spawnCodexAgent(
 			stdio: ['pipe', 'pipe', 'pipe'],
 		};
 
-		const codexCommand = getCodexCommand();
+		const codexCommand = getCodexCommand(overrides?.customPath);
 		const child = spawn(codexCommand, args, options);
 
 		const parser = new CodexOutputParser();
@@ -677,7 +719,7 @@ async function spawnOpenCodeAgent(
 			stdio: ['pipe', 'pipe', 'pipe'],
 		};
 
-		const opencodeCommand = getOpenCodeCommand();
+		const opencodeCommand = getOpenCodeCommand(overrides?.customPath);
 		const child = spawn(opencodeCommand, args, options);
 
 		const parser = new OpenCodeOutputParser();
@@ -787,7 +829,7 @@ async function spawnFactoryDroidAgent(
 			stdio: ['pipe', 'pipe', 'pipe'],
 		};
 
-		const droidCommand = getDroidCommand();
+		const droidCommand = getDroidCommand(overrides?.customPath);
 		const child = spawn(droidCommand, args, options);
 
 		const parser = new FactoryDroidOutputParser();
@@ -884,11 +926,11 @@ export async function spawnAgent(
 	overrides?: AgentSpawnOverrides
 ): Promise<AgentResult> {
 	if (toolType === 'codex') {
-		return spawnCodexAgent(cwd, prompt, agentSessionId);
+		return spawnCodexAgent(cwd, prompt, agentSessionId, overrides);
 	}
 
 	if (toolType === 'claude-code') {
-		return spawnClaudeAgent(cwd, prompt, agentSessionId);
+		return spawnClaudeAgent(cwd, prompt, agentSessionId, overrides);
 	}
 
 	if (toolType === 'opencode') {
