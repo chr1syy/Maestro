@@ -473,7 +473,10 @@ async function spawnClaudeAgent(
 	// Global shell env vars are primarily used by the desktop app's process manager.
 	const env = buildExpandedEnv(effectiveCustomEnvVars);
 
-	let spawnCommand = getClaudeCommand(overrides?.customPath);
+	let spawnCommand =
+		overrides?.sshRemoteConfig && !overrides?.customPath && agentDef?.binaryName
+			? agentDef.binaryName
+			: getClaudeCommand(overrides?.customPath);
 	let spawnArgs = args;
 	let spawnCwd = cwd;
 	let spawnEnv = env;
@@ -656,7 +659,10 @@ async function spawnStreamingAgent(
 	);
 	const agentDef = getAgentDefinition(toolType);
 
-	let spawnCommand = commandGetter(overrides?.customPath);
+	let spawnCommand =
+		overrides?.sshRemoteConfig && !overrides?.customPath && agentDef?.binaryName
+			? agentDef.binaryName
+			: commandGetter(overrides?.customPath);
 	let spawnArgs = args;
 	let spawnCwd = cwd;
 	let spawnEnv = env;

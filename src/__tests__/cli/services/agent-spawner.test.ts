@@ -35,11 +35,28 @@ const mockChild = Object.assign(new EventEmitter(), {
 // Mock child_process before imports
 vi.mock('child_process', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('child_process')>();
+	const actualDefault = (
+		actual as typeof import('child_process') & {
+			default?: typeof import('child_process');
+		}
+	).default;
+	const execFile =
+		actual.execFile ??
+		actualDefault?.execFile ??
+		((...args: unknown[]) => {
+			const callback = args[args.length - 1];
+			if (typeof callback === 'function') {
+				callback(null, '', '');
+			}
+		});
 	return {
 		...actual,
+		execFile,
 		spawn: (...args: unknown[]) => mockSpawn(...args),
 		default: {
+			...(actualDefault ?? {}),
 			...actual,
+			execFile,
 			spawn: (...args: unknown[]) => mockSpawn(...args),
 		},
 	};
