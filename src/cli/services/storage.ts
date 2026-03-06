@@ -4,7 +4,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { Group, SessionInfo, HistoryEntry } from '../../shared/types';
+import type { Group, SessionInfo, HistoryEntry, SshRemoteConfig } from '../../shared/types';
 import {
 	HISTORY_VERSION,
 	MAX_ENTRIES_PER_SESSION,
@@ -216,6 +216,15 @@ export function readHistoryPaginated(options?: {
 export function readSettings(): SettingsStore {
 	const data = readStoreFile<SettingsStore>('maestro-settings.json');
 	return data || {};
+}
+
+/**
+ * Read SSH remote configurations from settings storage
+ */
+export function readSshRemotes(): SshRemoteConfig[] {
+	const settings = readSettings();
+	const remotes = settings.sshRemotes;
+	return Array.isArray(remotes) ? (remotes as SshRemoteConfig[]) : [];
 }
 
 /**

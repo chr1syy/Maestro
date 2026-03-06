@@ -3,7 +3,7 @@
 
 import { spawn, SpawnOptions } from 'child_process';
 import * as fs from 'fs';
-import type { ToolType, UsageStats } from '../../shared/types';
+import type { ToolType, UsageStats, AgentSshRemoteConfig } from '../../shared/types';
 import { CodexOutputParser } from '../../main/parsers/codex-output-parser';
 import { OpenCodeOutputParser } from '../../main/parsers/opencode-output-parser';
 import { FactoryDroidOutputParser } from '../../main/parsers/factory-droid-output-parser';
@@ -14,10 +14,11 @@ import {
 	buildAgentArgs,
 	getContextWindowValue,
 } from '../../main/utils/agent-args';
-import { getAgentConfigValues, getAgentCustomPath } from './storage';
+import { getAgentConfigValues, getAgentCustomPath, readSshRemotes } from './storage';
 import { generateUUID } from '../../shared/uuid';
 import { buildExpandedPath, buildExpandedEnv } from '../../shared/pathUtils';
 import { isWindows, getWhichCommand } from '../../shared/platformDetection';
+import { wrapSpawnWithSsh } from '../../main/utils/ssh-spawn-wrapper';
 
 // Claude Code default command and arguments (same as Electron app)
 const CLAUDE_DEFAULT_COMMAND = 'claude';
@@ -72,6 +73,13 @@ export interface AgentSpawnOverrides {
 	customArgs?: string;
 	customEnvVars?: Record<string, string>;
 	customModel?: string;
+	sshRemoteConfig?: AgentSshRemoteConfig;
+}
+
+function getCliSshRemoteStore() {
+	return {
+		getSshRemotes: () => readSshRemotes(),
+	};
 }
 
 /**
@@ -150,11 +158,17 @@ async function findCodexInPath(): Promise<string | undefined> {
  * Check if Claude Code is available
  * First checks for a custom path in settings, then falls back to PATH detection
  */
-export async function detectClaude(customPathOverride?: string): Promise<{
+export async function detectClaude(
+	customPathOverride?: string,
+	sshRemoteConfig?: AgentSshRemoteConfig
+): Promise<{
 	available: boolean;
 	path?: string;
 	source?: 'settings' | 'path';
 }> {
+	if (sshRemoteConfig?.enabled) {
+		return { available: true, source: 'settings' };
+	}
 	if (customPathOverride) {
 		if (await isExecutable(customPathOverride)) {
 			cachedClaudePath = { path: customPathOverride, source: 'settings' };
@@ -201,11 +215,17 @@ export async function detectClaude(customPathOverride?: string): Promise<{
  * Check if Codex CLI is available
  * First checks for a custom path in settings, then falls back to PATH detection
  */
-export async function detectCodex(customPathOverride?: string): Promise<{
+export async function detectCodex(
+	customPathOverride?: string,
+	sshRemoteConfig?: AgentSshRemoteConfig
+): Promise<{
 	available: boolean;
 	path?: string;
 	source?: 'settings' | 'path';
 }> {
+	if (sshRemoteConfig?.enabled) {
+		return { available: true, source: 'settings' };
+	}
 	if (customPathOverride) {
 		if (await isExecutable(customPathOverride)) {
 			cachedCodexPath = { path: customPathOverride, source: 'settings' };
@@ -248,11 +268,17 @@ export async function detectCodex(customPathOverride?: string): Promise<{
  * Check if OpenCode CLI is available
  * First checks for a custom path in settings, then falls back to PATH detection
  */
-export async function detectOpenCode(customPathOverride?: string): Promise<{
+export async function detectOpenCode(
+	customPathOverride?: string,
+	sshRemoteConfig?: AgentSshRemoteConfig
+): Promise<{
 	available: boolean;
 	path?: string;
 	source?: 'settings' | 'path';
 }> {
+	if (sshRemoteConfig?.enabled) {
+		return { available: true, source: 'settings' };
+	}
 	if (customPathOverride) {
 		if (cachedOpenCodePath?.path === customPathOverride) {
 			return {
@@ -302,11 +328,17 @@ export async function detectOpenCode(customPathOverride?: string): Promise<{
  * Check if Factory Droid CLI is available
  * First checks for a custom path in settings, then falls back to PATH detection
  */
-export async function detectDroid(customPathOverride?: string): Promise<{
+export async function detectDroid(
+	customPathOverride?: string,
+	sshRemoteConfig?: AgentSshRemoteConfig
+): Promise<{
 	available: boolean;
 	path?: string;
 	source?: 'settings' | 'path';
 }> {
+	if (sshRemoteConfig?.enabled) {
+		return { available: true, source: 'settings' };
+	}
 	if (customPathOverride) {
 		if (cachedDroidPath?.path === customPathOverride) {
 			return {
@@ -397,8 +429,8 @@ export function getDroidCommand(customPath?: string): string {
 /**
  * Spawn Claude Code with a prompt and return the result.
  *
- * NOTE: CLI spawner does not support SSH wrapping and does not use the Electron
- * settingsStore/global shell env, but session overrides (model, args, env vars,
+ * NOTE: CLI spawner can SSH-wrap when sshRemoteConfig is provided, but it does not use
+ * the Electron settingsStore/global shell env. Session overrides (model, args, env vars,
  * and custom CLI path) are still applied via applyAgentConfigOverrides().
  */
 async function spawnClaudeAgent(
@@ -407,50 +439,71 @@ async function spawnClaudeAgent(
 	agentSessionId?: string,
 	overrides?: AgentSpawnOverrides
 ): Promise<AgentResult> {
-	return new Promise((resolve) => {
-		const agentDef = getAgentDefinition('claude-code');
-		const agentConfigValues = getAgentConfigValues('claude-code') as Record<string, any>;
+	const agentDef = getAgentDefinition('claude-code');
+	const agentConfigValues = getAgentConfigValues('claude-code') as Record<string, any>;
 
-		// Build args: base args + session handling (prompt appended after overrides)
-		const baseArgs = [...CLAUDE_ARGS];
+	// Build args: base args + session handling (prompt appended after overrides)
+	const baseArgs = [...CLAUDE_ARGS];
 
-		if (agentSessionId) {
-			// Resume an existing session (e.g., for synopsis generation)
-			baseArgs.push('--resume', agentSessionId);
-		} else {
-			// Force a fresh, isolated session for each task execution
-			// This prevents context bleeding between tasks in Auto Run
-			baseArgs.push('--session-id', generateUUID());
+	if (agentSessionId) {
+		// Resume an existing session (e.g., for synopsis generation)
+		baseArgs.push('--resume', agentSessionId);
+	} else {
+		// Force a fresh, isolated session for each task execution
+		// This prevents context bleeding between tasks in Auto Run
+		baseArgs.push('--session-id', generateUUID());
+	}
+
+	const { args: resolvedArgs, effectiveCustomEnvVars } = applyAgentConfigOverrides(
+		agentDef,
+		baseArgs,
+		{
+			agentConfigValues,
+			sessionCustomModel: overrides?.customModel,
+			sessionCustomArgs: overrides?.customArgs,
+			sessionCustomEnvVars: overrides?.customEnvVars,
 		}
+	);
 
-		const { args: resolvedArgs, effectiveCustomEnvVars } = applyAgentConfigOverrides(
-			agentDef,
-			baseArgs,
+	// Add prompt as positional argument after overrides
+	const args = [...resolvedArgs, '--', prompt];
+
+	// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
+	// For CLI, we rely on the environment that Maestro itself is running in.
+	// Global shell env vars are primarily used by the desktop app's process manager.
+	const env = buildExpandedEnv(effectiveCustomEnvVars);
+
+	let spawnCommand = getClaudeCommand(overrides?.customPath);
+	let spawnArgs = args;
+	let spawnCwd = cwd;
+	let spawnEnv = env;
+
+	if (overrides?.sshRemoteConfig) {
+		const sshWrapped = await wrapSpawnWithSsh(
 			{
-				agentConfigValues,
-				sessionCustomModel: overrides?.customModel,
-				sessionCustomArgs: overrides?.customArgs,
-				sessionCustomEnvVars: overrides?.customEnvVars,
-			}
+				command: spawnCommand,
+				args: spawnArgs,
+				cwd,
+				customEnvVars: effectiveCustomEnvVars,
+				agentBinaryName: agentDef?.binaryName,
+			},
+			overrides.sshRemoteConfig,
+			getCliSshRemoteStore()
 		);
+		spawnCommand = sshWrapped.command;
+		spawnArgs = sshWrapped.args;
+		spawnCwd = sshWrapped.cwd;
+		spawnEnv = buildExpandedEnv(sshWrapped.customEnvVars);
+	}
 
-		// Add prompt as positional argument after overrides
-		const args = [...resolvedArgs, '--', prompt];
-
-		// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
-		// For CLI, we rely on the environment that Maestro itself is running in.
-		// Global shell env vars are primarily used by the desktop app's process manager.
-		const env = buildExpandedEnv(effectiveCustomEnvVars);
-
+	return new Promise((resolve) => {
 		const options: SpawnOptions = {
-			cwd,
-			env,
+			cwd: spawnCwd,
+			env: spawnEnv,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		};
 
-		// Use the resolved Claude path (from settings or PATH detection)
-		const claudeCommand = getClaudeCommand(overrides?.customPath);
-		const child = spawn(claudeCommand, args, options);
+		const child = spawn(spawnCommand, spawnArgs, options);
 
 		let jsonBuffer = '';
 		let result: string | undefined;
@@ -584,7 +637,7 @@ type StreamJsonParser = {
 		| undefined;
 };
 
-function spawnStreamingAgent(
+async function spawnStreamingAgent(
 	toolType: 'opencode' | 'factory-droid',
 	cwd: string,
 	prompt: string,
@@ -594,23 +647,46 @@ function spawnStreamingAgent(
 	createParser: () => StreamJsonParser,
 	agentLabel: string
 ): Promise<AgentResult> {
-	return new Promise((resolve) => {
-		const { args, env, contextWindow } = resolveAgentInvocation(
-			toolType,
-			cwd,
-			prompt,
-			agentSessionId,
-			overrides
-		);
+	const { args, env, contextWindow, effectiveCustomEnvVars } = resolveAgentInvocation(
+		toolType,
+		cwd,
+		prompt,
+		agentSessionId,
+		overrides
+	);
+	const agentDef = getAgentDefinition(toolType);
 
+	let spawnCommand = commandGetter(overrides?.customPath);
+	let spawnArgs = args;
+	let spawnCwd = cwd;
+	let spawnEnv = env;
+
+	if (overrides?.sshRemoteConfig) {
+		const sshWrapped = await wrapSpawnWithSsh(
+			{
+				command: spawnCommand,
+				args: spawnArgs,
+				cwd,
+				customEnvVars: effectiveCustomEnvVars,
+				agentBinaryName: agentDef?.binaryName,
+			},
+			overrides.sshRemoteConfig,
+			getCliSshRemoteStore()
+		);
+		spawnCommand = sshWrapped.command;
+		spawnArgs = sshWrapped.args;
+		spawnCwd = sshWrapped.cwd;
+		spawnEnv = buildExpandedEnv(sshWrapped.customEnvVars);
+	}
+
+	return new Promise((resolve) => {
 		const options: SpawnOptions = {
-			cwd,
-			env,
+			cwd: spawnCwd,
+			env: spawnEnv,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		};
 
-		const agentCommand = commandGetter(overrides?.customPath);
-		const child = spawn(agentCommand, args, options);
+		const child = spawn(spawnCommand, spawnArgs, options);
 
 		const parser = createParser();
 		let jsonBuffer = '';
@@ -705,6 +781,7 @@ function resolveAgentInvocation(
 	args: string[];
 	env: NodeJS.ProcessEnv;
 	contextWindow: number;
+	effectiveCustomEnvVars?: Record<string, string>;
 } {
 	const agentDef = getAgentDefinition(toolType);
 	const agentConfigValues = getAgentConfigValues(toolType) as Record<string, any>;
@@ -736,14 +813,14 @@ function resolveAgentInvocation(
 	const env = buildExpandedEnv(effectiveCustomEnvVars);
 	const contextWindow = getContextWindowValue(agentDef, agentConfigValues);
 
-	return { args: finalArgs, env, contextWindow };
+	return { args: finalArgs, env, contextWindow, effectiveCustomEnvVars };
 }
 
 /**
  * Spawn Codex with a prompt and return the result.
  *
- * NOTE: Same limitations as spawnClaudeAgent (no SSH wrapping and no global
- * settingsStore); per-session overrides are still applied.
+ * NOTE: Same limitations as spawnClaudeAgent (no global settingsStore); per-session
+ * overrides are still applied.
  */
 async function spawnCodexAgent(
 	cwd: string,
@@ -751,43 +828,65 @@ async function spawnCodexAgent(
 	agentSessionId?: string,
 	overrides?: AgentSpawnOverrides
 ): Promise<AgentResult> {
-	return new Promise((resolve) => {
-		const agentDef = getAgentDefinition('codex');
-		const agentConfigValues = getAgentConfigValues('codex') as Record<string, any>;
+	const agentDef = getAgentDefinition('codex');
+	const agentConfigValues = getAgentConfigValues('codex') as Record<string, any>;
 
-		const baseArgs = [...CODEX_ARGS];
-		baseArgs.push('-C', cwd);
+	const baseArgs = [...CODEX_ARGS];
+	baseArgs.push('-C', cwd);
 
-		if (agentSessionId) {
-			baseArgs.push('resume', agentSessionId);
+	if (agentSessionId) {
+		baseArgs.push('resume', agentSessionId);
+	}
+
+	const { args: resolvedArgs, effectiveCustomEnvVars } = applyAgentConfigOverrides(
+		agentDef,
+		baseArgs,
+		{
+			agentConfigValues,
+			sessionCustomModel: overrides?.customModel,
+			sessionCustomArgs: overrides?.customArgs,
+			sessionCustomEnvVars: overrides?.customEnvVars,
 		}
+	);
 
-		const { args: resolvedArgs, effectiveCustomEnvVars } = applyAgentConfigOverrides(
-			agentDef,
-			baseArgs,
+	const args = [...resolvedArgs, '--', prompt];
+
+	// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
+	// For CLI, we rely on the environment that Maestro itself is running in.
+	// Global shell env vars are primarily used by the desktop app's process manager.
+	const env = buildExpandedEnv(effectiveCustomEnvVars);
+
+	let spawnCommand = getCodexCommand(overrides?.customPath);
+	let spawnArgs = args;
+	let spawnCwd = cwd;
+	let spawnEnv = env;
+
+	if (overrides?.sshRemoteConfig) {
+		const sshWrapped = await wrapSpawnWithSsh(
 			{
-				agentConfigValues,
-				sessionCustomModel: overrides?.customModel,
-				sessionCustomArgs: overrides?.customArgs,
-				sessionCustomEnvVars: overrides?.customEnvVars,
-			}
+				command: spawnCommand,
+				args: spawnArgs,
+				cwd,
+				customEnvVars: effectiveCustomEnvVars,
+				agentBinaryName: agentDef?.binaryName,
+			},
+			overrides.sshRemoteConfig,
+			getCliSshRemoteStore()
 		);
+		spawnCommand = sshWrapped.command;
+		spawnArgs = sshWrapped.args;
+		spawnCwd = sshWrapped.cwd;
+		spawnEnv = buildExpandedEnv(sshWrapped.customEnvVars);
+	}
 
-		const args = [...resolvedArgs, '--', prompt];
-
-		// Note: CLI agent spawner doesn't have access to settingsStore with global shell env vars.
-		// For CLI, we rely on the environment that Maestro itself is running in.
-		// Global shell env vars are primarily used by the desktop app's process manager.
-		const env = buildExpandedEnv(effectiveCustomEnvVars);
-
+	return new Promise((resolve) => {
 		const options: SpawnOptions = {
-			cwd,
-			env,
+			cwd: spawnCwd,
+			env: spawnEnv,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		};
 
-		const codexCommand = getCodexCommand(overrides?.customPath);
-		const child = spawn(codexCommand, args, options);
+		const child = spawn(spawnCommand, spawnArgs, options);
 
 		const parser = new CodexOutputParser();
 		let jsonBuffer = '';

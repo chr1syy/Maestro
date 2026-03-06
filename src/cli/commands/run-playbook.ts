@@ -149,7 +149,7 @@ export async function runPlaybook(playbookId: string, options: RunPlaybookOption
 
 		// Check if agent CLI is available
 		if (agent.toolType === 'codex') {
-			const codex = await detectCodex(agent.customPath);
+			const codex = await detectCodex(agent.customPath, agent.sshRemoteConfig);
 			if (!codex.available) {
 				if (useJson) {
 					emitError('Codex CLI not found. Please install codex CLI.', 'CODEX_NOT_FOUND');
@@ -159,7 +159,7 @@ export async function runPlaybook(playbookId: string, options: RunPlaybookOption
 				process.exit(1);
 			}
 		} else if (agent.toolType === 'claude-code') {
-			const claude = await detectClaude(agent.customPath);
+			const claude = await detectClaude(agent.customPath, agent.sshRemoteConfig);
 			if (!claude.available) {
 				if (useJson) {
 					emitError('Claude Code not found. Please install claude-code CLI.', 'CLAUDE_NOT_FOUND');
@@ -169,7 +169,7 @@ export async function runPlaybook(playbookId: string, options: RunPlaybookOption
 				process.exit(1);
 			}
 		} else if (agent.toolType === 'opencode') {
-			const opencode = await detectOpenCode(agent.customPath);
+			const opencode = await detectOpenCode(agent.customPath, agent.sshRemoteConfig);
 			if (!opencode.available) {
 				if (useJson) {
 					emitError('OpenCode CLI not found. Please install opencode CLI.', 'OPENCODE_NOT_FOUND');
@@ -179,7 +179,7 @@ export async function runPlaybook(playbookId: string, options: RunPlaybookOption
 				process.exit(1);
 			}
 		} else if (agent.toolType === 'factory-droid') {
-			const droid = await detectDroid(agent.customPath);
+			const droid = await detectDroid(agent.customPath, agent.sshRemoteConfig);
 			if (!droid.available) {
 				if (useJson) {
 					emitError('Factory Droid CLI not found. Please install droid CLI.', 'DROID_NOT_FOUND');

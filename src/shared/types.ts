@@ -32,6 +32,7 @@ export interface SessionInfo {
 	customArgs?: string;
 	customEnvVars?: Record<string, string>;
 	customModel?: string;
+	sshRemoteConfig?: AgentSshRemoteConfig;
 }
 
 // Usage statistics from AI agent CLI (Claude Code, Codex, etc.)

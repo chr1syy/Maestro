@@ -106,7 +106,7 @@ export async function send(
 
 	// Verify agent CLI is available
 	if (agent.toolType === 'claude-code') {
-		const claude = await detectClaude(agent.customPath);
+		const claude = await detectClaude(agent.customPath, agent.sshRemoteConfig);
 		if (!claude.available) {
 			emitErrorJson(
 				'Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code',
@@ -115,7 +115,7 @@ export async function send(
 			process.exit(1);
 		}
 	} else if (agent.toolType === 'codex') {
-		const codex = await detectCodex(agent.customPath);
+		const codex = await detectCodex(agent.customPath, agent.sshRemoteConfig);
 		if (!codex.available) {
 			emitErrorJson(
 				'Codex CLI not found. Install with: npm install -g @openai/codex',
@@ -124,7 +124,7 @@ export async function send(
 			process.exit(1);
 		}
 	} else if (agent.toolType === 'opencode') {
-		const opencode = await detectOpenCode(agent.customPath);
+		const opencode = await detectOpenCode(agent.customPath, agent.sshRemoteConfig);
 		if (!opencode.available) {
 			emitErrorJson(
 				'OpenCode CLI not found. Install with: npm install -g opencode',
@@ -133,7 +133,7 @@ export async function send(
 			process.exit(1);
 		}
 	} else if (agent.toolType === 'factory-droid') {
-		const droid = await detectDroid(agent.customPath);
+		const droid = await detectDroid(agent.customPath, agent.sshRemoteConfig);
 		if (!droid.available) {
 			emitErrorJson(
 				'Factory Droid CLI not found. Install with: https://factory.ai/product/cli',
@@ -147,13 +147,15 @@ export async function send(
 		agent.customPath !== undefined ||
 		agent.customArgs !== undefined ||
 		agent.customEnvVars !== undefined ||
-		agent.customModel !== undefined;
+		agent.customModel !== undefined ||
+		agent.sshRemoteConfig !== undefined;
 	const overrides = hasOverrides
 		? {
 				customPath: agent.customPath,
 				customArgs: agent.customArgs,
 				customEnvVars: agent.customEnvVars,
 				customModel: agent.customModel,
+				sshRemoteConfig: agent.sshRemoteConfig,
 			}
 		: undefined;
 

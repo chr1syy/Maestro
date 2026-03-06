@@ -444,6 +444,7 @@ export async function* runPlaybook(
 					customArgs: session.customArgs,
 					customEnvVars: session.customEnvVars,
 					customModel: session.customModel,
+					sshRemoteConfig: session.sshRemoteConfig,
 				};
 				const result = await spawnAgent(
 					session.toolType,
