@@ -13,6 +13,7 @@ import { showAgent } from './commands/show-agent';
 import { cleanPlaybooks } from './commands/clean-playbooks';
 import { send } from './commands/send';
 import { listSessions } from './commands/list-sessions';
+import { openFile } from './commands/open-file';
 
 // Read version from package.json at runtime
 function getVersion(): string {
@@ -108,5 +109,12 @@ program
 	.description('Send a message to an agent and get a JSON response')
 	.option('-s, --session <id>', 'Resume an existing agent session (for multi-turn conversations)')
 	.action(send);
+
+// Open file command - open a file in the Maestro desktop app
+program
+	.command('open-file <file-path>')
+	.description('Open a file as a preview tab in the Maestro desktop app')
+	.option('-s, --session <id>', 'Target session (defaults to active)')
+	.action(openFile);
 
 program.parse();
