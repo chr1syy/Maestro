@@ -110,6 +110,7 @@ program
 	.command('send <agent-id> <message>')
 	.description('Send a message to an agent and get a JSON response')
 	.option('-s, --session <id>', 'Resume an existing agent session (for multi-turn conversations)')
+	.option('-t, --tab', 'Open/focus the session tab in Maestro desktop')
 	.action(send);
 
 // Open file command - open a file in the Maestro desktop app
