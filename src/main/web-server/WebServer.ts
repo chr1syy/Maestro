@@ -62,6 +62,7 @@ import type {
 	StarTabCallback,
 	ReorderTabCallback,
 	ToggleBookmarkCallback,
+	OpenFileTabCallback,
 	GetThemeCallback,
 	GetCustomCommandsCallback,
 	GetHistoryCallback,
@@ -301,6 +302,10 @@ export class WebServer {
 		this.callbackRegistry.setToggleBookmarkCallback(callback);
 	}
 
+	setOpenFileTabCallback(callback: OpenFileTabCallback): void {
+		this.callbackRegistry.setOpenFileTabCallback(callback);
+	}
+
 	setGetHistoryCallback(callback: GetHistoryCallback): void {
 		this.callbackRegistry.setGetHistoryCallback(callback);
 	}
@@ -451,6 +456,8 @@ export class WebServer {
 			reorderTab: async (sessionId: string, fromIndex: number, toIndex: number) =>
 				this.callbackRegistry.reorderTab(sessionId, fromIndex, toIndex),
 			toggleBookmark: async (sessionId: string) => this.callbackRegistry.toggleBookmark(sessionId),
+			openFileTab: async (sessionId: string, filePath: string) =>
+				this.callbackRegistry.openFileTab(sessionId, filePath),
 			getSessions: () => this.callbackRegistry.getSessions(),
 			getLiveSessionInfo: (sessionId: string) =>
 				this.liveSessionManager.getLiveSessionInfo(sessionId),
