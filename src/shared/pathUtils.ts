@@ -395,6 +395,15 @@ export function buildExpandedPath(customPaths?: string[]): string {
 		}
 	}
 
+	// Add Node version manager paths (nvm, fnm, volta, mise, asdf, n)
+	// These are critical for agents spawned as child processes to find node/npm
+	const versionManagerPaths = detectNodeVersionManagerBinPaths();
+	for (const p of versionManagerPaths) {
+		if (!pathParts.includes(p)) {
+			pathParts.unshift(p);
+		}
+	}
+
 	// Add standard additional paths
 	for (const p of additionalPaths) {
 		if (!pathParts.includes(p)) {
