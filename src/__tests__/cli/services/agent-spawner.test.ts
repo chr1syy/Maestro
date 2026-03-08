@@ -50,13 +50,16 @@ vi.mock('fs', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('fs')>();
 	return {
 		...actual,
+		existsSync: actual.existsSync,
 		readFileSync: vi.fn(),
 		writeFileSync: vi.fn(),
 		promises: {
+			...actual.promises,
 			stat: vi.fn(),
 			access: vi.fn(),
 		},
 		constants: {
+			...actual.constants,
 			X_OK: 1,
 		},
 	};
