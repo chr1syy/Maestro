@@ -38,6 +38,9 @@ import { isWindows } from '../../shared/platformDetection';
 
 const LOG_CONTEXT = '[OpenCodeSessionStorage]';
 
+/** Regex matching one or more trailing path separators (platform-aware) */
+const TRAILING_SEP_RE = new RegExp(`${path.sep.replace('\\', '\\\\')}+$`);
+
 /**
  * Get OpenCode data base directory (platform-specific)
  * - Linux/macOS: ~/.local/share/opencode
@@ -220,15 +223,18 @@ interface SqlitePartData {
  * Returns null if the database file doesn't exist.
  */
 function openOpenCodeDb(dbPath: string = OPENCODE_DB_PATH): Database.Database | null {
+	if (!fsSync.existsSync(dbPath)) {
+		return null;
+	}
 	try {
-		if (!fsSync.existsSync(dbPath)) {
-			return null;
-		}
 		const db = new Database(dbPath, { readonly: true, fileMustExist: true });
 		return db;
 	} catch (error) {
-		logger.warn(`Failed to open OpenCode SQLite database: ${error}`, LOG_CONTEXT);
-		return null;
+		logger.warn(`${LOG_CONTEXT} Failed to open OpenCode SQLite database at ${dbPath}: ${error}`);
+		captureException(error instanceof Error ? error : new Error(String(error)), {
+			extra: { dbPath },
+		});
+		throw error;
 	}
 }
 
@@ -395,8 +401,8 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 
 		const projectFiles = await listJsonFiles(projectDir);
 
-		// Normalize project path for comparison (resolve and remove trailing slashes)
-		const normalizedPath = path.resolve(projectPath).replace(/\/+$/, '');
+		// Normalize project path for comparison (resolve and remove trailing separators)
+		const normalizedPath = path.resolve(projectPath).replace(TRAILING_SEP_RE, '');
 		logger.info(`Looking for OpenCode project for path: ${normalizedPath}`, LOG_CONTEXT);
 
 		for (const file of projectFiles) {
@@ -407,7 +413,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 			if (!projectData?.worktree) continue;
 
 			// Normalize stored path the same way
-			const storedPath = path.resolve(projectData.worktree).replace(/\/+$/, '');
+			const storedPath = path.resolve(projectData.worktree).replace(TRAILING_SEP_RE, '');
 
 			// Exact match
 			if (storedPath === normalizedPath) {
@@ -420,8 +426,8 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 
 			// Check if one is a subdirectory of the other (handles worktree subdirs)
 			if (
-				normalizedPath.startsWith(storedPath + '/') ||
-				storedPath.startsWith(normalizedPath + '/')
+				normalizedPath.startsWith(storedPath + path.sep) ||
+				storedPath.startsWith(normalizedPath + path.sep)
 			) {
 				logger.info(
 					`Found OpenCode project (subdirectory match): ${projectData.id} for path: ${normalizedPath}`,
@@ -748,7 +754,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 				return null;
 			}
 
-			const normalizedPath = path.resolve(projectPath).replace(/\/+$/, '');
+			const normalizedPath = path.resolve(projectPath).replace(TRAILING_SEP_RE, '');
 
 			// Find matching project(s) — exact match or subdirectory match
 			const projects = db.prepare('SELECT id, worktree FROM project').all() as Array<{
@@ -765,11 +771,11 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 					hasGlobalProject = true;
 					continue;
 				}
-				const storedPath = path.resolve(proj.worktree).replace(/\/+$/, '');
+				const storedPath = path.resolve(proj.worktree).replace(TRAILING_SEP_RE, '');
 				if (
 					storedPath === normalizedPath ||
-					normalizedPath.startsWith(storedPath + '/') ||
-					storedPath.startsWith(normalizedPath + '/')
+					normalizedPath.startsWith(storedPath + path.sep) ||
+					storedPath.startsWith(normalizedPath + path.sep)
 				) {
 					matchingProjectIds.push(proj.id);
 				}
@@ -793,7 +799,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 					.prepare(
 						"SELECT id, project_id, directory, title, version, time_created, time_updated, summary_additions, summary_deletions, summary_files FROM session WHERE project_id = 'global' AND (directory = ? OR directory LIKE ? ESCAPE '\\') ORDER BY time_updated DESC"
 					)
-					.all(normalizedPath, escapedPath + '/%') as SqliteSessionRow[];
+					.all(normalizedPath, escapedPath + path.sep + '%') as SqliteSessionRow[];
 				if (globalSessions.length > 0) {
 					const existingIds = new Set(sessions.map((s) => s.id));
 					for (const gs of globalSessions) {
@@ -803,6 +809,9 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 					}
 				}
 			}
+
+			// Re-sort after merging global sessions so newest come first
+			sessions.sort((a, b) => b.time_updated - a.time_updated);
 
 			if (sessions.length === 0) {
 				logger.info(`No OpenCode sessions found in SQLite for: ${normalizedPath}`, LOG_CONTEXT);
