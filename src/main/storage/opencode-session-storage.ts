@@ -1464,7 +1464,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 			// Check if this session exists in SQLite — deletion not supported for SQLite sessions
 			// (we open the DB read-only and shouldn't modify OpenCode's database)
 			const sqliteResult = this.loadSessionMessagesSqlite(sessionId);
-			if (sqliteResult && sqliteResult.messages.length > 0) {
+			if (sqliteResult) {
 				logger.warn(
 					'Delete message pair not supported for SQLite-backed OpenCode sessions',
 					LOG_CONTEXT
