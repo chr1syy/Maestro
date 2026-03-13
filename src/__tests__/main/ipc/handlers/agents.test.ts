@@ -1075,7 +1075,23 @@ describe('agents IPC handlers', () => {
 			expect(execFileNoThrow).toHaveBeenCalledWith('/custom/claude', expect.any(Array), '/test');
 		});
 
-		it('should return null for non-Claude Code agents', async () => {
+		it('should return null for unsupported agents', async () => {
+			const mockAgent = {
+				id: 'codex',
+				available: true,
+				path: '/usr/bin/codex',
+			};
+
+			mockAgentDetector.getAgent.mockResolvedValue(mockAgent);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'codex', '/test');
+
+			expect(result).toBeNull();
+			expect(execFileNoThrow).not.toHaveBeenCalled();
+		});
+
+		it('should return built-in commands for opencode', async () => {
 			const mockAgent = {
 				id: 'opencode',
 				available: true,
@@ -1087,7 +1103,9 @@ describe('agents IPC handlers', () => {
 			const handler = handlers.get('agents:discoverSlashCommands');
 			const result = await handler!({} as any, 'opencode', '/test');
 
-			expect(result).toBeNull();
+			expect(result).toEqual(
+				expect.arrayContaining(['init', 'review', 'undo', 'redo', 'share', 'help', 'models'])
+			);
 			expect(execFileNoThrow).not.toHaveBeenCalled();
 		});
 
