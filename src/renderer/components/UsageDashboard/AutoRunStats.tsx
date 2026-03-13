@@ -12,7 +12,7 @@
  * - Tooltip on hover for the bar chart
  */
 
-import React, { memo, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { memo, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Play, CheckSquare, ListChecks, Target, Clock, Timer } from 'lucide-react';
 import type { Theme } from '../../types';
 import type { StatsTimeRange } from '../../hooks/stats/useStats';
@@ -172,6 +172,14 @@ export const AutoRunStats = memo(function AutoRunStats({
 	} | null>(null);
 	const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
 
+	// Track whether the component is mounted to prevent state updates after unmount
+	const mountedRef = useRef(true);
+	useEffect(() => {
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
+
 	// Fetch Auto Run sessions (metrics and chart both derive from session-level data)
 	const fetchData = useCallback(async () => {
 		setLoading(true);
@@ -179,12 +187,14 @@ export const AutoRunStats = memo(function AutoRunStats({
 
 		try {
 			const autoRunSessions = await window.maestro.stats.getAutoRunSessions(timeRange);
-			setSessions(autoRunSessions);
+			if (mountedRef.current) setSessions(autoRunSessions);
 		} catch (err) {
-			captureException(err);
-			setError(err instanceof Error ? err.message : 'Failed to load Auto Run stats');
+			if (mountedRef.current) {
+				captureException(err);
+				setError(err instanceof Error ? err.message : 'Failed to load Auto Run stats');
+			}
 		} finally {
-			setLoading(false);
+			if (mountedRef.current) setLoading(false);
 		}
 	}, [timeRange]);
 
