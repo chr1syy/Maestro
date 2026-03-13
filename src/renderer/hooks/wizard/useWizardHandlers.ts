@@ -242,7 +242,7 @@ export function useWizardHandlers(deps: UseWizardHandlersDeps): UseWizardHandler
 
 				const agentCommandObjects = ((agentSlashCommands || []) as string[]).map((cmd) => ({
 					command: cmd.startsWith('/') ? cmd : `/${cmd}`,
-					description: getSlashCommandDescription(cmd),
+					description: getSlashCommandDescription(cmd, currentSession.toolType),
 				}));
 
 				if (agentCommandObjects.length > 0) {

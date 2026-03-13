@@ -1,6 +1,8 @@
 import { ipcMain } from 'electron';
 import Store from 'electron-store';
 import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { AgentDetector, AGENT_DEFINITIONS, getAgentCapabilities } from '../../agents';
 import { execFileNoThrow } from '../../utils/execFile';
 import { logger } from '../../utils/logger';
@@ -26,6 +28,97 @@ const handlerOpts = (
 	context,
 	operation,
 });
+
+// OpenCode built-in slash commands (always available)
+const OPENCODE_BUILTIN_COMMANDS = ['init', 'review', 'undo', 'redo', 'share', 'help', 'models'];
+
+/**
+ * Discover OpenCode slash commands by reading from disk.
+ *
+ * OpenCode commands come from three sources:
+ * 1. Built-in commands (init, review, undo, redo, share, help, models)
+ * 2. Project-local custom commands: .opencode/commands/*.md
+ * 3. Global custom commands: ~/.config/opencode/commands/*.md
+ * 4. Config-based commands: opencode.json "command" property
+ *
+ * Unlike Claude Code (which emits commands via init event), OpenCode commands
+ * are statically defined on disk and can be discovered without spawning the agent.
+ */
+function discoverOpenCodeSlashCommands(cwd: string): string[] {
+	const commands = new Set<string>(OPENCODE_BUILTIN_COMMANDS);
+
+	// Project-local custom commands: .opencode/commands/*.md
+	const projectCommandsDir = path.join(cwd, '.opencode', 'commands');
+	try {
+		if (fs.existsSync(projectCommandsDir)) {
+			const files = fs.readdirSync(projectCommandsDir);
+			for (const file of files) {
+				if (file.endsWith('.md')) {
+					commands.add(file.replace(/\.md$/, ''));
+				}
+			}
+		}
+	} catch (error) {
+		logger.debug(`Failed to read project OpenCode commands from ${projectCommandsDir}`, LOG_CONTEXT, {
+			error: String(error),
+		});
+	}
+
+	// Global custom commands: ~/.config/opencode/commands/*.md
+	const globalCommandsDir = path.join(os.homedir(), '.config', 'opencode', 'commands');
+	try {
+		if (fs.existsSync(globalCommandsDir)) {
+			const files = fs.readdirSync(globalCommandsDir);
+			for (const file of files) {
+				if (file.endsWith('.md')) {
+					commands.add(file.replace(/\.md$/, ''));
+				}
+			}
+		}
+	} catch (error) {
+		logger.debug(`Failed to read global OpenCode commands from ${globalCommandsDir}`, LOG_CONTEXT, {
+			error: String(error),
+		});
+	}
+
+	// Config-based commands: opencode.json "command" property (project-level)
+	const projectConfigPath = path.join(cwd, 'opencode.json');
+	try {
+		if (fs.existsSync(projectConfigPath)) {
+			const config = JSON.parse(fs.readFileSync(projectConfigPath, 'utf-8'));
+			if (config.command && typeof config.command === 'object') {
+				for (const name of Object.keys(config.command)) {
+					commands.add(name);
+				}
+			}
+		}
+	} catch (error) {
+		logger.debug(`Failed to read OpenCode config from ${projectConfigPath}`, LOG_CONTEXT, {
+			error: String(error),
+		});
+	}
+
+	// Config-based commands: global opencode.json
+	const globalConfigPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
+	try {
+		if (fs.existsSync(globalConfigPath)) {
+			const config = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
+			if (config.command && typeof config.command === 'object') {
+				for (const name of Object.keys(config.command)) {
+					commands.add(name);
+				}
+			}
+		}
+	} catch (error) {
+		logger.debug(`Failed to read global OpenCode config from ${globalConfigPath}`, LOG_CONTEXT, {
+			error: String(error),
+		});
+	}
+
+	const commandList = Array.from(commands);
+	logger.info(`Discovered ${commandList.length} OpenCode slash commands`, LOG_CONTEXT);
+	return commandList;
+}
 
 /**
  * Interface for agent configuration store data
@@ -850,7 +943,11 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 					return null;
 				}
 
-				// Only Claude Code supports slash command discovery via init message
+				// Agent-specific discovery paths
+				if (agentId === 'opencode') {
+					return discoverOpenCodeSlashCommands(cwd);
+				}
+
 				if (agentId !== 'claude-code') {
 					logger.debug(`Agent ${agentId} does not support slash command discovery`, LOG_CONTEXT);
 					return null;
