@@ -1,12 +1,17 @@
 /**
  * AutoRunSetupSheet component for Maestro mobile web interface
  *
- * Bottom sheet modal for configuring Auto Run before launch.
- * Allows document selection, custom prompt, and loop settings.
+ * Uses `ResponsiveModal` so it renders as a bottom sheet on phones and a
+ * centered dialog at tablet+. ResponsiveModal owns the backdrop, header,
+ * footer wrapper, focus trap, body scroll lock, slide-up/fade animations,
+ * and Escape→close. The sheet supplies the Auto Run setup body and a
+ * Cancel + Launch footer.
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useThemeColors } from '../components/ThemeProvider';
+import { ResponsiveModal, Button } from '../components';
+import { useBreakpoint } from '../hooks/useBreakpoint';
 import { triggerHaptic, HAPTIC_PATTERNS } from './constants';
 import { useAutoRun } from '../hooks/useAutoRun';
 import type { AutoRunDocument, LaunchConfig, Playbook } from '../hooks/useAutoRun';
@@ -17,6 +22,8 @@ import { TEMPLATE_VARIABLES } from '../../shared/templateVariables';
  * Props for AutoRunSetupSheet component
  */
 export interface AutoRunSetupSheetProps {
+	/** Whether the modal is visible. ResponsiveModal returns null when false. */
+	isOpen: boolean;
 	sessionId: string;
 	documents: AutoRunDocument[];
 	onLaunch: (config: LaunchConfig) => void;
@@ -42,6 +49,7 @@ export interface AutoRunSetupSheetProps {
  * Provides document selection, optional prompt, and loop configuration.
  */
 export function AutoRunSetupSheet({
+	isOpen,
 	sessionId,
 	documents,
 	onLaunch,
@@ -51,6 +59,7 @@ export function AutoRunSetupSheet({
 	currentDocument,
 }: AutoRunSetupSheetProps) {
 	const colors = useThemeColors();
+	const { isPhone } = useBreakpoint();
 	const [selectedFiles, setSelectedFiles] = useState<Set<string>>(() => {
 		// Match desktop BatchRunnerModal: open with just the active doc selected,
 		// not the full list. The user can still add more from the doc list below.
@@ -68,7 +77,6 @@ export function AutoRunSetupSheet({
 	const [prompt, setPrompt] = useState('');
 	const [loopEnabled, setLoopEnabled] = useState(false);
 	const [maxLoops, setMaxLoops] = useState(3);
-	const [isVisible, setIsVisible] = useState(false);
 	// Mirrors desktop's `DocumentSelectorModal`: unselected docs are tucked
 	// behind an "Add documents" expander so the sheet doesn't open with the
 	// entire library on screen.
@@ -76,7 +84,6 @@ export function AutoRunSetupSheet({
 	// Toggles the inline template-variable reference under the prompt textarea —
 	// matches desktop's collapsible "Template Variables" section.
 	const [showTemplateVars, setShowTemplateVars] = useState(false);
-	const sheetRef = useRef<HTMLDivElement>(null);
 	const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
 
 	// Playbook state — loaded once when the sheet opens, plus the id of the
@@ -160,8 +167,7 @@ export function AutoRunSetupSheet({
 
 	const handleClose = useCallback(() => {
 		triggerHaptic(HAPTIC_PATTERNS.tap);
-		setIsVisible(false);
-		setTimeout(() => onClose(), 300);
+		onClose();
 	}, [onClose]);
 
 	// Tracks the session whose `selectedFiles` have already been initialized
@@ -228,40 +234,31 @@ export function AutoRunSetupSheet({
 		void loadPlaybooks(sessionId);
 	}, [sessionId, loadPlaybooks]);
 
-	// Animate in on mount
-	useEffect(() => {
-		requestAnimationFrame(() => setIsVisible(true));
-	}, []);
-
 	// Escape handling — route to the top-most overlay first so pressing Escape
 	// inside the playbook-name prompt or the delete-confirmation dialog only
-	// dismisses that modal, not the whole setup sheet. Without this, the
-	// document-level listener would unconditionally tear the sheet down.
+	// dismisses that modal, not the whole setup sheet. Capture phase + immediate
+	// stop so we run before ResponsiveModal's bubble-phase document Escape
+	// handler, which would otherwise close the entire sheet. When neither
+	// sub-modal is open we let the event flow through to ResponsiveModal so it
+	// drives `onClose` itself.
 	useEffect(() => {
+		if (!isOpen) return;
 		const handleKeyDown = (e: KeyboardEvent) => {
 			if (e.key !== 'Escape') return;
 			if (playbookNamePromptState) {
+				e.stopImmediatePropagation();
 				setPlaybookNamePromptState(null);
 				return;
 			}
 			if (confirmDeletePlaybookState) {
+				e.stopImmediatePropagation();
 				setConfirmDeletePlaybookState(null);
 				return;
 			}
-			handleClose();
 		};
-		document.addEventListener('keydown', handleKeyDown);
-		return () => document.removeEventListener('keydown', handleKeyDown);
-	}, [handleClose, playbookNamePromptState, confirmDeletePlaybookState]);
-
-	const handleBackdropTap = useCallback(
-		(e: React.MouseEvent) => {
-			if (e.target === e.currentTarget) {
-				handleClose();
-			}
-		},
-		[handleClose]
-	);
+		document.addEventListener('keydown', handleKeyDown, true);
+		return () => document.removeEventListener('keydown', handleKeyDown, true);
+	}, [isOpen, playbookNamePromptState, confirmDeletePlaybookState]);
 
 	const handleToggleFile = useCallback((filename: string) => {
 		triggerHaptic(HAPTIC_PATTERNS.tap);
@@ -441,110 +438,36 @@ export function AutoRunSetupSheet({
 	]);
 
 	return (
-		<div
-			onClick={handleBackdropTap}
-			style={{
-				position: 'fixed',
-				top: 0,
-				left: 0,
-				right: 0,
-				bottom: 0,
-				backgroundColor: `rgba(0, 0, 0, ${isVisible ? 0.5 : 0})`,
-				zIndex: 220,
-				display: 'flex',
-				alignItems: 'flex-end',
-				transition: 'background-color 0.3s ease-out',
-			}}
-		>
-			{/* Sheet */}
-			<div
-				ref={sheetRef}
-				style={{
-					width: '100%',
-					maxHeight: '80vh',
-					backgroundColor: colors.bgMain,
-					borderTopLeftRadius: '16px',
-					borderTopRightRadius: '16px',
-					display: 'flex',
-					flexDirection: 'column',
-					transform: isVisible ? 'translateY(0)' : 'translateY(100%)',
-					transition: 'transform 0.3s ease-out',
-					paddingBottom: 'max(16px, env(safe-area-inset-bottom))',
-				}}
-			>
-				{/* Drag handle */}
-				<div
-					style={{
-						display: 'flex',
-						justifyContent: 'center',
-						padding: '10px 0 4px',
-						flexShrink: 0,
-					}}
-				>
-					<div
-						style={{
-							width: '36px',
-							height: '4px',
-							borderRadius: '2px',
-							backgroundColor: `${colors.textDim}40`,
-						}}
-					/>
-				</div>
-
-				{/* Header */}
-				<div
-					style={{
-						display: 'flex',
-						alignItems: 'center',
-						justifyContent: 'space-between',
-						padding: '8px 16px 12px',
-						flexShrink: 0,
-					}}
-				>
-					<h2
-						style={{
-							fontSize: '18px',
-							fontWeight: 600,
-							margin: 0,
-							color: colors.textMain,
-						}}
-					>
-						Auto Run Configuration
-					</h2>
-					<button
-						onClick={handleClose}
-						style={{
-							width: '44px',
-							height: '44px',
-							display: 'flex',
-							alignItems: 'center',
-							justifyContent: 'center',
-							borderRadius: '8px',
-							backgroundColor: colors.bgSidebar,
-							border: `1px solid ${colors.border}`,
-							color: colors.textMain,
-							cursor: 'pointer',
-							touchAction: 'manipulation',
-							WebkitTapHighlightColor: 'transparent',
-						}}
-						aria-label="Close setup sheet"
-					>
-						<svg
-							width="18"
-							height="18"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							strokeWidth="2"
-							strokeLinecap="round"
-							strokeLinejoin="round"
+		<>
+			<ResponsiveModal
+				isOpen={isOpen}
+				onClose={handleClose}
+				title="Auto Run Configuration"
+				width={560}
+				footer={
+					<>
+						<Button
+							type="button"
+							variant="secondary"
+							onClick={handleClose}
+							fullWidth={isPhone}
+							aria-label="Cancel"
 						>
-							<line x1="18" y1="6" x2="6" y2="18" />
-							<line x1="6" y1="6" x2="18" y2="18" />
-						</svg>
-					</button>
-				</div>
-
+							Cancel
+						</Button>
+						<Button
+							type="button"
+							variant="primary"
+							onClick={handleLaunch}
+							disabled={selectedFiles.size === 0}
+							fullWidth={isPhone}
+							aria-label="Launch Auto Run"
+						>
+							Launch Auto Run
+						</Button>
+					</>
+				}
+			>
 				{/* Transient error banner for failed save/delete — haptics alone
 				    aren't enough feedback on mobile (may be disabled), so surface
 				    the failure visibly for a few seconds. */}
@@ -552,7 +475,7 @@ export function AutoRunSetupSheet({
 					<div
 						role="alert"
 						style={{
-							margin: '0 16px 8px',
+							marginBottom: '12px',
 							padding: '10px 12px',
 							borderRadius: '10px',
 							backgroundColor: `${colors.error}20`,
@@ -560,22 +483,13 @@ export function AutoRunSetupSheet({
 							color: colors.error,
 							fontSize: '13px',
 							fontWeight: 500,
-							flexShrink: 0,
 						}}
 					>
 						{playbookActionError}
 					</div>
 				)}
 
-				{/* Scrollable content */}
-				<div
-					style={{
-						flex: 1,
-						overflowY: 'auto',
-						overflowX: 'hidden',
-						padding: '0 16px',
-					}}
-				>
+				<div>
 					{/* Playbooks section — collapsible. Surfaces saved configurations
 					    so the mobile launch flow has parity with the desktop's playbook
 					    list (load / save / update / delete). */}
@@ -1333,68 +1247,13 @@ export function AutoRunSetupSheet({
 						)}
 					</div>
 				</div>
-
-				{/* Footer — Cancel + Launch (mirrors desktop's Cancel/Save/Go).
-					Save lives in the Playbook section above; this footer is just
-					the dismiss + go pair. */}
-				<div
-					style={{
-						display: 'flex',
-						gap: '8px',
-						padding: '12px 16px 0',
-						flexShrink: 0,
-					}}
-				>
-					<button
-						type="button"
-						onClick={handleClose}
-						style={{
-							flex: 1,
-							padding: '14px 20px',
-							borderRadius: '12px',
-							border: `1px solid ${colors.border}`,
-							backgroundColor: 'transparent',
-							color: colors.textMain,
-							fontSize: '15px',
-							fontWeight: 500,
-							cursor: 'pointer',
-							touchAction: 'manipulation',
-							WebkitTapHighlightColor: 'transparent',
-							minHeight: '50px',
-						}}
-						aria-label="Cancel"
-					>
-						Cancel
-					</button>
-					<button
-						onClick={handleLaunch}
-						disabled={selectedFiles.size === 0}
-						style={{
-							flex: 2,
-							padding: '14px 20px',
-							borderRadius: '12px',
-							backgroundColor: selectedFiles.size === 0 ? `${colors.accent}40` : colors.accent,
-							border: 'none',
-							color: 'white',
-							fontSize: '16px',
-							fontWeight: 600,
-							cursor: selectedFiles.size === 0 ? 'not-allowed' : 'pointer',
-							opacity: selectedFiles.size === 0 ? 0.5 : 1,
-							touchAction: 'manipulation',
-							WebkitTapHighlightColor: 'transparent',
-							minHeight: '50px',
-							transition: 'all 0.15s ease',
-						}}
-						aria-label="Launch Auto Run"
-					>
-						Launch Auto Run
-					</button>
-				</div>
-			</div>
+			</ResponsiveModal>
 
 			{/* Playbook-name prompt overlay. Rendered above the sheet so it
 			    covers the whole screen on mobile and doesn't depend on
-			    `window.prompt`, which is unreliable in mobile WebViews. */}
+			    `window.prompt`, which is unreliable in mobile WebViews.
+			    `zIndex` is bumped above ResponsiveModal's default 400 so this
+			    sub-modal layers on top of the setup sheet. */}
 			{playbookNamePromptState && (
 				<div
 					onClick={(e) => {
@@ -1407,7 +1266,7 @@ export function AutoRunSetupSheet({
 						right: 0,
 						bottom: 0,
 						backgroundColor: 'rgba(0, 0, 0, 0.6)',
-						zIndex: 230,
+						zIndex: 500,
 						display: 'flex',
 						alignItems: 'center',
 						justifyContent: 'center',
@@ -1525,7 +1384,7 @@ export function AutoRunSetupSheet({
 						right: 0,
 						bottom: 0,
 						backgroundColor: 'rgba(0, 0, 0, 0.6)',
-						zIndex: 230,
+						zIndex: 500,
 						display: 'flex',
 						alignItems: 'center',
 						justifyContent: 'center',
@@ -1600,7 +1459,7 @@ export function AutoRunSetupSheet({
 					</div>
 				</div>
 			)}
-		</div>
+		</>
 	);
 }
 

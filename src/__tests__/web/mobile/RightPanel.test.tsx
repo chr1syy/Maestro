@@ -3,7 +3,7 @@
  *
  * @file src/web/mobile/RightPanel.tsx
  *
- * Covers the inline (desktop) vs full-screen (mobile) layout fork —
+ * Covers the inline vs overlay layout fork (driven by `mode` prop) —
  * specifically that the inline panel reserves bottom padding for the
  * fixed CommandInputBar (PR #895 follow-up: AutoRun toolbar was being
  * buried by the input bar overlay).
@@ -101,15 +101,15 @@ describe('RightPanel — inputBarHeight reserve (PR #895 desktop layout fix)', (
 		expect(panel?.style.paddingBottom).toBe('');
 	});
 
-	it('ignores inputBarHeight when in full-screen (mobile) mode — drawer sits above the bar via z-index', () => {
+	it('ignores inputBarHeight in overlay mode — drawer sits above the bar via z-index', () => {
 		const { container } = render(
-			<RightPanel {...makeProps({ inputBarHeight: 96, isFullScreen: true })} />
+			<RightPanel {...makeProps({ inputBarHeight: 96, mode: 'overlay' })} />
 		);
 		const panel = container
 			.querySelector<HTMLDivElement>('[role="tab"]')
 			?.closest('div')?.parentElement;
 		expect(panel).toBeTruthy();
-		// Full-screen panel uses position:fixed top/left/right/bottom — no paddingBottom reserve.
+		// Overlay panel uses position:fixed top/left/right/bottom — no paddingBottom reserve.
 		expect(panel?.style.paddingBottom).toBe('');
 		expect(panel?.style.position).toBe('fixed');
 	});
