@@ -3316,9 +3316,11 @@ export default function MobileApp() {
 				/>
 			)}
 
-			{/* Auto Run setup — bottom sheet with BatchRunner-style controls */}
-			{activeSessionId && showAutoRunSetup && (
+			{/* Auto Run setup — centered modal on tablet+, bottom sheet on phone.
+				ResponsiveModal owns the visibility/animations via `isOpen`. */}
+			{activeSessionId && (
 				<AutoRunSetupSheet
+					isOpen={showAutoRunSetup}
 					sessionId={activeSessionId}
 					documents={autoRunDocuments}
 					onLaunch={handleAutoRunLaunch}
