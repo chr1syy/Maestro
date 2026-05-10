@@ -3275,6 +3275,7 @@ export default function MobileApp() {
 					onResumeAfterError={handleAutoRunResume}
 					onSkipAfterError={handleAutoRunSkipDocument}
 					onAbortAfterError={handleAutoRunAbort}
+					onOpenMarketplace={handleOpenMarketplaceSheet}
 				/>
 			)}
 
@@ -3513,6 +3514,7 @@ export default function MobileApp() {
 						onAutoRunOpenDocument={handleAutoRunOpenDocument}
 						onAutoRunOpenSetup={handleAutoRunOpenSetup}
 						onAutoRunOpenFolderPicker={handleAutoRunOpenFolderPicker}
+						onAutoRunOpenMarketplace={handleOpenMarketplaceSheet}
 						onAutoRunSelectedDocumentChange={setAutoRunSelectedDoc}
 						sendRequest={sendRequest}
 						send={send}
