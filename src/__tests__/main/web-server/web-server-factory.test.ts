@@ -97,6 +97,10 @@ vi.mock('../../../main/web-server/WebServer', () => {
 			setKillTerminalForWebCallback = vi.fn();
 			setNotifyToastCallback = vi.fn();
 			setNotifyCenterFlashCallback = vi.fn();
+			setGetMarketplaceManifestCallback = vi.fn();
+			setGetMarketplaceDocumentCallback = vi.fn();
+			setGetMarketplaceReadmeCallback = vi.fn();
+			setImportMarketplacePlaybookCallback = vi.fn();
 			setListDesktopSessionsCallback = vi.fn();
 			setGetSessionHistoryCallback = vi.fn();
 
