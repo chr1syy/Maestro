@@ -1216,6 +1216,7 @@ function MaestroConsoleInner() {
 		setActiveSessionId,
 		defaultSaveToHistory,
 		defaultShowThinking,
+		processQueuedItemRef,
 	});
 
 	// Web broadcasting hook - handles external history change notifications

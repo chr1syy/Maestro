@@ -259,6 +259,14 @@ export function useRemoteHandlers(deps: UseRemoteHandlersDeps): UseRemoteHandler
 			// bypasses this guard — without that escape hatch, the renderer would
 			// silently drop forced dispatches and the server-side allow-list
 			// would be moot.
+			//
+			// Busy-agent offload note: the new-tab offload path (`dispatch --new-tab`,
+			// cross-agent `send --new-tab`) no longer flows through this handler. It
+			// creates a fresh idle tab and routes the prompt through the execution
+			// queue (enqueueOrDispatchInput → useQueueProcessing → agentStore), so it
+			// never reaches this guard. This guard therefore only governs same-tab
+			// dispatch/send into an EXISTING tab, where the session-level busy check
+			// still protects against concurrent writes to the same tab.
 			if (session.state === 'busy' && !force) {
 				logger.info('[Remote] Session is busy, cannot process command');
 				return;

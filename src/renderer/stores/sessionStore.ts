@@ -14,7 +14,15 @@
  */
 
 import { create } from 'zustand';
-import type { Session, Group, LogEntry, AITab } from '../types';
+import type {
+	Session,
+	Group,
+	LogEntry,
+	AITab,
+	QueuedItem,
+	QueuedItemType,
+	SessionState,
+} from '../types';
 import { generateId } from '../utils/ids';
 import { getActiveTab } from '../utils/tabHelpers';
 import { logger } from '../utils/logger';
@@ -403,4 +411,159 @@ export function updateAiTab(
 			};
 		})
 	);
+}
+
+// ============================================================================
+// Execution-queue enqueue / dispatch
+// ============================================================================
+
+/**
+ * Fields needed to construct a {@link QueuedItem}. Shared by every "send into a
+ * tab" path (local input bar, slash commands, remote new-tab offload).
+ */
+export interface BuildQueuedItemParams {
+	/** Target tab for this item. */
+	tabId: string;
+	/** 'message' or 'command'. */
+	type: QueuedItemType;
+	/** Message text (for type 'message'). */
+	text?: string;
+	/** Attached images (base64 data URLs). */
+	images?: string[];
+	/** Slash command (for type 'command'). */
+	command?: string;
+	/** Arguments after the command (for $ARGUMENTS substitution). */
+	commandArgs?: string;
+	/** Command description for display. */
+	commandDescription?: string;
+	/** Tab name at time of queuing (for display). */
+	tabName?: string;
+	/** True when the item originates from a read-only tab. */
+	readOnlyMode: boolean;
+	/** Force-parallel: dispatch as soon as THIS tab is free, skipping cross-tab wait. */
+	forceParallel?: boolean;
+}
+
+/**
+ * Build a {@link QueuedItem} from the given fields. Centralizes the item shape so
+ * the local input path and the remote offload path don't hand-roll the literal.
+ */
+export function buildQueuedItem(params: BuildQueuedItemParams): QueuedItem {
+	const {
+		tabId,
+		type,
+		text,
+		images,
+		command,
+		commandArgs,
+		commandDescription,
+		tabName,
+		readOnlyMode,
+		forceParallel,
+	} = params;
+	return {
+		id: generateId(),
+		timestamp: Date.now(),
+		tabId,
+		type,
+		...(text !== undefined && { text }),
+		...(images !== undefined && { images }),
+		...(command !== undefined && { command }),
+		...(commandArgs !== undefined && { commandArgs }),
+		...(commandDescription !== undefined && { commandDescription }),
+		...(tabName !== undefined && { tabName }),
+		readOnlyMode,
+		...(forceParallel && { forceParallel: true }),
+	};
+}
+
+export interface EnqueueOrDispatchInputParams extends BuildQueuedItemParams {
+	/** The session that owns the target tab. */
+	sessionId: string;
+	/** Snapshot of that session used for the run-now-vs-queue decision. */
+	session: Session;
+	/** Whether an Auto Run batch is active for this session (forces queuing). */
+	isAutoRunActive: boolean;
+	/** Dispatcher for immediate execution (the renderer's processQueuedItem). */
+	processQueuedItem: (sessionId: string, item: QueuedItem) => void;
+	/**
+	 * Optional extra session fields merged into BOTH branches (immediate dispatch
+	 * and queue append), e.g. updating `aiCommandHistory`. Receives the previous
+	 * session so the patch can read existing values.
+	 */
+	sessionPatch?: (session: Session) => Partial<Session>;
+}
+
+export interface EnqueueOrDispatchInputResult {
+	/** The built queued item (whether dispatched now or appended to the queue). */
+	item: QueuedItem;
+	/** True when the item was appended to the queue; false when dispatched now. */
+	queued: boolean;
+}
+
+/**
+ * Hybrid run-now-vs-queue decision shared by the local input path and the remote
+ * new-tab offload path. Builds the {@link QueuedItem}, decides whether to run it
+ * immediately or queue it, and applies the matching session mutation via
+ * {@link updateSessionWith}:
+ *
+ * - **forceParallel**: run now unless THIS tab is already busy.
+ * - **otherwise**: run now when the session is idle and Auto Run isn't active;
+ *   else append to the execution queue. `useQueueProcessing` then dispatches the
+ *   queued item once the session goes idle.
+ *
+ * When running immediately, the session and target tab are flipped to busy and
+ * the item is dispatched on a 50ms timeout so React commits the busy state
+ * before the agent spawns (prevents duplicate processing). When queued, the item
+ * is appended and nothing spawns yet.
+ */
+export function enqueueOrDispatchInput(
+	params: EnqueueOrDispatchInputParams
+): EnqueueOrDispatchInputResult {
+	const { sessionId, session, isAutoRunActive, processQueuedItem, sessionPatch, ...buildParams } =
+		params;
+	const item = buildQueuedItem(buildParams);
+	const targetTab = session.aiTabs.find((t) => t.id === item.tabId);
+
+	const sessionIsIdle = buildParams.forceParallel
+		? targetTab?.state !== 'busy'
+		: session.state !== 'busy' && !isAutoRunActive;
+
+	if (sessionIsIdle) {
+		// Set up session + tab busy state, then dispatch immediately. Don't add to
+		// executionQueue: it's not actually queued, and adding it would double-render
+		// (once as a sent message, once in the queue section).
+		updateSessionWith(sessionId, (s) => ({
+			...s,
+			state: 'busy' as SessionState,
+			busySource: 'ai',
+			thinkingStartTime: Date.now(),
+			currentCycleTokens: 0,
+			currentCycleBytes: 0,
+			aiTabs: s.aiTabs.map((tab) =>
+				tab.id === item.tabId
+					? { ...tab, state: 'busy' as const, thinkingStartTime: Date.now() }
+					: tab
+			),
+			...(sessionPatch?.(s) ?? {}),
+		}));
+
+		// 50ms delay lets React flush the busy state above before processQueuedItem
+		// runs, so the session is already 'busy' when the agent spawns.
+		setTimeout(() => {
+			processQueuedItem(sessionId, item);
+		}, 50);
+
+		return { item, queued: false };
+	}
+
+	// Session is busy - append to the queue; it will be dispatched when the
+	// session goes idle (via useQueueProcessing's runtime recovery / on-exit).
+	updateSessionWith(sessionId, (s) => ({
+		...s,
+		executionQueue: [...s.executionQueue, item],
+		...(sessionPatch?.(s) ?? {}),
+	}));
+
+	return { item, queued: true };
 }

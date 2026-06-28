@@ -1,12 +1,5 @@
 import { useCallback, useRef } from 'react';
-import type {
-	Session,
-	SessionState,
-	LogEntry,
-	QueuedItem,
-	CustomAICommand,
-	BatchRunState,
-} from '../../types';
+import type { Session, LogEntry, QueuedItem, CustomAICommand, BatchRunState } from '../../types';
 import { getActiveTab, getBusyTabs, extractQuickTabName } from '../../utils/tabHelpers';
 import { getStdinFlags, prepareMaestroSystemPrompt } from '../../utils/spawnHelpers';
 import { generateId, getInputBroadcastOriginId } from '../../utils/ids';
@@ -16,6 +9,7 @@ import { filterYoloArgs } from '../../utils/agentArgs';
 import { hasCapabilityCached } from '../agent/useAgentCapabilities';
 import { gitService } from '../../services/git';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { buildQueuedItem, enqueueOrDispatchInput } from '../../stores/sessionStore';
 import { logger } from '../../utils/logger';
 
 let cachedImageOnlyPrompt: string = '';
@@ -334,13 +328,16 @@ export function useInputProcessing(deps: UseInputProcessingDeps): UseInputProces
 							const forceParallel =
 								options?.forceParallel === true &&
 								useSettingsStore.getState().forcedParallelExecution;
-							const sessionIsIdle = forceParallel
-								? activeTab?.state !== 'busy'
-								: activeSession.state !== 'busy' && !isAutoRunActive;
 
-							const queuedItem: QueuedItem = {
-								id: generateId(),
-								timestamp: Date.now(),
+							// Build the QueuedItem and run the hybrid run-now-vs-queue decision via the
+							// shared helper (also used by the remote new-tab offload path). The helper
+							// flips the session/tab to busy + dispatches immediately when idle, or
+							// appends to the execution queue when busy. We still track command history
+							// in both branches via sessionPatch.
+							// Note: Input already cleared synchronously before this async block
+							enqueueOrDispatchInput({
+								sessionId: activeSessionId,
+								session: activeSession,
 								tabId: activeTab?.id || activeSession.activeTabId,
 								type: 'command',
 								command: matchingCustomCommand.command,
@@ -353,63 +350,14 @@ export function useInputProcessing(deps: UseInputProcessingDeps): UseInputProces
 										: 'New'),
 								readOnlyMode: isReadOnlyMode,
 								...(forceParallel && { forceParallel: true }),
-							};
-
-							// If session is idle, we need to set up state and process immediately
-							// If session is busy, just add to queue - it will be processed when current item finishes
-							if (sessionIsIdle) {
-								// Set up session and tab state for immediate processing
-								// NOTE: Don't add to executionQueue when processing immediately - it's not actually queued,
-								// and adding it would cause duplicate display (once as sent message, once in queue section)
-								setSessions((prev) =>
-									prev.map((s) => {
-										if (s.id !== activeSessionId) return s;
-
-										// Set the target tab to busy
-										const updatedAiTabs = s.aiTabs.map((tab) =>
-											tab.id === queuedItem.tabId
-												? { ...tab, state: 'busy' as const, thinkingStartTime: Date.now() }
-												: tab
-										);
-
-										return {
-											...s,
-											state: 'busy' as SessionState,
-											busySource: 'ai',
-											thinkingStartTime: Date.now(),
-											currentCycleTokens: 0,
-											currentCycleBytes: 0,
-											aiTabs: updatedAiTabs,
-											// Don't add to queue - we're processing immediately, not queuing
-											aiCommandHistory: Array.from(
-												new Set([...(s.aiCommandHistory || []), commandText])
-											).slice(-50),
-										};
-									})
-								);
-
-								// Process immediately after state is set up
-								// 50ms delay allows React to flush the setState above, ensuring the session
-								// is marked 'busy' before processQueuedItem runs (prevents duplicate processing)
-								setTimeout(() => {
-									processQueuedItemRef.current?.(activeSessionId, queuedItem);
-								}, 50);
-							} else {
-								// Session is busy - just add to queue
-								setSessions((prev) =>
-									prev.map((s) => {
-										if (s.id !== activeSessionId) return s;
-										return {
-											...s,
-											executionQueue: [...s.executionQueue, queuedItem],
-											aiCommandHistory: Array.from(
-												new Set([...(s.aiCommandHistory || []), commandText])
-											).slice(-50),
-										};
-									})
-								);
-							}
-							// Note: Input already cleared synchronously before this async block
+								isAutoRunActive,
+								processQueuedItem: (sid, item) => processQueuedItemRef.current?.(sid, item),
+								sessionPatch: (s) => ({
+									aiCommandHistory: Array.from(
+										new Set([...(s.aiCommandHistory || []), commandText])
+									).slice(-50),
+								}),
+							});
 						})();
 						return;
 					}
@@ -518,9 +466,7 @@ export function useInputProcessing(deps: UseInputProcessingDeps): UseInputProces
 				});
 
 				if (shouldQueue) {
-					const queuedItem: QueuedItem = {
-						id: generateId(),
-						timestamp: Date.now(),
+					const queuedItem: QueuedItem = buildQueuedItem({
 						tabId: activeTab?.id || activeSession.activeTabId,
 						type: 'message',
 						text: effectiveInputValue,
@@ -532,7 +478,7 @@ export function useInputProcessing(deps: UseInputProcessingDeps): UseInputProces
 								: 'New'),
 						readOnlyMode: isReadOnlyMode,
 						...(forceParallel && { forceParallel: true }),
-					};
+					});
 
 					// Add to queue - will be processed when:
 					// - Auto Run completes (via onProcessQueueAfterCompletion callback)

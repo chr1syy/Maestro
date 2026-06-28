@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { flushSync } from 'react-dom';
-import type { Session, SessionState, ThinkingMode } from '../../types';
+import type { Session, SessionState, ThinkingMode, QueuedItem } from '../../types';
 import { cueService } from '../../services/cue';
 import { captureException } from '../../utils/sentry';
 import { aiTabFocusFields, createTab, closeTab } from '../../utils/tabHelpers';
@@ -9,7 +9,8 @@ import { persistTabStarred } from '../../utils/starredSessions';
 import { formatLogsForClipboard } from '../../utils/contextExtractor';
 import { notifyToast } from '../../stores/notificationStore';
 import { notifyCenterFlash } from '../../stores/centerFlashStore';
-import { useSessionStore } from '../../stores/sessionStore';
+import { useSessionStore, enqueueOrDispatchInput } from '../../stores/sessionStore';
+import { useBatchStore } from '../../stores/batchStore';
 
 /**
  * Dependencies for the useRemoteIntegration hook.
@@ -32,6 +33,15 @@ export interface UseRemoteIntegrationDeps {
 	defaultSaveToHistory: boolean;
 	/** Default value for showThinking on new tabs */
 	defaultShowThinking: ThinkingMode;
+	/**
+	 * Ref to the renderer's processQueuedItem dispatcher. Used by the new-tab
+	 * offload path to run an offloaded prompt immediately when the target tab can
+	 * run (idle session / parallel-eligible). Held as a ref so the listener never
+	 * needs re-attaching when the dispatcher identity changes.
+	 */
+	processQueuedItemRef: React.MutableRefObject<
+		((sessionId: string, item: QueuedItem) => Promise<void>) | null
+	>;
 }
 
 /**
@@ -69,6 +79,7 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 		setActiveSessionId,
 		defaultSaveToHistory,
 		defaultShowThinking,
+		processQueuedItemRef,
 	} = deps;
 
 	// Broadcast active session change to web clients
@@ -351,20 +362,25 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 			}
 		);
 
-		// Handle remote "new AI tab with prompt" from CLI (send --live --new-tab).
-		// Atomically creates a fresh AI tab, makes it active, and dispatches the
-		// prompt through the same maestro:remoteCommand event path that --live
-		// uses — so downstream spawn/history/state flows are identical.
-		// flushSync forces React to commit the new tab as active before we fire
-		// the event; without it the downstream handler reads stale activeTabId
-		// and writes the prompt into the previously-active tab.
-		// Ack the renderer result on responseChannel so the CLI only reports
-		// success when a tab was actually created.
+		// Handle remote "new AI tab with prompt" from CLI (`dispatch --new-tab`,
+		// cross-agent `send`, web `new_ai_tab_with_prompt`).
+		//
+		// Busy-agent offload: a freshly created tab is idle by definition, so we
+		// create it even when the target SESSION is busy and route the prompt
+		// through the shared execution-queue helper instead of dropping it. The
+		// hybrid decision falls out of enqueueOrDispatchInput: when the session is
+		// idle (or the new tab can run in parallel) the prompt runs immediately;
+		// otherwise it is queued and useQueueProcessing dispatches it once the
+		// session goes idle.
+		//
+		// flushSync forces React to commit the new tab + active session before we
+		// enqueue, so the helper's run-now path dispatches into the tab we just
+		// created (not a stale activeTabId). We always ack with the created tab id
+		// so `dispatch --new-tab` returns a real tab id even when queued.
 		const unsubscribeNewTabWithPrompt = window.maestro.process.onRemoteNewAITabWithPrompt(
 			(sessionId: string, prompt: string, responseChannel: string) => {
-				// Guard: the downstream maestro:remoteCommand handler drops commands
-				// for missing or busy sessions. Check here so we don't create an
-				// orphan tab and falsely ack success.
+				// Keep the session-not-found guard: there's nothing to create a tab on.
+				// The busy-state guard is intentionally gone (offload, see above).
 				const targetSession = sessionsRef.current.find((s) => s.id === sessionId);
 				if (!targetSession) {
 					logger.warn(
@@ -373,14 +389,8 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 					window.maestro.process.sendRemoteNewAITabWithPromptResponse(responseChannel, false);
 					return;
 				}
-				if (targetSession.state === 'busy') {
-					logger.warn(
-						'[useRemoteIntegration] onRemoteNewAITabWithPrompt: session is busy, dropping prompt'
-					);
-					window.maestro.process.sendRemoteNewAITabWithPromptResponse(responseChannel, false);
-					return;
-				}
 				let createdTabId: string | undefined;
+				let createdSession: Session | undefined;
 				flushSync(() => {
 					setSessions((prev) =>
 						prev.map((s) => {
@@ -391,6 +401,7 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 							});
 							if (!result) return s;
 							createdTabId = result.tab.id;
+							createdSession = result.session;
 							return result.session;
 						})
 					);
@@ -398,22 +409,32 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 						setActiveSessionId(sessionId);
 					}
 				});
-				if (!createdTabId) {
+				if (!createdTabId || !createdSession) {
 					logger.warn(
 						'[useRemoteIntegration] onRemoteNewAITabWithPrompt: createTab failed, dropping prompt'
 					);
 					window.maestro.process.sendRemoteNewAITabWithPromptResponse(responseChannel, false);
 					return;
 				}
-				// Pass the new tab id explicitly so the renderer writes into the tab
-				// we just created — without it, useRemoteHandlers would fall back to
-				// activeTabId, which is correct here but would race in any future
-				// caller that doesn't atomically setActiveSessionId.
-				window.dispatchEvent(
-					new CustomEvent('maestro:remoteCommand', {
-						detail: { sessionId, command: prompt, inputMode: 'ai', tabId: createdTabId },
-					})
-				);
+				// Offload the prompt into the new tab via the shared enqueue/dispatch
+				// helper. A fresh tab is write-mode by default (createTab sets no
+				// readOnlyMode) and external dispatch carries no user modifier, so
+				// forceParallel is left unset.
+				const newTab = createdSession.aiTabs.find((t) => t.id === createdTabId);
+				enqueueOrDispatchInput({
+					sessionId,
+					session: createdSession,
+					tabId: createdTabId,
+					type: 'message',
+					text: prompt,
+					tabName: newTab?.name || 'New',
+					readOnlyMode: newTab?.readOnlyMode === true,
+					isAutoRunActive: useBatchStore.getState().batchRunStates[sessionId]?.isRunning ?? false,
+					processQueuedItem: (sid, item) => processQueuedItemRef.current?.(sid, item),
+				});
+				// Always ack with the created tab id — even when the prompt was queued
+				// rather than run immediately — so `dispatch --new-tab` against a busy
+				// agent returns a real tab id instead of NEW_TAB_NO_ID.
 				window.maestro.process.sendRemoteNewAITabWithPromptResponse(
 					responseChannel,
 					true,
@@ -548,6 +569,7 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 		setActiveSessionId,
 		defaultSaveToHistory,
 		defaultShowThinking,
+		processQueuedItemRef,
 	]);
 
 	// Handle remote open file tab from web/CLI interface
