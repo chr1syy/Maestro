@@ -56,14 +56,18 @@ describe('useRemoteIntegration', () => {
 	let onRemoteNewTabHandler: ((sessionId: string, responseChannel: string) => void) | undefined;
 	let onRemoteCloseTabHandler: ((sessionId: string, tabId: string) => void) | undefined;
 	let onRemoteRenameTabHandler:
-		((sessionId: string, tabId: string, newName: string) => void) | undefined;
+		| ((sessionId: string, tabId: string, newName: string) => void)
+		| undefined;
 	let onRemoteStarTabHandler:
-		((sessionId: string, tabId: string, starred: boolean) => void) | undefined;
+		| ((sessionId: string, tabId: string, starred: boolean) => void)
+		| undefined;
 	let onRemoteReorderTabHandler:
-		((sessionId: string, fromIndex: number, toIndex: number) => void) | undefined;
+		| ((sessionId: string, fromIndex: number, toIndex: number) => void)
+		| undefined;
 	let onRemoteToggleBookmarkHandler: ((sessionId: string) => void) | undefined;
 	let onRequestMovementDesignerInspectionHandler:
-		((id: string, expectedRevision: number, responseChannel: string) => void) | undefined;
+		| ((id: string, expectedRevision: number, responseChannel: string) => void)
+		| undefined;
 	let onRemoteNewAITabWithPromptHandler:
 		| ((sessionId: string, prompt: string, responseChannel: string, background?: boolean) => void)
 		| undefined;
@@ -79,9 +83,11 @@ describe('useRemoteIntegration', () => {
 		  ) => void)
 		| undefined;
 	let onRemoteListQueueHandler:
-		((sessionId: string | undefined, responseChannel: string) => void) | undefined;
+		| ((sessionId: string | undefined, responseChannel: string) => void)
+		| undefined;
 	let onRemoteRemoveQueueItemHandler:
-		((sessionId: string, itemId: string, responseChannel: string) => void) | undefined;
+		| ((sessionId: string, itemId: string, responseChannel: string) => void)
+		| undefined;
 	let onRemoteNotifyToastHandler:
 		| ((params: {
 				title: string;
@@ -100,7 +106,8 @@ describe('useRemoteIntegration', () => {
 		  }) => void)
 		| undefined;
 	let onRemoteMovementHandler:
-		((params: MovementPayload, responseChannel?: string) => void) | undefined;
+		| ((params: MovementPayload, responseChannel?: string) => void)
+		| undefined;
 
 	const mockProcess = {
 		...window.maestro.process,
@@ -548,6 +555,91 @@ describe('useRemoteIntegration', () => {
 
 			expect(deps.setActiveSessionId).not.toHaveBeenCalled();
 			expect(dispatchEventSpy).not.toHaveBeenCalled();
+
+			dispatchEventSpy.mockRestore();
+		});
+
+		// The receipt is what `maestro-cli dispatch` reports as success, so a
+		// command this listener drops must say so rather than time out into a
+		// generic failure - and the accept ack belongs downstream, not here.
+		it('rejects the delivery receipt when the session is unknown', () => {
+			const deps = createDeps({ sessions: [] });
+
+			renderHook(() => useRemoteIntegration(deps));
+
+			act(() => {
+				onRemoteCommandHandler?.(
+					'nonexistent',
+					'test command',
+					'ai',
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					'receipt-1'
+				);
+			});
+
+			expect(window.maestro.process.sendRemoteCommandReceipt).toHaveBeenCalledWith(
+				'receipt-1',
+				false,
+				'session-not-found'
+			);
+		});
+
+		it('rejects the delivery receipt when the session is busy', () => {
+			const session = createMockSession({ id: 'session-1', state: 'busy' });
+			const deps = createDeps({ sessions: [session] });
+
+			renderHook(() => useRemoteIntegration(deps));
+
+			act(() => {
+				onRemoteCommandHandler?.(
+					'session-1',
+					'test command',
+					'ai',
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					'receipt-2'
+				);
+			});
+
+			expect(window.maestro.process.sendRemoteCommandReceipt).toHaveBeenCalledWith(
+				'receipt-2',
+				false,
+				'session-busy'
+			);
+		});
+
+		it('forwards the receipt channel to handleRemoteCommand without acking it here', () => {
+			const session = createMockSession({ id: 'session-1', state: 'idle' });
+			const deps = createDeps({ sessions: [session] });
+			const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent');
+
+			renderHook(() => useRemoteIntegration(deps));
+
+			act(() => {
+				onRemoteCommandHandler?.(
+					'session-1',
+					'test command',
+					'ai',
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					'receipt-3'
+				);
+			});
+
+			const event = dispatchEventSpy.mock.calls
+				.map(([e]) => e as CustomEvent)
+				.find((e) => e.type === 'maestro:remoteCommand');
+			expect(event?.detail).toEqual(
+				expect.objectContaining({ sessionId: 'session-1', receiptChannel: 'receipt-3' })
+			);
+			expect(window.maestro.process.sendRemoteCommandReceipt).not.toHaveBeenCalled();
 
 			dispatchEventSpy.mockRestore();
 		});
