@@ -24,6 +24,8 @@ import type {
 	CueSubscriptionInfo,
 	CueActivityEntry,
 	QueueSessionSnapshot,
+	EnqueueCommandResult,
+	EnqueueCommandFailureReason,
 } from './types';
 import type { CueGraphSession, CueRunResult } from '../../shared/cue/contracts';
 import type { CadenzaPayload } from '../../shared/cadenza-types';
@@ -105,6 +107,24 @@ function parseRemoteCommandReceipt(raw: unknown): RemoteCommandReceipt {
 		};
 	}
 	return { accepted: false, reason: 'malformed-receipt' };
+}
+
+/** Known machine-readable enqueue failure causes, in the order the renderer's
+ *  `remote:enqueueCommand` handler can produce them. */
+const ENQUEUE_FAILURE_REASONS: readonly EnqueueCommandFailureReason[] = [
+	'session-not-found',
+	'tab-not-found',
+	'no-ai-tabs',
+];
+
+/**
+ * Narrow the renderer's `reason` field to a known cause. Anything else (an old
+ * renderer that does not send one, or a value we do not recognise) becomes
+ * `undefined` so callers fall back to their generic failure path rather than
+ * acting on a reason they cannot interpret.
+ */
+function parseEnqueueFailureReason(raw: unknown): EnqueueCommandFailureReason | undefined {
+	return ENQUEUE_FAILURE_REASONS.find((reason) => reason === raw);
 }
 
 /** UUID v4 format regex for validating stored security tokens.
@@ -1325,15 +1345,7 @@ export function createWebServerFactory(deps: WebServerFactoryDependencies) {
 					return { success: false, error: 'Desktop window unavailable' };
 				}
 
-				return new Promise<{
-					success: boolean;
-					tabId?: string;
-					queued?: boolean;
-					queuePosition?: number;
-					queueLength?: number;
-					itemId?: string;
-					error?: string;
-				}>((resolve) => {
+				return new Promise<EnqueueCommandResult>((resolve) => {
 					const responseChannel = `remote:enqueueCommand:response:${randomUUID()}`;
 					let resolved = false;
 
@@ -1351,6 +1363,7 @@ export function createWebServerFactory(deps: WebServerFactoryDependencies) {
 								queueLength: typeof r.queueLength === 'number' ? r.queueLength : undefined,
 								itemId: typeof r.itemId === 'string' ? r.itemId : undefined,
 								error: typeof r.error === 'string' ? r.error : undefined,
+								reason: parseEnqueueFailureReason(r.reason),
 							});
 						} else {
 							resolve({ success: false });
