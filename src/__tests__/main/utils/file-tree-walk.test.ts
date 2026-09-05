@@ -303,7 +303,7 @@ describe('walkLocalFileTree', () => {
 
 			await walkLocalFileTree('/project', { maxDepth: 5 });
 
-			const paths = vi.mocked(fs.readdir).mock.calls.map((c) => c[0]);
+			const paths = vi.mocked(fs.readdir).mock.calls.map((c) => c[0].replace(/\\/g, '/'));
 			expect(paths).toEqual(['/project', '/project/.maestro', '/project/src']);
 		});
 
