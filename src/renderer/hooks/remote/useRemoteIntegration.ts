@@ -9,6 +9,7 @@ import {
 	closeTab,
 	getActiveTab,
 	getRepairedUnifiedTabOrder,
+	visibleAiTabs,
 } from '../../utils/tabHelpers';
 import { logger } from '../../utils/logger';
 import { buildQueuedMessageItem } from '../../services/queuedPrompt';
@@ -36,6 +37,10 @@ import {
 	interactWithConcertoDesignerFrame,
 } from '../../components/Concerto/concertoDesignerBridge';
 import { useFileExplorerStore } from '../../stores/fileExplorerStore';
+import {
+	clearDesktopAiTabSelections,
+	consumeDesktopAiTabSelection,
+} from '../../utils/desktopTabSelectionSync';
 
 /**
  * Dependencies for the useRemoteIntegration hook.
@@ -540,7 +545,10 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 					// If the browser's remembered AI tab was removed, repair the dormant id
 					// without clearing a currently focused file/terminal/browser surface.
 					if (!updatedSession.aiTabs.some((tab) => tab.id === updatedSession.activeTabId)) {
-						const fallbackTabId = targetExists ? tabId : updatedSession.aiTabs[0]?.id || '';
+						const visibleTabs = visibleAiTabs(updatedSession.aiTabs);
+						const fallbackTabId = visibleTabs.some((tab) => tab.id === tabId)
+							? tabId
+							: visibleTabs[0]?.id || '';
 						return { ...updatedSession, activeTabId: fallbackTabId };
 					}
 
@@ -1880,6 +1888,7 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 	useEffect(() => {
 		// Skip entirely if not in live mode - no web clients to broadcast to
 		if (!isLiveMode) return;
+		clearDesktopAiTabSelections();
 
 		// Use an interval to periodically check for changes instead of running on every render
 		// This dramatically reduces CPU usage during normal typing
@@ -1915,14 +1924,15 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 					activeTabId: session.activeTabId || session.aiTabs[0]?.id || '',
 					tabsHash,
 				};
-				const activeTabChanged = !!prev && prev.activeTabId !== current.activeTabId;
+				const activeTabChanged = consumeDesktopAiTabSelection(session.id, current.activeTabId);
 
 				// Check if anything changed
 				if (
 					!prev ||
 					prev.tabCount !== current.tabCount ||
 					prev.activeTabId !== current.activeTabId ||
-					prev.tabsHash !== current.tabsHash
+					prev.tabsHash !== current.tabsHash ||
+					activeTabChanged
 				) {
 					const tabsForBroadcast = session.aiTabs.map((tab) => ({
 						id: tab.id,

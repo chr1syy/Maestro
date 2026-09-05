@@ -1266,6 +1266,10 @@ export class WebServer {
 		this.broadcastService.broadcastActiveSessionChange(sessionId);
 	}
 
+	/**
+	 * Broadcast the canonical tab inventory and whether its active tab came from
+	 * an explicit desktop selection.
+	 */
 	broadcastTabsChange(
 		sessionId: string,
 		aiTabs: AITabData[],
