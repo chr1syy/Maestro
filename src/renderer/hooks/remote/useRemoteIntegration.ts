@@ -1909,6 +1909,11 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 					prevSessionStatesRef.current.set(session.id, session.state);
 				}
 
+				const activeTabChanged = consumeDesktopAiTabSelection(
+					session.id,
+					session.activeTabId || session.aiTabs?.[0]?.id || ''
+				);
+
 				// An empty aiTabs array is a valid state and still has to be broadcast,
 				// otherwise remote clients keep rendering tabs the user already closed.
 				if (!session.aiTabs) return;
@@ -1924,8 +1929,6 @@ export function useRemoteIntegration(deps: UseRemoteIntegrationDeps): UseRemoteI
 					activeTabId: session.activeTabId || session.aiTabs[0]?.id || '',
 					tabsHash,
 				};
-				const activeTabChanged = consumeDesktopAiTabSelection(session.id, current.activeTabId);
-
 				// Check if anything changed
 				if (
 					!prev ||
