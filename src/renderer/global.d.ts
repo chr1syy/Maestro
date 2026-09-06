@@ -277,6 +277,14 @@ interface MaestroAPI {
 		onFocusRequest: (
 			handler: (payload: { sessionId: string; tabId?: string }) => void
 		) => () => void;
+		/**
+		 * Listen for agents another client (a second desktop window, or a
+		 * web-desktop browser tab) added or closed, so this renderer's session list
+		 * follows along instead of only finding out on reload.
+		 */
+		onLifecycleSync: (
+			handler: (payload: { added: any[]; removedIds: string[] }) => void
+		) => () => void;
 	};
 	groups: {
 		getAll: () => Promise<any[]>;
@@ -3574,6 +3582,28 @@ interface MaestroAPI {
 			range: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'all'
 		) => Promise<number>;
 		// Record session creation (launched)
+		recordResilience: (event: {
+			id: string;
+			sessionId: string;
+			agentType: string;
+			strategy: 'availability' | 'token-exhaustion';
+			outcome: 'recovered' | 'stopped';
+			startedAt: number;
+			resolvedAt: number;
+			retries: number;
+		}) => Promise<string | null>;
+		getResilience: (range: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'all') => Promise<
+			Array<{
+				id: string;
+				sessionId: string;
+				agentType: string;
+				strategy: 'availability' | 'token-exhaustion';
+				outcome: 'recovered' | 'stopped';
+				startedAt: number;
+				resolvedAt: number;
+				retries: number;
+			}>
+		>;
 		recordSessionCreated: (event: {
 			sessionId: string;
 			agentType: string;

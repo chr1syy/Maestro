@@ -1459,9 +1459,10 @@ describe('group-chat-router', () => {
 
 				// Past the 15 minute wait budget, then keep pumping until the give-up
 				// announcement is actually on disk. Reaching the deadline only starts
-				// it: the announcement runs in a floating async chain and writes the
-				// log file, so a fixed number of timer passes followed by a single read
-				// can land between the last poll and that write on a slower filesystem.
+				// it: the announce runs in a floating async chain and writes the log
+				// file, so a fixed number of timer passes followed by a single read
+				// can land between the last poll and that write - which is what made
+				// this test fail on every run rather than only under load.
 				let gaveUp = false;
 				for (let i = 0; i < 400 && !gaveUp; i++) {
 					await vi.advanceTimersByTimeAsync(5000);
