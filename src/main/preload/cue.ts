@@ -6,6 +6,7 @@
  * - Runtime engine controls (enable/disable)
  * - Run management (stop individual or all)
  * - YAML configuration management (read, write, validate)
+ * - Scheduled Tasks (list / create / edit / cancel time-driven subscriptions)
  * - Real-time activity updates via event listener
  */
 
@@ -16,6 +17,14 @@ import type {
 	CueSessionStatus,
 	CueSettings,
 } from '../../shared/cue';
+import type {
+	ScheduledTask,
+	ScheduledTaskCreateInput,
+	ScheduledTaskUpdateInput,
+} from '../../shared/cue/scheduled-tasks';
+import type { CueLogPayload } from '../../shared/cue-log-types';
+import type { CueMetrics } from '../cue/cue-metrics';
+import type { FanInHealthEntry } from '../cue/cue-fan-in-tracker';
 export type {
 	CueEvent,
 	CueEventType,
@@ -25,6 +34,16 @@ export type {
 	CueSessionStatus,
 	CueSettings,
 } from '../../shared/cue';
+export type { CueLogPayload } from '../../shared/cue-log-types';
+
+/**
+ * Payload shape received by `onActivityUpdate` listeners. The main process
+ * forwards the `data` argument of every `onLog(level, message, data)` call
+ * verbatim on `cue:activityUpdate`, and every data-bearing call passes a
+ * typed `CueLogPayload` (queueOverflow, runFinished, rateLimitBackoff, …).
+ * Renderer code narrows via `payload.type`.
+ */
+export type CueActivityPayload = CueLogPayload;
 
 /**
  * Creates the Cue API object for preload exposure
@@ -33,6 +52,13 @@ export function createCueApi() {
 	return {
 		// Get global Cue settings (timeout, concurrency, queue)
 		getSettings: (): Promise<CueSettings> => ipcRenderer.invoke('cue:getSettings'),
+
+		// Persist global Cue settings to every known cue.yaml on disk +
+		// refresh engine in-memory state. Returns the list of project roots
+		// that were actually written so callers can detect the "no sessions
+		// registered" case and warn the user.
+		saveSettings: (settings: CueSettings): Promise<{ writtenRoots: string[] }> =>
+			ipcRenderer.invoke('cue:saveSettings', { settings }),
 
 		// Get status of all Cue-enabled sessions
 		getStatus: (): Promise<CueSessionStatus[]> => ipcRenderer.invoke('cue:getStatus'),
@@ -43,9 +69,17 @@ export function createCueApi() {
 		// Get currently active Cue runs
 		getActiveRuns: (): Promise<CueRunResult[]> => ipcRenderer.invoke('cue:getActiveRuns'),
 
+		// Snapshot the in-flight stdout/stderr for an active Cue run (live logs).
+		// Returns null when the runId isn't currently active.
+		getRunLiveOutput: (runId: string): Promise<{ stdout: string; stderr: string } | null> =>
+			ipcRenderer.invoke('cue:getRunLiveOutput', { runId }),
+
 		// Get activity log (recent completed/failed runs)
 		getActivityLog: (limit?: number): Promise<CueRunResult[]> =>
 			ipcRenderer.invoke('cue:getActivityLog', { limit }),
+
+		// Lifetime count of Cue events (dashboard stats)
+		getEventCount: (): Promise<number> => ipcRenderer.invoke('cue:getEventCount'),
 
 		// Enable the Cue engine (runtime control)
 		enable: (): Promise<void> => ipcRenderer.invoke('cue:enable'),
@@ -53,18 +87,33 @@ export function createCueApi() {
 		// Disable the Cue engine (runtime control)
 		disable: (): Promise<void> => ipcRenderer.invoke('cue:disable'),
 
+		// Visibility-aware pause - the renderer flips this on visibilitychange
+		// so the scanner subsystem skips expensive background work while the
+		// app is hidden. Idempotent.
+		setActive: (active: boolean): Promise<void> => ipcRenderer.invoke('cue:setActive', active),
+
 		// Stop a specific running Cue execution
 		stopRun: (runId: string): Promise<boolean> => ipcRenderer.invoke('cue:stopRun', { runId }),
 
 		// Stop all running Cue executions
 		stopAll: (): Promise<void> => ipcRenderer.invoke('cue:stopAll'),
 
-		// Manually trigger a subscription by name (Run Now)
-		triggerSubscription: (subscriptionName: string): Promise<boolean> =>
-			ipcRenderer.invoke('cue:triggerSubscription', { subscriptionName }),
+		// Manually trigger a subscription by name (Run Now), with optional prompt override
+		triggerSubscription: (
+			subscriptionName: string,
+			prompt?: string,
+			sourceAgentId?: string
+		): Promise<boolean> =>
+			ipcRenderer.invoke('cue:triggerSubscription', { subscriptionName, prompt, sourceAgentId }),
 
 		// Get queue status per session
 		getQueueStatus: (): Promise<Record<string, number>> => ipcRenderer.invoke('cue:getQueueStatus'),
+
+		// Get engine metrics snapshot (runsStarted, eventsDropped, etc.)
+		getMetrics: (): Promise<CueMetrics | null> => ipcRenderer.invoke('cue:getMetrics'),
+
+		// Get stalled fan-in subscriptions (> 50% timeout). Empty = healthy.
+		getFanInHealth: (): Promise<FanInHealthEntry[]> => ipcRenderer.invoke('cue:getFanInHealth'),
 
 		// Refresh a session's Cue configuration
 		refreshSession: (sessionId: string, projectRoot: string): Promise<void> =>
@@ -73,6 +122,27 @@ export function createCueApi() {
 		// Remove a session from Cue tracking
 		removeSession: (sessionId: string): Promise<void> =>
 			ipcRenderer.invoke('cue:removeSession', { sessionId }),
+
+		// ── Scheduled Tasks (time.once / time.scheduled / time.heartbeat) ──
+		// Same on-disk representation as `maestro-cli cue schedule`.
+		listScheduledTasks: (): Promise<{ tasks: ScheduledTask[]; warnings: string[] }> =>
+			ipcRenderer.invoke('cue:listScheduledTasks'),
+
+		createScheduledTask: (input: ScheduledTaskCreateInput): Promise<{ names: string[] }> =>
+			ipcRenderer.invoke('cue:createScheduledTask', { input }),
+
+		updateScheduledTask: (
+			projectRoot: string,
+			name: string,
+			patch: ScheduledTaskUpdateInput
+		): Promise<{ updated: boolean; reason?: string }> =>
+			ipcRenderer.invoke('cue:updateScheduledTask', { projectRoot, name, patch }),
+
+		cancelScheduledTask: (
+			projectRoot: string,
+			name: string
+		): Promise<{ removed: boolean; reason?: string }> =>
+			ipcRenderer.invoke('cue:cancelScheduledTask', { projectRoot, name }),
 
 		// Read raw YAML content from a session's maestro-cue.yaml
 		readYaml: (projectRoot: string): Promise<string | null> =>
@@ -83,11 +153,24 @@ export function createCueApi() {
 			projectRoot: string,
 			content: string,
 			promptFiles?: Record<string, string>
-		): Promise<void> => ipcRenderer.invoke('cue:writeYaml', { projectRoot, content, promptFiles }),
+		): Promise<{ changed: boolean }> =>
+			ipcRenderer.invoke('cue:writeYaml', { projectRoot, content, promptFiles }),
 
 		// Delete a session's cue.yaml config file
 		deleteYaml: (projectRoot: string): Promise<boolean> =>
 			ipcRenderer.invoke('cue:deleteYaml', { projectRoot }),
+
+		// Rename a pipeline across every cue.yaml it spans
+		renamePipeline: (
+			oldName: string,
+			newName: string
+		): Promise<{
+			renamed: boolean;
+			subscriptionsUpdated: number;
+			filesWritten: string[];
+			reason?: string;
+			warnings: string[];
+		}> => ipcRenderer.invoke('cue:renamePipeline', { oldName, newName }),
 
 		// Validate YAML content as a Cue configuration
 		validateYaml: (content: string): Promise<{ valid: boolean; errors: string[] }> =>
@@ -101,9 +184,11 @@ export function createCueApi() {
 		loadPipelineLayout: (): Promise<Record<string, unknown> | null> =>
 			ipcRenderer.invoke('cue:loadPipelineLayout'),
 
-		// Listen for real-time activity updates from the main process
-		onActivityUpdate: (callback: (data: CueRunResult) => void): (() => void) => {
-			const handler = (_e: unknown, data: CueRunResult) => callback(data);
+		// Listen for real-time activity updates from the main process. Payload
+		// is a typed CueLogPayload discriminated union - narrow on `data.type`
+		// to handle specific events (queueOverflow, runFinished, ...).
+		onActivityUpdate: (callback: (data: CueActivityPayload) => void): (() => void) => {
+			const handler = (_e: unknown, data: CueActivityPayload) => callback(data);
 			ipcRenderer.on('cue:activityUpdate', handler);
 			return () => {
 				ipcRenderer.removeListener('cue:activityUpdate', handler);

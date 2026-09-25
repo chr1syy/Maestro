@@ -5,8 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { UsageDashboardModal } from '../../../renderer/components/UsageDashboard/UsageDashboardModal';
+import { useUIStore } from '../../../renderer/stores/uiStore';
+import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import type { Theme } from '../../../renderer/types';
 
 // Mock lucide-react icons - include all icons used by modal and its child components
@@ -28,6 +31,7 @@ vi.mock('lucide-react', () => {
 		RefreshCw: createIcon('refresh', '🔄'),
 		Database: createIcon('database', '💾'),
 		// SummaryCards icons
+		Filter: createIcon('filter', '🔍'),
 		MessageSquare: createIcon('message-square', '💬'),
 		Clock: createIcon('clock', '🕐'),
 		Timer: createIcon('timer', '⏱️'),
@@ -44,8 +48,13 @@ vi.mock('lucide-react', () => {
 		Target: createIcon('target', '🎯'),
 		// SummaryCards - Open Tabs
 		PanelTop: createIcon('panel-top', '🔲'),
-		// LongestAutoRunsTable icons
+		// LongestAutoRunsTable + SummaryCards (Best Day) icons
 		Trophy: createIcon('trophy', '🏆'),
+		// SummaryCards streak/best/active/image-annotations icons
+		Flame: createIcon('flame', '🔥'),
+		CalendarCheck: createIcon('calendar-check', '📆'),
+		PenLine: createIcon('pen-line', '✏️'),
+		Coins: createIcon('coins', '🪙'),
 		// ChartErrorBoundary icons
 		AlertTriangle: createIcon('alert-triangle', '⚠️'),
 		ChevronDown: createIcon('chevron-down', '▼'),
@@ -53,6 +62,19 @@ vi.mock('lucide-react', () => {
 		// WeekdayComparisonChart icons
 		Briefcase: createIcon('briefcase', '💼'),
 		Coffee: createIcon('coffee', '☕'),
+		// RealtimeMetricsCard icons
+		Cpu: createIcon('cpu', '🖥️'),
+		DollarSign: createIcon('dollar', '💲'),
+		Activity: createIcon('activity', '📈'),
+		// KeyboardStats icons
+		Keyboard: createIcon('keyboard', '⌨️'),
+		Sparkles: createIcon('sparkles', '✨'),
+		// AgentOverviewCards agent filter icon
+		Search: createIcon('search', '🔎'),
+		// Delegation score card + summary ratio card icons
+		Rocket: createIcon('rocket', '🚀'),
+		Info: createIcon('info', 'ℹ️'),
+		Split: createIcon('split', '🔀'),
 	};
 });
 
@@ -64,12 +86,19 @@ vi.mock('../../../renderer/contexts/LayerStackContext', () => ({
 	useLayerStack: () => ({
 		registerLayer: mockRegisterLayer,
 		unregisterLayer: mockUnregisterLayer,
+		updateLayerHandler: vi.fn(),
 	}),
+}));
+
+const mockNotifyToast = vi.hoisted(() => vi.fn());
+vi.mock('../../../renderer/stores/notificationStore', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../../../renderer/stores/notificationStore')>()),
+	notifyToast: mockNotifyToast,
 }));
 
 // Mock maestro stats API
 const mockGetAggregation = vi.fn();
-const mockExportCsv = vi.fn();
+const mockExportUsage = vi.fn();
 const mockOnStatsUpdate = vi.fn(() => vi.fn()); // Returns unsubscribe function
 const mockGetAutoRunSessions = vi.fn(() => Promise.resolve([]));
 const mockGetAutoRunTasks = vi.fn(() => Promise.resolve([]));
@@ -79,20 +108,46 @@ const mockGetDatabaseSize = vi.fn();
 const mockSaveFile = vi.fn();
 const mockWriteFile = vi.fn();
 
+const mockGetShortcutUsageByDay = vi.fn(() => Promise.resolve([]));
+const mockGetShortcutUsageTotal = vi.fn(() => Promise.resolve(0));
+
 const mockMaestro = {
 	stats: {
 		getAggregation: mockGetAggregation,
-		exportCsv: mockExportCsv,
+		getDelegationTotals: vi.fn().mockResolvedValue({
+			interactive: { count: 0, durationMs: 0 },
+			autoRun: { count: 0, durationMs: 0 },
+			cue: { count: 0, durationMs: 0 },
+		}),
+		getDelegationByDay: vi.fn().mockResolvedValue([]),
+		exportUsage: mockExportUsage,
 		onStatsUpdate: mockOnStatsUpdate,
 		getAutoRunSessions: mockGetAutoRunSessions,
 		getAutoRunTasks: mockGetAutoRunTasks,
 		getDatabaseSize: mockGetDatabaseSize,
+		getShortcutUsageByDay: mockGetShortcutUsageByDay,
+		getShortcutUsageTotal: mockGetShortcutUsageTotal,
 	},
 	dialog: {
 		saveFile: mockSaveFile,
 	},
 	fs: {
 		writeFile: mockWriteFile,
+	},
+	// Usage snapshot samplers fired by the dashboard's quota-on-open effect.
+	// Without these the effect throws on `window.maestro.agents` and leaks an
+	// unhandled rejection.
+	agents: {
+		refreshClaudeUsageSnapshots: vi.fn().mockResolvedValue({ refreshed: 0 }),
+		refreshCodexUsageSnapshots: vi.fn().mockResolvedValue({ refreshed: 0 }),
+		getClaudeUsageSnapshots: vi.fn().mockResolvedValue({}),
+		getCodexUsageSnapshots: vi.fn().mockResolvedValue({}),
+	},
+	// Minimum surface needed by `useGlobalAgentStats` (called from the
+	// dashboard's Achievement share image flow).
+	agentSessions: {
+		getGlobalStats: vi.fn().mockResolvedValue(null),
+		onGlobalStatsUpdate: vi.fn().mockReturnValue(() => {}),
 	},
 };
 
@@ -128,6 +183,18 @@ const createSampleData = () => ({
 	totalQueries: 150,
 	totalDuration: 3600000, // 1 hour in ms
 	avgDuration: 24000, // 24 seconds
+	queryDurationPercentiles: { count: 0, min: 0, p50: 0, p75: 0, p90: 0, p95: 0, p99: 0, max: 0 },
+	queryDurationPercentilesByAgent: {},
+	autoRunTaskDurationPercentiles: {
+		count: 0,
+		min: 0,
+		p50: 0,
+		p75: 0,
+		p90: 0,
+		p95: 0,
+		p99: 0,
+		max: 0,
+	},
 	byAgent: {
 		'claude-code': { count: 100, duration: 2400000 },
 		terminal: { count: 50, duration: 1200000 },
@@ -157,6 +224,7 @@ const createSampleData = () => ({
 	avgSessionDuration: 144000,
 	byAgentByDay: {},
 	bySessionByDay: {},
+	bySessionSource: {},
 });
 
 describe('UsageDashboardModal', () => {
@@ -165,8 +233,23 @@ describe('UsageDashboardModal', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// The dashboard tab is now persisted in the shared uiStore singleton, which
+		// survives across tests in this file. Reset it so each test starts on the
+		// default 'overview' tab instead of inheriting whatever a prior tab-switching
+		// test left behind.
+		useUIStore.setState({ usageDashboardViewMode: 'overview' });
+		// Pin the Encore flags this file was written against. Cue ships on by
+		// default, which adds a Cue tab and a cueStats fetch these tests do not mock.
+		useSettingsStore.setState((s) => ({
+			encoreFeatures: { ...s.encoreFeatures, usageStats: true, maestroCue: false },
+		}));
 		mockGetAggregation.mockResolvedValue(createSampleData());
-		mockExportCsv.mockResolvedValue('date,count\n2024-01-15,25');
+		mockExportUsage.mockResolvedValue({
+			path: '/path/to/export.json',
+			format: 'json',
+			rowCounts: { 'query-events': 1 },
+			notes: [],
+		});
 		mockSaveFile.mockResolvedValue(null); // User cancels by default
 		mockWriteFile.mockResolvedValue({ success: true });
 		mockGetDatabaseSize.mockResolvedValue(1024 * 1024 * 5); // 5 MB default
@@ -215,20 +298,24 @@ describe('UsageDashboardModal', () => {
 
 			await waitFor(() => {
 				// Use getAllByRole('tab') to find tabs - there may be multiple elements with text 'Agents'
+				// Cue ships on, so its tab sits between Auto Run and Shortcuts.
 				const tabs = screen.getAllByRole('tab');
-				expect(tabs).toHaveLength(4);
+				expect(tabs).toHaveLength(8);
 				expect(tabs[0]).toHaveTextContent('Overview');
-				expect(tabs[1]).toHaveTextContent('Agents');
-				expect(tabs[2]).toHaveTextContent('Activity');
-				expect(tabs[3]).toHaveTextContent('Auto Run');
+				expect(tabs[1]).toHaveTextContent('Agent Overview');
+				expect(tabs[2]).toHaveTextContent('Agents');
+				expect(tabs[3]).toHaveTextContent('Groups');
+				expect(tabs[4]).toHaveTextContent('Tokens');
+				expect(tabs[5]).toHaveTextContent('Activity');
+				expect(tabs[6]).toHaveTextContent('Auto Run');
 			});
 		});
 
-		it('renders Export CSV button', async () => {
+		it('renders Export button', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
-				expect(screen.getByText('Export CSV')).toBeInTheDocument();
+				expect(screen.getByRole('button', { name: 'Export' })).toBeInTheDocument();
 			});
 		});
 
@@ -327,6 +414,27 @@ describe('UsageDashboardModal', () => {
 				totalQueries: 0,
 				totalDuration: 0,
 				avgDuration: 0,
+				queryDurationPercentiles: {
+					count: 0,
+					min: 0,
+					p50: 0,
+					p75: 0,
+					p90: 0,
+					p95: 0,
+					p99: 0,
+					max: 0,
+				},
+				queryDurationPercentilesByAgent: {},
+				autoRunTaskDurationPercentiles: {
+					count: 0,
+					min: 0,
+					p50: 0,
+					p75: 0,
+					p90: 0,
+					p95: 0,
+					p99: 0,
+					max: 0,
+				},
 				byAgent: {},
 				bySource: { user: 0, auto: 0 },
 				byDay: [],
@@ -384,6 +492,9 @@ describe('UsageDashboardModal', () => {
 			});
 		});
 	});
+
+	// The drill-down filter feature was removed - the dashboard no longer
+	// renders a filter bar or a clickable filter affordance on chart rows.
 
 	describe('View Mode Tabs', () => {
 		it('switches view mode when tab is clicked', async () => {
@@ -443,20 +554,31 @@ describe('UsageDashboardModal', () => {
 		});
 	});
 
-	describe('CSV Export', () => {
-		it('shows save dialog when export button is clicked', async () => {
-			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
-
+	describe('Export', () => {
+		const openExportMenu = async () => {
 			await waitFor(() => {
-				expect(screen.getByText('Export CSV')).toBeInTheDocument();
+				expect(screen.getByRole('button', { name: 'Export' })).toBeInTheDocument();
 			});
+			fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+		};
 
-			fireEvent.click(screen.getByText('Export CSV'));
+		it('offers JSON and CSV', async () => {
+			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+			await openExportMenu();
+
+			expect(screen.getByRole('menuitem', { name: /JSON/ })).toBeInTheDocument();
+			expect(screen.getByRole('menuitem', { name: /CSV/ })).toBeInTheDocument();
+		});
+
+		it('asks for a zip file when CSV is chosen', async () => {
+			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+			await openExportMenu();
+			fireEvent.click(screen.getByRole('menuitem', { name: /CSV/ }));
 
 			await waitFor(() => {
 				expect(mockSaveFile).toHaveBeenCalledWith(
 					expect.objectContaining({
-						filters: [{ name: 'CSV Files', extensions: ['csv'] }],
+						filters: [{ name: 'Zip of CSV files', extensions: ['zip'] }],
 						title: 'Export Usage Data',
 					})
 				);
@@ -467,63 +589,50 @@ describe('UsageDashboardModal', () => {
 			mockSaveFile.mockResolvedValue(null); // User cancels
 
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
-
-			await waitFor(() => {
-				expect(screen.getByText('Export CSV')).toBeInTheDocument();
-			});
-
-			fireEvent.click(screen.getByText('Export CSV'));
+			await openExportMenu();
+			fireEvent.click(screen.getByRole('menuitem', { name: /JSON/ }));
 
 			await waitFor(() => {
 				expect(mockSaveFile).toHaveBeenCalled();
 			});
-
-			// exportCsv should not be called if user cancelled
-			expect(mockExportCsv).not.toHaveBeenCalled();
+			expect(mockExportUsage).not.toHaveBeenCalled();
 		});
 
-		it('exports CSV to selected file location', async () => {
-			const testFilePath = '/path/to/export.csv';
-			const csvContent =
-				'id,sessionId,agentType,source,startTime,duration\n"1","test","claude-code","user","2024-01-15","1000"';
-			mockSaveFile.mockResolvedValue(testFilePath);
-			mockExportCsv.mockResolvedValue(csvContent);
+		it('exports to the selected file location and confirms it', async () => {
+			mockSaveFile.mockResolvedValue('/path/to/export.json');
 
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+			await openExportMenu();
+			fireEvent.click(screen.getByRole('menuitem', { name: /JSON/ }));
 
 			await waitFor(() => {
-				expect(screen.getByText('Export CSV')).toBeInTheDocument();
+				expect(mockExportUsage).toHaveBeenCalledWith('week', 'json', '/path/to/export.json');
 			});
-
-			fireEvent.click(screen.getByText('Export CSV'));
-
 			await waitFor(() => {
-				expect(mockExportCsv).toHaveBeenCalledWith('week');
-			});
-
-			await waitFor(() => {
-				expect(mockWriteFile).toHaveBeenCalledWith(testFilePath, csvContent);
+				expect(mockNotifyToast).toHaveBeenCalledWith(expect.objectContaining({ color: 'green' }));
 			});
 		});
 
-		it('handles export error gracefully', async () => {
-			const testFilePath = '/path/to/export.csv';
-			mockSaveFile.mockResolvedValue(testFilePath);
-			mockExportCsv.mockRejectedValue(new Error('Export failed'));
+		it('reports an export error instead of failing silently', async () => {
+			mockSaveFile.mockResolvedValue('/path/to/export.json');
+			mockExportUsage.mockRejectedValue(new Error('Export failed'));
 
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+			await openExportMenu();
+			fireEvent.click(screen.getByRole('menuitem', { name: /JSON/ }));
 
 			await waitFor(() => {
-				expect(screen.getByText('Export CSV')).toBeInTheDocument();
+				expect(consoleSpy).toHaveBeenCalledWith(
+					'Failed to export usage data:',
+					undefined,
+					expect.any(Error)
+				);
 			});
-
-			fireEvent.click(screen.getByText('Export CSV'));
-
-			await waitFor(() => {
-				expect(consoleSpy).toHaveBeenCalledWith('Failed to export CSV:', expect.any(Error));
-			});
+			expect(mockNotifyToast).toHaveBeenCalledWith(
+				expect.objectContaining({ color: 'red', message: 'Export failed' })
+			);
 
 			consoleSpy.mockRestore();
 		});
@@ -577,14 +686,8 @@ describe('UsageDashboardModal', () => {
 			});
 		});
 
-		it('displays interactive percentage', async () => {
-			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
-
-			await waitFor(() => {
-				expect(screen.getByText('Interactive %')).toBeInTheDocument();
-				expect(screen.getByText('67%')).toBeInTheDocument(); // 100/150 = 66.67%
-			});
-		});
+		// Interactive % card was removed in favor of streak/best-day/active-days/
+		// worktree % cards (see SummaryCards.tsx).
 	});
 
 	describe('Debounced Refresh - No Flickering', () => {
@@ -1136,7 +1239,9 @@ describe('UsageDashboardModal', () => {
 		});
 
 		it('stats updates during an Auto Run session update dashboard correctly', async () => {
-			// This simulates the Auto Run flow where stats are recorded for each task
+			// This simulates the Auto Run flow where stats are recorded for each task.
+			// Interactive % was removed from SummaryCards, so we assert on totalQueries
+			// (the Total Queries metric is the most stable cross-version signal).
 			const initialData = createSampleData();
 			const afterAutoRunData = {
 				...createSampleData(),
@@ -1158,8 +1263,11 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Initial state shows 67% interactive (100/150)
-			expect(screen.getByText('67%')).toBeInTheDocument();
+			// Initial state shows totalQueries = 150.
+			// Wrapped in waitFor because the value count-up animation runs over 600ms.
+			await waitFor(() => {
+				expect(screen.getAllByText('150').length).toBeGreaterThan(0);
+			});
 
 			mockGetAggregation.mockResolvedValueOnce(afterAutoRunData);
 
@@ -1177,9 +1285,9 @@ describe('UsageDashboardModal', () => {
 				expect(mockGetAggregation).toHaveBeenCalledTimes(2);
 			});
 
-			// Interactive percentage should update (100/160 = 62.5%, rounded to 63%)
+			// Total queries should update from 150 to 160
 			await waitFor(() => {
-				expect(screen.getByText('63%')).toBeInTheDocument();
+				expect(screen.getAllByText('160').length).toBeGreaterThan(0);
 			});
 		});
 
@@ -1541,7 +1649,7 @@ describe('UsageDashboardModal', () => {
 
 			await waitFor(() => {
 				const tabs = screen.getAllByRole('tab');
-				expect(tabs).toHaveLength(4);
+				expect(tabs).toHaveLength(8);
 
 				// First tab (Overview) should be selected
 				expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
@@ -1549,9 +1657,9 @@ describe('UsageDashboardModal', () => {
 				expect(tabs[0]).toHaveAttribute('id', 'tab-overview');
 
 				// Other tabs should not be selected
-				expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
-				expect(tabs[2]).toHaveAttribute('aria-selected', 'false');
-				expect(tabs[3]).toHaveAttribute('aria-selected', 'false');
+				for (const tab of tabs.slice(1)) {
+					expect(tab).toHaveAttribute('aria-selected', 'false');
+				}
 			});
 		});
 
@@ -1610,12 +1718,14 @@ describe('UsageDashboardModal', () => {
 
 			const tablist = screen.getByTestId('view-mode-tabs');
 
-			// Press ArrowLeft while on first tab - should wrap to last tab (Auto Run)
+			// Press ArrowLeft while on first tab - should wrap to the LAST tab,
+			// addressed by position from the end so adding a tab cannot turn a
+			// wrap-around test into an off-by-one failure.
 			fireEvent.keyDown(tablist, { key: 'ArrowLeft' });
 
 			await waitFor(() => {
 				const tabs = screen.getAllByRole('tab');
-				expect(tabs[3]).toHaveAttribute('aria-selected', 'true'); // Auto Run tab
+				expect(tabs[tabs.length - 1]).toHaveAttribute('aria-selected', 'true');
 				expect(tabs[0]).toHaveAttribute('aria-selected', 'false');
 			});
 		});
@@ -1629,11 +1739,12 @@ describe('UsageDashboardModal', () => {
 
 			const tablist = screen.getByTestId('view-mode-tabs');
 
-			// Navigate to last tab (Auto Run)
-			fireEvent.keyDown(tablist, { key: 'ArrowLeft' }); // Wraps to last
+			// Navigate to the last tab by wrapping backwards off the first.
+			fireEvent.keyDown(tablist, { key: 'ArrowLeft' });
 
 			await waitFor(() => {
-				expect(screen.getAllByRole('tab')[3]).toHaveAttribute('aria-selected', 'true');
+				const tabs = screen.getAllByRole('tab');
+				expect(tabs[tabs.length - 1]).toHaveAttribute('aria-selected', 'true');
 			});
 
 			// Press ArrowRight - should wrap to first tab (Overview)
@@ -1642,7 +1753,7 @@ describe('UsageDashboardModal', () => {
 			await waitFor(() => {
 				const tabs = screen.getAllByRole('tab');
 				expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
-				expect(tabs[3]).toHaveAttribute('aria-selected', 'false');
+				expect(tabs[tabs.length - 1]).toHaveAttribute('aria-selected', 'false');
 			});
 		});
 
@@ -1653,7 +1764,9 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Check for focusable chart sections
+			// Overview retains summary cards, provider comparison, the two
+			// distribution donuts, and the radial activity chart. The activity
+			// heatmap and duration trends moved to the Activity tab.
 			expect(screen.getByTestId('section-summary-cards')).toHaveAttribute('tabIndex', '0');
 			expect(screen.getByTestId('section-summary-cards')).toHaveAttribute('role', 'region');
 			expect(screen.getByTestId('section-summary-cards')).toHaveAttribute(
@@ -1673,16 +1786,10 @@ describe('UsageDashboardModal', () => {
 				'Session Type Chart'
 			);
 
-			expect(screen.getByTestId('section-activity-heatmap')).toHaveAttribute('tabIndex', '0');
-			expect(screen.getByTestId('section-activity-heatmap')).toHaveAttribute(
+			expect(screen.getByTestId('section-radial-activity')).toHaveAttribute('tabIndex', '0');
+			expect(screen.getByTestId('section-radial-activity')).toHaveAttribute(
 				'aria-label',
-				'Activity Heatmap'
-			);
-
-			expect(screen.getByTestId('section-duration-trends')).toHaveAttribute('tabIndex', '0');
-			expect(screen.getByTestId('section-duration-trends')).toHaveAttribute(
-				'aria-label',
-				'Duration Trends Chart'
+				'Activity by Hour and Day of Week'
 			);
 		});
 
@@ -1704,9 +1811,9 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Click on Agents tab - use getAllByRole('tab') to avoid "multiple elements" error
-			const tabs = screen.getAllByRole('tab');
-			fireEvent.click(tabs[1]); // Agents is the 2nd tab (index 1)
+			// Click on the "Agents" tab by name - its index drifted when
+			// "Agent Overview" was inserted above it, so look up by label.
+			fireEvent.click(screen.getByRole('tab', { name: 'Agents' }));
 
 			await waitFor(() => {
 				const tabpanel = screen.getByRole('tabpanel');
@@ -1728,9 +1835,10 @@ describe('UsageDashboardModal', () => {
 			summarySection.focus();
 			fireEvent.keyDown(summarySection, { key: 'ArrowDown' });
 
-			// Should focus agent comparison (next section)
+			// Should focus the Delegation Score card, which sits directly under
+			// the summary cards on Overview.
 			await waitFor(() => {
-				expect(document.activeElement).toBe(screen.getByTestId('section-agent-comparison'));
+				expect(document.activeElement).toBe(screen.getByTestId('section-delegation-score'));
 			});
 		});
 
@@ -1741,15 +1849,15 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			const agentSection = screen.getByTestId('section-agent-comparison');
+			const percentilesSection = screen.getByTestId('section-query-percentiles');
 
-			// Focus agent comparison and press ArrowUp
-			agentSection.focus();
-			fireEvent.keyDown(agentSection, { key: 'ArrowUp' });
+			// Focus Query Duration Percentiles and press ArrowUp
+			percentilesSection.focus();
+			fireEvent.keyDown(percentilesSection, { key: 'ArrowUp' });
 
-			// Should focus summary cards (previous section)
+			// Should focus the Delegation Score card (previous section)
 			await waitFor(() => {
-				expect(document.activeElement).toBe(screen.getByTestId('section-summary-cards'));
+				expect(document.activeElement).toBe(screen.getByTestId('section-delegation-score'));
 			});
 		});
 
@@ -1760,15 +1868,17 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			const durationSection = screen.getByTestId('section-duration-trends');
+			// Use the radial activity chart - last section in overview view
+			// (after the activity heatmap moved to the Activity tab).
+			const lastSection = screen.getByTestId('section-radial-activity');
 
 			// Focus last section and press Home
-			durationSection.focus();
-			fireEvent.keyDown(durationSection, { key: 'Home' });
+			lastSection.focus();
+			fireEvent.keyDown(lastSection, { key: 'Home' });
 
-			// Should focus first section (summary cards)
+			// Should focus first section (year-in-pixels - added as the new hero strip)
 			await waitFor(() => {
-				expect(document.activeElement).toBe(screen.getByTestId('section-summary-cards'));
+				expect(document.activeElement).toBe(screen.getByTestId('section-year-in-pixels'));
 			});
 		});
 
@@ -1781,13 +1891,14 @@ describe('UsageDashboardModal', () => {
 
 			const summarySection = screen.getByTestId('section-summary-cards');
 
-			// Focus first section and press End
+			// Focus first section and press End. Last section in overview is
+			// the radial activity chart (the activity heatmap moved to the
+			// Activity tab).
 			summarySection.focus();
 			fireEvent.keyDown(summarySection, { key: 'End' });
 
-			// Should focus last section (duration trends)
 			await waitFor(() => {
-				expect(document.activeElement).toBe(screen.getByTestId('section-duration-trends'));
+				expect(document.activeElement).toBe(screen.getByTestId('section-radial-activity'));
 			});
 		});
 
@@ -1800,13 +1911,13 @@ describe('UsageDashboardModal', () => {
 
 			const tablist = screen.getByTestId('view-mode-tabs');
 
-			// Tab from tablist to first section
+			// Tab from tablist to first section (now year-in-pixels)
 			fireEvent.keyDown(tablist, { key: 'Tab' });
 
 			await waitFor(() => {
-				const summarySection = screen.getByTestId('section-summary-cards');
+				const firstSection = screen.getByTestId('section-year-in-pixels');
 				// Check for focus ring style
-				expect(summarySection).toHaveStyle({ boxShadow: `0 0 0 2px ${theme.colors.accent}` });
+				expect(firstSection).toHaveStyle({ boxShadow: `0 0 0 2px ${theme.colors.accent}` });
 			});
 		});
 
@@ -1817,13 +1928,15 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Switch to Agents view - use getAllByRole('tab') to avoid "multiple elements" error
-			const tabs = screen.getAllByRole('tab');
-			fireEvent.click(tabs[1]); // Agents is the 2nd tab (index 1)
+			// Switch to the "Agents" tab by name - index-based clicks broke
+			// when "Agent Overview" was inserted above it.
+			fireEvent.click(screen.getByRole('tab', { name: 'Agents' }));
 
+			// Agents tab now contains a single AgentOverviewCards section. The
+			// previous agent-comparison/session-stats charts moved to the new
+			// "Agent Overview" tab.
 			await waitFor(() => {
-				expect(screen.getByTestId('section-agent-comparison')).toBeInTheDocument();
-				// Only one section in agents view
+				expect(screen.getByTestId('section-agent-overview-cards')).toBeInTheDocument();
 				expect(screen.queryByTestId('section-summary-cards')).not.toBeInTheDocument();
 				expect(screen.queryByTestId('section-source-distribution')).not.toBeInTheDocument();
 			});
@@ -1855,9 +1968,9 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Switch to Auto Run view - use the tab button specifically
-			const tabs = screen.getAllByRole('tab');
-			fireEvent.click(tabs[3]); // Auto Run is the 4th tab
+			// Switch to Auto Run view - use the tab button specifically, addressed
+			// by name so inserting a tab cannot silently retarget the click.
+			fireEvent.click(screen.getByRole('tab', { name: 'Auto Run' }));
 
 			await waitFor(() => {
 				expect(screen.getByTestId('section-autorun-stats')).toBeInTheDocument();
@@ -1875,12 +1988,13 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			const summarySection = screen.getByTestId('section-summary-cards');
+			// First section is now year-in-pixels (the new hero strip)
+			const firstSection = screen.getByTestId('section-year-in-pixels');
 			const tablist = screen.getByTestId('view-mode-tabs');
 
 			// Focus first section and press ArrowUp (or Shift+Tab)
-			summarySection.focus();
-			fireEvent.keyDown(summarySection, { key: 'ArrowUp' });
+			firstSection.focus();
+			fireEvent.keyDown(firstSection, { key: 'ArrowUp' });
 
 			// Focus should return to tabs
 			await waitFor(() => {
@@ -1895,12 +2009,12 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			const summarySection = screen.getByTestId('section-summary-cards');
+			const firstSection = screen.getByTestId('section-year-in-pixels');
 			const tablist = screen.getByTestId('view-mode-tabs');
 
 			// Focus first section and press Shift+Tab
-			summarySection.focus();
-			fireEvent.keyDown(summarySection, { key: 'Tab', shiftKey: true });
+			firstSection.focus();
+			fireEvent.keyDown(firstSection, { key: 'Tab', shiftKey: true });
 
 			// Focus should return to tabs
 			await waitFor(() => {
@@ -1921,9 +2035,9 @@ describe('UsageDashboardModal', () => {
 			tablist.focus();
 			fireEvent.keyDown(tablist, { key: 'Tab' });
 
-			// Should focus first section
+			// Should focus first section (year-in-pixels)
 			await waitFor(() => {
-				expect(document.activeElement).toBe(screen.getByTestId('section-summary-cards'));
+				expect(document.activeElement).toBe(screen.getByTestId('section-year-in-pixels'));
 			});
 		});
 
@@ -1934,22 +2048,23 @@ describe('UsageDashboardModal', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Focus a section in overview
+			// Focus a section in overview, then move down one
 			const summarySection = screen.getByTestId('section-summary-cards');
 			summarySection.focus();
 			fireEvent.keyDown(summarySection, { key: 'ArrowDown' });
 
 			await waitFor(() => {
-				expect(document.activeElement).toBe(screen.getByTestId('section-agent-comparison'));
+				expect(document.activeElement).toBe(screen.getByTestId('section-delegation-score'));
 			});
 
-			// Switch to Agents view - use getAllByRole('tab') to avoid "multiple elements" error
-			const tabs = screen.getAllByRole('tab');
-			fireEvent.click(tabs[1]); // Agents is the 2nd tab (index 1)
+			// Switch to Agents view by name (its index drifted when "Agent
+			// Overview" was inserted above it).
+			fireEvent.click(screen.getByRole('tab', { name: 'Agents' }));
 
 			await waitFor(() => {
-				// The section in the new view should not have focus ring initially
-				const agentSection = screen.getByTestId('section-agent-comparison');
+				// Agents view's only section is agent-overview-cards. It should not
+				// have a focus ring just from the view-mode change.
+				const agentSection = screen.getByTestId('section-agent-overview-cards');
 				expect(agentSection).not.toHaveStyle({ boxShadow: `0 0 0 2px ${theme.colors.accent}` });
 			});
 		});

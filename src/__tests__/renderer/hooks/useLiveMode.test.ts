@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { logger } from '../../../renderer/utils/logger';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useLiveMode } from '../../../renderer/hooks/remote/useLiveMode';
 
 describe('useLiveMode', () => {
@@ -10,18 +11,31 @@ describe('useLiveMode', () => {
 	};
 
 	const mockLive = {
+		getDashboardUrl: vi.fn(),
 		startServer: vi.fn(),
 		stopServer: vi.fn(),
 		disableAll: vi.fn(),
+		onUrlChanged: vi.fn(),
 	};
+
+	/** Captures the handler the hook registers so tests can fire a network change. */
+	let emitUrlChanged: ((data: { url: string }) => void) | null = null;
+	const unsubscribeUrlChanged = vi.fn();
 
 	beforeEach(() => {
 		vi.clearAllMocks();
 
 		mockTunnel.stop.mockResolvedValue(undefined);
+		mockLive.getDashboardUrl.mockResolvedValue(null);
 		mockLive.startServer.mockResolvedValue({ success: true, url: 'http://localhost:3000' });
 		mockLive.stopServer.mockResolvedValue(undefined);
 		mockLive.disableAll.mockResolvedValue(undefined);
+
+		emitUrlChanged = null;
+		mockLive.onUrlChanged.mockImplementation((handler: (data: { url: string }) => void) => {
+			emitUrlChanged = handler;
+			return unsubscribeUrlChanged;
+		});
 
 		(window as any).maestro = {
 			...originalMaestro,
@@ -62,8 +76,53 @@ describe('useLiveMode', () => {
 		expect(result.current.webInterfaceUrl).toBeNull();
 	});
 
+	it('restores live mode from the running server when auto-start is enabled', async () => {
+		mockLive.getDashboardUrl.mockResolvedValue('http://localhost:31999/secure');
+
+		const { result } = renderHook(() => useLiveMode(true));
+
+		await waitFor(() => expect(result.current.isLiveMode).toBe(true));
+
+		expect(mockLive.getDashboardUrl).toHaveBeenCalledOnce();
+		expect(mockLive.startServer).not.toHaveBeenCalled();
+		expect(result.current.webInterfaceUrl).toBe('http://localhost:31999/secure');
+	});
+
+	it('starts the server when auto-start is enabled and no server URL is available', async () => {
+		const { result } = renderHook(() => useLiveMode(true));
+
+		await waitFor(() => expect(result.current.isLiveMode).toBe(true));
+
+		expect(mockLive.getDashboardUrl).toHaveBeenCalledOnce();
+		expect(mockLive.startServer).toHaveBeenCalledOnce();
+		expect(result.current.webInterfaceUrl).toBe('http://localhost:3000');
+	});
+
+	it('stops a pending auto-start when the setting is disabled before startup completes', async () => {
+		let resolveStart: ((result: { success: true; url: string }) => void) | undefined;
+		mockLive.startServer.mockReturnValue(
+			new Promise((resolve) => {
+				resolveStart = resolve;
+			})
+		);
+
+		const { result, rerender } = renderHook(({ autoStart }) => useLiveMode(autoStart), {
+			initialProps: { autoStart: true },
+		});
+		await waitFor(() => expect(mockLive.startServer).toHaveBeenCalledOnce());
+
+		rerender({ autoStart: false });
+		await act(async () => {
+			resolveStart?.({ success: true, url: 'http://localhost:3000' });
+		});
+
+		expect(mockLive.stopServer).toHaveBeenCalledOnce();
+		expect(result.current.isLiveMode).toBe(false);
+		expect(result.current.webInterfaceUrl).toBeNull();
+	});
+
 	// -----------------------------------------------------------------------
-	// toggleGlobalLive — turning ON
+	// toggleGlobalLive - turning ON
 	// -----------------------------------------------------------------------
 
 	it('toggleGlobalLive turns on: calls startServer and sets state', async () => {
@@ -81,7 +140,7 @@ describe('useLiveMode', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// toggleGlobalLive — turning OFF
+	// toggleGlobalLive - turning OFF
 	// -----------------------------------------------------------------------
 
 	it('toggleGlobalLive turns off: calls tunnel.stop then disableAll, clears state', async () => {
@@ -107,13 +166,13 @@ describe('useLiveMode', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// toggleGlobalLive — failure cases
+	// toggleGlobalLive - failure cases
 	// -----------------------------------------------------------------------
 
 	it('toggleGlobalLive handles startServer failure (success: false) without changing state', async () => {
 		mockLive.startServer.mockResolvedValue({ success: false, error: 'Port in use' });
 
-		const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 		const { result } = renderHook(() => useLiveMode());
 
 		await act(async () => {
@@ -125,6 +184,7 @@ describe('useLiveMode', () => {
 		expect(result.current.webInterfaceUrl).toBeNull();
 		expect(consoleSpy).toHaveBeenCalledWith(
 			'[toggleGlobalLive] Failed to start server:',
+			undefined,
 			'Port in use'
 		);
 
@@ -135,7 +195,7 @@ describe('useLiveMode', () => {
 		const error = new Error('Network failure');
 		mockLive.startServer.mockRejectedValue(error);
 
-		const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 		const { result } = renderHook(() => useLiveMode());
 
 		await act(async () => {
@@ -144,7 +204,7 @@ describe('useLiveMode', () => {
 
 		expect(result.current.isLiveMode).toBe(false);
 		expect(result.current.webInterfaceUrl).toBeNull();
-		expect(consoleSpy).toHaveBeenCalledWith('[toggleGlobalLive] Error:', error);
+		expect(consoleSpy).toHaveBeenCalledWith('[toggleGlobalLive] Error:', undefined, error);
 
 		consoleSpy.mockRestore();
 	});
@@ -163,7 +223,7 @@ describe('useLiveMode', () => {
 		const error = new Error('disableAll failed');
 		mockLive.disableAll.mockRejectedValue(error);
 
-		const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 		await act(async () => {
 			await result.current.toggleGlobalLive();
@@ -174,6 +234,7 @@ describe('useLiveMode', () => {
 		expect(result.current.webInterfaceUrl).toBeNull();
 		expect(consoleSpy).toHaveBeenCalledWith(
 			'[toggleGlobalLive] disableAll failed after tunnel stop:',
+			undefined,
 			error
 		);
 
@@ -252,7 +313,7 @@ describe('useLiveMode', () => {
 		// Make restart fail
 		mockLive.startServer.mockResolvedValue({ success: false, error: 'Restart failed' });
 
-		const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 		let returnValue: string | null = 'not-null';
 		await act(async () => {
@@ -265,6 +326,7 @@ describe('useLiveMode', () => {
 		expect(result.current.webInterfaceUrl).toBeNull();
 		expect(consoleSpy).toHaveBeenCalledWith(
 			'[restartWebServer] Failed to restart server:',
+			undefined,
 			'Restart failed'
 		);
 
@@ -283,7 +345,7 @@ describe('useLiveMode', () => {
 		const error = new Error('Stop server crashed');
 		mockLive.stopServer.mockRejectedValue(error);
 
-		const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 		let returnValue: string | null = 'not-null';
 		await act(async () => {
@@ -294,7 +356,7 @@ describe('useLiveMode', () => {
 		// State should reflect server is stopped after exception
 		expect(result.current.isLiveMode).toBe(false);
 		expect(result.current.webInterfaceUrl).toBeNull();
-		expect(consoleSpy).toHaveBeenCalledWith('[restartWebServer] Error:', error);
+		expect(consoleSpy).toHaveBeenCalledWith('[restartWebServer] Error:', undefined, error);
 
 		consoleSpy.mockRestore();
 	});
@@ -338,5 +400,51 @@ describe('useLiveMode', () => {
 		// tunnel.stop and disableAll called once (the single "off" cycle)
 		expect(mockTunnel.stop).toHaveBeenCalledTimes(1);
 		expect(mockLive.disableAll).toHaveBeenCalledTimes(1);
+	});
+	// -----------------------------------------------------------------------
+	// Network changes (WiFi to hotspot, dock to undock)
+	// -----------------------------------------------------------------------
+
+	it('adopts the new URL when the machine moves networks while live', async () => {
+		const { result } = renderHook(() => useLiveMode());
+
+		await act(async () => {
+			await result.current.toggleGlobalLive();
+		});
+		expect(result.current.webInterfaceUrl).toBe('http://localhost:3000');
+
+		act(() => {
+			emitUrlChanged?.({ url: 'http://172.20.10.3:8080/token' });
+		});
+
+		expect(result.current.webInterfaceUrl).toBe('http://172.20.10.3:8080/token');
+		// The server never restarted, so live mode must not have flickered off.
+		expect(result.current.isLiveMode).toBe(true);
+		expect(mockLive.startServer).toHaveBeenCalledTimes(1);
+	});
+
+	it('ignores address changes while live mode is off', () => {
+		const { result } = renderHook(() => useLiveMode());
+
+		act(() => {
+			emitUrlChanged?.({ url: 'http://172.20.10.3:8080/token' });
+		});
+
+		// With Live off the server is CLI-only; its address is not user-facing.
+		expect(result.current.webInterfaceUrl).toBeNull();
+	});
+
+	it('unsubscribes from address changes on unmount', () => {
+		const { unmount } = renderHook(() => useLiveMode());
+
+		expect(mockLive.onUrlChanged).toHaveBeenCalledTimes(1);
+		unmount();
+		expect(unsubscribeUrlChanged).toHaveBeenCalledTimes(1);
+	});
+
+	it('survives a preload without the address-change channel', () => {
+		(window as any).maestro.live = { ...mockLive, onUrlChanged: undefined };
+
+		expect(() => renderHook(() => useLiveMode())).not.toThrow();
 	});
 });

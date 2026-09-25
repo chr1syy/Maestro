@@ -16,6 +16,8 @@ import { memo, useState, useMemo } from 'react';
 import type { Theme } from '../../types';
 import type { StatsAggregation } from '../../hooks/stats/useStats';
 import { COLORBLIND_BINARY_PALETTE } from '../../constants/colorblindPalettes';
+import { formatNumber } from '../../../shared/formatters';
+import { DONUT_CHART, describeDonutArc } from './chartUtils';
 
 interface LocationData {
 	location: 'local' | 'remote';
@@ -32,19 +34,6 @@ interface LocationDistributionChartProps {
 	theme: Theme;
 	/** Enable colorblind-friendly colors */
 	colorBlindMode?: boolean;
-}
-
-/**
- * Format large numbers with K/M suffixes
- */
-function formatNumber(num: number): string {
-	if (num >= 1000000) {
-		return `${(num / 1000000).toFixed(1)}M`;
-	}
-	if (num >= 1000) {
-		return `${(num / 1000).toFixed(1)}K`;
-	}
-	return num.toString();
 }
 
 /**
@@ -85,50 +74,6 @@ function getRemoteColor(theme: Theme): string {
 	} else {
 		return '#34d399'; // emerald-400
 	}
-}
-
-/**
- * SVG arc path generator for donut chart segments
- */
-function describeArc(
-	x: number,
-	y: number,
-	outerRadius: number,
-	innerRadius: number,
-	startAngle: number,
-	endAngle: number
-): string {
-	// Handle full circle case (nearly 360 degrees)
-	if (endAngle - startAngle >= 359.99) {
-		const midAngle = startAngle + 180;
-		return `
-      ${describeArc(x, y, outerRadius, innerRadius, startAngle, midAngle)}
-      ${describeArc(x, y, outerRadius, innerRadius, midAngle, endAngle)}
-    `;
-	}
-
-	const startRad = (startAngle - 90) * (Math.PI / 180);
-	const endRad = (endAngle - 90) * (Math.PI / 180);
-
-	const startOuterX = x + outerRadius * Math.cos(startRad);
-	const startOuterY = y + outerRadius * Math.sin(startRad);
-	const endOuterX = x + outerRadius * Math.cos(endRad);
-	const endOuterY = y + outerRadius * Math.sin(endRad);
-
-	const startInnerX = x + innerRadius * Math.cos(startRad);
-	const startInnerY = y + innerRadius * Math.sin(startRad);
-	const endInnerX = x + innerRadius * Math.cos(endRad);
-	const endInnerY = y + innerRadius * Math.sin(endRad);
-
-	const largeArcFlag = endAngle - startAngle > 180 ? 1 : 0;
-
-	return `
-    M ${startOuterX} ${startOuterY}
-    A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${endOuterX} ${endOuterY}
-    L ${endInnerX} ${endInnerY}
-    A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${startInnerX} ${startInnerY}
-    Z
-  `;
 }
 
 export const LocationDistributionChart = memo(function LocationDistributionChart({
@@ -181,9 +126,7 @@ export const LocationDistributionChart = memo(function LocationDistributionChart
 	}, [locationData]);
 
 	// Donut chart configuration
-	const size = 160;
-	const outerRadius = 70;
-	const innerRadius = 45;
+	const { size, outerRadius, innerRadius, hoverExpansion, centerLabelWidth } = DONUT_CHART;
 	const centerX = size / 2;
 	const centerY = size / 2;
 
@@ -215,7 +158,10 @@ export const LocationDistributionChart = memo(function LocationDistributionChart
 		>
 			{/* Header with title */}
 			<div className="flex items-center justify-between mb-4">
-				<h3 className="text-sm font-medium" style={{ color: theme.colors.textMain }}>
+				<h3
+					className="text-sm font-medium"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
 					Session Location
 				</h3>
 			</div>
@@ -243,10 +189,10 @@ export const LocationDistributionChart = memo(function LocationDistributionChart
 								{arcs.map((arc) => (
 									<path
 										key={arc.location}
-										d={describeArc(
+										d={describeDonutArc(
 											centerX,
 											centerY,
-											hoveredLocation === arc.location ? outerRadius + 4 : outerRadius,
+											hoveredLocation === arc.location ? outerRadius + hoverExpansion : outerRadius,
 											innerRadius,
 											arc.startAngle,
 											arc.endAngle
@@ -268,7 +214,10 @@ export const LocationDistributionChart = memo(function LocationDistributionChart
 								className="absolute inset-0 flex flex-col items-center justify-center"
 								style={{ pointerEvents: 'none' }}
 							>
-								<span className="text-lg font-semibold" style={{ color: theme.colors.textMain }}>
+								<span
+									className="text-lg font-semibold leading-tight text-center truncate"
+									style={{ color: theme.colors.textMain, maxWidth: centerLabelWidth }}
+								>
 									{formatNumber(total)}
 								</span>
 								<span className="text-xs" style={{ color: theme.colors.textDim }}>

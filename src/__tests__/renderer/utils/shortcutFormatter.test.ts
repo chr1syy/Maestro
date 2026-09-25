@@ -4,18 +4,20 @@
  * Platform detection now uses window.maestro.platform (Electron preload bridge)
  * instead of navigator.userAgent. Since isMac() is a function call (not a
  * module-level constant), we can simply set window.maestro.platform before
- * each test — no dynamic imports needed.
+ * each test - no dynamic imports needed.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Undo the global mock from setup.ts — this file tests the real module
+// Undo the global mock from setup.ts - this file tests the real module
 vi.unmock('../../../renderer/utils/shortcutFormatter');
 
 import {
 	formatKey,
 	formatShortcutKeys,
 	formatMetaKey,
+	formatMetaKeyName,
+	formatAltKeyName,
 	formatEnterToSend,
 	formatEnterToSendTooltip,
 	isMacOS,
@@ -177,6 +179,18 @@ describe('shortcutFormatter', () => {
 		describe('formatMetaKey()', () => {
 			it('returns ⌘ on macOS', () => {
 				expect(formatMetaKey()).toBe('⌘');
+			});
+		});
+
+		describe('formatMetaKeyName()', () => {
+			it('returns the spelled-out Command on macOS', () => {
+				expect(formatMetaKeyName()).toBe('Command');
+			});
+		});
+
+		describe('formatAltKeyName()', () => {
+			it('returns the spelled-out Option on macOS', () => {
+				expect(formatAltKeyName()).toBe('Option');
 			});
 		});
 
@@ -352,6 +366,18 @@ describe('shortcutFormatter', () => {
 		describe('formatMetaKey()', () => {
 			it('returns Ctrl on Windows/Linux', () => {
 				expect(formatMetaKey()).toBe('Ctrl');
+			});
+		});
+
+		describe('formatAltKeyName()', () => {
+			it('returns Alt on Windows/Linux', () => {
+				expect(formatAltKeyName()).toBe('Alt');
+			});
+		});
+
+		describe('formatMetaKeyName()', () => {
+			it('returns Ctrl on Windows/Linux', () => {
+				expect(formatMetaKeyName()).toBe('Ctrl');
 			});
 		});
 

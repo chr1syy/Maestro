@@ -14,8 +14,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { UsageDashboardModal } from '../../../../renderer/components/UsageDashboard/UsageDashboardModal';
+import { useUIStore } from '../../../../renderer/stores/uiStore';
+import { useSettingsStore } from '../../../../renderer/stores/settingsStore';
 import type { Theme } from '../../../../renderer/types';
 
 // Mock lucide-react icons
@@ -52,9 +54,24 @@ vi.mock('lucide-react', () => {
 		Globe: createIcon('globe', '🌐'),
 		Zap: createIcon('zap', '⚡'),
 		PanelTop: createIcon('panel-top', '🔲'),
+		Keyboard: createIcon('keyboard', '⌨️'),
 		Trophy: createIcon('trophy', '🏆'),
+		Sparkles: createIcon('sparkles', '✨'),
 		Briefcase: createIcon('briefcase', '💼'),
 		Coffee: createIcon('coffee', '☕'),
+		Filter: createIcon('filter', '🔍'),
+		Cpu: createIcon('cpu', '🖥️'),
+		DollarSign: createIcon('dollar', '💲'),
+		Activity: createIcon('activity', '📈'),
+		// New SummaryCards momentum-row icons
+		Flame: createIcon('flame', '🔥'),
+		CalendarCheck: createIcon('calendar-check', '📆'),
+		PenLine: createIcon('pen-line', '✏️'),
+		Coins: createIcon('coins', '🪙'),
+		// Delegation score card + summary ratio card icons
+		Rocket: createIcon('rocket', '🚀'),
+		Info: createIcon('info', 'ℹ️'),
+		Split: createIcon('split', '🔀'),
 	};
 });
 
@@ -63,6 +80,7 @@ vi.mock('../../../../renderer/contexts/LayerStackContext', () => ({
 	useLayerStack: () => ({
 		registerLayer: vi.fn(() => 'layer-123'),
 		unregisterLayer: vi.fn(),
+		updateLayerHandler: vi.fn(),
 	}),
 }));
 
@@ -141,7 +159,7 @@ global.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
 
 // Mock maestro API
 const mockGetAggregation = vi.fn();
-const mockExportCsv = vi.fn();
+const mockExportUsage = vi.fn();
 const mockOnStatsUpdate = vi.fn(() => vi.fn());
 const mockGetAutoRunSessions = vi.fn(() => Promise.resolve([]));
 const mockGetAutoRunTasks = vi.fn(() => Promise.resolve([]));
@@ -153,7 +171,13 @@ Object.defineProperty(window, 'maestro', {
 	value: {
 		stats: {
 			getAggregation: mockGetAggregation,
-			exportCsv: mockExportCsv,
+			getDelegationTotals: vi.fn().mockResolvedValue({
+				interactive: { count: 0, durationMs: 0 },
+				autoRun: { count: 0, durationMs: 0 },
+				cue: { count: 0, durationMs: 0 },
+			}),
+			getDelegationByDay: vi.fn().mockResolvedValue([]),
+			exportUsage: mockExportUsage,
 			onStatsUpdate: mockOnStatsUpdate,
 			getAutoRunSessions: mockGetAutoRunSessions,
 			getAutoRunTasks: mockGetAutoRunTasks,
@@ -161,6 +185,21 @@ Object.defineProperty(window, 'maestro', {
 		},
 		dialog: { saveFile: mockSaveFile },
 		fs: { writeFile: mockWriteFile },
+		// Usage snapshot samplers fired by the dashboard's quota-on-open effect.
+		// Without these the effect throws on `window.maestro.agents` and leaks an
+		// unhandled rejection.
+		agents: {
+			refreshClaudeUsageSnapshots: vi.fn().mockResolvedValue({ refreshed: 0 }),
+			refreshCodexUsageSnapshots: vi.fn().mockResolvedValue({ refreshed: 0 }),
+			getClaudeUsageSnapshots: vi.fn().mockResolvedValue({}),
+			getCodexUsageSnapshots: vi.fn().mockResolvedValue({}),
+		},
+		// Minimum surface needed by `useGlobalAgentStats` (called from the
+		// dashboard's Achievement share image flow).
+		agentSessions: {
+			getGlobalStats: vi.fn().mockResolvedValue(null),
+			onGlobalStatsUpdate: vi.fn().mockReturnValue(() => {}),
+		},
 	},
 	writable: true,
 });
@@ -191,6 +230,18 @@ const createSampleData = () => ({
 	totalQueries: 150,
 	totalDuration: 3600000,
 	avgDuration: 24000,
+	queryDurationPercentiles: { count: 0, min: 0, p50: 0, p75: 0, p90: 0, p95: 0, p99: 0, max: 0 },
+	queryDurationPercentilesByAgent: {},
+	autoRunTaskDurationPercentiles: {
+		count: 0,
+		min: 0,
+		p50: 0,
+		p75: 0,
+		p90: 0,
+		p95: 0,
+		p99: 0,
+		max: 0,
+	},
 	byAgent: {
 		'claude-code': { count: 100, duration: 2400000 },
 		terminal: { count: 50, duration: 1200000 },
@@ -219,6 +270,7 @@ const createSampleData = () => ({
 	avgSessionDuration: 144000,
 	byAgentByDay: {},
 	bySessionByDay: {},
+	bySessionSource: {},
 });
 
 describe('UsageDashboard Responsive Layout', () => {
@@ -227,8 +279,22 @@ describe('UsageDashboard Responsive Layout', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// The dashboard tab is persisted in the shared uiStore singleton across
+		// tests in this file. Reset it so each test starts on 'overview' instead of
+		// inheriting the tab a prior test switched to.
+		useUIStore.setState({ usageDashboardViewMode: 'overview' });
+		// Pin the Encore flags this file was written against. Cue ships on by
+		// default, which adds a Cue tab and a cueStats fetch these tests do not mock.
+		useSettingsStore.setState((s) => ({
+			encoreFeatures: { ...s.encoreFeatures, usageStats: true, maestroCue: false },
+		}));
 		mockGetAggregation.mockResolvedValue(createSampleData());
-		mockExportCsv.mockResolvedValue('date,count\n2024-01-15,25');
+		mockExportUsage.mockResolvedValue({
+			path: '/tmp/usage.json',
+			format: 'json',
+			rowCounts: {},
+			notes: [],
+		});
 		mockSaveFile.mockResolvedValue(null);
 		mockWriteFile.mockResolvedValue({ success: true });
 		mockGetDatabaseSize.mockResolvedValue(1024 * 1024 * 5);
@@ -242,39 +308,38 @@ describe('UsageDashboard Responsive Layout', () => {
 	});
 
 	describe('Modal Container Sizing', () => {
-		it('modal uses viewport-relative width (80vw)', async () => {
+		it('modal renders a persisted-size shell', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
 				const dialog = screen.getByRole('dialog');
-				expect(dialog).toHaveStyle({ width: '80vw' });
+				expect(dialog).toHaveAttribute('data-modal-resize-key', 'usage-dashboard');
 			});
 		});
 
-		it('modal has max-width constraint (1400px)', async () => {
+		it('modal has max-width viewport clamp', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
 				const dialog = screen.getByRole('dialog');
-				expect(dialog).toHaveStyle({ maxWidth: '1400px' });
+				expect(dialog).toHaveStyle({ maxWidth: '90vw' });
 			});
 		});
 
-		it('modal uses viewport-relative height (85vh)', async () => {
+		it('modal renders resize handles', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
-				const dialog = screen.getByRole('dialog');
-				expect(dialog).toHaveStyle({ height: '85vh' });
+				expect(screen.getByTestId('modal-resize-handle-se')).toBeInTheDocument();
 			});
 		});
 
-		it('modal has max-height constraint (900px)', async () => {
+		it('modal has max-height viewport clamp', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
 				const dialog = screen.getByRole('dialog');
-				expect(dialog).toHaveStyle({ maxHeight: '900px' });
+				expect(dialog).toHaveStyle({ maxHeight: '90vh' });
 			});
 		});
 	});
@@ -339,7 +404,26 @@ describe('UsageDashboard Responsive Layout', () => {
 	});
 
 	describe('Summary Cards Responsive Columns', () => {
-		it('displays 2 columns in narrow mode (<600px)', async () => {
+		it('displays 2 columns in narrow mode (440-600px)', async () => {
+			mockOffsetWidth = 500;
+
+			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+
+			await waitFor(() => {
+				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
+			});
+
+			simulateContainerResize(500);
+
+			await waitFor(() => {
+				const summaryCards = screen.getByTestId('summary-cards');
+				expect(summaryCards).toHaveStyle({ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' });
+			});
+		});
+
+		it('drops to one column at phone width (<440px)', async () => {
+			// Two cards in a 400px column leave each about 90px of text, which is
+			// narrower than the figures they carry.
 			mockOffsetWidth = 400;
 
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
@@ -352,7 +436,7 @@ describe('UsageDashboard Responsive Layout', () => {
 
 			await waitFor(() => {
 				const summaryCards = screen.getByTestId('summary-cards');
-				expect(summaryCards).toHaveStyle({ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' });
+				expect(summaryCards).toHaveStyle({ gridTemplateColumns: 'repeat(1, minmax(0, 1fr))' });
 			});
 		});
 
@@ -390,16 +474,17 @@ describe('UsageDashboard Responsive Layout', () => {
 			});
 		});
 
-		it('renders all 10 metric cards regardless of column count', async () => {
+		it('renders all 14 metric cards regardless of column count', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Should always have 10 metric cards
+			// Card count grew from 10 to 12 (Interactive % / Local % were
+			// replaced with Current Streak / Best Day / Active Days / Worktree %).
 			const metricCards = screen.getAllByTestId('metric-card');
-			expect(metricCards).toHaveLength(10);
+			expect(metricCards).toHaveLength(14);
 		});
 	});
 
@@ -553,8 +638,8 @@ describe('UsageDashboard Responsive Layout', () => {
 			});
 
 			// Resize to narrow
-			mockOffsetWidth = 400;
-			simulateContainerResize(400);
+			mockOffsetWidth = 500;
+			simulateContainerResize(500);
 
 			await waitFor(() => {
 				const summaryCards = screen.getByTestId('summary-cards');
@@ -563,7 +648,7 @@ describe('UsageDashboard Responsive Layout', () => {
 		});
 
 		it('updates layout when container is resized from narrow to wide', async () => {
-			mockOffsetWidth = 400;
+			mockOffsetWidth = 500;
 
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
@@ -572,7 +657,7 @@ describe('UsageDashboard Responsive Layout', () => {
 			});
 
 			// Start at narrow
-			simulateContainerResize(400);
+			simulateContainerResize(500);
 
 			await waitFor(() => {
 				const summaryCards = screen.getByTestId('summary-cards');
@@ -626,8 +711,10 @@ describe('UsageDashboard Responsive Layout', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Switch to Auto Run view
-			const autoRunTab = screen.getAllByRole('tab')[3];
+			// Switch to Auto Run view. Selected by name rather than index - the
+			// tab strip has gained a tab twice now, and each time every positional
+			// lookup in this file broke at once.
+			const autoRunTab = screen.getByRole('tab', { name: 'Auto Run' });
 			act(() => {
 				autoRunTab.click();
 			});
@@ -650,8 +737,10 @@ describe('UsageDashboard Responsive Layout', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Switch to Auto Run view
-			const autoRunTab = screen.getAllByRole('tab')[3];
+			// Switch to Auto Run view. Selected by name rather than index - the
+			// tab strip has gained a tab twice now, and each time every positional
+			// lookup in this file broke at once.
+			const autoRunTab = screen.getByRole('tab', { name: 'Auto Run' });
 			act(() => {
 				autoRunTab.click();
 			});
@@ -673,8 +762,10 @@ describe('UsageDashboard Responsive Layout', () => {
 				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
 			});
 
-			// Switch to Auto Run view
-			const autoRunTab = screen.getAllByRole('tab')[3];
+			// Switch to Auto Run view. Selected by name rather than index - the
+			// tab strip has gained a tab twice now, and each time every positional
+			// lookup in this file broke at once.
+			const autoRunTab = screen.getByRole('tab', { name: 'Auto Run' });
 			act(() => {
 				autoRunTab.click();
 			});
@@ -742,17 +833,31 @@ describe('UsageDashboard Responsive Layout', () => {
 			});
 		});
 
-		it('activity heatmap has minimum height of 200px', async () => {
+		it('activity heatmap has minimum height of 300px', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
 
 			await waitFor(() => {
+				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
+			});
+
+			// Activity heatmap lives on the Activity tab - switch to it before checking.
+			fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
+
+			await waitFor(() => {
 				const heatmapSection = screen.getByTestId('section-activity-heatmap');
-				expect(heatmapSection).toHaveStyle({ minHeight: '200px' });
+				expect(heatmapSection).toHaveStyle({ minHeight: '300px' });
 			});
 		});
 
 		it('duration trends chart has minimum height of 280px', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+
+			await waitFor(() => {
+				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
+			});
+
+			// Duration trends moved to the Activity tab - switch to it before checking.
+			fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
 
 			await waitFor(() => {
 				const trendsSection = screen.getByTestId('section-duration-trends');
@@ -774,6 +879,13 @@ describe('UsageDashboard Responsive Layout', () => {
 
 		it('activity heatmap has horizontal scroll for year view', async () => {
 			render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+
+			await waitFor(() => {
+				expect(screen.getByTestId('usage-dashboard-content')).toBeInTheDocument();
+			});
+
+			// Activity heatmap lives on the Activity tab - switch to it before checking.
+			fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
 
 			await waitFor(() => {
 				const heatmapSection = screen.getByTestId('section-activity-heatmap');
@@ -822,14 +934,17 @@ describe('UsageDashboard Responsive Layout', () => {
 				expect(summaryCards).toHaveStyle({ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' });
 			});
 
-			// Switch to agents
-			const agentsTab = screen.getAllByRole('tab')[1];
+			// Switch to agents - its single section is now agent-overview-cards
+			// (the previous agent-comparison chart moved to the new "Agent
+			// Overview" tab). Look up by label, not index, since the order
+			// changed when "Agent Overview" was inserted above "Agents".
+			const agentsTab = screen.getByRole('tab', { name: 'Agents' });
 			act(() => {
 				agentsTab.click();
 			});
 
 			await waitFor(() => {
-				expect(screen.getByTestId('section-agent-comparison')).toBeInTheDocument();
+				expect(screen.getByTestId('section-agent-overview-cards')).toBeInTheDocument();
 				expect(screen.queryByTestId('summary-cards')).not.toBeInTheDocument();
 			});
 
@@ -882,6 +997,43 @@ describe('UsageDashboard Responsive Layout', () => {
 				expect(summaryCards).toHaveStyle({ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' });
 			});
 		});
+	});
+});
+
+// 48px of side padding is a seventh of a phone screen, spent on nothing. The
+// tab strip keeps its `px-6` because its first chip wants the indent; the
+// charts and cards do not.
+vi.mock('../../../../renderer/hooks/ui/useViewportBreakpoint', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../../../../renderer/hooks/ui/useViewportBreakpoint')>()),
+	usePhoneLayout: vi.fn(() => false),
+}));
+import { usePhoneLayout } from '../../../../renderer/hooks/ui/useViewportBreakpoint';
+
+describe('UsageDashboard content padding', () => {
+	// The suite above scopes its theme and close handler inside its own describe.
+	const theme = createTheme();
+	const onClose = vi.fn();
+
+	afterEach(() => {
+		vi.mocked(usePhoneLayout).mockReturnValue(false);
+	});
+
+	it('keeps the roomy padding on desktop', async () => {
+		vi.mocked(usePhoneLayout).mockReturnValue(false);
+		render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+
+		const scroller = await screen.findByTestId('usage-dashboard-scroller');
+		expect(scroller).toHaveClass('p-6');
+		expect(scroller).not.toHaveClass('px-3');
+	});
+
+	it('trims it on a phone', async () => {
+		vi.mocked(usePhoneLayout).mockReturnValue(true);
+		render(<UsageDashboardModal isOpen={true} onClose={onClose} theme={theme} />);
+
+		const scroller = await screen.findByTestId('usage-dashboard-scroller');
+		expect(scroller).toHaveClass('px-3', 'py-4');
+		expect(scroller).not.toHaveClass('p-6');
 	});
 });
 

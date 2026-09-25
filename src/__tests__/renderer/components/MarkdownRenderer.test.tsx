@@ -1,19 +1,29 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MarkdownRenderer } from '../../../renderer/components/MarkdownRenderer';
 
-// Mock react-syntax-highlighter
-vi.mock('react-syntax-highlighter', () => ({
-	Prism: ({ children, language }: { children: string; language?: string }) => (
-		<pre data-testid="syntax-highlighter" data-language={language}>
-			{children}
-		</pre>
-	),
+import { mockTheme } from '../../helpers/mockTheme';
+// Mock Shiki so CodeFence's async highlighting doesn't hit the real library.
+// The tests assert on the synchronous fallback render before highlighting completes.
+vi.mock('shiki', () => ({
+	createHighlighter: vi.fn(async () => ({
+		codeToHtml: () => '<pre class="shiki"><code>mocked</code></pre>',
+		getLoadedLanguages: () => [],
+		loadLanguage: async () => undefined,
+	})),
+	bundledLanguagesInfo: [],
+	bundledLanguagesAlias: {},
 }));
-vi.mock('react-syntax-highlighter/dist/esm/styles/prism', () => ({
-	vscDarkPlus: {},
-	vs: {},
+
+// Mock highlight.js so detection imports don't blow up in jsdom. Exposed as a
+// controllable spy (default: no confident guess) so individual tests can make
+// auto-detection succeed without affecting the others.
+const { mockHighlightAuto } = vi.hoisted(() => ({
+	mockHighlightAuto: vi.fn(() => ({ language: null, relevance: 0 })),
+}));
+vi.mock('highlight.js', () => ({
+	default: { highlightAuto: mockHighlightAuto },
 }));
 
 // Mock lucide-react icons
@@ -23,8 +33,13 @@ vi.mock('lucide-react', () => ({
 	ImageOff: () => <span data-testid="image-off-icon">ImageOff</span>,
 	Copy: () => <span data-testid="copy-icon">Copy</span>,
 	ExternalLink: () => <span data-testid="external-link-icon">ExternalLink</span>,
+	FolderOpen: () => <span data-testid="folder-open-icon">FolderOpen</span>,
+	Globe: () => <span data-testid="globe-icon">Globe</span>,
 	FileText: () => <span data-testid="file-text-icon">FileText</span>,
 	Target: () => <span data-testid="target-icon">Target</span>,
+	ChevronDown: () => <span data-testid="chevron-down-icon">ChevronDown</span>,
+	Search: () => <span data-testid="search-icon">Search</span>,
+	Check: () => <span data-testid="check-icon">Check</span>,
 }));
 
 // Mock window.maestro for IPC calls (LocalImage, shell, etc.)
@@ -36,6 +51,18 @@ const mockMaestro = {
 };
 Object.defineProperty(window, 'maestro', { value: mockMaestro, writable: true });
 
+// Mock openUrl so link-click tests can assert the exact options passed through
+// (specifically the translated `ctrlKey` modifier) without depending on the
+// settings store's useSystemBrowser default or whether an active session
+// exists. See bug #1060: cmd-click (metaKey) on macOS must translate to the
+// same ctrlKey:true inversion as ctrl-click.
+const { mockOpenUrl } = vi.hoisted(() => ({ mockOpenUrl: vi.fn() }));
+vi.mock('../../../renderer/utils/openUrl', () => ({
+	openUrl: mockOpenUrl,
+	openInSystemBrowser: vi.fn(),
+	openInMaestroBrowser: vi.fn(),
+}));
+
 // Mock fileExplorerStore for FileContextMenu's Document Graph action
 vi.mock('../../../renderer/stores/fileExplorerStore', () => ({
 	useFileExplorerStore: {
@@ -44,20 +71,6 @@ vi.mock('../../../renderer/stores/fileExplorerStore', () => ({
 		}),
 	},
 }));
-
-const mockTheme = {
-	id: 'test-theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgActivity: '#16213e',
-		bgSidebar: '#111',
-		textMain: '#eee',
-		textDim: '#888',
-		border: '#333',
-		accent: '#4a9eff',
-	},
-} as any;
 
 const defaultProps = {
 	content: '',
@@ -240,18 +253,31 @@ describe('MarkdownRenderer', () => {
 		it('renders fenced code block with language', () => {
 			const content = '```typescript\nconst x: number = 42;\n```';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter).toBeInTheDocument();
 			expect(highlighter!.getAttribute('data-language')).toBe('typescript');
-			expect(highlighter!.textContent).toBe('const x: number = 42;');
+			expect(highlighter!.querySelector('code')!.textContent).toBe('const x: number = 42;');
 		});
 
 		it('renders fenced code block without language', () => {
 			const content = '```\nsome code here\n```';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter).toBeInTheDocument();
 			expect(highlighter!.getAttribute('data-language')).toBe('text');
+		});
+
+		it('auto-detects the language for an untagged fence', async () => {
+			// Regression: a bare ``` fence used to resolve to `text` and skip
+			// detection entirely, leaving the block unhighlighted until the user
+			// manually picked a language. It must now guess from the body.
+			mockHighlightAuto.mockReturnValueOnce({ language: 'javascript', relevance: 10 });
+			const content = '```\nconsole.log("hello world");\n```';
+			const { container } = renderMd(content);
+			await waitFor(() => {
+				const highlighter = container.querySelector('[data-testid="code-fence"]');
+				expect(highlighter!.getAttribute('data-language')).toBe('javascript');
+			});
 		});
 
 		it('renders multiple code blocks', () => {
@@ -268,21 +294,21 @@ describe('MarkdownRenderer', () => {
 				'```',
 			].join('\n');
 			const { container } = renderMd(content);
-			const highlighters = container.querySelectorAll('[data-testid="syntax-highlighter"]');
+			const highlighters = container.querySelectorAll('[data-testid="code-fence"]');
 			expect(highlighters.length).toBe(2);
 		});
 
 		it('renders code block with special characters', () => {
 			const content = '```html\n<div class="foo">&amp; bar</div>\n```';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter).toBeInTheDocument();
 		});
 
 		it('renders code block with empty lines preserved', () => {
 			const content = '```\nline 1\n\nline 3\n```';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter!.textContent).toContain('line 1');
 			expect(highlighter!.textContent).toContain('line 3');
 		});
@@ -304,25 +330,27 @@ describe('MarkdownRenderer', () => {
 		});
 
 		it('renders various language identifiers', () => {
-			const languages = [
-				'js',
-				'ts',
-				'py',
-				'rust',
-				'go',
-				'bash',
-				'sh',
-				'json',
-				'yaml',
-				'sql',
-				'css',
-				'diff',
+			// CodeFence normalises common short tags to their canonical Shiki id
+			// on first paint via the local alias table.
+			const cases: Array<[string, string]> = [
+				['js', 'javascript'],
+				['ts', 'typescript'],
+				['py', 'python'],
+				['rust', 'rust'],
+				['go', 'go'],
+				['bash', 'bash'],
+				['sh', 'sh'],
+				['json', 'json'],
+				['yaml', 'yaml'],
+				['sql', 'sql'],
+				['css', 'css'],
+				['diff', 'diff'],
 			];
-			for (const lang of languages) {
-				const { container, unmount } = renderMd(`\`\`\`${lang}\ncode\n\`\`\``);
-				const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			for (const [fenceTag, expected] of cases) {
+				const { container, unmount } = renderMd(`\`\`\`${fenceTag}\ncode\n\`\`\``);
+				const highlighter = container.querySelector('[data-testid="code-fence"]');
 				expect(highlighter).toBeInTheDocument();
-				expect(highlighter!.getAttribute('data-language')).toBe(lang);
+				expect(highlighter!.getAttribute('data-language')).toBe(expected);
 				unmount();
 			}
 		});
@@ -349,12 +377,12 @@ describe('MarkdownRenderer', () => {
 			expect(link!.getAttribute('href')).toBe('https://example.com');
 		});
 
-		it('opens external links via shell.openExternal', () => {
-			mockMaestro.shell.openExternal.mockClear();
+		it('opens external links via openUrl', () => {
+			mockOpenUrl.mockClear();
 			const { container } = renderMd('[Link](https://example.com)');
 			const link = container.querySelector('a');
 			fireEvent.click(link!);
-			expect(mockMaestro.shell.openExternal).toHaveBeenCalledWith('https://example.com');
+			expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: false });
 		});
 
 		it('renders link with inline code in label', () => {
@@ -726,7 +754,7 @@ describe('MarkdownRenderer', () => {
 			].join('\n');
 			const { container } = renderMd(content);
 			expect(container.querySelector('ol')).toBeInTheDocument();
-			const highlighters = container.querySelectorAll('[data-testid="syntax-highlighter"]');
+			const highlighters = container.querySelectorAll('[data-testid="code-fence"]');
 			expect(highlighters.length).toBe(3);
 		});
 
@@ -773,7 +801,7 @@ describe('MarkdownRenderer', () => {
 				'> **Note:** This is a breaking change if callers depend on the throw behavior.',
 			].join('\n');
 			const { container } = renderMd(content);
-			expect(container.querySelector('[data-testid="syntax-highlighter"]')).toBeInTheDocument();
+			expect(container.querySelector('[data-testid="code-fence"]')).toBeInTheDocument();
 			expect(container.querySelector('blockquote')).toBeInTheDocument();
 			// Multiple inline code elements
 			const codes = container.querySelectorAll('code');
@@ -839,7 +867,7 @@ describe('MarkdownRenderer', () => {
 			const lines = Array.from({ length: 50 }, (_, i) => `  line ${i + 1}: doSomething(${i});`);
 			const content = '```javascript\nfunction big() {\n' + lines.join('\n') + '\n}\n```';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter).toBeInTheDocument();
 			expect(highlighter!.textContent).toContain('line 1');
 			expect(highlighter!.textContent).toContain('line 50');
@@ -884,7 +912,7 @@ describe('MarkdownRenderer', () => {
 		it('handles consecutive code blocks with no gap', () => {
 			const content = '```js\nfirst\n```\n```py\nsecond\n```';
 			const { container } = renderMd(content);
-			const highlighters = container.querySelectorAll('[data-testid="syntax-highlighter"]');
+			const highlighters = container.querySelectorAll('[data-testid="code-fence"]');
 			expect(highlighters.length).toBe(2);
 		});
 
@@ -905,7 +933,7 @@ describe('MarkdownRenderer', () => {
 		it('handles HTML entities in code blocks', () => {
 			const content = '```\n<div>&amp;</div>\n```';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter).toBeInTheDocument();
 		});
 
@@ -936,7 +964,7 @@ describe('MarkdownRenderer', () => {
 			const content = '### Example\n```ts\nconst x = 1;\n```';
 			const { container } = renderMd(content);
 			expect(container.querySelector('h3')).toBeInTheDocument();
-			expect(container.querySelector('[data-testid="syntax-highlighter"]')).toBeInTheDocument();
+			expect(container.querySelector('[data-testid="code-fence"]')).toBeInTheDocument();
 		});
 
 		it('handles paragraphs separated by single newline (should merge)', () => {
@@ -1004,9 +1032,9 @@ describe('MarkdownRenderer', () => {
 	});
 
 	// ========================================================================
-	// DOMPurify sanitization (allowRawHtml=true)
+	// Raw HTML sanitization (allowRawHtml=true, via rehype-sanitize at HAST level)
 	// ========================================================================
-	describe('DOMPurify sanitization with allowRawHtml', () => {
+	describe('raw HTML sanitization with allowRawHtml', () => {
 		it('strips script tags when allowRawHtml is true', () => {
 			const maliciousContent = 'Hello <script>alert("xss")</script> world';
 			const { container } = renderMd(maliciousContent, { allowRawHtml: true } as any);
@@ -1037,10 +1065,12 @@ describe('MarkdownRenderer', () => {
 			expect(container.querySelector('em')).toBeInTheDocument();
 		});
 
-		it('does not apply DOMPurify when allowRawHtml is false (default)', () => {
+		it('does not render raw HTML when allowRawHtml is explicitly false', () => {
 			const content = 'Hello <b>bold</b> world';
 			const { container } = renderMd(content, { allowRawHtml: false } as any);
 			expect(container.innerHTML).not.toContain('<script>');
+			// With raw HTML off, the <b> tag is not parsed into an element.
+			expect(container.querySelector('b')).toBeNull();
 		});
 
 		it('strips onload event handlers from body tags when allowRawHtml is true', () => {
@@ -1059,6 +1089,121 @@ describe('MarkdownRenderer', () => {
 			const maliciousContent = '<div style="background:url(javascript:alert(1))">styled</div>';
 			const { container } = renderMd(maliciousContent, { allowRawHtml: true } as any);
 			expect(container.innerHTML).not.toContain('javascript:');
+		});
+	});
+
+	// ========================================================================
+	// Inline SVG rendering (chat renders sanitized raw HTML by default)
+	// ========================================================================
+	describe('inline SVG', () => {
+		const showcaseSvg = [
+			'<svg width="360" height="80" viewBox="0 0 360 80" xmlns="http://www.w3.org/2000/svg">',
+			'  <defs>',
+			'    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">',
+			'      <stop offset="0%" stop-color="#7c3aed"/>',
+			'      <stop offset="100%" stop-color="#f59e0b"/>',
+			'    </linearGradient>',
+			'  </defs>',
+			'  <rect x="2" y="2" width="356" height="76" rx="16" fill="url(#g)"/>',
+			'  <circle cx="46" cy="40" r="22" fill="#fff"/>',
+			'  <text x="90" y="46" font-family="sans-serif" font-size="26" fill="#fff">Maestro</text>',
+			'</svg>',
+		].join('\n');
+
+		it('renders inline <svg> in chat without an explicit allowRawHtml prop', () => {
+			// Chat defaults allowRawHtml on, so agents can show diagrams/badges.
+			const { container } = renderMd(showcaseSvg);
+			const svg = container.querySelector('svg');
+			expect(svg).toBeInTheDocument();
+			expect(svg!.getAttribute('viewBox')).toBe('0 0 360 80');
+		});
+
+		it('preserves SVG geometry, gradient, and presentation attributes', () => {
+			const { container } = renderMd(showcaseSvg);
+			expect(container.querySelector('linearGradient#g')).toBeInTheDocument();
+			expect(container.querySelectorAll('stop').length).toBe(2);
+			const rect = container.querySelector('rect');
+			expect(rect!.getAttribute('fill')).toBe('url(#g)');
+			expect(rect!.getAttribute('rx')).toBe('16');
+			expect(container.querySelector('circle')!.getAttribute('cx')).toBe('46');
+			expect(container.querySelector('text')!.textContent).toBe('Maestro');
+		});
+
+		it('strips <script> and event handlers nested inside an SVG', () => {
+			const evil = '<svg onload="alert(1)"><script>alert(2)</script><rect fill="red"/></svg>';
+			const { container } = renderMd(evil);
+			expect(container.querySelector('svg')).toBeInTheDocument();
+			expect(container.querySelector('rect')).toBeInTheDocument();
+			expect(container.innerHTML).not.toContain('alert');
+			expect(container.innerHTML).not.toContain('onload');
+			expect(container.querySelector('script')).toBeNull();
+		});
+
+		it('does not corrupt inline code containing generics next to markdown', () => {
+			// Regression guard: the old raw-string DOMPurify pass turned `List<int>`
+			// into `List`. HAST-level sanitization must leave code text intact.
+			const { container } = renderMd('Use `List<int>` and `Map<string, Foo>` here.');
+			const codes = container.querySelectorAll('code');
+			expect(codes[0].textContent).toBe('List<int>');
+			expect(codes[1].textContent).toBe('Map<string, Foo>');
+		});
+	});
+
+	// ========================================================================
+	// GitHub-style alert callouts ([!NOTE] / [!TIP] / etc.)
+	// ========================================================================
+	describe('alert callouts', () => {
+		it('renders a [!NOTE] blockquote as a styled callout, not a plain blockquote', () => {
+			const { container } = renderMd('> [!NOTE]\n> Callouts render with real typography.');
+			const callout = container.querySelector('.markdown-alert[data-alert-type="note"]');
+			expect(callout).toBeInTheDocument();
+			// It is NOT a bare blockquote and the raw marker text is gone.
+			expect(container.querySelector('blockquote')).toBeNull();
+			expect(container.textContent).not.toContain('[!NOTE]');
+			expect(container.textContent).toContain('Callouts render with real typography.');
+			// The Note label + an inline SVG icon are present.
+			expect(callout!.querySelector('svg')).toBeInTheDocument();
+			expect(container.textContent).toContain('Note');
+		});
+
+		it('renders each of the five alert types with its icon and label', () => {
+			const cases: Array<[string, string, string]> = [
+				['NOTE', 'note', 'Note'],
+				['TIP', 'tip', 'Tip'],
+				['IMPORTANT', 'important', 'Important'],
+				['WARNING', 'warning', 'Warning'],
+				['CAUTION', 'caution', 'Caution'],
+			];
+			for (const [marker, type, label] of cases) {
+				const { container, unmount } = renderMd(`> [!${marker}]\n> body`);
+				const callout = container.querySelector(`.markdown-alert[data-alert-type="${type}"]`);
+				expect(callout).toBeInTheDocument();
+				expect(callout!.querySelector('svg')).toBeInTheDocument();
+				expect(callout!.textContent).toContain(label);
+				unmount();
+			}
+		});
+
+		it('leaves an ordinary blockquote as a plain blockquote', () => {
+			const { container } = renderMd('> Just a normal quote, nothing special.');
+			expect(container.querySelector('blockquote')).toBeInTheDocument();
+			expect(container.querySelector('.markdown-alert')).toBeNull();
+		});
+
+		it('does not convert a marker with a trailing inline title (GitHub-strict)', () => {
+			const { container } = renderMd('> [!WARNING] inline title\n> body');
+			expect(container.querySelector('.markdown-alert')).toBeNull();
+			expect(container.querySelector('blockquote')).toBeInTheDocument();
+			// Marker text is preserved verbatim since it was not treated as an alert.
+			expect(container.textContent).toContain('[!WARNING] inline title');
+		});
+
+		it('renders inline formatting inside a callout body', () => {
+			const { container } = renderMd('> [!TIP]\n> Use **bold** and `code` here.');
+			const callout = container.querySelector('.markdown-alert[data-alert-type="tip"]');
+			expect(callout).toBeInTheDocument();
+			expect(callout!.querySelector('strong')).toBeInTheDocument();
+			expect(callout!.querySelector('code')).toBeInTheDocument();
 		});
 	});
 
@@ -1083,9 +1228,12 @@ describe('MarkdownRenderer', () => {
 
 			expect(screen.getByText('Preview')).toBeInTheDocument();
 			expect(screen.getByText('Copy Path')).toBeInTheDocument();
+			expect(screen.getByText('Copy File Name')).toBeInTheDocument();
+			expect(screen.getByText(/^Reveal in /)).toBeInTheDocument();
 			expect(screen.getByText('Open in Default App')).toBeInTheDocument();
 			expect(screen.queryByText('Copy Link')).toBeNull();
-			expect(screen.queryByText('Open in Browser')).toBeNull();
+			expect(screen.queryByText('Open in Maestro Browser')).toBeNull();
+			expect(screen.queryByText('Open in System Browser')).toBeNull();
 		});
 
 		it('shows Document Graph option for markdown file references', () => {
@@ -1122,8 +1270,31 @@ describe('MarkdownRenderer', () => {
 		});
 	});
 
+	describe('file:// context menu (paths outside the project root)', () => {
+		it('shows the FILE menu, not the browser menu, for a file:// link', () => {
+			const { container } = render(
+				<MarkdownRenderer
+					{...defaultProps}
+					content="See [Ritto-DNA-Report.pdf](file:///Users/test/Documents/Ritto-DNA-Report.pdf)"
+					projectRoot="/Users/test/project"
+					onFileClick={vi.fn()}
+				/>
+			);
+			const link = container.querySelector('a[href^="file://"]');
+			expect(link).not.toBeNull();
+
+			fireEvent.contextMenu(link!, { clientX: 150, clientY: 250 });
+
+			expect(screen.getByText('Copy Path')).toBeInTheDocument();
+			expect(screen.getByText('Copy File Name')).toBeInTheDocument();
+			expect(screen.getByText(/^Reveal in /)).toBeInTheDocument();
+			expect(screen.queryByText('Copy Link')).toBeNull();
+			expect(screen.queryByText('Open in Maestro Browser')).toBeNull();
+		});
+	});
+
 	describe('link context menu', () => {
-		it('renders a context menu with Copy Link and Open in Browser on right-click', () => {
+		it('renders a context menu with Copy Link, Open in Maestro Browser, and Open in System Browser on right-click', () => {
 			const { container } = render(
 				<MarkdownRenderer
 					{...defaultProps}
@@ -1136,7 +1307,8 @@ describe('MarkdownRenderer', () => {
 			fireEvent.contextMenu(link!, { clientX: 100, clientY: 200 });
 
 			expect(screen.getByText('Copy Link')).toBeInTheDocument();
-			expect(screen.getByText('Open in Browser')).toBeInTheDocument();
+			expect(screen.getByText('Open in Maestro Browser')).toBeInTheDocument();
+			expect(screen.getByText('Open in System Browser')).toBeInTheDocument();
 		});
 
 		it('does not show context menu for links without href', () => {
@@ -1202,7 +1374,7 @@ describe('MarkdownRenderer', () => {
 			const { container } = renderMd(content);
 			const ol = container.querySelector('ol');
 			expect(ol).toBeInTheDocument();
-			const highlighters = container.querySelectorAll('[data-testid="syntax-highlighter"]');
+			const highlighters = container.querySelectorAll('[data-testid="code-fence"]');
 			expect(highlighters.length).toBe(2);
 		});
 
@@ -1231,7 +1403,7 @@ describe('MarkdownRenderer', () => {
 			// Using 4 backticks to wrap content that contains 3 backticks
 			const content = '````\n```\ninner code\n```\n````';
 			const { container } = renderMd(content);
-			const highlighter = container.querySelector('[data-testid="syntax-highlighter"]');
+			const highlighter = container.querySelector('[data-testid="code-fence"]');
 			expect(highlighter).toBeInTheDocument();
 		});
 
@@ -1259,6 +1431,402 @@ describe('MarkdownRenderer', () => {
 			const link = strong!.querySelector('a');
 			expect(link).toBeInTheDocument();
 			expect(link!.getAttribute('href')).toBe('https://example.com');
+		});
+	});
+
+	describe('chatLineBreaks (#622)', () => {
+		// Two lines joined by a single newline. CommonMark treats this as a soft
+		// break (rendered as a space) which flattens multi-line chat messages.
+		// chatLineBreaks must turn the soft break into a hard <br>.
+		const multilineContent = 'first line\nsecond line';
+
+		it('collapses single newlines by default (document semantics)', () => {
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={multilineContent} />
+			);
+			expect(container.querySelector('br')).toBeNull();
+		});
+
+		it('preserves single newlines as <br> when chatLineBreaks is enabled', () => {
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={multilineContent} chatLineBreaks />
+			);
+			expect(container.querySelector('br')).not.toBeNull();
+			expect(screen.getByText(/first line/)).toBeInTheDocument();
+			expect(screen.getByText(/second line/)).toBeInTheDocument();
+		});
+
+		it('keeps paragraph breaks (blank line) regardless of chatLineBreaks', () => {
+			const content = 'paragraph one\n\nparagraph two';
+
+			const defaultRender = render(<MarkdownRenderer {...defaultProps} content={content} />);
+			expect(defaultRender.container.querySelectorAll('p').length).toBe(2);
+			defaultRender.unmount();
+
+			const chatRender = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatLineBreaks />
+			);
+			expect(chatRender.container.querySelectorAll('p').length).toBe(2);
+		});
+	});
+
+	describe('rendered chat copy normalization (#1101)', () => {
+		function copyRenderedSelection(root: HTMLElement, configureRange?: (range: Range) => void) {
+			const range = document.createRange();
+			if (configureRange) {
+				configureRange(range);
+			} else {
+				range.selectNodeContents(root);
+			}
+			const selection = window.getSelection()!;
+			selection.removeAllRanges();
+			selection.addRange(range);
+
+			const clipboardData = { setData: vi.fn() };
+			fireEvent.copy(root, { clipboardData });
+			selection.removeAllRanges();
+			return clipboardData.setData;
+		}
+
+		it('copies prose soft wraps as spaces instead of literal newlines', () => {
+			const { container } = renderMd('This line was wrapped\nby terminal output.', {
+				chatLineBreaks: true,
+			});
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(container.querySelector('br')).not.toBeNull();
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'This line was wrapped by terminal output.'
+			);
+		});
+
+		it('rejoins URLs split by chat soft wraps', () => {
+			const { container } = renderMd(
+				'Open https://example.com/docs/really-long-\npath?query=1 when ready.',
+				{ chatLineBreaks: true }
+			);
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'Open https://example.com/docs/really-long-path?query=1 when ready.'
+			);
+		});
+
+		it('rejoins URLs split inside box-drawing text', () => {
+			const { container } = renderMd(
+				'│ https://example.com/docs/really-long- │\n│ path?query=1 │',
+				{ chatLineBreaks: true }
+			);
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'│ https://example.com/docs/really-long-path?query=1 │'
+			);
+		});
+
+		it('does not join a complete URL path to prose on the next soft-wrapped line', () => {
+			const { container } = renderMd(
+				'Open https://example.com/docs\nnow that the deploy is ready.',
+				{ chatLineBreaks: true }
+			);
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'Open https://example.com/docs now that the deploy is ready.'
+			);
+		});
+
+		it('preserves paragraph boundaries while removing soft wraps inside each paragraph', () => {
+			const { container } = renderMd(
+				'First paragraph\nwraps here.\n\nSecond paragraph\nwraps too.',
+				{
+					chatLineBreaks: true,
+				}
+			);
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'First paragraph wraps here.\n\nSecond paragraph wraps too.'
+			);
+		});
+
+		it('preserves repeated spaces in inline command text', () => {
+			const { container } = renderMd('Run `tool --flag  value` before retrying.', {
+				chatLineBreaks: true,
+			});
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'Run tool --flag  value before retrying.'
+			);
+		});
+
+		it('keeps list items on separate lines', () => {
+			const { container } = renderMd('- First item\n- Second item');
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'- First item\n- Second item'
+			);
+		});
+
+		it('keeps table cells tab-separated and rows line-separated', () => {
+			const { container } = renderMd(
+				['| Name | Status |', '| --- | --- |', '| Build | Passing |'].join('\n')
+			);
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).toHaveBeenCalledWith(
+				'text/plain',
+				'Name\tStatus\nBuild\tPassing'
+			);
+		});
+
+		it('does not override native copy for code block selections', () => {
+			const { container } = renderMd('```\nline one\nline two\n```');
+			const pre = container.querySelector('pre') as HTMLElement;
+
+			expect(copyRenderedSelection(pre)).not.toHaveBeenCalled();
+		});
+
+		it('does not override native copy for mixed prose and code block selections', () => {
+			const { container } = renderMd(
+				[
+					'Before the code:',
+					'',
+					'```ts',
+					'function example() {',
+					'    return 1;',
+					'}',
+					'```',
+					'',
+					'After the code.',
+				].join('\n')
+			);
+			const prose = container.querySelector('.prose') as HTMLElement;
+
+			expect(copyRenderedSelection(prose)).not.toHaveBeenCalled();
+		});
+
+		it('does not override native copy for selections crossing the markdown container boundary', () => {
+			const { container } = render(
+				<div>
+					<span data-testid="outside-copy-boundary">Outside</span>
+					<MarkdownRenderer
+						{...defaultProps}
+						content="Inside line one\ninside line two."
+						chatLineBreaks
+					/>
+				</div>
+			);
+			const outside = screen.getByTestId('outside-copy-boundary').firstChild as Text;
+			const prose = container.querySelector('.prose') as HTMLElement;
+			const paragraphText = prose.querySelector('p')!.firstChild as Text;
+
+			expect(
+				copyRenderedSelection(prose, (range) => {
+					range.setStart(outside, 0);
+					range.setEnd(paragraphText, paragraphText.textContent!.length);
+				})
+			).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('chatMath (#622)', () => {
+		it('does not parse $...$ as math by default (document semantics)', () => {
+			const content = 'price is $5 and $10 today';
+			const { container } = render(<MarkdownRenderer {...defaultProps} content={content} />);
+			// No KaTeX rendering - `$` characters stay as literal text
+			expect(container.querySelector('.katex')).toBeNull();
+			expect(container.textContent).toContain('$5');
+			expect(container.textContent).toContain('$10');
+		});
+
+		it('does NOT parse single-dollar $x$ as inline math even when chatMath is enabled', () => {
+			// `singleDollarTextMath: false` keeps single-dollar content as literal
+			// text so chat messages with `$5`, `$HOME`, etc. don't misparse.
+			const content = 'inline $x + y$ math';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex')).toBeNull();
+			expect(container.textContent).toContain('$x + y$');
+		});
+
+		it('preserves currency / shell-variable dollar text when chatMath is enabled', () => {
+			const content = 'It costs $5 and shipping is $3; my path is $HOME/bin';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex')).toBeNull();
+			expect(container.textContent).toContain('$5');
+			expect(container.textContent).toContain('$HOME/bin');
+		});
+
+		it('renders line-isolated $$...$$ as display math when chatMath is enabled', () => {
+			const content = 'before\n\n$$x + y$$\n\nafter';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			// Display math gets the `.katex-display` wrapper
+			expect(container.querySelector('.katex-display')).not.toBeNull();
+		});
+
+		it('promotes $$...$$ inside a blockquote to display math (nested containers)', () => {
+			const content = '> $$E = mc^2$$';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			const block = container.querySelector('blockquote .katex-display');
+			expect(block).not.toBeNull();
+		});
+
+		it('promotes $$...$$ inside a list item to display math (nested containers)', () => {
+			const content = '- $$E = mc^2$$';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			const block = container.querySelector('li .katex-display');
+			expect(block).not.toBeNull();
+		});
+
+		it('leaves $$...$$ as literal text when chatMath is disabled', () => {
+			const content = 'before\n\n$$x + y$$\n\nafter';
+			const { container } = render(<MarkdownRenderer {...defaultProps} content={content} />);
+			expect(container.querySelector('.katex')).toBeNull();
+			expect(container.textContent).toContain('$$x + y$$');
+		});
+
+		it('renders multi-line $$...$$ with delimiters hugging content as display math', () => {
+			// remark-math treats `$$` like a code fence: text after the opening
+			// `$$` is discarded as meta and the closing `$$` must be alone on its
+			// line. `normalizeChatDisplayMath` rewrites this common LLM form so it
+			// parses cleanly instead of failing. See #622.
+			const content = '$$\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}$$';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex-display')).not.toBeNull();
+		});
+
+		it('does not let an unterminated multi-line $$ block swallow following content', () => {
+			// The regression: a multi-line `$$...$$` whose close hugged content
+			// consumed the rest of the message into one invalid KaTeX blob.
+			const content =
+				'$$\\begin{aligned}\na &= b\n\\end{aligned}$$\n\nThis prose must still render.';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex-display')).not.toBeNull();
+			expect(container.textContent).toContain('This prose must still render.');
+		});
+
+		it('does not treat $$ inside a fenced code block as math', () => {
+			const content = '```\n$$not math$$\n```';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex')).toBeNull();
+			expect(container.textContent).toContain('$$not math$$');
+		});
+	});
+
+	// ========================================================================
+	// Bracket-delimited LaTeX math (\(...\) inline, \[...\] display)
+	// ========================================================================
+	describe('bracket LaTeX math (chatMath)', () => {
+		it('renders \\(...\\) as inline math (not a display block)', () => {
+			const content = 'Plug in and you get \\(N \\approx 1000\\) civilizations.';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex')).not.toBeNull();
+			// Inline, so no display wrapper.
+			expect(container.querySelector('.katex-display')).toBeNull();
+			// The raw delimiters are gone.
+			expect(container.textContent).not.toContain('\\(');
+		});
+
+		it('renders \\[...\\] as display math', () => {
+			const content = 'The identity \\[E = mc^2\\] is famous.';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex-display')).not.toBeNull();
+		});
+
+		it('renders multiple inline \\(...\\) spans in one sentence', () => {
+			const content = 'Compare \\(a^2\\) with \\(b^2\\) directly.';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(2);
+		});
+
+		it('keeps $5 and $HOME literal alongside \\(...\\) math', () => {
+			const content = 'It costs $5 but the ratio \\(r = 1/2\\) holds; path is $HOME/bin.';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex')).not.toBeNull();
+			expect(container.textContent).toContain('$5');
+			expect(container.textContent).toContain('$HOME/bin');
+		});
+
+		it('does not render \\(...\\) inside inline code as math', () => {
+			const content = 'The literal `\\(y\\)` stays as text.';
+			const { container } = render(
+				<MarkdownRenderer {...defaultProps} content={content} chatMath />
+			);
+			expect(container.querySelector('.katex')).toBeNull();
+			expect(container.textContent).toContain('\\(y\\)');
+		});
+
+		it('leaves \\(...\\) as literal text when chatMath is disabled', () => {
+			const content = 'Inline \\(x + y\\) here.';
+			const { container } = render(<MarkdownRenderer {...defaultProps} content={content} />);
+			expect(container.querySelector('.katex')).toBeNull();
+		});
+	});
+
+	// ========================================================================
+	// Cmd/Ctrl-click modifier handling (#1060)
+	// ========================================================================
+	describe('cmd/ctrl-click URL opening (#1060)', () => {
+		// openUrl inverts the default browser choice when ctrlKey is true. On
+		// macOS a Cmd+click sets metaKey (not ctrlKey), so the link handler must
+		// translate `metaKey || ctrlKey` into the ctrlKey option. Otherwise the
+		// modifier is silently dropped on macOS and the URL opens in the wrong
+		// target.
+		it('passes ctrlKey:true when Cmd (metaKey) is held', () => {
+			mockOpenUrl.mockClear();
+			const { container } = renderMd('[Link](https://example.com)');
+			const link = container.querySelector('a');
+			fireEvent.click(link!, { metaKey: true });
+			expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: true });
+		});
+
+		it('passes ctrlKey:true when Ctrl is held', () => {
+			mockOpenUrl.mockClear();
+			const { container } = renderMd('[Link](https://example.com)');
+			const link = container.querySelector('a');
+			fireEvent.click(link!, { ctrlKey: true });
+			expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: true });
+		});
+
+		it('passes ctrlKey:false on a plain click (no modifier)', () => {
+			mockOpenUrl.mockClear();
+			const { container } = renderMd('[Link](https://example.com)');
+			const link = container.querySelector('a');
+			fireEvent.click(link!);
+			expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: false });
 		});
 	});
 });

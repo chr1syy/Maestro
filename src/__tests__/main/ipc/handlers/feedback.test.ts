@@ -16,16 +16,24 @@ vi.mock('electron', () => ({
 		isPackaged: false,
 		getAppPath: () => '/mock/app',
 		getVersion: () => '0.15.3',
+		getPath: (name: string) => `/mock/${name}`,
 	},
 }));
 
-vi.mock('fs/promises', () => ({
-	default: {
+vi.mock('fs/promises', () => {
+	const mock = {
 		readFile: vi.fn(),
 		writeFile: vi.fn(),
 		unlink: vi.fn(),
-	},
-}));
+		mkdir: vi.fn(),
+		rename: vi.fn(),
+		access: vi.fn(),
+		readdir: vi.fn(),
+	};
+	// Provide both default (feedback.ts) and named (atomic-json-store) shapes,
+	// sharing the same vi.fn instances so assertions see every write.
+	return { ...mock, default: mock };
+});
 
 vi.mock('../../../../main/utils/logger', () => ({
 	logger: {
@@ -33,7 +41,12 @@ vi.mock('../../../../main/utils/logger', () => ({
 		error: vi.fn(),
 		warn: vi.fn(),
 		debug: vi.fn(),
+		getLogFilePath: vi.fn(() => '/mock/logs/maestro-2026-08-21.log'),
 	},
+}));
+
+vi.mock('../../../../main/prompt-manager', () => ({
+	getPrompt: vi.fn(() => 'FEEDBACK TEMPLATE\n\n## Environment Context\n{{ENVIRONMENT}}\n'),
 }));
 
 vi.mock('../../../../main/utils/cliDetection', () => ({
@@ -41,6 +54,15 @@ vi.mock('../../../../main/utils/cliDetection', () => ({
 	setCachedGhStatus: vi.fn(),
 	getCachedGhStatus: vi.fn(),
 	getExpandedEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+	resolveGhPath: vi.fn(async (customPath?: string) => customPath ?? 'gh'),
+}));
+
+vi.mock('../../../../main/stores/getters', () => ({
+	getSettingsStore: vi.fn(() => ({ get: vi.fn(() => '') })),
+}));
+
+vi.mock('../../../../main/stores/instances', () => ({
+	isInitialized: vi.fn(() => true),
 }));
 
 vi.mock('../../../../main/utils/execFile', () => ({
@@ -56,12 +78,15 @@ vi.mock('../../../../main/process-manager/utils/imageUtils', () => ({
 }));
 
 import fs from 'fs/promises';
+import os from 'os';
 import {
 	getCachedGhStatus,
 	isGhInstalled,
 	setCachedGhStatus,
 } from '../../../../main/utils/cliDetection';
 import { execFileNoThrow } from '../../../../main/utils/execFile';
+import { getSettingsStore } from '../../../../main/stores/getters';
+import { isInitialized } from '../../../../main/stores/instances';
 import {
 	cleanupTempFiles,
 	saveImageToTempFile,
@@ -91,6 +116,7 @@ describe('feedback handlers', () => {
 		const result = await handler!({});
 
 		expect(result).toEqual({ authenticated: true });
+		expect(getCachedGhStatus).toHaveBeenCalledWith('gh');
 		expect(isGhInstalled).not.toHaveBeenCalled();
 	});
 
@@ -423,7 +449,7 @@ describe('feedback handlers', () => {
 				author: { login: 'user' },
 			}));
 
-			// Each search returns 5 unique issues — with enough chunks this could exceed 10
+			// Each search returns 5 unique issues - with enough chunks this could exceed 10
 			let callCount = 0;
 			vi.mocked(execFileNoThrow).mockImplementation(async () => {
 				const batch = issues.map((iss) => ({
@@ -460,7 +486,594 @@ describe('feedback handlers', () => {
 		expect(execFileNoThrow).toHaveBeenCalledWith('gh', ['auth', 'status'], undefined, {
 			PATH: '/usr/bin',
 		});
-		expect(setCachedGhStatus).toHaveBeenCalledWith(true, true);
+		expect(setCachedGhStatus).toHaveBeenCalledWith('gh', true, true);
 		expect(result).toEqual({ authenticated: true });
+	});
+
+	// Regression: every gh call in the feedback handler used to hardcode the bare
+	// string 'gh', so Settings > GitHub CLI (gh) Path was silently ignored and
+	// feedback reported "not installed" on installs where gh is not on PATH.
+	it('honors a configured custom gh path when probing auth', async () => {
+		vi.mocked(getSettingsStore).mockReturnValue({
+			get: vi.fn(() => '/custom/bin/gh'),
+		} as any);
+		vi.mocked(getCachedGhStatus).mockReturnValue(null);
+		vi.mocked(execFileNoThrow).mockResolvedValue({
+			exitCode: 0,
+			stdout: '',
+			stderr: '',
+		} as any);
+
+		const handler = registeredHandlers.get('feedback:check-gh-auth');
+		const result = await handler!({});
+
+		// A configured path is authoritative, so `which`-based detection is skipped
+		// and the binary itself is probed instead.
+		expect(isGhInstalled).not.toHaveBeenCalled();
+		expect(execFileNoThrow).toHaveBeenCalledWith('/custom/bin/gh', ['--version'], undefined, {
+			PATH: '/usr/bin',
+		});
+		expect(execFileNoThrow).toHaveBeenCalledWith('/custom/bin/gh', ['auth', 'status'], undefined, {
+			PATH: '/usr/bin',
+		});
+		expect(result).toEqual({ authenticated: true });
+	});
+
+	// Regression: the cache was path-agnostic, so a verdict the renderer's
+	// checkGhCli() reached against the PATH-resolved gh answered for a configured
+	// custom path, and a failed custom-path probe answered for everyone else.
+	it('keys the cached verdict by the configured custom gh path', async () => {
+		vi.mocked(getSettingsStore).mockReturnValue({
+			get: vi.fn(() => '/custom/bin/gh'),
+		} as any);
+		vi.mocked(getCachedGhStatus).mockReturnValue(null);
+		vi.mocked(execFileNoThrow).mockResolvedValue({
+			exitCode: 1,
+			stdout: '',
+			stderr: 'no such file',
+		} as any);
+
+		const handler = registeredHandlers.get('feedback:check-gh-auth');
+		const result = await handler!({});
+
+		expect(getCachedGhStatus).toHaveBeenCalledWith('/custom/bin/gh');
+		expect(setCachedGhStatus).toHaveBeenCalledWith('/custom/bin/gh', false, false);
+		expect(result).toEqual({
+			authenticated: false,
+			message: expect.stringContaining('not installed'),
+		});
+	});
+
+	it('falls back to which-based detection when no custom path is configured', async () => {
+		vi.mocked(getSettingsStore).mockReturnValue({ get: vi.fn(() => '   ') } as any);
+		vi.mocked(getCachedGhStatus).mockReturnValue(null);
+		vi.mocked(isGhInstalled).mockResolvedValue(true);
+		vi.mocked(execFileNoThrow).mockResolvedValue({
+			exitCode: 0,
+			stdout: '',
+			stderr: '',
+		} as any);
+
+		const handler = registeredHandlers.get('feedback:check-gh-auth');
+		await handler!({});
+
+		// A whitespace-only setting means "unset", not a path.
+		expect(isGhInstalled).toHaveBeenCalled();
+		expect(execFileNoThrow).not.toHaveBeenCalledWith(
+			expect.anything(),
+			['--version'],
+			undefined,
+			expect.anything()
+		);
+	});
+
+	// The guard is a predicate rather than a try/catch so that a REAL settings
+	// failure still surfaces instead of silently running some other binary.
+	it('falls back to auto-detection when the stores are not initialised', async () => {
+		vi.mocked(isInitialized).mockReturnValue(false);
+		vi.mocked(getCachedGhStatus).mockReturnValue(null);
+		vi.mocked(isGhInstalled).mockResolvedValue(true);
+		vi.mocked(execFileNoThrow).mockResolvedValue({
+			exitCode: 0,
+			stdout: '',
+			stderr: '',
+		} as any);
+
+		const handler = registeredHandlers.get('feedback:check-gh-auth');
+		const result = await handler!({});
+
+		expect(getSettingsStore).not.toHaveBeenCalled();
+		expect(isGhInstalled).toHaveBeenCalled();
+		expect(result).toEqual({ authenticated: true });
+	});
+
+	describe('feedback:get-conversation-prompt', () => {
+		const getPrompt = () => registeredHandlers.get('feedback:get-conversation-prompt')!({});
+
+		it('runs diagnostics from the home directory, not the app cwd', async () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as any);
+
+			const result = await getPrompt();
+
+			// A Finder-launched .app has cwd '/', where no diagnostic resolves.
+			expect(result.cwd).toBe(os.homedir());
+		});
+
+		it('points the agent at today log when file logging is on', async () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as any);
+
+			const { environment, prompt } = await getPrompt();
+
+			expect(environment).toContain('/mock/logs/maestro-2026-08-21.log');
+			expect(environment).toContain('today, live');
+			expect(prompt).toContain(environment);
+			expect(prompt).not.toContain('{{ENVIRONMENT}}');
+		});
+
+		it('names the most recent log as stale when today has none', async () => {
+			vi.mocked(fs.access).mockRejectedValue(new Error('ENOENT'));
+			vi.mocked(fs.readdir).mockResolvedValue([
+				'maestro-2026-08-01.log',
+				'maestro-2026-08-19.log',
+				'notes.txt',
+			] as any);
+
+			const { environment } = await getPrompt();
+
+			expect(environment).toContain('maestro-2026-08-19.log');
+			expect(environment).toContain('stale');
+			expect(environment).not.toContain('maestro-2026-08-01.log');
+		});
+
+		it('tells the agent not to hunt for a log that does not exist', async () => {
+			vi.mocked(fs.access).mockRejectedValue(new Error('ENOENT'));
+			vi.mocked(fs.readdir).mockRejectedValue(new Error('ENOENT'));
+
+			const { environment } = await getPrompt();
+
+			expect(environment).toContain('Do not try to read one');
+		});
+
+		it('advertises maestro-cli only when it is actually installed', async () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as any);
+			registeredHandlers.clear();
+			registerFeedbackHandlers({
+				getProcessManager: () => mockProcessManager as any,
+				getMaestroCliManager: () =>
+					({
+						checkStatus: vi.fn().mockResolvedValue({
+							installed: true,
+							commandPath: '/usr/local/bin/maestro-cli',
+						}),
+					}) as any,
+			});
+
+			const { environment } = await getPrompt();
+
+			expect(environment).toContain('maestro-cli: available at /usr/local/bin/maestro-cli');
+		});
+
+		it('tells the agent to skip maestro-cli diagnostics when it is missing', async () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as any);
+			registeredHandlers.clear();
+			registerFeedbackHandlers({
+				getProcessManager: () => mockProcessManager as any,
+				getMaestroCliManager: () =>
+					({
+						checkStatus: vi.fn().mockResolvedValue({ installed: false, commandPath: null }),
+					}) as any,
+			});
+
+			const { environment } = await getPrompt();
+
+			expect(environment).toContain('maestro-cli: NOT installed');
+		});
+
+		it('still returns a prompt when the maestro-cli probe throws', async () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as any);
+			registeredHandlers.clear();
+			registerFeedbackHandlers({
+				getProcessManager: () => mockProcessManager as any,
+				getMaestroCliManager: () =>
+					({
+						checkStatus: vi.fn().mockRejectedValue(new Error('probe blew up')),
+					}) as any,
+			});
+
+			// A status probe failure must not take the whole feedback flow down.
+			const { environment } = await getPrompt();
+
+			expect(environment).toContain('Maestro version: 0.15.3');
+			expect(environment).not.toContain('maestro-cli:');
+		});
+	});
+});
+
+describe('feedback drafts handlers', () => {
+	const sampleDraft = {
+		id: 'draft-1',
+		suggestedName: 'App crashes on save',
+		category: 'bug_report' as const,
+		summary: 'App crashes on save',
+		confidence: 80,
+		agentType: 'claude-code',
+		messages: [{ role: 'user' as const, content: 'It crashes when I save', timestamp: 1000 }],
+		attachments: [
+			{ id: 'a1', name: 'shot.png', dataUrl: 'data:image/png;base64,abc123', sizeBytes: 42 },
+		],
+		inputDraft: 'more details to add',
+		includeDebugPackage: false,
+		createdAt: 1000,
+		updatedAt: 1000,
+	};
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		registeredHandlers.clear();
+		registerFeedbackHandlers({
+			getProcessManager: () => mockProcessManager as any,
+		});
+	});
+
+	it('registers the drafts list/save/delete handlers', () => {
+		expect(ipcMain.handle).toHaveBeenCalledWith('feedback:drafts:list', expect.any(Function));
+		expect(ipcMain.handle).toHaveBeenCalledWith('feedback:drafts:save', expect.any(Function));
+		expect(ipcMain.handle).toHaveBeenCalledWith('feedback:drafts:delete', expect.any(Function));
+	});
+
+	it('returns an empty list when the drafts file is missing', async () => {
+		vi.mocked(fs.readFile).mockRejectedValue(new Error('ENOENT'));
+
+		const handler = registeredHandlers.get('feedback:drafts:list');
+		const result = await handler!({});
+
+		expect(result).toEqual({ drafts: [] });
+	});
+
+	it('lists drafts sorted by updatedAt descending', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(
+			JSON.stringify({
+				drafts: [
+					{ ...sampleDraft, id: 'older', updatedAt: 100 },
+					{ ...sampleDraft, id: 'newer', updatedAt: 900 },
+				],
+			}) as any
+		);
+
+		const handler = registeredHandlers.get('feedback:drafts:list');
+		const result = await handler!({});
+
+		expect(result.drafts.map((d: { id: string }) => d.id)).toEqual(['newer', 'older']);
+	});
+
+	it('saves a new draft and writes it with timestamps', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:drafts:save');
+		const result = await handler!({}, sampleDraft);
+
+		expect(result.draft.id).toBe('draft-1');
+		expect(result.draft.updatedAt).toBeGreaterThan(0);
+
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-drafts.json'));
+		expect(writeCall).toBeDefined();
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.drafts).toHaveLength(1);
+		expect(written.drafts[0].id).toBe('draft-1');
+		expect(written.drafts[0].suggestedName).toBe('App crashes on save');
+		expect(written.drafts[0].attachments).toHaveLength(1);
+	});
+
+	it('upserts an existing draft instead of duplicating it', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [sampleDraft] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:drafts:save');
+		await handler!({}, { ...sampleDraft, summary: 'Updated summary' });
+
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-drafts.json'));
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.drafts).toHaveLength(1);
+		expect(written.drafts[0].id).toBe('draft-1');
+		expect(written.drafts[0].summary).toBe('Updated summary');
+		expect(written.drafts[0].createdAt).toBe(1000);
+	});
+
+	it('deletes a draft by id and writes the remaining list', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [sampleDraft] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:drafts:delete');
+		const result = await handler!({}, { id: 'draft-1' });
+
+		expect(result).toEqual({});
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-drafts.json'));
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.drafts).toEqual([]);
+	});
+
+	it('persists and clamps the submit-ready response on save', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:drafts:save');
+		const result = await handler!(
+			{},
+			{
+				...sampleDraft,
+				lastResponse: {
+					confidence: 95,
+					ready: true,
+					message: 'Looks good',
+					category: 'bug_report',
+					summary: 'Crash on save',
+					structured: {
+						expectedBehavior: 'no crash',
+						actualBehavior: 'crash',
+						reproductionSteps: 'save',
+						additionalContext: '',
+					},
+				},
+			}
+		);
+
+		expect(result.draft.lastResponse?.ready).toBe(true);
+		expect(result.draft.lastResponse?.structured.expectedBehavior).toBe('no crash');
+
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-drafts.json'));
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.drafts[0].lastResponse.ready).toBe(true);
+		expect(written.drafts[0].lastResponse.structured.actualBehavior).toBe('crash');
+	});
+
+	it('normalizes a malformed lastResponse to null', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:drafts:save');
+		const result = await handler!({}, { ...sampleDraft, lastResponse: 'not-an-object' });
+
+		expect(result.draft.lastResponse).toBeNull();
+	});
+
+	it('serializes overlapping saves so neither draft is lost (read-modify-write race)', async () => {
+		// Back the mocked fs with an in-memory file so an unserialized
+		// read-modify-write would clobber: both saves would read the empty base
+		// and the later write would drop the earlier draft.
+		const norm = (p: unknown): string => String(p).replace(/\\/g, '/');
+		const draftsFile = '/mock/userData/feedback-drafts.json';
+		const files = new Map<string, string>([[draftsFile, JSON.stringify({ drafts: [] })]]);
+		const tmps = new Map<string, string>();
+		vi.mocked(fs.mkdir).mockResolvedValue(undefined as any);
+		vi.mocked(fs.readFile).mockImplementation(async (p: any) => {
+			await new Promise((r) => setTimeout(r, 0));
+			const content = files.get(norm(p));
+			if (content === undefined) throw new Error('ENOENT');
+			return content as any;
+		});
+		vi.mocked(fs.writeFile).mockImplementation(async (p: any, data: any) => {
+			await new Promise((r) => setTimeout(r, 0));
+			tmps.set(norm(p), String(data));
+			return undefined as any;
+		});
+		vi.mocked(fs.rename).mockImplementation(async (from: any, to: any) => {
+			const content = tmps.get(norm(from));
+			if (content !== undefined) files.set(norm(to), content);
+			tmps.delete(norm(from));
+			return undefined as any;
+		});
+
+		const save = registeredHandlers.get('feedback:drafts:save');
+		await Promise.all([
+			save!({}, { ...sampleDraft, id: 'first' }),
+			save!({}, { ...sampleDraft, id: 'second' }),
+		]);
+
+		const ids = JSON.parse(String(files.get(draftsFile)))
+			.drafts.map((d: { id: string }) => d.id)
+			.sort();
+		expect(ids).toEqual(['first', 'second']);
+	});
+
+	it('keeps the newest messages when trimming beyond the cap', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+
+		// 205 messages: only the last 200 (MAX_DRAFT_MESSAGES) survive, and they
+		// must be the newest ones, not the oldest. Trimming from the front would
+		// drop a user's most recent exchange on resume.
+		const messages = Array.from({ length: 205 }, (_, i) => ({
+			role: 'user' as const,
+			content: `msg-${i}`,
+			timestamp: 1000 + i,
+		}));
+
+		const handler = registeredHandlers.get('feedback:drafts:save');
+		const result = await handler!({}, { ...sampleDraft, messages });
+
+		expect(result.draft.messages).toHaveLength(200);
+		// Oldest five (msg-0..msg-4) dropped; newest message survives at the end.
+		expect(result.draft.messages[0].content).toBe('msg-5');
+		expect(result.draft.messages[199].content).toBe('msg-204');
+	});
+
+	it('preserves long unsent composer input up to the draft message cap', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ drafts: [] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:drafts:save');
+
+		// 8000 chars exceeds the 5000 field cap but fits the 20000 message cap:
+		// composer text in that range must survive a save/resume round-trip
+		// instead of being silently truncated to the field limit.
+		const longInput = 'a'.repeat(8000);
+		const result = await handler!({}, { ...sampleDraft, inputDraft: longInput });
+		expect(result.draft.inputDraft).toHaveLength(8000);
+
+		// Beyond the message cap it is still clamped to MAX_DRAFT_MESSAGE_LENGTH.
+		const hugeInput = 'a'.repeat(25000);
+		const clamped = await handler!({}, { ...sampleDraft, inputDraft: hugeInput });
+		expect(clamped.draft.inputDraft).toHaveLength(20000);
+	});
+
+	const sampleIssue = {
+		number: 101,
+		url: 'https://github.com/RunMaestro/Maestro/issues/101',
+		title: 'Bug: Feedback modal crashes',
+		category: 'bug_report' as const,
+		submittedAt: 1000,
+		state: 'open' as const,
+		lastCheckedAt: 1000,
+	};
+
+	it('registers the submitted-issue history handlers', () => {
+		expect(ipcMain.handle).toHaveBeenCalledWith('feedback:issues:list', expect.any(Function));
+		expect(ipcMain.handle).toHaveBeenCalledWith('feedback:issues:delete', expect.any(Function));
+		expect(ipcMain.handle).toHaveBeenCalledWith(
+			'feedback:issues:refresh-states',
+			expect.any(Function)
+		);
+	});
+
+	it('returns an empty issue history when the file is missing', async () => {
+		vi.mocked(fs.readFile).mockRejectedValue(new Error('ENOENT'));
+
+		const handler = registeredHandlers.get('feedback:issues:list');
+		const result = await handler!({});
+
+		expect(result).toEqual({ issues: [] });
+	});
+
+	it('lists submitted issues sorted by submittedAt descending', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(
+			JSON.stringify({
+				issues: [
+					{ ...sampleIssue, number: 1, submittedAt: 100 },
+					{ ...sampleIssue, number: 2, submittedAt: 900 },
+				],
+			}) as any
+		);
+
+		const handler = registeredHandlers.get('feedback:issues:list');
+		const result = await handler!({});
+
+		expect(result.issues.map((i: { number: number }) => i.number)).toEqual([2, 1]);
+	});
+
+	it('deletes a submitted issue by number and writes the remaining list', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(
+			JSON.stringify({ issues: [sampleIssue, { ...sampleIssue, number: 202 }] }) as any
+		);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+
+		const handler = registeredHandlers.get('feedback:issues:delete');
+		const result = await handler!({}, { number: 101 });
+
+		expect(result).toEqual({});
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-submitted-issues.json'));
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.issues.map((i: { number: number }) => i.number)).toEqual([202]);
+	});
+
+	it('refresh-states updates open/closed from a gh GraphQL response', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ issues: [sampleIssue] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+		vi.mocked(execFileNoThrow).mockResolvedValue({
+			exitCode: 0,
+			stdout: JSON.stringify({ data: { repository: { i101: { number: 101, state: 'CLOSED' } } } }),
+			stderr: '',
+		} as any);
+
+		const handler = registeredHandlers.get('feedback:issues:refresh-states');
+		const result = await handler!({});
+
+		expect(result.issues[0].state).toBe('closed');
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-submitted-issues.json'));
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.issues[0].state).toBe('closed');
+	});
+
+	it('refresh-states returns the cached list unchanged when gh fails', async () => {
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ issues: [sampleIssue] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(execFileNoThrow).mockResolvedValue({
+			exitCode: 1,
+			stdout: '',
+			stderr: 'gh: not authenticated',
+		} as any);
+
+		const handler = registeredHandlers.get('feedback:issues:refresh-states');
+		const result = await handler!({});
+
+		expect(result.issues[0].state).toBe('open');
+		// No persistence when the refresh could not resolve any state.
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-submitted-issues.json'));
+		expect(writeCall).toBeUndefined();
+	});
+
+	it('records a submitted issue after a successful submit', async () => {
+		// The issue-history file starts empty; the submit path appends to it.
+		vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ issues: [] }) as any);
+		vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+		vi.mocked(fs.unlink).mockResolvedValue(undefined);
+		vi.mocked(fs.rename).mockResolvedValue(undefined);
+		// Args-aware so the test does not depend on the exact pre-create gh call
+		// count: the issue-create call returns the URL, everything else succeeds.
+		vi.mocked(execFileNoThrow).mockImplementation((_cmd: any, args: any) => {
+			const argv: string[] = Array.isArray(args) ? args : [];
+			if (argv.includes('issue') && argv.includes('create')) {
+				return Promise.resolve({
+					exitCode: 0,
+					stdout: 'https://github.com/RunMaestro/Maestro/issues/456',
+					stderr: '',
+				} as any);
+			}
+			return Promise.resolve({ exitCode: 0, stdout: '{}', stderr: '' } as any);
+		});
+
+		const handler = registeredHandlers.get('feedback:submit');
+		const result = await handler!(
+			{},
+			{
+				sessionId: 'session-1',
+				category: 'bug_report',
+				summary: 'Something broke',
+				expectedBehavior: 'It should work.',
+				details: 'It did not work.',
+				reproductionSteps: '1. Do the thing\n2. Watch it break',
+			}
+		);
+
+		expect(result.success).toBe(true);
+		const writeCall = vi
+			.mocked(fs.writeFile)
+			.mock.calls.find(([p]) => String(p).includes('feedback-submitted-issues.json'));
+		expect(writeCall).toBeDefined();
+		const written = JSON.parse(String(writeCall?.[1]));
+		expect(written.issues).toHaveLength(1);
+		expect(written.issues[0].number).toBe(456);
+		expect(written.issues[0].state).toBe('open');
+		expect(written.issues[0].url).toBe('https://github.com/RunMaestro/Maestro/issues/456');
 	});
 });

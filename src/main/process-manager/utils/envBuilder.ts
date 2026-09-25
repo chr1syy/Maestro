@@ -1,8 +1,16 @@
 import * as os from 'os';
 import * as path from 'path';
 import { STANDARD_UNIX_PATHS } from '../constants';
-import { detectNodeVersionManagerBinPaths, buildExpandedPath } from '../../../shared/pathUtils';
+import { detectNodeVersionManagerBinPaths } from '../../../shared/pathUtils';
 import { isWindows } from '../../../shared/platformDetection';
+import {
+	DEFAULT_QUERY_SOURCE,
+	QUERY_SOURCE_ENV_VAR,
+	type QuerySource,
+} from '../../../shared/querySource';
+import { buildSpawnPath } from '../../utils/spawnPath';
+import { isBlankEnvKey, isBlankEnvValue } from '../../../shared/agentEnvironment';
+import { CALLER_AGENT_ID_ENV_VAR, CALLER_TAB_ID_ENV_VAR } from '../../../shared/agentDelegation';
 
 /**
  * Build the base PATH for macOS/Linux with detected Node version manager paths.
@@ -35,8 +43,8 @@ export function buildUnixBasePath(): string {
  *
  * Platform-specific behavior:
  * - **Windows**: Inherits full parent environment + TERM setting
- * - **Unix/Linux/macOS**: Creates a minimal clean environment with essential variables and
- *   an expanded PATH that includes Node version manager paths
+ * - **Unix/Linux/macOS**: Inherits full parent environment with Electron/IDE variables stripped,
+ *   TERM forced to xterm-256color, and an expanded PATH that includes Node version manager paths
  *
  * @param {Record<string, string>} [shellEnvVars] - Optional custom environment variables to merge.
  *        These override process defaults. Supports `~/` path expansion (e.g., `~/workspace`).
@@ -59,7 +67,8 @@ export function buildUnixBasePath(): string {
  * // WORKSPACE will expand to /Users/john/projects (with path expansion)
  *
  * @note Path expansion (`~/` → home directory) is applied to all values
- * @note Terminal sessions do NOT strip Electron/IDE variables (full environment inherited on Windows)
+ * @note On Windows, the full environment is inherited without stripping. On Unix/Linux/macOS,
+ *       Electron/IDE variables listed in STRIPPED_ENV_VARS are removed to avoid shell/plugin issues.
  */
 export function buildPtyTerminalEnv(shellEnvVars?: Record<string, string>): NodeJS.ProcessEnv {
 	let env: NodeJS.ProcessEnv;
@@ -70,15 +79,45 @@ export function buildPtyTerminalEnv(shellEnvVars?: Record<string, string>): Node
 			TERM: 'xterm-256color',
 		};
 	} else {
-		const basePath = buildUnixBasePath();
+		// Use the full expanded PATH so common user install locations
+		// (~/.local/bin, ~/.claude/local, ~/.opencode/bin, Homebrew, npm-global, etc.)
+		// are available even when the user's shell doesn't source an rc file that
+		// augments PATH. bash falls through to .bashrc for login+interactive on
+		// Debian, but zsh only sources .zprofile/.zshrc if they exist - users
+		// without those would otherwise see `command not found` for tools like
+		// `claude` and `codex` that live in ~/.local/bin.
+		// Use buildSpawnPath() so the user's cached login-shell PATH is also
+		// included - covers custom node/python installs outside the standard
+		// version-manager paths we hardcode in buildExpandedPath().
 		env = {
-			HOME: process.env.HOME,
-			USER: process.env.USER,
-			SHELL: process.env.SHELL,
+			...process.env,
 			TERM: 'xterm-256color',
 			LANG: process.env.LANG || 'en_US.UTF-8',
-			PATH: basePath,
+			PATH: buildSpawnPath(),
 		};
+		for (const key of STRIPPED_ENV_VARS) {
+			delete env[key];
+		}
+	}
+
+	// A Command Terminal is a shell the USER drives, not an agent turn, so it
+	// must never carry the query-source marker. It can arrive two ways: Maestro
+	// itself launched from an agent shell that had it set (the normal case in
+	// development), or the Windows branch above, which inherits process.env
+	// wholesale and strips nothing. Deleted unconditionally rather than added to
+	// STRIPPED_ENV_VARS, because buildChildProcessEnv() sets this variable on
+	// purpose and must keep doing so.
+	delete env[QUERY_SOURCE_ENV_VAR];
+	// Same for the caller identity: a dispatch typed into a terminal is the user's,
+	// and attributing it to whichever agent launched Maestro would be a lie.
+	delete env[CALLER_AGENT_ID_ENV_VAR];
+	delete env[CALLER_TAB_ID_ENV_VAR];
+
+	// Vim arrow-key ergonomics: when users launch `vi`/`vim` with distro defaults
+	// that force compatible mode, insert-mode arrows can degrade to literal ABCD.
+	// Provide a safe default for terminal sessions, but never override explicit user config.
+	if (!env.VIMINIT) {
+		env.VIMINIT = process.env.VIMINIT || 'set nocompatible | set esckeys';
 	}
 
 	// Apply custom shell environment variables
@@ -109,17 +148,32 @@ export function buildPtyTerminalEnv(shellEnvVars?: Record<string, string>): Node
  * @see buildChildProcessEnv() for where these are applied
  */
 const STRIPPED_ENV_VARS = [
-	// Electron internals — can cause Electron-based CLIs (e.g. Claude Code) to
+	// Electron internals - can cause Electron-based CLIs (e.g. Claude Code) to
 	// misidentify their execution context
 	'ELECTRON_RUN_AS_NODE',
 	'ELECTRON_NO_ASAR',
 	'ELECTRON_EXTRA_LAUNCH_ARGS',
-	// VSCode / Claude Code extension markers — when inherited, agents may use
+	// VSCode / Claude Code extension markers - when inherited, agents may use
 	// IDE-specific credentials or API paths instead of their own CLI auth
 	'CLAUDECODE',
 	'CLAUDE_CODE_ENTRYPOINT',
 	'CLAUDE_AGENT_SDK_VERSION',
 	'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+	// Claude session-identity markers. If Maestro itself was launched from
+	// within a Claude session (e.g. `claude` spawned the app, or a dev shell
+	// inherited them), these leak into spawned claude-code turns and the
+	// maestro-p TUI it drives, making that child claude run as a NESTED session
+	// that never writes its own JSONL transcript. maestro-p reads only the
+	// JSONL, so the run times out with an empty result and no History entry is
+	// recorded. Strip them here so no spawn surface forwards them; maestro-p
+	// also strips them itself as a second line of defense.
+	'CLAUDE_CODE_SESSION_ID',
+	'CLAUDE_CODE_CHILD_SESSION',
+	// Caller identity inherited from whatever launched Maestro (an agent shell, in
+	// development). The real identity is re-applied from the session layer, which
+	// is merged after this list is stripped, so only a stale inherited copy dies.
+	CALLER_AGENT_ID_ENV_VAR,
+	CALLER_TAB_ID_ENV_VAR,
 	// Maestro's own NODE_ENV should not leak to agents
 	'NODE_ENV',
 ];
@@ -196,10 +250,57 @@ const STRIPPED_ENV_VARS = [
  * @see STRIPPED_ENV_VARS - List of variables that are always removed
  * @see buildPtyTerminalEnv() - Similar function for PTY terminal environments
  */
+/**
+ * Collect the environment variables that Maestro is explicitly setting on a
+ * spawned process, in the same precedence order as the build* helpers below
+ * (global → session-level, with session overriding global). The MAESTRO_SESSION_RESUMED
+ * marker is included when applicable. Inherited system env vars are deliberately
+ * excluded - this is the set the user can act on (Settings → Shell Configuration
+ * and per-agent / per-session overrides), surfaced in the Process Details modal.
+ *
+ * Applies `~/` path expansion the same way the build helpers do.
+ */
+export function collectMaestroEnvVars(
+	globalShellEnvVars?: Record<string, string>,
+	customEnvVars?: Record<string, string>,
+	isResuming?: boolean,
+	querySource?: QuerySource
+): Record<string, string> {
+	const home = os.homedir();
+	const expand = (value: string): string =>
+		value.startsWith('~/') ? path.join(home, value.slice(2)) : value;
+	const result: Record<string, string> = {};
+	// Merge first, strip blanks second: a blank at the session layer has to be
+	// able to cancel a value set globally, which it cannot do if it is dropped
+	// before the merge. See stripBlankEnvVars() for why blanks are not exported.
+	const merged: Record<string, string> = {
+		...(globalShellEnvVars || {}),
+		...(customEnvVars || {}),
+	};
+	for (const [key, value] of Object.entries(merged)) {
+		// An unnamed row is a half-finished editor entry, not a variable.
+		if (isBlankEnvKey(key) || isBlankEnvValue(value)) continue;
+		result[key] = expand(value);
+	}
+	if (isResuming) {
+		result.MAESTRO_SESSION_RESUMED = '1';
+	}
+	// Only present when the caller resolved one. Terminal PTYs build their env
+	// through buildPtyTerminalEnv(), which does not stamp the marker, and this
+	// list is meant to mirror what the process actually got - not to advertise a
+	// variable the user would then fail to find.
+	if (querySource) {
+		result[QUERY_SOURCE_ENV_VAR] = querySource;
+	}
+	return result;
+}
+
 export function buildChildProcessEnv(
 	customEnvVars?: Record<string, string>,
 	isResuming?: boolean,
-	globalShellEnvVars?: Record<string, string>
+	globalShellEnvVars?: Record<string, string>,
+	extraPathDirs?: string[],
+	querySource?: QuerySource
 ): NodeJS.ProcessEnv {
 	const env = { ...process.env };
 
@@ -210,8 +311,23 @@ export function buildChildProcessEnv(
 		delete env[key];
 	}
 
-	// Use the shared expanded PATH
-	env.PATH = buildExpandedPath();
+	// Build PATH that merges Maestro's hardcoded paths with the user's cached
+	// login-shell PATH and any caller-supplied dirs (typically the parent dir
+	// of the detected agent binary, so its shebang's interpreter resolves).
+	env.PATH = buildSpawnPath(extraPathDirs);
+
+	// Never let a Maestro-spawned agent hijack the user's browser. When an
+	// interactive claude (the maestro-p TUI) finds its OAuth token needs a
+	// refresh, its URL opener execs `$BROWSER <authorize-url>` - and if BROWSER
+	// is unset it falls back to the OS default opener - popping a real browser
+	// tab mid-turn even though the turn itself still succeeds on the current
+	// access token. Force BROWSER to a no-op so that self-heal can never open a
+	// tab; a genuinely dead token then surfaces as Maestro's normal auth-expired
+	// error instead. Set BEFORE the global/session loops so a user who *wants*
+	// an explicit BROWSER (Settings → Shell Configuration or a per-session
+	// override) still wins. Mirrors the guard in claude-usage-sampler.ts; a
+	// value that can't be exec'd (e.g. on Windows) still fails closed = no tab.
+	env.BROWSER = '/usr/bin/true';
 
 	if (isResuming) {
 		env.MAESTRO_SESSION_RESUMED = '1';
@@ -219,20 +335,34 @@ export function buildChildProcessEnv(
 		delete env.MAESTRO_SESSION_RESUMED;
 	}
 
-	// Apply global shell environment variables (lower priority than session overrides)
+	// Apply the user-editable layers: global shell vars first, then session-level
+	// overrides on top. Merged before they are applied so a blank session value
+	// can cancel a global one instead of being overwritten by it.
 	const home = os.homedir();
-	if (globalShellEnvVars && Object.keys(globalShellEnvVars).length > 0) {
-		for (const [key, value] of Object.entries(globalShellEnvVars)) {
-			env[key] = value.startsWith('~/') ? path.join(home, value.slice(2)) : value;
+	const userEnvVars: Record<string, string> = {
+		...(globalShellEnvVars || {}),
+		...(customEnvVars || {}),
+	};
+	for (const [key, value] of Object.entries(userEnvVars)) {
+		// An unnamed row is a half-finished editor entry, not a variable, so it
+		// neither sets nor cancels anything.
+		if (isBlankEnvKey(key)) continue;
+		// A blank value means "do not set this variable" - so it has to remove any
+		// inherited value too, not just skip the assignment. Exporting `FOO=`
+		// instead is what made a blank CLAUDE_CONFIG_DIR crash the agent inside
+		// mkdir('') before it ever reached the provider.
+		if (isBlankEnvValue(value)) {
+			delete env[key];
+			continue;
 		}
+		env[key] = value.startsWith('~/') ? path.join(home, value.slice(2)) : value;
 	}
 
-	// Apply session-level custom environment variables (highest priority - override global)
-	if (customEnvVars && Object.keys(customEnvVars).length > 0) {
-		for (const [key, value] of Object.entries(customEnvVars)) {
-			env[key] = value.startsWith('~/') ? path.join(home, value.slice(2)) : value;
-		}
-	}
+	// Who asked for this turn. Stamped after the user-editable layers rather than
+	// before them: this is Maestro stating a fact about the spawn, not a default
+	// the user is offering an opinion on, and a stray global var of the same name
+	// would otherwise silently mislabel every turn on the machine.
+	env[QUERY_SOURCE_ENV_VAR] = querySource ?? DEFAULT_QUERY_SOURCE;
 
 	return env;
 }

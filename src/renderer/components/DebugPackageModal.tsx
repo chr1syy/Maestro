@@ -9,11 +9,16 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Package, Check, Loader2, FolderOpen, AlertCircle, Copy } from 'lucide-react';
+import { Package, Check, FolderOpen, AlertCircle, Copy } from 'lucide-react';
+import { Spinner } from './ui/Spinner';
 import type { Theme } from '../types';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { Modal, ModalFooter } from './ui/Modal';
 import { notifyToast } from '../stores/notificationStore';
+import { flashCopiedToClipboard } from '../utils/flashCopiedToClipboard';
+import { safeClipboardWrite } from '../utils/clipboard';
+import { logger } from '../utils/logger';
+import { createDebugPackage } from '../services/debugPackage';
 
 interface DebugPackageModalProps {
 	theme: Theme;
@@ -57,7 +62,7 @@ export function DebugPackageModal({ theme, isOpen, onClose }: DebugPackageModalP
 					setLoading(false);
 				})
 				.catch((err) => {
-					console.error('[DebugPackageModal] Failed to load preview:', err);
+					logger.error('[DebugPackageModal] Failed to load preview:', undefined, err);
 					// Use fallback categories if preview fails
 					setCategories([
 						{ id: 'system', name: 'System Information', included: true, sizeEstimate: '< 1 KB' },
@@ -101,7 +106,7 @@ export function DebugPackageModal({ theme, isOpen, onClose }: DebugPackageModalP
 				includeBatchState: categories.find((c) => c.id === 'batchState')?.included ?? true,
 			};
 
-			const result = await window.maestro.debug.createPackage(options);
+			const result = await createDebugPackage(options);
 
 			if (result.cancelled) {
 				setGenerationState('idle');
@@ -126,7 +131,7 @@ export function DebugPackageModal({ theme, isOpen, onClose }: DebugPackageModalP
 				});
 			}
 		} catch (err) {
-			console.error('[DebugPackageModal] Generation failed:', err);
+			logger.error('[DebugPackageModal] Generation failed:', undefined, err);
 			setGenerationState('error');
 			setErrorMessage(err instanceof Error ? err.message : 'Unknown error');
 			notifyToast({
@@ -155,16 +160,9 @@ export function DebugPackageModal({ theme, isOpen, onClose }: DebugPackageModalP
 	// Copy file path to clipboard
 	const handleCopyPath = useCallback(() => {
 		if (resultPath) {
-			navigator.clipboard
-				.writeText(resultPath)
-				.then(() => {
-					notifyToast({
-						type: 'success',
-						title: 'Copied',
-						message: 'File path copied to clipboard',
-					});
-				})
-				.catch(console.error);
+			void safeClipboardWrite(resultPath).then((copied) => {
+				if (copied) flashCopiedToClipboard(resultPath, 'File Path Copied');
+			});
 		}
 	}, [resultPath]);
 
@@ -232,18 +230,19 @@ export function DebugPackageModal({ theme, isOpen, onClose }: DebugPackageModalP
 				}}
 			>
 				<p style={{ color: theme.colors.textMain }}>
-					<strong>Privacy:</strong> This package does NOT include your conversations, API keys, or
-					file contents. All paths are sanitized to remove usernames.
+					<strong>Privacy:</strong> This package is safe to attach to a public issue. It does NOT
+					include your conversations, API keys, or file contents, and it carries no username,
+					computer name, file paths, or project names.
 				</p>
 			</div>
 
 			{loading ? (
 				<div className="flex items-center justify-center py-8">
-					<Loader2 className="w-6 h-6 animate-spin" style={{ color: theme.colors.accent }} />
+					<Spinner size={24} color={theme.colors.accent} />
 				</div>
 			) : generationState === 'generating' ? (
 				<div className="flex flex-col items-center justify-center py-8 gap-4">
-					<Loader2 className="w-8 h-8 animate-spin" style={{ color: theme.colors.accent }} />
+					<Spinner size={32} color={theme.colors.accent} />
 					<p className="text-sm" style={{ color: theme.colors.textDim }}>
 						Collecting diagnostic information...
 					</p>

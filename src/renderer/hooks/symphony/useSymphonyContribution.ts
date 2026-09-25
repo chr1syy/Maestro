@@ -1,5 +1,5 @@
 /**
- * useSymphonyContribution — extracted from App.tsx
+ * useSymphonyContribution - extracted from App.tsx
  *
  * Handles creating a new session for a Symphony contribution:
  *   - Validates session uniqueness
@@ -9,6 +9,9 @@
  *   - Auto-starts batch run with contribution documents
  *
  * Reads from: sessionStore, settingsStore, modalStore, uiStore
+ *
+ * PERF: Does not subscribe to full sessions[]. Validation reads sessions at
+ * click time via getState().
  */
 
 import { useCallback } from 'react';
@@ -23,6 +26,7 @@ import { validateNewSession } from '../../utils/sessionValidation';
 import { gitService } from '../../services/git';
 import { notifyToast } from '../../stores/notificationStore';
 import { DEFAULT_BATCH_PROMPT } from '../../components/BatchRunnerModal';
+import { logger } from '../../utils/logger';
 
 // ============================================================================
 // Dependencies interface
@@ -53,8 +57,7 @@ export function useSymphonyContribution(
 ): UseSymphonyContributionReturn {
 	const { startBatchRun, inputRef } = deps;
 
-	// --- Reactive subscriptions ---
-	const sessions = useSessionStore((s) => s.sessions);
+	// PERF: No reactive sessions[] sub - contribution starts at click time via getState().
 
 	// --- Store actions (stable via getState) ---
 	const { setSessions, setActiveSessionId } = useSessionStore.getState();
@@ -66,12 +69,12 @@ export function useSymphonyContribution(
 
 	const handleStartContribution = useCallback(
 		async (data: SymphonyContributionData) => {
-			console.log('[Symphony] Creating session for contribution:', data);
+			logger.info('[Symphony] Creating session for contribution:', undefined, data);
 
 			// Get agent definition
 			const agent = await window.maestro.agents.get(data.agentType);
 			if (!agent) {
-				console.error(`Agent not found: ${data.agentType}`);
+				logger.error(`Agent not found: ${data.agentType}`);
 				notifyToast({
 					type: 'error',
 					title: 'Symphony Error',
@@ -80,15 +83,15 @@ export function useSymphonyContribution(
 				return;
 			}
 
-			// Validate uniqueness
+			// Validate uniqueness against current store (event-time read)
 			const validation = validateNewSession(
 				data.sessionName,
 				data.localPath,
 				data.agentType as ToolType,
-				sessions
+				useSessionStore.getState().sessions
 			);
 			if (!validation.valid) {
-				console.error(`Session validation failed: ${validation.error}`);
+				logger.error(`Session validation failed: ${validation.error}`);
 				notifyToast({
 					type: 'error',
 					title: 'Agent Creation Failed',
@@ -179,6 +182,8 @@ export function useSymphonyContribution(
 				activeTerminalTabId: null,
 				unifiedTabOrder: [{ type: 'ai' as const, id: initialTabId }],
 				unifiedClosedTabHistory: [],
+				tabGroups: [],
+				activeGroupId: null,
 				// Custom agent config
 				customPath: data.customPath,
 				customArgs: data.customArgs,
@@ -195,6 +200,8 @@ export function useSymphonyContribution(
 					documentPaths: data.issue.documentPaths.map((d) => d.path),
 					status: 'running',
 				},
+				claudeInteractive:
+					data.agentType === 'claude-code' ? { mode: 'api', modeReason: 'auto' } : undefined,
 			};
 
 			setSessions((prev) => [...prev, newSession]);
@@ -219,7 +226,7 @@ export function useSymphonyContribution(
 					draftPrUrl: data.draftPrUrl,
 				})
 				.catch((err: unknown) => {
-					console.error('[Symphony] Failed to register active contribution:', err);
+					logger.error('[Symphony] Failed to register active contribution:', undefined, err);
 				});
 
 			// Track stats
@@ -229,6 +236,7 @@ export function useSymphonyContribution(
 				projectPath: data.localPath,
 				createdAt: Date.now(),
 				isRemote: false,
+				isWorktree: false,
 			});
 
 			// Focus input
@@ -253,16 +261,15 @@ export function useSymphonyContribution(
 
 				// Small delay to ensure session state is fully propagated
 				setTimeout(() => {
-					console.log(
-						'[Symphony] Auto-starting batch run with',
+					logger.info('[Symphony] Auto-starting batch run with', undefined, [
 						batchConfig.documents.length,
-						'documents'
-					);
+						'documents',
+					]);
 					startBatchRun(newId, batchConfig, data.autoRunPath!);
 				}, 500);
 			}
 		},
-		[sessions, defaultSaveToHistory, startBatchRun]
+		[defaultSaveToHistory, startBatchRun, inputRef]
 	);
 
 	return { handleStartContribution };

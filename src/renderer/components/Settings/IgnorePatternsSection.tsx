@@ -45,6 +45,12 @@ export interface IgnorePatternsSectionProps {
 	onHonorGitignoreChange?: (value: boolean) => void;
 	/** Optional: Callback invoked on reset (for resetting related settings like honorGitignore) */
 	onReset?: () => void;
+	/**
+	 * When true, hide the internal "File Indexing" eyebrow label. Use when the caller
+	 * renders its own section heading above a group of cards and the eyebrow would
+	 * just duplicate that heading.
+	 */
+	hideEyebrow?: boolean;
 }
 
 export function IgnorePatternsSection({
@@ -59,6 +65,7 @@ export function IgnorePatternsSection({
 	honorGitignore = false,
 	onHonorGitignoreChange,
 	onReset,
+	hideEyebrow = false,
 }: IgnorePatternsSectionProps) {
 	// Local state for the new pattern input
 	const [newPattern, setNewPattern] = useState('');
@@ -122,9 +129,11 @@ export function IgnorePatternsSection({
 
 			{/* Content */}
 			<div className="flex-1 min-w-0">
-				<p className="text-[10px] uppercase font-bold opacity-50 mb-1">File Indexing</p>
+				{!hideEyebrow && (
+					<p className="text-2xs uppercase font-bold opacity-50 mb-1">File Indexing</p>
+				)}
 				<p className="font-semibold mb-1">{title}</p>
-				<p className="text-xs opacity-60 mb-3">{description}</p>
+				<p className="text-xs opacity-70 mb-3">{description}</p>
 
 				{/* Honor .gitignore checkbox (optional) */}
 				{showHonorGitignore && onHonorGitignoreChange && (
@@ -225,7 +234,7 @@ export function IgnorePatternsSection({
 						/>
 						{inputError && (
 							<p
-								className="absolute -bottom-4 left-0 text-[10px]"
+								className="absolute -bottom-4 left-0 text-2xs"
 								style={{ color: theme.colors.error }}
 							>
 								{inputError}

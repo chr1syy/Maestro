@@ -1,39 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useUIStore } from '../../../renderer/stores/uiStore';
-
-/**
- * Reset the Zustand store to initial state between tests.
- * Zustand stores are singletons, so state persists across tests unless explicitly reset.
- */
-function resetStore() {
-	useUIStore.setState({
-		leftSidebarOpen: true,
-		rightPanelOpen: true,
-		activeFocus: 'main',
-		activeRightTab: 'files',
-		bookmarksCollapsed: false,
-		groupChatsExpanded: true,
-		showUnreadOnly: false,
-		showUnreadAgentsOnly: false,
-		preFilterActiveTabId: null,
-		preTerminalFileTabId: null,
-		selectedSidebarIndex: 0,
-		flashNotification: null,
-		successFlashNotification: null,
-		outputSearchOpen: false,
-		outputSearchQuery: '',
-		sessionFilterOpen: false,
-		historySearchFilterOpen: false,
-		draggingSessionId: null,
-		editingGroupId: null,
-		editingSessionId: null,
-	});
-}
+import { resetStore } from '../../helpers';
 
 describe('uiStore', () => {
 	beforeEach(() => {
-		resetStore();
+		resetStore(useUIStore);
 	});
 
 	describe('initial state', () => {
@@ -45,20 +17,57 @@ describe('uiStore', () => {
 			expect(state.activeFocus).toBe('main');
 			expect(state.activeRightTab).toBe('files');
 			expect(state.bookmarksCollapsed).toBe(false);
-			expect(state.groupChatsExpanded).toBe(true);
 			expect(state.showUnreadOnly).toBe(false);
 			expect(state.preFilterActiveTabId).toBeNull();
 			expect(state.preTerminalFileTabId).toBeNull();
 			expect(state.selectedSidebarIndex).toBe(0);
-			expect(state.flashNotification).toBeNull();
-			expect(state.successFlashNotification).toBeNull();
-			expect(state.outputSearchOpen).toBe(false);
-			expect(state.outputSearchQuery).toBe('');
+			expect(state.outputSearchByKey).toEqual({});
 			expect(state.sessionFilterOpen).toBe(false);
 			expect(state.historySearchFilterOpen).toBe(false);
 			expect(state.draggingSessionId).toBeNull();
 			expect(state.editingGroupId).toBeNull();
 			expect(state.editingSessionId).toBeNull();
+			expect(state.usageDashboardViewMode).toBe('overview');
+			expect(state.focusRequest).toBeNull();
+		});
+	});
+
+	describe('focus request', () => {
+		it('publishes a pane request for the given leaf id', () => {
+			useUIStore.getState().requestPaneFocus('leaf-1');
+			expect(useUIStore.getState().focusRequest).toEqual({ leafId: 'leaf-1' });
+		});
+
+		it('publishes a tab request for the given tab ref', () => {
+			useUIStore.getState().requestTabFocus({ type: 'browser', id: 'b-1' });
+			expect(useUIStore.getState().focusRequest).toEqual({
+				tab: { type: 'browser', id: 'b-1' },
+			});
+		});
+
+		it('clears the request once it has been consumed', () => {
+			useUIStore.getState().requestPaneFocus('leaf-1');
+			useUIStore.getState().clearFocusRequest();
+			expect(useUIStore.getState().focusRequest).toBeNull();
+		});
+
+		it('replaces an unconsumed request rather than queueing', () => {
+			useUIStore.getState().requestPaneFocus('leaf-1');
+			useUIStore.getState().requestPaneFocus('leaf-2');
+			expect(useUIStore.getState().focusRequest).toEqual({ leafId: 'leaf-2' });
+		});
+
+		it('lets a tab request supersede a pane request, so there is one focus owner', () => {
+			useUIStore.getState().requestPaneFocus('leaf-1');
+			useUIStore.getState().requestTabFocus({ type: 'file', id: 'f-1' });
+			expect(useUIStore.getState().focusRequest).toEqual({ tab: { type: 'file', id: 'f-1' } });
+		});
+
+		it('re-publishes the same leaf after a clear so a repeat press refocuses', () => {
+			useUIStore.getState().requestPaneFocus('leaf-1');
+			useUIStore.getState().clearFocusRequest();
+			useUIStore.getState().requestPaneFocus('leaf-1');
+			expect(useUIStore.getState().focusRequest).toEqual({ leafId: 'leaf-1' });
 		});
 	});
 
@@ -98,6 +107,89 @@ describe('uiStore', () => {
 			useUIStore.getState().toggleRightPanel();
 			expect(useUIStore.getState().rightPanelOpen).toBe(true);
 		});
+
+		describe('closeLeftSidebarForNavigation', () => {
+			const setViewportWidth = (width: number) => {
+				Object.defineProperty(window, 'innerWidth', {
+					configurable: true,
+					writable: true,
+					value: width,
+				});
+			};
+			const originalWidth = window.innerWidth;
+
+			afterEach(() => {
+				setViewportWidth(originalWidth);
+			});
+
+			it('closes the drawer on a narrow viewport', () => {
+				setViewportWidth(390);
+				useUIStore.getState().setLeftSidebarOpen(true);
+				useUIStore.getState().closeLeftSidebarForNavigation();
+				expect(useUIStore.getState().leftSidebarOpen).toBe(false);
+			});
+
+			it('leaves the sidebar alone on a wide viewport', () => {
+				setViewportWidth(1440);
+				useUIStore.getState().setLeftSidebarOpen(true);
+				useUIStore.getState().closeLeftSidebarForNavigation();
+				expect(useUIStore.getState().leftSidebarOpen).toBe(true);
+			});
+
+			it('is a no-op when the drawer is already closed', () => {
+				setViewportWidth(390);
+				useUIStore.getState().setLeftSidebarOpen(false);
+				const before = useUIStore.getState();
+				useUIStore.getState().closeLeftSidebarForNavigation();
+				expect(useUIStore.getState()).toBe(before);
+			});
+		});
+
+		describe('closeRightPanelForNavigation', () => {
+			const setViewportWidth = (width: number) => {
+				Object.defineProperty(window, 'innerWidth', {
+					configurable: true,
+					writable: true,
+					value: width,
+				});
+			};
+			const originalWidth = window.innerWidth;
+
+			afterEach(() => {
+				setViewportWidth(originalWidth);
+			});
+
+			it('closes the drawer on a narrow viewport', () => {
+				setViewportWidth(390);
+				useUIStore.getState().setRightPanelOpen(true);
+				useUIStore.getState().closeRightPanelForNavigation();
+				expect(useUIStore.getState().rightPanelOpen).toBe(false);
+			});
+
+			it('leaves the Right Bar alone on a wide viewport', () => {
+				setViewportWidth(1440);
+				useUIStore.getState().setRightPanelOpen(true);
+				useUIStore.getState().closeRightPanelForNavigation();
+				expect(useUIStore.getState().rightPanelOpen).toBe(true);
+			});
+
+			it('is a no-op when the drawer is already closed', () => {
+				setViewportWidth(390);
+				useUIStore.getState().setRightPanelOpen(false);
+				const before = useUIStore.getState();
+				useUIStore.getState().closeRightPanelForNavigation();
+				expect(useUIStore.getState()).toBe(before);
+			});
+
+			it('does not disturb the left drawer', () => {
+				setViewportWidth(390);
+				useUIStore.getState().setLeftSidebarOpen(true);
+				useUIStore.getState().setRightPanelOpen(true);
+				useUIStore.getState().closeRightPanelForNavigation();
+				expect(useUIStore.getState().rightPanelOpen).toBe(false);
+				expect(useUIStore.getState().leftSidebarOpen).toBe(true);
+			});
+		});
 	});
 
 	describe('focus state', () => {
@@ -134,17 +226,15 @@ describe('uiStore', () => {
 			expect(useUIStore.getState().bookmarksCollapsed).toBe(false);
 		});
 
-		it('sets group chats expanded', () => {
-			useUIStore.getState().setGroupChatsExpanded(false);
-			expect(useUIStore.getState().groupChatsExpanded).toBe(false);
-		});
+		it('persists bookmarks collapse state so it survives restarts', () => {
+			const setSetting = (window as any).maestro.settings.set as ReturnType<typeof vi.fn>;
+			setSetting.mockClear();
 
-		it('toggles group chats expanded', () => {
-			expect(useUIStore.getState().groupChatsExpanded).toBe(true);
-			useUIStore.getState().toggleGroupChatsExpanded();
-			expect(useUIStore.getState().groupChatsExpanded).toBe(false);
-			useUIStore.getState().toggleGroupChatsExpanded();
-			expect(useUIStore.getState().groupChatsExpanded).toBe(true);
+			useUIStore.getState().setBookmarksCollapsed(true);
+			expect(setSetting).toHaveBeenCalledWith('bookmarksCollapsed', true);
+
+			useUIStore.getState().toggleBookmarksCollapsed();
+			expect(setSetting).toHaveBeenLastCalledWith('bookmarksCollapsed', false);
 		});
 	});
 
@@ -210,33 +300,90 @@ describe('uiStore', () => {
 		});
 	});
 
-	describe('flash notification state', () => {
-		it('sets flash notification', () => {
-			useUIStore.getState().setFlashNotification('Commands disabled');
-			expect(useUIStore.getState().flashNotification).toBe('Commands disabled');
+	describe('flash notification setters (compatibility shims → centerFlashStore)', () => {
+		it('setFlashNotification fires a yellow center flash', async () => {
+			const { useCenterFlashStore } = await import('../../../renderer/stores/centerFlashStore');
+			useCenterFlashStore.getState().setActive(null);
 
+			useUIStore.getState().setFlashNotification('Commands disabled');
+			const active = useCenterFlashStore.getState().active;
+			expect(active?.message).toBe('Commands disabled');
+			expect(active?.color).toBe('yellow');
+
+			// Passing null is a no-op (auto-dismiss handles clearing)
 			useUIStore.getState().setFlashNotification(null);
-			expect(useUIStore.getState().flashNotification).toBeNull();
+			expect(useCenterFlashStore.getState().active?.message).toBe('Commands disabled');
 		});
 
-		it('sets success flash notification', () => {
+		it('setSuccessFlashNotification fires a themed center flash', async () => {
+			const { useCenterFlashStore } = await import('../../../renderer/stores/centerFlashStore');
+			useCenterFlashStore.getState().setActive(null);
+
 			useUIStore.getState().setSuccessFlashNotification('Refresh complete');
-			expect(useUIStore.getState().successFlashNotification).toBe('Refresh complete');
+			const active = useCenterFlashStore.getState().active;
+			expect(active?.message).toBe('Refresh complete');
+			expect(active?.color).toBe('theme');
 
 			useUIStore.getState().setSuccessFlashNotification(null);
-			expect(useUIStore.getState().successFlashNotification).toBeNull();
+			expect(useCenterFlashStore.getState().active?.message).toBe('Refresh complete');
 		});
 	});
 
-	describe('output search state', () => {
-		it('sets output search open', () => {
-			useUIStore.getState().setOutputSearchOpen(true);
-			expect(useUIStore.getState().outputSearchOpen).toBe(true);
+	describe('output search state (scoped per agent+tab key)', () => {
+		const KEY = 'agent-1::tab-1';
+
+		it('sets output search open for a key', () => {
+			useUIStore.getState().setOutputSearchOpen(KEY, true);
+			expect(useUIStore.getState().outputSearchByKey[KEY]?.open).toBe(true);
 		});
 
-		it('sets output search query', () => {
-			useUIStore.getState().setOutputSearchQuery('find this');
-			expect(useUIStore.getState().outputSearchQuery).toBe('find this');
+		it('sets output search query for a key', () => {
+			useUIStore.getState().setOutputSearchQuery(KEY, 'find this');
+			expect(useUIStore.getState().outputSearchByKey[KEY]?.query).toBe('find this');
+		});
+
+		it('keeps each key independent', () => {
+			useUIStore.getState().setOutputSearchOpen('a::1', true);
+			useUIStore.getState().setOutputSearchQuery('a::1', 'alpha');
+			expect(useUIStore.getState().outputSearchByKey['b::1']).toBeUndefined();
+		});
+
+		it('prunes a slot when closed with an empty query', () => {
+			useUIStore.getState().setOutputSearchOpen(KEY, true);
+			useUIStore.getState().setOutputSearchOpen(KEY, false);
+			expect(useUIStore.getState().outputSearchByKey[KEY]).toBeUndefined();
+		});
+	});
+
+	describe('pending log jump (cross-tab search)', () => {
+		const JUMP = { sessionId: 'agent-1', tabId: 'tab-2', logId: 'log-9' };
+
+		it('starts empty', () => {
+			expect(useUIStore.getState().pendingLogJump).toBeNull();
+		});
+
+		it('stores a jump request', () => {
+			useUIStore.getState().setPendingLogJump(JUMP);
+			expect(useUIStore.getState().pendingLogJump).toEqual(JUMP);
+		});
+
+		it('clears the request once the target entry consumes it', () => {
+			useUIStore.getState().setPendingLogJump(JUMP);
+			useUIStore.getState().clearPendingLogJump('log-9');
+			expect(useUIStore.getState().pendingLogJump).toBeNull();
+		});
+
+		it('does not clear a newer request queued for a different entry', () => {
+			useUIStore.getState().setPendingLogJump(JUMP);
+			useUIStore.getState().clearPendingLogJump('some-older-log');
+			expect(useUIStore.getState().pendingLogJump).toEqual(JUMP);
+		});
+
+		it('replaces an unconsumed request', () => {
+			useUIStore.getState().setPendingLogJump(JUMP);
+			const next = { sessionId: 'agent-1', tabId: 'tab-3', logId: 'log-10' };
+			useUIStore.getState().setPendingLogJump(next);
+			expect(useUIStore.getState().pendingLogJump).toEqual(next);
 		});
 	});
 
@@ -292,6 +439,21 @@ describe('uiStore', () => {
 		});
 	});
 
+	describe('usage dashboard view mode', () => {
+		it('sets the last-selected tab with a value', () => {
+			useUIStore.getState().setUsageDashboardViewMode('cue');
+			expect(useUIStore.getState().usageDashboardViewMode).toBe('cue');
+		});
+
+		it('sets the last-selected tab with an updater', () => {
+			useUIStore.getState().setUsageDashboardViewMode('autorun');
+			useUIStore
+				.getState()
+				.setUsageDashboardViewMode((prev) => (prev === 'autorun' ? 'activity' : 'overview'));
+			expect(useUIStore.getState().usageDashboardViewMode).toBe('activity');
+		});
+	});
+
 	describe('React hook integration', () => {
 		it('provides state to React components via selectors', () => {
 			const { result } = renderHook(() => useUIStore((s) => s.leftSidebarOpen));
@@ -320,7 +482,7 @@ describe('uiStore', () => {
 
 			// Change unrelated state
 			act(() => {
-				useUIStore.getState().setOutputSearchQuery('test');
+				useUIStore.getState().setOutputSearchQuery('k::1', 'test');
 			});
 
 			// Should not have re-rendered (selector isolation)
@@ -350,7 +512,7 @@ describe('uiStore', () => {
 		it('returns stable action references across state changes', () => {
 			const actionsBefore = useUIStore.getState();
 			useUIStore.getState().setLeftSidebarOpen(false);
-			useUIStore.getState().setOutputSearchQuery('changed');
+			useUIStore.getState().setOutputSearchQuery('k::1', 'changed');
 			const actionsAfter = useUIStore.getState();
 
 			// Actions must be the same function references after state mutations.
@@ -364,7 +526,7 @@ describe('uiStore', () => {
 		});
 
 		it('extracted actions still mutate state correctly', () => {
-			// Grab actions once, then call them — mirrors the App.tsx pattern
+			// Grab actions once, then call them - mirrors the App.tsx pattern
 			const { setLeftSidebarOpen, setActiveFocus } = useUIStore.getState();
 
 			setLeftSidebarOpen(false);

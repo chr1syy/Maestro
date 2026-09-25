@@ -29,7 +29,9 @@ const mockAutoRunStats = { longestRunMs: 0 };
 
 vi.mock('../../../renderer/stores/settingsStore', () => ({
 	useSettingsStore: Object.assign(
-		vi.fn((selector: (s: any) => any) => selector({ autoRunStats: mockAutoRunStats })),
+		vi.fn((selector: (s: any) => any) =>
+			selector({ autoRunStats: mockAutoRunStats, settingsLoaded: true })
+		),
 		{
 			getState: vi.fn(() => ({
 				updateAutoRunProgress: mockUpdateAutoRunProgress,
@@ -43,8 +45,17 @@ vi.mock('../../../renderer/stores/settingsStore', () => ({
 // Mock sessionStore
 const mockSessions: any[] = [];
 
+function mockSessionStoreState() {
+	return { sessions: mockSessions };
+}
+
 vi.mock('../../../renderer/stores/sessionStore', () => ({
-	useSessionStore: vi.fn((selector: (s: any) => any) => selector({ sessions: mockSessions })),
+	useSessionStore: Object.assign(
+		vi.fn((selector: (s: any) => any) => selector(mockSessionStoreState())),
+		{
+			getState: vi.fn(() => mockSessionStoreState()),
+		}
+	),
 }));
 
 // Mock modalStore
@@ -56,7 +67,33 @@ vi.mock('../../../renderer/stores/modalStore', () => ({
 	}),
 }));
 
-// Mock conductorBadges — provide just enough badges for tests (inlined to avoid TDZ in hoisted vi.mock)
+// Mock cueService - capture the onActivityUpdate callback so tests can push
+// conductorTimeCredit payloads through the real subscription path.
+let capturedCueActivityCallback: ((payload: any) => void) | null = null;
+const mockCueUnsubscribe = vi.fn();
+const mockCueOnActivityUpdate = vi.fn((cb: (payload: any) => void) => {
+	capturedCueActivityCallback = cb;
+	return mockCueUnsubscribe;
+});
+
+vi.mock('../../../renderer/services/cue', () => ({
+	cueService: {
+		onActivityUpdate: (cb: (payload: any) => void) => mockCueOnActivityUpdate(cb),
+	},
+}));
+
+// Mock the leaderboard service - Cue credit must also ship a delta to the
+// server, which accumulates totals from deltaMs (no delta = permanent drift).
+const mockSubmitLeaderboardTimeDelta = vi.fn().mockResolvedValue(undefined);
+// Auto Run ticks record what they credited so a crash mid-run can be recovered.
+const mockNoteAutoRunCreditAccrued = vi.fn();
+
+vi.mock('../../../renderer/services/leaderboard', () => ({
+	submitLeaderboardTimeDelta: (args: any) => mockSubmitLeaderboardTimeDelta(args),
+	noteAutoRunCreditAccrued: (ms: number) => mockNoteAutoRunCreditAccrued(ms),
+}));
+
+// Mock conductorBadges - provide just enough badges for tests (inlined to avoid TDZ in hoisted vi.mock)
 vi.mock('../../../renderer/constants/conductorBadges', () => ({
 	CONDUCTOR_BADGES: [
 		{
@@ -90,28 +127,14 @@ import { useAutoRunAchievements } from '../../../renderer/hooks/batch/useAutoRun
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import { CONDUCTOR_BADGES as MOCK_CONDUCTOR_BADGES } from '../../../renderer/constants/conductorBadges';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
 function createMockSession(overrides: Record<string, any> = {}): any {
-	return {
-		id: 'session-1',
-		name: 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test',
-		projectRoot: '/test',
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		aiLogs: [],
-		shellLogs: [],
-		messageQueue: [],
-		executionQueue: [],
-		...overrides,
-	};
+	return baseCreateMockSession(overrides as any);
 }
 
 // ============================================================================
@@ -132,12 +155,16 @@ describe('useAutoRunAchievements', () => {
 		// Default: no badge unlocked
 		mockUpdateAutoRunProgress.mockReturnValue({ newBadgeLevel: null, isNewRecord: false });
 
+		// Reset captured Cue subscription callback
+		capturedCueActivityCallback = null;
+
 		// Re-wire store mocks to current mockSessions reference
 		(useSessionStore as any).mockImplementation((selector: (s: any) => any) =>
-			selector({ sessions: mockSessions })
+			selector(mockSessionStoreState())
 		);
+		(useSessionStore as any).getState = vi.fn(() => mockSessionStoreState());
 		(useSettingsStore as any).mockImplementation((selector: (s: any) => any) =>
-			selector({ autoRunStats: mockAutoRunStats })
+			selector({ autoRunStats: mockAutoRunStats, settingsLoaded: true })
 		);
 		(useSettingsStore as any).getState.mockReturnValue({
 			updateAutoRunProgress: mockUpdateAutoRunProgress,
@@ -152,7 +179,7 @@ describe('useAutoRunAchievements', () => {
 	});
 
 	// ==========================================================================
-	// Timer interval — empty activeBatchSessionIds
+	// Timer interval - empty activeBatchSessionIds
 	// ==========================================================================
 
 	describe('no interval when no active batches', () => {
@@ -202,10 +229,10 @@ describe('useAutoRunAchievements', () => {
 			// Clear mocks so we can assert fresh state
 			mockUpdateAutoRunProgress.mockClear();
 
-			// Now remove all active sessions — should reset the ref
+			// Now remove all active sessions - should reset the ref
 			rerender({ ids: [] });
 
-			// Advance time — no progress update should fire because interval is torn down
+			// Advance time - no progress update should fire because interval is torn down
 			act(() => {
 				vi.advanceTimersByTime(60000);
 			});
@@ -215,7 +242,7 @@ describe('useAutoRunAchievements', () => {
 	});
 
 	// ==========================================================================
-	// Timer interval — with active batches
+	// Timer interval - with active batches
 	// ==========================================================================
 
 	describe('interval setup with active batches', () => {
@@ -311,7 +338,7 @@ describe('useAutoRunAchievements', () => {
 			unmount1();
 			mockUpdateAutoRunProgress.mockClear();
 
-			// Run with two sessions — reinitialize fake timers to get a fresh epoch
+			// Run with two sessions - reinitialize fake timers to get a fresh epoch
 			vi.useRealTimers();
 			vi.useFakeTimers();
 
@@ -606,11 +633,12 @@ describe('useAutoRunAchievements', () => {
 
 			const callsBefore = mockUpdateUsageStats.mock.calls.length;
 
-			// Mutate sessions and force rerender
+			// Mutate sessions and force rerender (new usagePeaksKey via selector)
 			mockSessions.push(createMockSession({ id: 's1' }));
 			(useSessionStore as any).mockImplementation((selector: (s: any) => any) =>
-				selector({ sessions: [...mockSessions] })
+				selector(mockSessionStoreState())
 			);
+			(useSessionStore as any).getState = vi.fn(() => mockSessionStoreState());
 
 			rerender();
 
@@ -681,6 +709,31 @@ describe('useAutoRunAchievements', () => {
 			});
 		});
 
+		// Regression: this effect fires on the first `sessions` ref flip, which
+		// routinely beats loadAllSettings. Sampling then would hand the store a
+		// live snapshot to max against its zeroed defaults, persisting it as the
+		// all-time peak and destroying the real one.
+		it('samples nothing until settings have hydrated', () => {
+			(useSettingsStore as any).mockImplementation((selector: (s: any) => any) =>
+				selector({ autoRunStats: mockAutoRunStats, settingsLoaded: false })
+			);
+			mockSessions.push(createMockSession({ id: 's1', state: 'busy' }));
+
+			const { rerender } = renderHook(() =>
+				useAutoRunAchievements({ activeBatchSessionIds: ['s1'] })
+			);
+			expect(mockUpdateUsageStats).not.toHaveBeenCalled();
+
+			// Once hydration completes the sample must land, not stay lost.
+			(useSettingsStore as any).mockImplementation((selector: (s: any) => any) =>
+				selector({ autoRunStats: mockAutoRunStats, settingsLoaded: true })
+			);
+			rerender();
+			expect(mockUpdateUsageStats).toHaveBeenCalledWith(
+				expect.objectContaining({ maxAgents: 1, maxSimultaneousAutoRuns: 1 })
+			);
+		});
+
 		it('does not throw when activeBatchSessionIds transitions from empty to non-empty', () => {
 			const { rerender } = renderHook(
 				({ ids }) => useAutoRunAchievements({ activeBatchSessionIds: ids }),
@@ -702,7 +755,7 @@ describe('useAutoRunAchievements', () => {
 		it('initializes lastUpdateTime on first active run and uses it for subsequent ticks', () => {
 			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: ['session-1'] }));
 
-			// First tick — should fire and produce a positive delta
+			// First tick - should fire and produce a positive delta
 			act(() => {
 				vi.advanceTimersByTime(60000);
 			});
@@ -742,13 +795,13 @@ describe('useAutoRunAchievements', () => {
 
 			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: ['session-1'] }));
 
-			// First tick — no badge
+			// First tick - no badge
 			act(() => {
 				vi.advanceTimersByTime(60000);
 			});
 			expect(mockSetStandingOvationData).not.toHaveBeenCalled();
 
-			// Second tick — badge level 1 unlocked, uses fresh autoRunStats (longestRunMs: 5000)
+			// Second tick - badge level 1 unlocked, uses fresh autoRunStats (longestRunMs: 5000)
 			act(() => {
 				vi.advanceTimersByTime(60000);
 			});
@@ -756,6 +809,115 @@ describe('useAutoRunAchievements', () => {
 			expect(mockSetStandingOvationData).toHaveBeenCalledTimes(1);
 			const callArg = mockSetStandingOvationData.mock.calls[0][0];
 			expect(callArg.recordTimeMs).toBe(5000);
+		});
+	});
+
+	// ==========================================================================
+	// Cue conductor time credit (autonomous AI time from the Cue engine)
+	// ==========================================================================
+
+	describe('Cue conductor time credit', () => {
+		it('subscribes to Cue activity updates even with no active batch runs', () => {
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			expect(mockCueOnActivityUpdate).toHaveBeenCalledTimes(1);
+			expect(capturedCueActivityCallback).toBeTypeOf('function');
+		});
+
+		it('credits creditMs through updateAutoRunProgress on a conductorTimeCredit payload', () => {
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			act(() => {
+				capturedCueActivityCallback?.({ type: 'conductorTimeCredit', creditMs: 120000 });
+			});
+
+			expect(mockUpdateAutoRunProgress).toHaveBeenCalledTimes(1);
+			// Tagged 'cue' so the credit also lands in the Cue subtotal the About
+			// card shows, not just in the shared cumulative total.
+			expect(mockUpdateAutoRunProgress).toHaveBeenCalledWith(120000, 'cue');
+		});
+
+		it('ignores unrelated Cue activity payloads', () => {
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			act(() => {
+				capturedCueActivityCallback?.({ type: 'runFinished', status: 'completed' });
+				capturedCueActivityCallback?.({ type: 'queueRestored', sessionId: 's1', count: 2 });
+			});
+
+			expect(mockUpdateAutoRunProgress).not.toHaveBeenCalled();
+		});
+
+		it('does not credit a zero creditMs (guarded by the shared helper)', () => {
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			act(() => {
+				capturedCueActivityCallback?.({ type: 'conductorTimeCredit', creditMs: 0 });
+			});
+
+			expect(mockUpdateAutoRunProgress).not.toHaveBeenCalled();
+		});
+
+		it('raises the standing ovation when Cue credit unlocks a badge', () => {
+			mockAutoRunStats.longestRunMs = 7000;
+			mockUpdateAutoRunProgress.mockReturnValue({ newBadgeLevel: 1, isNewRecord: false });
+
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			act(() => {
+				capturedCueActivityCallback?.({ type: 'conductorTimeCredit', creditMs: 900000 });
+			});
+
+			expect(mockSetStandingOvationData).toHaveBeenCalledTimes(1);
+			const callArg = mockSetStandingOvationData.mock.calls[0][0];
+			expect(callArg.badge).toEqual(MOCK_CONDUCTOR_BADGES[0]);
+			expect(callArg.recordTimeMs).toBe(7000);
+			expect(callArg.isNewRecord).toBe(false);
+		});
+
+		it('submits the same delta to the leaderboard tagged as cue, deltaRuns left at 0', () => {
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			act(() => {
+				capturedCueActivityCallback?.({ type: 'conductorTimeCredit', creditMs: 180000 });
+			});
+
+			expect(mockSubmitLeaderboardTimeDelta).toHaveBeenCalledTimes(1);
+			expect(mockSubmitLeaderboardTimeDelta).toHaveBeenCalledWith({
+				deltaMs: 180000,
+				source: 'cue',
+			});
+		});
+
+		it('does not submit a leaderboard delta for unrelated Cue payloads', () => {
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			act(() => {
+				capturedCueActivityCallback?.({ type: 'runFinished', status: 'completed' });
+			});
+
+			expect(mockSubmitLeaderboardTimeDelta).not.toHaveBeenCalled();
+		});
+
+		it('does not submit a leaderboard delta from Auto Run interval ticks (no double count)', () => {
+			// Auto Run submits its full elapsed time once on completion via
+			// useBatchHandlers, so the per-minute ticks must stay silent here.
+			renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: ['session-1'] }));
+
+			act(() => {
+				vi.advanceTimersByTime(60000);
+			});
+
+			expect(mockUpdateAutoRunProgress).toHaveBeenCalled();
+			expect(mockSubmitLeaderboardTimeDelta).not.toHaveBeenCalled();
+		});
+
+		it('unsubscribes from Cue activity updates on unmount', () => {
+			const { unmount } = renderHook(() => useAutoRunAchievements({ activeBatchSessionIds: [] }));
+
+			unmount();
+
+			expect(mockCueUnsubscribe).toHaveBeenCalledTimes(1);
 		});
 	});
 });

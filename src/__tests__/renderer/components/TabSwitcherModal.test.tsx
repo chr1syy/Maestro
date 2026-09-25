@@ -13,6 +13,7 @@
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { TabSwitcherModal } from '../../../renderer/components/TabSwitcherModal';
 import { formatShortcutKeys } from '../../../renderer/utils/shortcutFormatter';
@@ -25,6 +26,29 @@ vi.mock('lucide-react', () => ({
 	Star: () => <svg data-testid="star-icon" />,
 	FileText: () => <svg data-testid="file-text-icon" />,
 	Terminal: () => <svg data-testid="terminal-icon" />,
+	Globe: () => <svg data-testid="globe-icon" />,
+	Wand2: () => <svg data-testid="wand-icon" />,
+	MessageSquare: () => <svg data-testid="message-square-icon" />,
+	X: () => <svg data-testid="x-icon" />,
+}));
+
+// Phone layout is opt-in per test; the default (desktop) keeps every existing
+// assertion about pills, gauges, and keyboard legends valid.
+vi.mock('../../../renderer/hooks/ui/useViewportBreakpoint', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../../../renderer/hooks/ui/useViewportBreakpoint')>()),
+	usePhoneLayout: vi.fn(() => false),
+}));
+import { usePhoneLayout } from '../../../renderer/hooks/ui/useViewportBreakpoint';
+const mockedUsePhoneLayout = vi.mocked(usePhoneLayout);
+
+// Live wizard activity comes from InlineWizardProvider, which wraps this modal in the app
+// but not in a standalone render. Mock the accessor so a test can declare which tabs are
+// mid-wizard; the real one degrades to an empty map without a provider.
+const { wizardActiveTabs } = vi.hoisted(() => ({
+	wizardActiveTabs: new Map<string, { sessionId: string | null; isGeneratingDocs: boolean }>(),
+}));
+vi.mock('../../../renderer/contexts/InlineWizardContext', () => ({
+	useWizardActiveTabs: () => wizardActiveTabs,
 }));
 
 // Create a test theme
@@ -442,7 +466,7 @@ describe('TabSwitcherModal', () => {
 					/>
 				);
 
-				// No name or agentSessionId yet — shows "New Session"
+				// No name or agentSessionId yet - shows "New Session"
 				expect(screen.getByText('New Session')).toBeInTheDocument();
 			});
 		});
@@ -570,12 +594,47 @@ describe('TabSwitcherModal', () => {
 				expect(screen.getByText('20%')).toBeInTheDocument();
 			});
 
-			it('caps at 100%', () => {
+			it('caps at 100% when tokens fill the window exactly', () => {
+				// Use values that fill the window without overflowing so we exercise
+				// the Math.min(100, …) cap rather than the overflow branch (which now
+				// returns untrustworthy zeros - see issue #762).
+				const tab = createTestTab({
+					usageStats: {
+						inputTokens: 199500,
+						outputTokens: 0,
+						cacheReadInputTokens: 0,
+						cacheCreationInputTokens: 500,
+						totalCostUsd: 5.0,
+						contextWindow: 200000,
+					},
+				});
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[tab]}
+						activeTabId={tab.id}
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				// 200000 / 200000 = 100%
+				expect(screen.getByText('100%')).toBeInTheDocument();
+			});
+
+			it('hides the gauge when accumulated tokens overflow without a fallback', () => {
+				// Issue #762: an accumulated multi-tool turn can blow past the configured
+				// window before any session-level percentage has been preserved. We must
+				// not surface that as "0%" - hide the gauge instead so users don't read
+				// untrustworthy data.
 				const tab = createTestTab({
 					usageStats: {
 						inputTokens: 150000,
 						outputTokens: 0,
-						cacheReadInputTokens: 100000, // Excluded from calculation (cumulative)
+						cacheReadInputTokens: 100000,
 						cacheCreationInputTokens: 100000,
 						totalCostUsd: 5.0,
 						contextWindow: 200000,
@@ -594,8 +653,8 @@ describe('TabSwitcherModal', () => {
 					/>
 				);
 
-				// (150000 + 100000) / 200000 = 125% -> capped at 100% (cacheRead excluded)
-				expect(screen.getByText('100%')).toBeInTheDocument();
+				// No percentage badge should render (raw=350000 > window=200000, no fallback).
+				expect(screen.queryByText(/^\d+%$/)).not.toBeInTheDocument();
 			});
 		});
 	});
@@ -619,6 +678,27 @@ describe('TabSwitcherModal', () => {
 			expect(screen.getByTestId('search-icon')).toBeInTheDocument();
 			expect(screen.getByPlaceholderText('Search open tabs...')).toBeInTheDocument();
 			expect(screen.getByText('ESC')).toBeInTheDocument();
+		});
+
+		// Pointer-only surfaces (remote desktop, tablet) have no Escape key.
+		it('closes when the ESC pill is clicked', () => {
+			const tabs = [createTestTab()];
+			const onClose = vi.fn();
+
+			renderWithLayerStack(
+				<TabSwitcherModal
+					theme={theme}
+					tabs={tabs}
+					activeTabId={tabs[0].id}
+					projectRoot="/test"
+					onTabSelect={vi.fn()}
+					onNamedSessionSelect={vi.fn()}
+					onClose={onClose}
+				/>
+			);
+
+			fireEvent.click(screen.getByRole('button', { name: 'Close (Esc)' }));
+			expect(onClose).toHaveBeenCalledTimes(1);
 		});
 
 		it('renders dialog with correct ARIA attributes', () => {
@@ -1176,6 +1256,50 @@ describe('TabSwitcherModal', () => {
 			fireEvent.keyDown(input, { key: 'Tab' });
 			expect(screen.getByPlaceholderText('Search open tabs...')).toBeInTheDocument();
 		});
+
+		it('cycles modes forward with Cmd+Shift+]', () => {
+			renderWithLayerStack(
+				<TabSwitcherModal
+					theme={theme}
+					tabs={[createTestTab({ name: 'Test Tab' })]}
+					activeTabId=""
+					projectRoot="/test"
+					onTabSelect={vi.fn()}
+					onNamedSessionSelect={vi.fn()}
+					onClose={vi.fn()}
+				/>
+			);
+
+			const input = screen.getByPlaceholderText('Search open tabs...');
+
+			// open -> all-named
+			fireEvent.keyDown(input, { key: ']', code: 'BracketRight', metaKey: true, shiftKey: true });
+			expect(screen.getByPlaceholderText('Search named sessions...')).toBeInTheDocument();
+
+			// all-named -> starred
+			fireEvent.keyDown(input, { key: ']', code: 'BracketRight', metaKey: true, shiftKey: true });
+			expect(screen.getByPlaceholderText('Search starred sessions...')).toBeInTheDocument();
+		});
+
+		it('cycles modes backward with Cmd+Shift+[', () => {
+			renderWithLayerStack(
+				<TabSwitcherModal
+					theme={theme}
+					tabs={[createTestTab({ name: 'Test Tab' })]}
+					activeTabId=""
+					projectRoot="/test"
+					onTabSelect={vi.fn()}
+					onNamedSessionSelect={vi.fn()}
+					onClose={vi.fn()}
+				/>
+			);
+
+			const input = screen.getByPlaceholderText('Search open tabs...');
+
+			// open -> starred (reverse)
+			fireEvent.keyDown(input, { key: '[', code: 'BracketLeft', metaKey: true, shiftKey: true });
+			expect(screen.getByPlaceholderText('Search starred sessions...')).toBeInTheDocument();
+		});
 	});
 
 	describe('search functionality', () => {
@@ -1322,6 +1446,62 @@ describe('TabSwitcherModal', () => {
 			expect(screen.getByText('Authentication Service')).toBeInTheDocument();
 			expect(screen.getByText('User Auth Module')).toBeInTheDocument();
 			expect(screen.queryByText('API Gateway')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('wizard tabs', () => {
+		afterEach(() => wizardActiveTabs.clear());
+
+		const renderTabs = (tabs: AITab[]) =>
+			renderWithLayerStack(
+				<TabSwitcherModal
+					theme={theme}
+					tabs={tabs}
+					activeTabId={tabs[0].id}
+					projectRoot="/test"
+					onTabSelect={vi.fn()}
+					onNamedSessionSelect={vi.fn()}
+					onClose={vi.fn()}
+				/>
+			);
+
+		it('matches a wizard tab on "wizard" even though its name never says so', () => {
+			// A wizard tab is named for whatever it produced, so name matching alone finds
+			// every tab that merely mentions a wizard and misses the one actually running one.
+			const wizardTab = createTestTab({ name: 'api-project' });
+			const decoyTab = createTestTab({ name: 'Wizard Escape Confirmation' });
+			wizardActiveTabs.set(wizardTab.id, { sessionId: 'agent-1', isGeneratingDocs: false });
+
+			renderTabs([decoyTab, wizardTab]);
+
+			fireEvent.change(screen.getByPlaceholderText('Search open tabs...'), {
+				target: { value: 'wizard' },
+			});
+
+			expect(screen.getByText('api-project')).toBeInTheDocument();
+			expect(screen.getByText('Wizard Escape Confirmation')).toBeInTheDocument();
+		});
+
+		it('does not match an ordinary tab on "wizard"', () => {
+			const plainTab = createTestTab({ name: 'api-project' });
+
+			renderTabs([plainTab]);
+
+			fireEvent.change(screen.getByPlaceholderText('Search open tabs...'), {
+				target: { value: 'wizard' },
+			});
+
+			expect(screen.queryByText('api-project')).not.toBeInTheDocument();
+		});
+
+		it('badges the wizard tab and only the wizard tab', () => {
+			const wizardTab = createTestTab({ name: 'api-project' });
+			const plainTab = createTestTab({ name: 'Something Else' });
+			wizardActiveTabs.set(wizardTab.id, { sessionId: 'agent-1', isGeneratingDocs: true });
+
+			renderTabs([wizardTab, plainTab]);
+
+			expect(screen.getAllByTestId('wand-icon')).toHaveLength(1);
 		});
 	});
 
@@ -1669,7 +1849,7 @@ describe('TabSwitcherModal', () => {
 		});
 
 		it('handles sync errors gracefully', async () => {
-			const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
 			// For claude-code sessions (default), it uses window.maestro.claude.updateSessionName
 			vi.mocked(window.maestro.claude.updateSessionName).mockRejectedValue(
@@ -1693,11 +1873,68 @@ describe('TabSwitcherModal', () => {
 			await waitFor(() => {
 				expect(consoleSpy).toHaveBeenCalledWith(
 					'[TabSwitcher] Failed to sync tab name:',
+					undefined,
 					expect.any(Error)
 				);
 			});
 
 			consoleSpy.mockRestore();
+		});
+	});
+
+	describe('hidden consult tabs', () => {
+		it('leaves a hidden cross-agent consult tab out of the Open Tabs list and count', () => {
+			const visible = createTestTab({ name: 'My Tab' });
+			const consult = createTestTab({ name: '\u21a9 Other Agent', hidden: true });
+
+			renderWithLayerStack(
+				<TabSwitcherModal
+					theme={theme}
+					tabs={[visible, consult]}
+					activeTabId={visible.id}
+					projectRoot="/test"
+					onTabSelect={vi.fn()}
+					onNamedSessionSelect={vi.fn()}
+					onClose={vi.fn()}
+				/>
+			);
+
+			expect(screen.getByText('Open Tabs (1)')).toBeInTheDocument();
+			expect(screen.getByText('My Tab')).toBeInTheDocument();
+			expect(screen.queryByText('\u21a9 Other Agent')).not.toBeInTheDocument();
+		});
+
+		it('does not sync a hidden consult tab name to the named-session store', async () => {
+			const tabs = [
+				createTestTab({ name: 'Named Tab', agentSessionId: 'session-123' }),
+				createTestTab({
+					name: '\u21a9 Other Agent',
+					agentSessionId: 'consult-session',
+					hidden: true,
+				}),
+			];
+
+			renderWithLayerStack(
+				<TabSwitcherModal
+					theme={theme}
+					tabs={tabs}
+					activeTabId={tabs[0].id}
+					projectRoot="/test/project"
+					onTabSelect={vi.fn()}
+					onNamedSessionSelect={vi.fn()}
+					onClose={vi.fn()}
+				/>
+			);
+
+			await waitFor(() => {
+				expect(window.maestro.claude.updateSessionName).toHaveBeenCalledWith(
+					'/test/project',
+					'session-123',
+					'Named Tab'
+				);
+			});
+
+			expect(window.maestro.claude.updateSessionName).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -1855,7 +2092,7 @@ describe('TabSwitcherModal', () => {
 				/>
 			);
 
-			const modalContent = container.querySelector('.w-\\[600px\\]');
+			const modalContent = container.querySelector('[data-modal-resize-key="tab-switcher"]');
 			expect(modalContent).toHaveStyle({
 				backgroundColor: theme.colors.bgActivity,
 				borderColor: theme.colors.border,
@@ -1883,7 +2120,7 @@ describe('TabSwitcherModal', () => {
 				/>
 			);
 
-			const modalContent = container.querySelector('.w-\\[600px\\]');
+			const modalContent = container.querySelector('[data-modal-resize-key="tab-switcher"]');
 			expect(modalContent).toHaveStyle({ backgroundColor: lightTheme.colors.bgActivity });
 		});
 	});
@@ -2543,5 +2780,309 @@ describe('TabSwitcherModal', () => {
 				expect(screen.getByTestId('terminal-icon')).toBeInTheDocument();
 			});
 		});
+
+		describe('browser tab support', () => {
+			// Helper to create a test browser tab
+			const createTestBrowserTab = (
+				overrides: Partial<import('../../../renderer/types').BrowserTab> = {}
+			) => ({
+				id: `browser-tab-${Math.random().toString(36).substr(2, 9)}`,
+				url: 'https://example.com',
+				title: 'Example',
+				createdAt: Date.now(),
+				canGoBack: false,
+				canGoForward: false,
+				isLoading: false,
+				...overrides,
+			});
+
+			it('includes browser tabs in Open Tabs count', () => {
+				const aiTabs = [createTestTab({ name: 'AI Tab' })];
+				const browserTabs = [createTestBrowserTab(), createTestBrowserTab()];
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={aiTabs}
+						browserTabs={browserTabs}
+						activeTabId={aiTabs[0].id}
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				// Should show 3 total tabs (1 AI + 2 browser)
+				expect(screen.getByText('Open Tabs (3)')).toBeInTheDocument();
+			});
+
+			it('renders browser tabs with title, URL, and Browser label', () => {
+				const browserTabs = [
+					createTestBrowserTab({ title: 'My Page', url: 'https://mypage.com/path' }),
+				];
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[]}
+						browserTabs={browserTabs}
+						activeTabId=""
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				expect(screen.getByText('My Page')).toBeInTheDocument();
+				expect(screen.getByText('https://mypage.com/path')).toBeInTheDocument();
+				expect(screen.getByText('Browser')).toBeInTheDocument();
+			});
+
+			it('falls back to host when title is empty', () => {
+				const browserTabs = [createTestBrowserTab({ title: '', url: 'https://fallback.com' })];
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[]}
+						browserTabs={browserTabs}
+						activeTabId=""
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				// With no title, the display name falls back to the URL host
+				// (getBrowserTabLabel), while the full URL remains the subtitle.
+				expect(screen.getByText('fallback.com')).toBeInTheDocument();
+				expect(screen.getByText('https://fallback.com')).toBeInTheDocument();
+			});
+
+			it('calls onBrowserTabSelect when clicking a browser tab', () => {
+				const browserTabs = [createTestBrowserTab({ title: 'Click Me' })];
+				const onBrowserTabSelect = vi.fn();
+				const onClose = vi.fn();
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[]}
+						browserTabs={browserTabs}
+						activeTabId=""
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onBrowserTabSelect={onBrowserTabSelect}
+						onNamedSessionSelect={vi.fn()}
+						onClose={onClose}
+					/>
+				);
+
+				fireEvent.click(screen.getByText('Click Me'));
+
+				expect(onBrowserTabSelect).toHaveBeenCalledWith(browserTabs[0].id);
+				expect(onClose).toHaveBeenCalled();
+			});
+
+			it('filters browser tabs by search query', () => {
+				const browserTabs = [
+					createTestBrowserTab({ title: 'GitHub', url: 'https://github.com' }),
+					createTestBrowserTab({ title: 'Google', url: 'https://google.com' }),
+				];
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[]}
+						browserTabs={browserTabs}
+						activeTabId=""
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				const input = screen.getByPlaceholderText('Search open tabs...');
+				fireEvent.change(input, { target: { value: 'github' } });
+
+				expect(screen.getByText('GitHub')).toBeInTheDocument();
+				expect(screen.queryByText('Google')).not.toBeInTheDocument();
+			});
+
+			it('shows active indicator for the active browser tab', () => {
+				const browserTabs = [
+					createTestBrowserTab({ id: 'active-browser-tab', title: 'Active Page' }),
+				];
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[]}
+						browserTabs={browserTabs}
+						activeTabId=""
+						activeBrowserTabId="active-browser-tab"
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				// Active browser tab shows a green dot instead of the globe icon
+				expect(screen.queryByTestId('globe-icon')).not.toBeInTheDocument();
+			});
+
+			it('shows globe icon for inactive browser tab', () => {
+				const browserTabs = [
+					createTestBrowserTab({ id: 'inactive-browser', title: 'Inactive Page' }),
+				];
+
+				renderWithLayerStack(
+					<TabSwitcherModal
+						theme={theme}
+						tabs={[]}
+						browserTabs={browserTabs}
+						activeTabId=""
+						activeBrowserTabId="other-tab"
+						projectRoot="/test"
+						onTabSelect={vi.fn()}
+						onNamedSessionSelect={vi.fn()}
+						onClose={vi.fn()}
+					/>
+				);
+
+				expect(screen.getByTestId('globe-icon')).toBeInTheDocument();
+			});
+		});
+	});
+});
+
+describe('TabSwitcherModal on a phone', () => {
+	let theme: Theme;
+
+	beforeEach(() => {
+		// This describe has its own setup, so the `clearAllMocks` in the desktop
+		// describe above never runs for it and call history from earlier tests
+		// carries in. That matters here because one of these tests asserts the
+		// named-session catalog was NEVER fetched.
+		vi.clearAllMocks();
+		theme = createTestTheme();
+		Element.prototype.scrollIntoView = vi.fn();
+		mockedUsePhoneLayout.mockReturnValue(true);
+		vi.mocked(window.maestro.agentSessions.getAllNamedSessions).mockResolvedValue([]);
+	});
+
+	afterEach(() => {
+		mockedUsePhoneLayout.mockReturnValue(false);
+		vi.restoreAllMocks();
+	});
+
+	// A phone has no keyboard for the hotkeys the badges advertise, and at 390px
+	// the per-tab metadata crowded out the name. The phone list is the name, a
+	// kind glyph, and a star. Nothing else.
+	it('lists open tabs by name only - no mode pills, metadata, or keyboard legend', () => {
+		const tab = createTestTab({ name: 'Cue Doctor', starred: true });
+		renderWithLayerStack(
+			<TabSwitcherModal
+				theme={theme}
+				tabs={[tab]}
+				activeTabId={tab.id}
+				projectRoot="/test"
+				onTabSelect={vi.fn()}
+				onNamedSessionSelect={vi.fn()}
+				onClose={vi.fn()}
+			/>
+		);
+
+		expect(screen.getByTestId('tab-switcher-phone')).toBeInTheDocument();
+		expect(screen.getByText('Cue Doctor')).toBeInTheDocument();
+		expect(screen.getByTestId('star-icon')).toBeInTheDocument();
+		expect(screen.queryByText(/All Named/)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Starred \(/)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Open Tabs \(/)).not.toBeInTheDocument();
+		expect(screen.queryByText(/tokens/)).not.toBeInTheDocument();
+		expect(screen.queryByText(/navigate/)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Tab \/ /)).not.toBeInTheDocument();
+	});
+
+	it('still offers a close control', () => {
+		const onClose = vi.fn();
+		renderWithLayerStack(
+			<TabSwitcherModal
+				theme={theme}
+				tabs={[createTestTab({ name: 'One' })]}
+				activeTabId=""
+				projectRoot="/test"
+				onTabSelect={vi.fn()}
+				onNamedSessionSelect={vi.fn()}
+				onClose={onClose}
+			/>
+		);
+		fireEvent.click(screen.getByLabelText('Close (Esc)'));
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it('selects a tab on tap and closes', () => {
+		const onTabSelect = vi.fn();
+		const onClose = vi.fn();
+		const tab = createTestTab({ name: 'Interplay' });
+		renderWithLayerStack(
+			<TabSwitcherModal
+				theme={theme}
+				tabs={[tab]}
+				activeTabId=""
+				projectRoot="/test"
+				onTabSelect={onTabSelect}
+				onNamedSessionSelect={vi.fn()}
+				onClose={onClose}
+			/>
+		);
+
+		fireEvent.click(screen.getByText('Interplay'));
+		expect(onTabSelect).toHaveBeenCalledWith(tab.id);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it('marks the active tab and shows a busy dot instead of the glyph for a working tab', () => {
+		const active = createTestTab({ name: 'Active', state: 'idle' });
+		const busy = createTestTab({ name: 'Busy', state: 'busy' });
+		renderWithLayerStack(
+			<TabSwitcherModal
+				theme={theme}
+				tabs={[active, busy]}
+				activeTabId={active.id}
+				projectRoot="/test"
+				onTabSelect={vi.fn()}
+				onNamedSessionSelect={vi.fn()}
+				onClose={vi.fn()}
+			/>
+		);
+
+		const activeRow = screen.getByText('Active').closest('button');
+		const busyRow = screen.getByText('Busy').closest('button');
+		expect(activeRow).toHaveAttribute('aria-current', 'true');
+		expect(busyRow).not.toHaveAttribute('aria-current');
+		// One chat glyph (the idle row); the busy row swaps it for a dot.
+		expect(screen.getAllByTestId('message-square-icon')).toHaveLength(1);
+	});
+
+	it('does not fetch the named-session catalog it never shows', async () => {
+		renderWithLayerStack(
+			<TabSwitcherModal
+				theme={theme}
+				tabs={[createTestTab({ name: 'One', agentSessionId: 'abc-def' })]}
+				activeTabId=""
+				projectRoot="/test"
+				onTabSelect={vi.fn()}
+				onNamedSessionSelect={vi.fn()}
+				onClose={vi.fn()}
+			/>
+		);
+		await act(async () => {});
+		expect(window.maestro.agentSessions.getAllNamedSessions).not.toHaveBeenCalled();
 	});
 });

@@ -1,0 +1,937 @@
+<!-- Verified 2026-04-09 against origin/rc (06e5a2eb3) -->
+
+# Agent Infrastructure Reference
+
+Complete reference for Maestro's agent registration system: agent IDs, definitions, capabilities, detection, output parsers, error patterns, session storage, and process management.
+
+---
+
+## Agent Registration Pipeline
+
+```text
+1. Agent IDs         src/shared/agentIds.ts           Single source of truth for all agent IDs
+2. Definitions       src/main/agents/definitions.ts   CLI args, config options, argument builders
+3. Capabilities      src/main/agents/capabilities.ts  Feature flags per agent
+4. Detection         src/main/agents/detector.ts      Runtime binary detection + PATH resolution
+5. Output Parsers    src/main/parsers/                 JSON output normalization per agent
+6. Error Patterns    src/shared/agentErrorPatterns.ts    Regex patterns for error detection
+7. Session Storage   src/main/storage/                 Per-agent session file reading
+8. Picker Registry   src/shared/agentMetadata.ts       Whether and how the user can choose it
+```
+
+Steps 1-7 make an agent work. Step 8 is what makes it reachable: an agent that
+is defined, capable, and detected is still invisible in the UI until it has a
+`AGENT_PICKER_META` entry.
+
+---
+
+## 1. Agent IDs (`src/shared/agentIds.ts`)
+
+The canonical list of all agent IDs:
+
+```typescript
+export const AGENT_IDS = [
+	'terminal',
+	'claude-code',
+	'codex',
+	'gemini-cli',
+	'qwen3-coder',
+	'opencode',
+	'factory-droid',
+	'copilot-cli',
+	'grok',
+] as const;
+
+export type AgentId = (typeof AGENT_IDS)[number];
+```
+
+**Adding a new agent:** Add the ID string to `AGENT_IDS`. TypeScript enforces updates everywhere via the `AgentId` type.
+
+### Related Metadata (`src/shared/agentMetadata.ts`)
+
+```typescript
+AGENT_DISPLAY_NAMES: Record<AgentId, string>       // Human-readable names
+BETA_AGENTS: ReadonlySet<AgentId>                  // Agents showing "(Beta)" badge
+AGENT_PICKER_META: Record<AgentId, Meta | null>    // Picker presentation, null = never offered
+PICKABLE_AGENT_IDS: readonly AgentId[]             // Picker order, sorted by display name
+AGENT_AUTOSELECT_ORDER: readonly AgentId[]         // Which provider a picker defaults to
+getAgentDisplayName(agentId): string               // Get name with fallback
+isBetaAgent(agentId): boolean                      // Check beta status
+getAgentPickerMeta(agentId): Meta | null           // Description + brand color, or null
+getAgentLoginCommand(agentId, customPath?)         // Re-auth command, or null
+formatAgentLoginCommand(login, syntax?)            // Render it as a shell line
+loginShellSyntaxFor(shellId, isWindows)            // 'posix' | 'powershell' | 'cmd'
+```
+
+**Provider pickers** all read `AGENT_PICKER_META`. The New Agent modal's
+`SUPPORTED_AGENTS` re-exports `PICKABLE_AGENT_IDS`; the New Agent Wizard's
+`AGENT_TILES` is derived from the record (name from `getAgentDisplayName`, pitch
+and brand color from the entry); the Group Chat moderator dropdown renders those
+same tiles filtered by what detection found installed. `null` withholds an agent
+from all three - correct for `terminal` (internal) and `gemini-cli` (kept for
+type and back-compat only). Because the record is keyed by `AgentId`, a new id
+does not compile until that decision is made. Do NOT add a fourth hand-written
+list of agent ids for a new picker; the three used to be hand-written, and Grok
+and Qwen3 Coder shipped selectable in one of them and missing from the other two.
+
+`PICKABLE_AGENT_IDS` sorts the record by display name, so all three surfaces show
+the same alphabetical list and the record's key order carries no meaning - add a
+new entry wherever it reads best. A picker that has to choose for the user reads
+`AGENT_AUTOSELECT_ORDER` and takes the first entry that is installed; do NOT
+default to `PICKABLE_AGENT_IDS[0]`, which is only ever "whatever sorts first".
+
+Registering a provider also means drawing it: a `case` in `AgentLogo`
+(`src/renderer/components/Wizard/screens/AgentSelectionScreen/components/AgentLogo.tsx`)
+and a glyph in `AGENT_ICONS` (`src/renderer/constants/agentIcons.ts`). Without
+the logo case the tile renders a blank fallback ring, and a test in
+`AgentSelectionScreen/components.test.tsx` fails.
+
+**Re-authentication commands** are keyed by `AgentId`, so adding an agent forces a decision about how it logs in. An entry carries `binary` + `args` (the line Maestro types into the re-authentication terminal) and an optional `followUp` for providers whose login only exists as a slash command inside their TUI (`gemini-cli`, `qwen3-coder`, `factory-droid`). `null` means the agent has no login flow of its own. `getAgentLoginCommand` returns `null` for unknown ids rather than guessing, because the result is executed in a shell. The consumer is `ReauthModal` (`src/renderer/components/ReauthModal.tsx`); do not hand-roll a second login-command table.
+
+**Five things about the login shell `ReauthModal` spawns are not optional, and every one of them was a bug first.**
+
+1. **The command is typed on the shell's FIRST BYTE, not when the spawn resolves.** Over SSH the spawn resolves as soon as the local `ssh` client is running, seconds before the remote shell exists, and anything written into that gap is dropped - which is how a remote re-authentication came up as an empty box. The command is held in a ref until `process.onData` fires for that PTY, with an 8 second fallback for a shell that prints no prompt at all.
+2. **Spawn and kill live in ONE effect.** Split across two, StrictMode's remount (cleanup, then re-run) killed the shell the first pass had just started while a `spawnStarted` boolean blocked the second pass from starting another, leaving a dead PTY nobody typed into. The guard is therefore a generation counter the cleanup resets, and every async continuation re-checks it, so a remount ends with exactly one live shell.
+3. **Over SSH, no working directory is passed.** The shell exists only to run a login; it gains nothing from the project directory, and main turns `workingDirOverride` into a `cd` the remote runs first, so a stale or local-looking path kills the session before the login can start. Landing in the remote home directory is always safe. Never fall back to `session.cwd` on a remote.
+
+4. **The command is submitted with CR, not LF.** That is what a real Enter key sends, and on Windows it is the only one that works: ConPTY passes LF through as Ctrl+J, which PSReadLine does not read as "run this line", so the login command sits on the prompt untyped forever. A Unix PTY maps CR to NL itself, so CR is correct everywhere.
+5. **On Windows the login never runs in WSL, even when WSL is the default shell.** Agents are always spawned as native Windows processes - nothing in the spawn path goes through `wsl.exe` - so a login inside WSL writes credentials into the WSL home directory that the native agent never reads. The flow looks like it succeeded and fixes nothing. `ReauthModal` substitutes `powershell` for a `wsl` default; an SSH remote is exempt, since its shell belongs to the remote host. The same split decides quoting: `loginShellSyntaxFor()` maps the shell id to a dialect, and `formatAgentLoginCommand()` prefixes the call operator `&` for a quoted path in PowerShell, which otherwise parses a line starting with a quoted string as an expression and just echoes it. Agents install under `C:\Program Files\...`, so that is the common Windows case, not an edge case.
+   A login shell that dies without printing anything also writes `[the login session ended]` into the terminal, because an empty box with no explanation is indistinguishable from a hang.
+
+**The same dialog serves a login the user ASKED for, and `AuthOutage.initiatedBy` is the only thing that separates them.** `startManualReauth(sessionId)` (`src/renderer/stores/authOutageStore.ts`), behind the Command K entry **Re-authenticate Provider**, builds the same outage record `reportAuthFailure` does, on purpose: one login shell, one SSH resolution, one environment disclosure, one resume path, rather than two that drift. Only data differs - an `initiatedBy: 'user'` outage carries no provider error text and a roster with no lost tabs, so `ReauthModal` swaps its copy (nothing is stopped, no queue is held, the button says `Done` rather than `Resume Agent`). Claiming a recovery that did not happen is a lie the user has to go and disprove. Two rules keep the reuse honest. The flag **upgrades to `'failure'` and never back**, because credentials expiring while the user is signing in by hand really does block agents and the roster then has to be described truthfully (`reportAuthFailure` also backfills the `message`, which is the first real evidence of what broke). And `resolveAuthOutage` **skips `clearAgentError` for a healthy agent on a manual login**: that call forces the session to `'idle'`, which would report a turn still running in another tab as finished. An agent that IS in the error state still clears, manual login or not - its held queue has to be released either way.
+
+**The sign-in URL needs a Copy button, because it cannot be read off the screen.** `findLoginUrl()` (`src/renderer/utils/loginUrl.ts`) scans a rolling tail of the login PTY's output and `ReauthModal` surfaces the match as `Copy Login URL`. Every part of that is load-bearing for the same reason: the URL is hundreds of characters of query string, the TUI soft-wraps it across several rows so it is not one selectable run of text, and a provider TUI with mouse tracking on eats the drag that would select it anyway - so without the button the user has no way to reach it and the login is abandoned. Three details in the scanner are decisions, not accidents. It strips ANSI first and REJOINS rows the terminal wrapped, since a newline inside a URL is formatting rather than content (a blank line is a real break and is kept, so following prose is never glued onto the link). It matches against an ALLOWLIST of sign-in hosts rather than taking any URL, because the same screen prints docs and status links and a Copy button that silently grabs the wrong one sends the user somewhere that cannot log them in. And it returns the LAST match, because a retried login prints a fresh URL and the earlier one is spent. Do not hand-roll a second URL scraper for a new provider - add its host to `LOGIN_URL_HINTS`.
+
+**Testing that flow means faking the failure, not waiting for one.** The command
+palette carries `Debug: Trigger Provider Re-auth` and a `(Cue pipeline)` variant,
+which call `debug:simulateAuthExpiry` in the MAIN process. The handler emits the
+real `agent:error` / `agent:authExpired` event rather than poking the renderer's
+stores, so classification, the provider-scoped outage grouping, the modal, the
+login PTY, and the resume that replays blocked turns all run exactly as they do
+in production - anything that only works when a test reaches past the IPC
+boundary is a bug this is meant to catch, not hide. Two payload details decide whether the
+exercise proves anything: the interactive variant sends the FULL process id
+(`{sessionId}-ai-{tabId}`), because that is what a real error carries and it is
+how the failing tab is identified for replay, while the pipeline variant sends
+the bare agent id on the separate channel Cue uses (its agents are spawned
+outside the ProcessManager). Send a bare id down the interactive path and the
+dialog opens and then resumes nothing, which looks like a passing test.
+
+### Context Windows (`src/shared/agentConstants.ts`)
+
+```typescript
+DEFAULT_CONTEXT_WINDOWS: Partial<Record<AgentId, number>>;
+// claude-code: 200000, codex: 200000, opencode: 128000, factory-droid: 200000, terminal: 0
+
+FALLBACK_CONTEXT_WINDOW = 200000; // Default when no entry exists
+
+COMBINED_CONTEXT_AGENTS: ReadonlySet<AgentId>; // Agents with combined I/O context (codex)
+```
+
+---
+
+## 2. Agent Definitions (`src/main/agents/definitions.ts`)
+
+Each agent definition includes CLI configuration:
+
+```typescript
+// AgentDefinition is derived from AgentConfig:
+// export type AgentDefinition = Omit<AgentConfig, 'available' | 'path' | 'capabilities'>;
+//
+// AgentConfig (in definitions.ts) contains:
+interface AgentConfig {
+	id: string;
+	name: string;
+	binaryName: string; // Binary to look for (e.g., 'claude', 'codex')
+	command: string; // Default command to execute
+	args: string[]; // Base args always included (excludes batch mode prefix)
+	available: boolean; // (runtime only - not on AgentDefinition)
+	path?: string; // (runtime only - not on AgentDefinition)
+	customPath?: string; // User-specified custom path
+	requiresPty?: boolean; // Whether agent needs pseudo-terminal
+	configOptions?: AgentConfigOption[]; // Agent-specific configuration
+	hidden?: boolean; // Hide from UI (terminal is hidden)
+	capabilities: AgentCapabilities; // (runtime only - not on AgentDefinition)
+
+	// Argument builders (optional per agent)
+	batchModePrefix?: string[]; // Args added before base args for batch mode (e.g., ['run'] for OpenCode)
+	batchModeArgs?: string[]; // Args only applied in batch mode
+	jsonOutputArgs?: string[]; // Args for JSON output format
+	resumeArgs?: (sessionId: string) => string[]; // Build resume flags
+	readOnlyArgs?: string[]; // Read-only mode flags
+	modelArgs?: (modelId: string) => string[]; // Model selection flags
+	yoloModeArgs?: string[]; // Full-access/bypass flags
+	workingDirArgs?: (dir: string) => string[]; // Working directory flags
+	imageArgs?: (imagePath: string) => string[]; // Image attachment flags
+	promptArgs?: (prompt: string) => string[]; // Prompt flags (e.g., [-p, prompt] for OpenCode)
+	noPromptSeparator?: boolean; // Don't add '--' before prompt
+	defaultEnvVars?: Record<string, string>; // Default env vars
+	readOnlyEnvOverrides?: Record<string, string>; // Env overrides in read-only mode
+	readOnlyCliEnforced?: boolean; // Whether CLI enforces read-only (vs prompt-only)
+}
+```
+
+### Configuration Options
+
+Agent-specific UI settings using discriminated union types:
+
+```typescript
+// All options share BaseConfigOption { key, label, description }.
+type AgentConfigOption =
+	| {
+			type: 'checkbox';
+			key: string;
+			label: string;
+			description: string;
+			default: boolean;
+			argBuilder?: (value: boolean) => string[];
+	  }
+	| {
+			type: 'text';
+			key: string;
+			label: string;
+			description: string;
+			default: string;
+			argBuilder?: (value: string) => string[];
+	  }
+	| {
+			type: 'number';
+			key: string;
+			label: string;
+			description: string;
+			default: number;
+			argBuilder?: (value: number) => string[];
+	  }
+	| {
+			type: 'select';
+			key: string;
+			label: string;
+			description: string;
+			default: string;
+			options?: string[]; // Optional when dynamic is true
+			dynamic?: boolean; // Fetched at runtime via discoverConfigOptions()
+			argBuilder?: (value: string) => string[];
+	  };
+```
+
+The `argBuilder` function converts the setting value to CLI arguments.
+
+### Agent-Specific Examples
+
+**Claude Code** args: `['--print', '--verbose', '--output-format', 'stream-json', '--dangerously-skip-permissions']`
+
+- No `batchModePrefix` - `--print` is part of base `args`
+- resumeArgs: `(id) => ['--resume', id]`
+- readOnlyArgs: `['--permission-mode', 'plan']`
+- modelArgs: `(id) => ['--model', id]`
+
+**Codex** args: `[]` (interactive mode has no base args)
+
+- batchModePrefix: `['exec']`
+- batchModeArgs: `['--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check']`
+- jsonOutputArgs: `['--json']`
+- resumeArgs: `(id) => ['resume', id]`
+- readOnlyArgs: `['--sandbox', 'read-only', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check']`
+- modelArgs: `(id) => ['-m', id]`
+- imageArgs: `(path) => ['-i', path]`
+- workingDirArgs: `(dir) => ['-C', dir]`
+- yoloModeArgs: `['--dangerously-bypass-approvals-and-sandbox']`
+
+**OpenCode** args: `[]`
+
+- batchModePrefix: `['run']`
+- jsonOutputArgs: `['--format', 'json']`
+- resumeArgs: `(id) => ['--session', id]`
+- readOnlyArgs: `['--agent', 'plan']`
+- modelArgs: `(id) => ['--model', id]`
+- imageArgs: `(path) => ['-f', path]`
+- Note: No `promptArgs` - prompt is positional. `noPromptSeparator` is NOT set on OpenCode (it uses the default `--` separator; see comment in definitions.ts)
+
+**Factory Droid** args: `[]`
+
+- batchModePrefix: `['exec']`
+- batchModeArgs: `['--skip-permissions-unsafe']`
+- jsonOutputArgs: `['-o', 'stream-json']`
+- resumeArgs: `(id) => ['-s', id]`
+- readOnlyArgs: `[]` (exec is read-only by default)
+- modelArgs: `(id) => ['-m', id]`
+- imageArgs: `(path) => ['-f', path]`
+- workingDirArgs: `(dir) => ['--cwd', dir]`
+- yoloModeArgs: `['--skip-permissions-unsafe']`
+- noPromptSeparator: `true`
+
+---
+
+## 3. Capabilities (`src/main/agents/capabilities.ts`)
+
+Feature flags that control Maestro behavior per agent:
+
+```typescript
+interface AgentCapabilities {
+	supportsResume: boolean; // Session resumption
+	supportsReadOnlyMode: boolean; // Plan/read-only mode
+	supportsJsonOutput: boolean; // JSON-formatted responses
+	supportsSessionId: boolean; // Conversation continuity
+	supportsImageInput: boolean; // Accept images
+	supportsImageInputOnResume: boolean; // Images on resumed sessions
+	supportsSlashCommands: boolean; // /help, /compact, etc.
+	supportsSessionStorage: boolean; // Discoverable session history
+	supportsCostTracking: boolean; // USD cost data
+	supportsUsageStats: boolean; // Token count reporting
+	supportsBatchMode: boolean; // Non-interactive execution
+	requiresPromptToStart: boolean; // No eager spawn
+	supportsStreaming: boolean; // Real-time output
+	supportsResultMessages: boolean; // Distinct "done" events
+	supportsModelSelection: boolean; // --model flag
+	supportsStreamJsonInput: boolean; // stdin image input
+	supportsPromptViaStdin: boolean; // CLI reads the prompt from stdin
+	supportsThinkingDisplay: boolean; // Thinking/reasoning content
+	supportsContextMerge: boolean; // Receive transferred context
+	supportsContextExport: boolean; // Export context for transfer
+	supportsWizard: boolean; // Inline wizard conversations
+	supportsGroupChatModeration: boolean; // Group chat moderator
+	usesJsonLineOutput: boolean; // JSONL output format
+	usesCombinedContextWindow: boolean; // Combined I/O context
+	supportsAppendSystemPrompt: boolean; // --append-system-prompt flag
+	imageResumeMode?: 'prompt-embed'; // How to handle images on resume
+}
+```
+
+### Capability Matrix (Active Agents)
+
+| Capability        | Claude Code | Codex | OpenCode | Factory Droid |
+| ----------------- | :---------: | :---: | :------: | :-----------: |
+| Resume            |      Y      |   Y   |    Y     |       Y       |
+| Read-Only         |      Y      |   Y   |    Y     |       Y       |
+| JSON Output       |      Y      |   Y   |    Y     |       Y       |
+| Session ID        |      Y      |   Y   |    Y     |       Y       |
+| Image Input       |      Y      |   Y   |    Y     |       Y       |
+| Session Storage   |      Y      |   Y   |    Y     |       Y       |
+| Cost Tracking     |      Y      |   N   |    Y     |       N       |
+| Usage Stats       |      Y      |   Y   |    Y     |       Y       |
+| Batch Mode        |      Y      |   Y   |    Y     |       Y       |
+| Requires Prompt   |      N      |   Y   |    Y     |       Y       |
+| Model Selection   |      Y      |   Y   |    Y     |       Y       |
+| Thinking Display  |      Y      |   Y   |    Y     |       Y       |
+| Context Merge     |      Y      |   Y   |    Y     |       Y       |
+| Wizard            |      Y      |   Y   |    Y     |       N       |
+| Group Chat        |      Y      |   Y   |    Y     |       Y       |
+| JSONL Output      |      N      |   Y   |    Y     |       Y       |
+| Combined Context  |      N      |   Y   |    N     |       N       |
+| Append Sys Prompt |      Y      |   N   |    N     |       N       |
+
+### Access Functions
+
+```typescript
+getAgentCapabilities(agentId: string): AgentCapabilities
+// Returns capabilities or DEFAULT_CAPABILITIES for unknown agents
+
+hasCapability(agentId: string, capability: keyof AgentCapabilities): boolean
+// Quick check for a single capability
+```
+
+---
+
+## 4. Agent Detection (`src/main/agents/detector.ts`)
+
+The `AgentDetector` class detects installed agents at runtime:
+
+```typescript
+class AgentDetector {
+	setCustomPaths(paths: Record<string, string>): void; // User-configured paths
+	async detectAgents(): Promise<AgentConfig[]>; // Detect all agents (cached)
+	async discoverModels(agentId: string, forceRefresh?): Promise<string[]>; // Model discovery
+}
+```
+
+Detection process:
+
+1. Check custom paths first (user-configured in settings)
+2. Probe platform-specific paths (Windows registry locations, Homebrew, npm global, etc.)
+3. Fall back to PATH-based detection via `which`/`where`
+4. Cache results (model cache TTL: 5 minutes)
+5. Return `AgentConfig[]` with `available: boolean` and resolved `path`
+
+### Path Probing (`src/main/agents/path-prober.ts`)
+
+```typescript
+checkCustomPath(customPath: string): Promise<BinaryDetectionResult>
+probeWindowsPaths(binaryName: string): Promise<string | null>
+probeUnixPaths(binaryName: string): Promise<string | null>
+checkBinaryExists(binaryName: string): Promise<BinaryDetectionResult>
+getExpandedEnv(): NodeJS.ProcessEnv  // PATH with common binary locations
+getExpandedEnvWithShell(): Promise<NodeJS.ProcessEnv>
+```
+
+---
+
+## 5. Output Parsers (`src/main/parsers/`)
+
+Each agent has a parser that normalizes its output into `ParsedEvent` objects.
+
+### Parser Interface (`src/main/parsers/agent-output-parser.ts`)
+
+```typescript
+interface AgentOutputParser {
+	readonly agentId: ToolType;
+
+	parseJsonLine(line: string): ParsedEvent | null;
+	parseJsonObject(parsed: unknown): ParsedEvent | null;
+	isResultMessage(event: ParsedEvent): boolean;
+	extractSessionId(event: ParsedEvent): string | null;
+	extractUsage(event: ParsedEvent): ParsedEvent['usage'] | null;
+	extractSlashCommands(event: ParsedEvent): string[] | null;
+	detectErrorFromLine(line: string): AgentError | null;
+	detectErrorFromParsed(parsed: unknown): AgentError | null;
+	detectErrorFromExit(exitCode: number, stderr: string, stdout: string): AgentError | null;
+}
+```
+
+### ParsedEvent (Normalized Output)
+
+```typescript
+interface ParsedEvent {
+	type: 'init' | 'text' | 'tool_use' | 'result' | 'error' | 'usage' | 'system';
+	sessionId?: string;
+	text?: string;
+	toolName?: string;
+	toolCallId?: string; // Stable id used to merge running -> completed for the same call
+	parentToolUseId?: string; // Set on activity spawned by a parent tool (e.g. Task subagents)
+	toolState?: unknown;
+	usage?: {
+		inputTokens: number;
+		outputTokens: number;
+		cacheReadTokens?: number;
+		cacheCreationTokens?: number;
+		contextWindow?: number;
+		costUsd?: number;
+		reasoningTokens?: number;
+	};
+	slashCommands?: string[];
+	isPartial?: boolean;
+	isReasoning?: boolean;
+	toolUseBlocks?: Array<{ name: string; id?; input? }>;
+	raw?: unknown;
+}
+```
+
+### Thinking / Tool Log Contract (REQUIRED for new parsers)
+
+Maestro renders reasoning and tool-execution activity as ephemeral cells whose
+lifecycle is governed by the tab's `ThinkingMode` (`'off' | 'on' | 'sticky'`,
+defined in `src/shared/types.ts`). **Every parser that surfaces reasoning or
+tool activity MUST cooperate with this contract**, otherwise users will see
+stale thinking cells leak past the final answer or process exit.
+
+Concretely:
+
+1. **Reasoning chunks**: Emit `ParsedEvent`s with `isReasoning: true`
+   alongside `isPartial: true`. The dispatcher routes these to the
+   `process:thinking-chunk` IPC channel; the renderer appends them to the
+   target tab as `LogEntry { source: 'thinking' }`.
+2. **Tool execution**: Emit tool-use events normally. The renderer appends
+   them as `LogEntry { source: 'tool' }`.
+3. **Final answer text**: Emit non-reasoning text events. The renderer
+   appends them as `LogEntry { source: 'stdout' | 'stderr' }`.
+
+The renderer enforces the lifecycle in three coordinated places - parser
+authors do **not** need to implement clearing logic, only the correct
+`source` tagging:
+
+| Clear point | Where                                               | Trigger                             | Effect (when `showThinking !== 'sticky'`) |
+| ----------- | --------------------------------------------------- | ----------------------------------- | ----------------------------------------- |
+| Inline      | `useBatchedSessionUpdates.ts`                       | New `stdout`/`stderr` chunk arrives | Drops prior `thinking`/`tool` entries     |
+| On exit     | `useAgentListeners.ts` → `cleanupExitedTabLogs`     | Process `exit` event                | Drops remaining `thinking`/`tool` entries |
+| Manual      | `useTabHandlers.ts` → `handleToggleTabShowThinking` | User cycles mode to `'off'`         | Wipes `thinking`/`tool` entries           |
+
+Sticky mode (`'sticky'`) opts out of all three clear points. Off mode
+suppresses appending in the first place at the renderer's `onThinkingChunk`
+listener.
+
+### Streams vs cards: what may be appended to
+
+A `LogEntry` is one of two things, and coalescing must tell them apart:
+
+- **A stream** - `stdout` / `stderr` / `thinking` text arriving in chunks.
+  Consecutive chunks coalesce into one entry so the transcript isn't one
+  bubble per packet.
+- **A self-contained card** - a `!` command's output, a retry-outage card, a
+  session-recovery prompt, a tool call. Its text is owned by whoever created
+  it and is updated by log id, never appended to.
+
+Cards keep a **natural `source`**: a command-mode card is `source: 'stdout'`
+because its body genuinely is terminal output. So `source` alone cannot tell
+you whether appending is safe, and every site that assumed it could has
+produced a bug - most recently agent replies being concatenated into a `!`
+command's terminal output, because the card was the newest `stdout` entry when
+the next chunk arrived (command mode runs _during_ a turn by design, so this
+was near-certain rather than a rare race).
+
+The rule lives in one place, `renderer/utils/logEntries.ts`:
+
+- `isSelfContainedCard(entry)` - enumerates the card markers, plus the one
+  card that has no marker: Claude's plan-limit banner, which arrives as plain
+  `stdout` text and is recognized by `isClaudeLimitNotice()`
+- `canAppendToLogEntry(entry, source)` - same source **and** not a card
+
+Used by all three coalescing sites (`useBatchedSessionUpdates` AI-tab path,
+its legacy `shellLogs` path, and `useAgentThinkingListener`). Callers keep
+their own policy on top (the 500ms window, session-busy). **Adding a new card
+kind:** add its marker to `isSelfContainedCard` and every site is correct by
+construction.
+
+**Adding a new agent:** make sure your parser tags reasoning deltas with
+`isReasoning: true` and emits tool-use events through the standard
+`tool_use` ParsedEvent type. Verify the tab transitions to `idle` cleanly
+on exit by spot-checking that thinking cells disappear when
+`showThinking === 'on'` and persist when `showThinking === 'sticky'` -
+covered by `src/__tests__/renderer/hooks/useAgentListeners.test.ts`.
+
+### Tool-Execution Pipeline (end to end)
+
+Tool badges (the "Read", "Bash", "Task" cells with a running/completed/failed
+state) flow through a single pipeline shared by every provider. A parser only
+has to emit the right `ParsedEvent`; the main process dedups and forwards, and
+the renderer merges and draws.
+
+1. **Parse** (`src/main/parsers/agent-output-parser.ts` + each parser). A parser
+   emits `ParsedEvent { type: 'tool_use', toolName, toolCallId?, toolState, parentToolUseId? }`.
+   `toolState` carries `{ status: 'running' | 'completed' | 'failed' | 'error', input?, output? }`.
+   `toolCallId` is the stable id that ties a later `completed`/`failed` event
+   back to the earlier `running` one. `parentToolUseId` is set when the activity
+   was spawned by a parent tool call (claude-code's `Task` subagents; see Phase 2)
+   so the renderer can nest it.
+2. **Dedup + emit** (`src/main/process-manager/handlers/StdoutHandler.ts`). On a
+   `tool_use` event the handler emits a `tool-execution` event on the process
+   manager. It keeps a per-process `emittedToolCallIds` Set so a `running` event
+   is emitted once per `toolCallId`; the id is removed once the call reaches a
+   terminal state, so a reused id is not suppressed. Events without a
+   `toolCallId` (some providers) always emit and are attributed downstream by
+   tool name.
+3. **Forward over IPC** (`src/main/process-listeners/forwarding-listeners.ts`).
+   The `tool-execution` event is sent to the renderer on the
+   `process:tool-execution` channel and, for web-desktop parity, broadcast to
+   connected web clients.
+4. **Merge into tab logs** (`src/renderer/hooks/agent/internal/useAgentToolExecutionListener.ts`).
+   The listener builds a deterministic log id `tool-${toolCallId}` and merges by
+   id, so a `running` cell transitions in place to `completed`/`failed`. Without
+   a `toolCallId` it attributes a finalizing event to the most recent still
+   `running` entry of the same `toolName`, else appends a fresh entry. Tool
+   events are recorded regardless of the `showToolCalls` setting. Visibility is a
+   pure render concern: `TerminalOutput` reads `showToolCalls` alone and hides
+   `source:'tool'` entries when it is off. **`showToolCalls` and the per-tab
+   `showThinking` mode are independent** - the setting was briefly ANDed with
+   `showThinking !== 'off'`, which made it impossible to read a reasoning chain
+   without the tool noise. The two answer different questions: `showToolCalls`
+   decides whether tool cells are DRAWN, `showThinking` decides how long
+   `thinking`/`tool` entries are RETAINED. Do not re-couple them. The Settings UI
+   groups both under Default Thinking Mode, but the switch is never disabled.
+   Storage is governed by the thinking/tool log contract above, so the
+   `showThinking` lifecycle can still drop stored `thinking`/`tool` entries (on
+   exit, and when new assistant text arrives, unless the tab is `'sticky'`)
+   regardless of `showToolCalls`.
+5. **Render** (`src/renderer/components/TerminalOutput/components/LogItem.tsx` +
+   `src/renderer/components/TerminalOutput/utils/toolSummaries.ts`). `LogItem`
+   draws the tool badge and its status; `toolSummaries.ts` turns `toolState.input`
+   into the short human summary (e.g. the path a `Read` opened). Child entries
+   carrying `parentToolUseId` are grouped under their parent by
+   `utils/groupSubagentToolLogs.ts` and collapse behind an expandable
+   "N tool call(s)" toggle.
+
+**Per-provider support matrix** (does the parser emit `tool_use` on the live
+stream?):
+
+| Provider        | Live tool badges | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code`   | Yes              | Includes `tool_result` -> terminal state (Phase 1) and `Task` subagent nesting via `parentToolUseId` (Phase 2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `codex`         | Yes              | Emits `tool_use` from its JSONL stream, keyed by `payload.call_id` (`function_call`) or `item.id` (`command_execution`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `opencode`      | Yes              | `step_start` -> `tool_use` -> `step_finish` per step                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `copilot-cli`   | Yes              | Emits `tool_use` from `--output-format json`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pi`            | Yes              | Emits `tool_use`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `omp`           | Yes              | Emits `tool_use`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `antigravity`   | Yes              | `step_update` steps of type `tool`, keyed by `step_index`; lifecycle word (`ACTIVE`/`DONE`) is mapped onto the `{status,input,output}` badge shape                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `grok`          | Yes (1.x)        | grok 1.x emits `tool_call` / `tool_call_update` keyed by `toolCallId`; 0.2.93 emitted none, and those turns still render as thinking + text only                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `factory-droid` | No               | The `-o stream-json` stream Maestro consumes carries only `system`/`message`/`completion`/`error` objects; tool activity is folded into the assistant `message.text` rather than emitted as distinct events. Structured tool events exist only in droid's separate `debug` (SSE) and `jsonrpc` formats, which are a different transport than the JSONL parser reads. To wire this up: capture real `-o stream-json` lines from a `droid` build that forces a tool call and, if a `tool_call`/`tool_result` object appears, extend `factory-droid-output-parser.ts` to emit `tool_use` ParsedEvents |
+
+**AskUserQuestion (Phase 3).** claude-code's `AskUserQuestion` tool is not
+answered through this display pipeline but through the permission relay
+(`src/main/permission-relay/`): when running interactively in standard
+permission mode, the relay recognizes `AskUserQuestion`, surfaces the question
+options in the permission prompt UI, and returns the user's selection as the
+tool answer. See that directory and the Phase 3 doc for the answer-delivery
+contract.
+
+### Parser Implementations
+
+| Parser                     | File                             | Agent Output Format                                   |
+| -------------------------- | -------------------------------- | ----------------------------------------------------- |
+| `ClaudeOutputParser`       | `claude-output-parser.ts`        | Stream-JSON events (type: system/assistant/result)    |
+| `CodexOutputParser`        | `codex-output-parser.ts`         | JSONL (thread.started, agent_message, turn.completed) |
+| `OpenCodeOutputParser`     | `opencode-output-parser.ts`      | JSONL (chat.start, text_delta, step_finish)           |
+| `FactoryDroidOutputParser` | `factory-droid-output-parser.ts` | Stream-JSON (init, content_block_delta, message_stop) |
+
+### Registry Functions
+
+```typescript
+registerOutputParser(parser: AgentOutputParser): void
+getOutputParser(agentId: ToolType | string): AgentOutputParser | null
+hasOutputParser(agentId: ToolType | string): boolean
+getAllOutputParsers(): AgentOutputParser[]
+```
+
+### Initialization
+
+Call `initializeOutputParsers()` at app startup (or use `ensureParsersInitialized()` for lazy init):
+
+```typescript
+import { initializeOutputParsers } from './parsers';
+initializeOutputParsers(); // Registers all 4 parsers
+```
+
+---
+
+## 6. Error Pattern System (`src/shared/agentErrorPatterns.ts`)
+
+Regex-based error detection for agent output. Each agent has patterns organized by error type.
+
+There is ONE bank, and it lives in `shared/` because both processes classify agent output: main parses streaming stdout/stderr through it, and the wizard classifies a finished run through it. `src/main/parsers/error-patterns.ts` is the main-process face of the same module - identical API, plus the logger the shared file cannot import. Import that path from main code and `shared/agentErrorPatterns` from renderer code; both reach the same registry object.
+
+Do NOT start a second bank. The wizard used to carry its own copy of about twenty patterns, which drifted behind this one and told every user to run `claude login` regardless of which of the seven providers had actually failed.
+
+An error `message` here names WHAT failed and stops there. The remedy belongs to whichever surface shows it, because only that surface knows the credential: an agent authenticating with `ANTHROPIC_API_KEY`, a gateway `ANTHROPIC_BASE_URL`, and a Bedrock agent all produce `auth_expired` output, and none of them is repaired by a login command. See `classifyCredentialKind()` in `src/shared/providerAuthIdentity.ts`, which is what `ReauthModal` gates its login terminal on.
+
+### Error Types
+
+```typescript
+type AgentErrorType =
+	| 'auth_expired' // API key invalid, token expired
+	| 'token_exhaustion' // Context window full
+	| 'rate_limited' // Too many requests
+	| 'network_error' // Connection failed
+	| 'agent_crashed' // Process exited unexpectedly
+	| 'permission_denied' // Lacks required permissions
+	| 'session_not_found' // Session deleted or invalid
+	| 'unknown'; // Unrecognized error
+```
+
+### Error Pattern Structure
+
+```typescript
+interface ErrorPattern {
+	pattern: RegExp; // Regex to match
+	message: string | ((match: RegExpMatchArray) => string); // User message (can use captures)
+	recoverable: boolean; // Can recover without user intervention
+}
+
+type AgentErrorPatterns = { [K in AgentErrorType]?: ErrorPattern[] };
+```
+
+### Registered Patterns
+
+| Agent             | Pattern Count | Key Patterns                                                                                            |
+| ----------------- | ------------- | ------------------------------------------------------------------------------------------------------- |
+| `claude-code`     | ~30           | OAuth expiry, prompt too long (with token counts), 529 overload, session not found                      |
+| `codex`           | ~20           | API key, 429 rate limit, usage limit, context length                                                    |
+| `opencode`        | ~15           | provider not found, fuzzysort, panic                                                                    |
+| `factory-droid`   | ~18           | FACTORY_API_KEY missing, autonomy level                                                                 |
+| SSH (cross-agent) | ~20           | Permission denied (publickey), host key verification, command not found, broken pipe, shell parse error |
+
+### Dynamic Error Messages
+
+Some patterns use capture groups for rich error messages:
+
+```typescript
+{
+	pattern: /prompt.*too\s+long:\s*(\d+)\s*tokens?\s*>\s*(\d+)\s*maximum/i,
+	message: (match) => {
+		const actual = parseInt(match[1], 10).toLocaleString('en-US');
+		const max = parseInt(match[2], 10).toLocaleString('en-US');
+		return `Prompt is too long: ${actual} tokens exceeds the ${max} token limit.`;
+	},
+	recoverable: true,
+}
+```
+
+### Plan-limit notices arrive as a successful `result`, not an error
+
+Claude Code reports a hit plan limit in the `result` field of a `stream-json`
+result event ("You've hit your session limit - resets 11:40am (America/Chicago)",
+legacy "Claude AI usage limit reached|1755500000"). A result event is the CLI's
+own end-of-turn envelope, so it carries no `error` field: without special
+handling the notice renders as an ordinary assistant reply, the turn looks
+successful, and Agent Resilience never sees a failure to retry.
+
+`isClaudeLimitNotice(text)` is the gate for that branch in
+`ClaudeOutputParser.detectError()`. It is anchored at the start of the string and
+length-capped on purpose - a result body is normal assistant prose, and agents
+working on Maestro discuss rate limits constantly, so running the whole result
+through the pattern bank would turn a normal answer into a phantom failure. Keep
+the CLI's own wording as the error message rather than the generic pattern text:
+it names which limit was hit and when it resets, which is exactly what
+`tokenExhaustionResetAt()` in `src/shared/retryClassification.ts` parses to
+schedule the retry. That parser accepts a wall-clock reset only when the notice
+names its own IANA zone; a bare "resets at 3pm" stays unparseable and falls back
+to the hourly poll.
+
+`src/maestro-p/tui-driver.ts` matches the same banner from the TUI's painted
+output with `LIMIT_REGEX`, which is line-anchored for the same reason.
+
+### Usage Functions
+
+```typescript
+getErrorPatterns(agentId: ToolType | string): AgentErrorPatterns
+// Get patterns for agent. Returns {} for unknown agents.
+
+matchErrorPattern(patterns: AgentErrorPatterns, line: string): { type, message, recoverable } | null
+// Match line against patterns. Checks types in priority order.
+
+matchSshErrorPattern(line: string): { type, message, recoverable } | null
+// Match against SSH-specific patterns. Call for SSH sessions IN ADDITION to agent patterns.
+
+getSshErrorPatterns(): AgentErrorPatterns
+// Get the SSH error patterns object.
+```
+
+---
+
+## 7. Session Storage (`src/main/storage/`)
+
+Per-agent session storage for reading historical conversations.
+
+### Expected transcript-read failures (`src/main/utils/session-read-errors.ts`)
+
+Provider transcripts under `~/.claude/projects`, `~/.codex/sessions`, etc. belong
+to the agent CLI, not to Maestro. Any code that reads a transcript it merely
+_discovered_ on disk must classify environmental failures instead of reporting
+them, or one unreadable tree pages a Sentry event per file per refresh
+(MAESTRO-W9, MAESTRO-YG/YH/YJ):
+
+```typescript
+import { isExpectedSessionReadError } from '../utils/session-read-errors';
+
+try {
+	const content = await fs.readFile(filePath, 'utf-8');
+	// ...
+} catch (error) {
+	if (error instanceof RangeError) {
+		logger.warn('Session file too large to parse', LOG_CONTEXT, { filePath });
+	} else if (isExpectedSessionReadError(error)) {
+		logger.warn('Session file not readable', LOG_CONTEXT, { filePath, error });
+	} else {
+		captureException(error); // genuine fault, keep reporting
+	}
+	return null;
+}
+```
+
+Covers `EACCES`, `EPERM`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EBUSY`. Do NOT widen it
+to codes that indicate a Maestro bug (`EMFILE` means we leaked descriptors).
+Pair it with the `RangeError` carve-out for oversized files - they are separate
+boundaries. When quieting one call site, grep the whole file for other
+`captureException` calls on the same failure path (an outer `fs.stat` catch
+usually needs the same guard).
+
+### Storage Interface (`src/main/agents/session-storage.ts`)
+
+```typescript
+interface AgentSessionStorage {
+	readonly agentId: ToolType;
+
+	listSessions(projectPath: string, sshConfig?): Promise<AgentSessionInfo[]>;
+	listSessionsPaginated(projectPath, options?, sshConfig?): Promise<PaginatedSessionsResult>;
+	readSessionMessages(projectPath, sessionId, options?, sshConfig?): Promise<SessionMessagesResult>;
+	getSessionPath(projectPath, sessionId, sshConfig?): string | null;
+	deleteMessagePair(projectPath, sessionId, userMessageUuid, fallback?, sshConfig?): Promise<...>;
+	searchSessions(projectPath, query, searchMode, sshConfig?): Promise<SessionSearchResult[]>;
+}
+```
+
+### Base Class (`src/main/storage/base-session-storage.ts`)
+
+`BaseSessionStorage` provides shared logic:
+
+- `listSessionsPaginated()` - Cursor-based pagination over `listSessions()`
+- `searchSessions()` - Full-text search with configurable mode (title/user/assistant/all)
+- `paginateSessions()` - Static helper for cursor pagination
+- `applyMessagePagination()` - Static helper for message pagination (load from end)
+- `extractMatchPreview()` - Static helper for search result preview snippets
+- `resolveSearchMode()` - Static helper for mode-specific result filtering
+
+Subclasses implement:
+
+- `listSessions()` - Agent-specific session discovery
+- `readSessionMessages()` - Agent-specific message loading
+- `getSessionPath()` - Agent-specific path resolution
+- `deleteMessagePair()` - Agent-specific message deletion
+- `getSearchableMessages()` - Load messages for search
+
+### Storage Implementations
+
+| Storage                      | File                               | Session Location                                                     | Format                  |
+| ---------------------------- | ---------------------------------- | -------------------------------------------------------------------- | ----------------------- |
+| `ClaudeSessionStorage`       | `claude-session-storage.ts`        | `~/.claude/projects/<encoded-path>/`                                 | Stream-JSON JSONL       |
+| `CodexSessionStorage`        | `codex-session-storage.ts`         | `~/.codex/sessions/YYYY/MM/DD/`                                      | JSONL events            |
+| `OpenCodeSessionStorage`     | `opencode-session-storage.ts`      | `~/.local/share/opencode/opencode.db` (v1.2+) or `storage/` (legacy) | SQLite (or legacy JSON) |
+| `FactoryDroidSessionStorage` | `factory-droid-session-storage.ts` | `~/.factory/sessions/`                                               | JSONL + settings.json   |
+
+### Parse Cache (`src/main/storage/session-info-cache.ts`)
+
+`listSessions()` is enumerate-then-parse for every storage, and the parse is the
+expensive half: a heavy Claude user is 5+ GB of JSONL across ~14k transcripts,
+which is why the Cost & Tokens dashboard used to take ~15 seconds to render every
+single time. `SessionInfoCache` caches the parsed `AgentSessionInfo` keyed by a
+`mtimeMs + size` fingerprint, so only new or grown transcripts are re-read.
+Enumerating and stat-ing all 14k files costs under 100ms.
+
+Use it instead of hand-rolling another mtime map (there are already several):
+
+```typescript
+const files = await this.statProjectSessionFiles(projectDir); // readdir + stat
+const sessions = await getSessionInfoCache(this.agentId).resolve(
+	projectDir, // scope: one cache file per project folder
+	files.map((f) => ({ key: f.filePath, fingerprint: fileFingerprint(f.sizeBytes, f.mtimeMs) })),
+	(ref) => parseSessionFile(...), // only called on a miss; null = skip, not cached
+	{ prune: true } // ONLY when refs cover the whole scope (never for one page)
+);
+```
+
+Rules:
+
+- Attach mutable metadata (origin, starred, session name) AFTER `resolve()`. It
+  lives in `originsStore` and changes without the transcript changing, so a
+  fingerprint would never catch it.
+- Returned infos are the cached objects: spread them, never mutate in place.
+- Bump `SESSION_INFO_CACHE_VERSION` when `AgentSessionInfo` gains a field, or
+  cached entries will come back missing it.
+- Tests: `setSessionInfoCacheForTest(agentId, new SessionInfoCache(agentId, tmpDir))`
+  in `beforeEach`, or fixtures that reuse one path + stats while varying content
+  will (correctly) hit the cache.
+
+Wired up for `ClaudeSessionStorage` (local paths). `CodexSessionStorage` predates
+it and still carries its own equivalent cache; the remaining storages parse
+everything on every list and should adopt this when their volume justifies it.
+
+### Registry Functions
+
+```typescript
+registerSessionStorage(storage: AgentSessionStorage): void
+getSessionStorage(agentId: ToolType | string): AgentSessionStorage | null
+hasSessionStorage(agentId: ToolType | string): boolean
+getAllSessionStorages(): AgentSessionStorage[]
+```
+
+### Initialization
+
+```typescript
+import { initializeSessionStorages } from './storage';
+initializeSessionStorages({
+	claudeSessionOriginsStore: store, // Optional: for session names/starred status
+});
+```
+
+### AgentSessionInfo (Session Metadata)
+
+```typescript
+interface AgentSessionInfo {
+	sessionId: string;
+	projectPath: string;
+	timestamp: string; // ISO date of creation
+	modifiedAt: string; // ISO date of last modification
+	firstMessage: string; // First user message (truncated)
+	messageCount: number;
+	sizeBytes: number;
+	costUsd?: number; // Only for agents with cost tracking
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheCreationTokens: number;
+	durationSeconds: number;
+	origin?: 'user' | 'auto'; // How session was created
+	sessionName?: string; // Custom name (if set)
+	starred?: boolean; // Starred status
+}
+```
+
+---
+
+## Adding a New Agent (Checklist)
+
+1. **Add ID** to `AGENT_IDS` in `src/shared/agentIds.ts`
+2. **Add display name** to `AGENT_DISPLAY_NAMES` in `src/shared/agentMetadata.ts`
+3. **Add definition** to `AGENT_DEFINITIONS` in `src/main/agents/definitions.ts`
+4. **Add capabilities** to `AGENT_CAPABILITIES` in `src/main/agents/capabilities.ts`
+5. **Add context window** to `DEFAULT_CONTEXT_WINDOWS` in `src/shared/agentConstants.ts`
+6. **Create output parser** in `src/main/parsers/<agent>-output-parser.ts`, register in `src/main/parsers/index.ts`
+7. **Add error patterns** in `src/shared/agentErrorPatterns.ts`
+8. **Create session storage** in `src/main/storage/<agent>-session-storage.ts`, register in `src/main/storage/index.ts`
+9. **Add beta flag** (optional) to `BETA_AGENTS` in `src/shared/agentMetadata.ts`
+10. **Add combined context flag** (if applicable) to `COMBINED_CONTEXT_AGENTS` in `src/shared/agentConstants.ts`
+
+TypeScript will enforce completeness for `Record<AgentId, T>` types, guiding you to all required updates.
+
+---
+
+## Process Management
+
+Agent processes are spawned and managed by `ProcessManager` (`src/main/process-manager/ProcessManager.ts`, re-exported from `src/main/process-manager/index.ts`). The IPC handler in `src/main/ipc/handlers/process.ts` is the entry point.
+
+### Spawn Flow
+
+1. Renderer calls `window.maestro.process.spawn(config)`
+2. Handler resolves agent config (custom path, custom args, custom env vars)
+3. If SSH enabled, wraps with `wrapSpawnWithSsh()`
+4. Builds final command line using agent's argument builders
+5. Spawns process via PTY or child_process
+6. Attaches output parser for the agent's format
+7. Forwards parsed events to renderer via `safeSend()`
+
+### Key IPC Channels (process namespace)
+
+| Channel             | Direction | Purpose                        |
+| ------------------- | --------- | ------------------------------ |
+| `process:spawn`     | R -> M    | Start agent process            |
+| `process:kill`      | R -> M    | Kill process by session ID     |
+| `process:write`     | R -> M    | Write to process stdin         |
+| `process:interrupt` | R -> M    | Send SIGINT/CTRL+C             |
+| `output`            | M -> R    | Parsed agent output events     |
+| `process-exit`      | M -> R    | Process exit notification      |
+| `usage-update`      | M -> R    | Token/cost statistics          |
+| `agent-error`       | M -> R    | Structured error notification  |
+| `ssh-remote`        | M -> R    | SSH remote connection info     |
+| `tool-execution`    | M -> R    | Tool use events for UI display |
+
+### ProcessConfig (Spawn Request)
+
+Defined in `src/main/process-manager/types.ts`. Note: `toolType` is `string` (not `ToolType`), and resume/model/read-only/yolo/custom-path handling happens upstream in the IPC handler before the config reaches `ProcessManager.spawn()`.
+
+```typescript
+interface ProcessConfig {
+	sessionId: string;
+	toolType: string;
+	cwd: string;
+	command: string;
+	args: string[];
+	requiresPty?: boolean;
+	prompt?: string;
+	shell?: string;
+	shellArgs?: string;
+	shellEnvVars?: Record<string, string>;
+	images?: string[];
+	imageArgs?: (imagePath: string) => string[];
+	promptArgs?: (prompt: string) => string[];
+	contextWindow?: number;
+	customEnvVars?: Record<string, string>;
+	noPromptSeparator?: boolean;
+	sshRemoteId?: string;
+	sshRemoteHost?: string;
+	querySource?: 'user' | 'auto';
+	tabId?: string;
+	projectPath?: string;
+	runInShell?: boolean;
+	sendPromptViaStdin?: boolean;
+	sendPromptViaStdinRaw?: boolean;
+	sshStdinScript?: string;
+	cols?: number;
+	rows?: number;
+}
+```

@@ -6,9 +6,13 @@
 import {
 	formatSize,
 	formatNumber,
+	formatCount,
 	formatTokens,
 	formatTokensCompact,
 	formatRelativeTime,
+	formatCacheAge,
+	formatAgeShort,
+	formatCalendarDay,
 	formatActiveTime,
 	formatElapsedTime,
 	formatElapsedTimeColon,
@@ -16,6 +20,12 @@ import {
 	estimateTokenCount,
 	truncatePath,
 	truncateCommand,
+	abbreviateGroupName,
+	isAbsolutePath,
+	getBasename,
+	joinPath,
+	formatSshTarget,
+	formatTimestamp,
 } from '../../shared/formatters';
 
 describe('shared/formatters', () => {
@@ -58,15 +68,15 @@ describe('shared/formatters', () => {
 	// ==========================================================================
 	describe('formatNumber', () => {
 		it('should format small numbers', () => {
-			expect(formatNumber(0)).toBe('0.0');
-			expect(formatNumber(1)).toBe('1.0');
-			expect(formatNumber(999)).toBe('999.0');
+			expect(formatNumber(0)).toBe('0');
+			expect(formatNumber(1)).toBe('1');
+			expect(formatNumber(999)).toBe('999');
 		});
 
-		it('should format thousands with k suffix', () => {
-			expect(formatNumber(1000)).toBe('1.0k');
-			expect(formatNumber(1500)).toBe('1.5k');
-			expect(formatNumber(999999)).toBe('1000.0k');
+		it('should format thousands with K suffix', () => {
+			expect(formatNumber(1000)).toBe('1.0K');
+			expect(formatNumber(1500)).toBe('1.5K');
+			expect(formatNumber(999999)).toBe('1000.0K');
 		});
 
 		it('should format millions with M suffix', () => {
@@ -78,6 +88,29 @@ describe('shared/formatters', () => {
 		it('should format billions with B suffix', () => {
 			expect(formatNumber(1000000000)).toBe('1.0B');
 			expect(formatNumber(2500000000)).toBe('2.5B');
+		});
+	});
+
+	// ==========================================================================
+	// formatCount tests (exact counterpart to formatNumber)
+	// ==========================================================================
+	describe('formatCount', () => {
+		it('groups digits instead of rounding to a magnitude', () => {
+			expect(formatCount(42)).toBe('42');
+			expect(formatCount(1000)).toBe('1,000');
+			expect(formatCount(1204993)).toBe('1,204,993');
+		});
+
+		it('keeps every digit where formatNumber discards them', () => {
+			// The whole reason this exists: a filtered row count is read for its
+			// digits, and `1.2M` throws away the part the user was looking at.
+			expect(formatNumber(1204993)).toBe('1.2M');
+			expect(formatCount(1204993)).toBe('1,204,993');
+		});
+
+		it('handles zero and negatives', () => {
+			expect(formatCount(0)).toBe('0');
+			expect(formatCount(-5)).toBe('-5');
 		});
 	});
 
@@ -175,6 +208,133 @@ describe('shared/formatters', () => {
 			expect(formatRelativeTime(new Date(now).toISOString())).toBe('just now');
 			expect(formatRelativeTime(new Date(now - 60000).toISOString())).toBe('1m ago');
 		});
+
+		describe('includeSeconds option', () => {
+			it('should format sub-minute durations as seconds', () => {
+				expect(formatRelativeTime(now, { includeSeconds: true })).toBe('0s ago');
+				expect(formatRelativeTime(now - 1000, { includeSeconds: true })).toBe('1s ago');
+				expect(formatRelativeTime(now - 10000, { includeSeconds: true })).toBe('10s ago');
+				expect(formatRelativeTime(now - 59000, { includeSeconds: true })).toBe('59s ago');
+			});
+
+			it('should fall through to minutes/hours/days when over a minute', () => {
+				expect(formatRelativeTime(now - 60000, { includeSeconds: true })).toBe('1m ago');
+				expect(formatRelativeTime(now - 60 * 60000, { includeSeconds: true })).toBe('1h ago');
+				expect(formatRelativeTime(now - 24 * 60 * 60000, { includeSeconds: true })).toBe('1d ago');
+			});
+		});
+	});
+
+	// ==========================================================================
+	// formatCacheAge tests
+	// ==========================================================================
+	describe('formatCacheAge', () => {
+		it('should format null and zero as just now', () => {
+			expect(formatCacheAge(null)).toBe('just now');
+			expect(formatCacheAge(0)).toBe('just now');
+		});
+
+		it('should format sub-minute durations as just now', () => {
+			expect(formatCacheAge(15_000)).toBe('just now');
+			expect(formatCacheAge(59_999)).toBe('just now');
+		});
+
+		it('should format minutes below one hour', () => {
+			expect(formatCacheAge(60_000)).toBe('1m ago');
+			expect(formatCacheAge(45 * 60_000)).toBe('45m ago');
+			expect(formatCacheAge(59 * 60_000)).toBe('59m ago');
+		});
+
+		it('should format whole hours without rolling into days', () => {
+			expect(formatCacheAge(60 * 60_000)).toBe('1h ago');
+			expect(formatCacheAge(2 * 60 * 60_000)).toBe('2h ago');
+			expect(formatCacheAge(25 * 60 * 60_000)).toBe('25h ago');
+		});
+	});
+
+	// ==========================================================================
+	// formatCalendarDay tests
+	// ==========================================================================
+	describe('formatCalendarDay', () => {
+		it('formats a YYYY-MM-DD day for display', () => {
+			expect(formatCalendarDay('2026-07-10')).toBe('Jul 10, 2026');
+			expect(formatCalendarDay('2025-11-26')).toBe('Nov 26, 2025');
+		});
+
+		it('renders the day it was given, not the UTC-shifted one', () => {
+			// `new Date('2026-01-01')` is UTC midnight, which is Dec 31 anywhere
+			// west of Greenwich. The parts are read out of the string instead.
+			expect(formatCalendarDay('2026-01-01')).toBe('Jan 1, 2026');
+		});
+
+		it('tolerates surrounding whitespace', () => {
+			expect(formatCalendarDay('  2026-03-01  ')).toBe('Mar 1, 2026');
+		});
+
+		it('returns the input unchanged when it is not a calendar day', () => {
+			expect(formatCalendarDay('July 2026')).toBe('July 2026');
+			expect(formatCalendarDay('2026-7-1')).toBe('2026-7-1');
+			expect(formatCalendarDay('')).toBe('');
+		});
+	});
+
+	// ==========================================================================
+	// formatAgeShort tests
+	// ==========================================================================
+	describe('formatAgeShort', () => {
+		const now = Date.now();
+		const MIN = 60_000;
+		const HOUR = 60 * MIN;
+		const DAY = 24 * HOUR;
+
+		it('returns "new" for < 1 minute', () => {
+			expect(formatAgeShort(now)).toBe('new');
+			expect(formatAgeShort(now - 30_000)).toBe('new');
+			expect(formatAgeShort(now + 10_000)).toBe('new'); // clamp future to 0
+		});
+
+		it('formats minutes (< 1 hour)', () => {
+			expect(formatAgeShort(now - 1 * MIN)).toBe('1m');
+			expect(formatAgeShort(now - 5 * MIN)).toBe('5m');
+			expect(formatAgeShort(now - 59 * MIN)).toBe('59m');
+		});
+
+		it('formats hours (< 1 day)', () => {
+			expect(formatAgeShort(now - 1 * HOUR)).toBe('1h');
+			expect(formatAgeShort(now - 5 * HOUR)).toBe('5h');
+			expect(formatAgeShort(now - 23 * HOUR)).toBe('23h');
+		});
+
+		it('formats days (< 1 week)', () => {
+			expect(formatAgeShort(now - 1 * DAY)).toBe('1d');
+			expect(formatAgeShort(now - 5 * DAY)).toBe('5d');
+			expect(formatAgeShort(now - 6 * DAY)).toBe('6d');
+		});
+
+		it('formats weeks (< 30 days)', () => {
+			expect(formatAgeShort(now - 7 * DAY)).toBe('1w');
+			expect(formatAgeShort(now - 21 * DAY)).toBe('3w');
+			expect(formatAgeShort(now - 29 * DAY)).toBe('4w');
+		});
+
+		it('formats months (< 365 days)', () => {
+			expect(formatAgeShort(now - 30 * DAY)).toBe('1mo');
+			expect(formatAgeShort(now - 6 * 30 * DAY)).toBe('6mo');
+			expect(formatAgeShort(now - 364 * DAY)).toBe('12mo');
+		});
+
+		it('formats years with one decimal under 10 years, integer otherwise', () => {
+			expect(formatAgeShort(now - 365 * DAY)).toBe('1y');
+			// ~3.5y → 3.5y (rounded to one decimal)
+			expect(formatAgeShort(now - Math.round(3.5 * 365) * DAY)).toBe('3.5y');
+			// >= 10y: floored integer
+			expect(formatAgeShort(now - 12 * 365 * DAY)).toBe('12y');
+		});
+
+		it('accepts Date objects and ISO strings', () => {
+			expect(formatAgeShort(new Date(now - 5 * MIN))).toBe('5m');
+			expect(formatAgeShort(new Date(now - 5 * MIN).toISOString())).toBe('5m');
+		});
 	});
 
 	// ==========================================================================
@@ -264,6 +424,83 @@ describe('shared/formatters', () => {
 			expect(formatCost(1.234)).toBe('$1.23');
 			expect(formatCost(1.235)).toBe('$1.24'); // rounds up
 			expect(formatCost(1.999)).toBe('$2.00');
+		});
+
+		it('should add thousands separators to large costs', () => {
+			expect(formatCost(1000)).toBe('$1,000.00');
+			expect(formatCost(40950.6)).toBe('$40,950.60');
+			expect(formatCost(1234567.89)).toBe('$1,234,567.89');
+		});
+
+		it('should not add a separator below 1000', () => {
+			expect(formatCost(999.99)).toBe('$999.99');
+		});
+	});
+
+	// ==========================================================================
+	// formatTimestamp tests
+	// ==========================================================================
+	// These assert against `toLocale*String` rather than literal strings on
+	// purpose. formatTimestamp is backed by cached `Intl.DateTimeFormat`
+	// singletons (constructing one per call cost 38% of renderer JS in a field
+	// trace), and the whole contract of that cache is that output stays
+	// byte-identical to the `toLocale*String` calls it replaced - in whatever
+	// locale and timezone the test machine happens to run.
+	describe('formatTimestamp', () => {
+		const sameDayMorning = new Date();
+		sameDayMorning.setHours(9, 5, 0, 0);
+		const otherDay = new Date('2023-03-05T14:30:45.123Z');
+
+		it("matches toLocaleTimeString for the 'time' style", () => {
+			const ts = otherDay.getTime();
+			expect(formatTimestamp(ts, 'time')).toBe(
+				otherDay.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+			);
+		});
+
+		it("matches toLocaleString for the 'datetime' style", () => {
+			const ts = otherDay.getTime();
+			expect(formatTimestamp(ts, 'datetime')).toBe(
+				otherDay.toLocaleString([], {
+					month: 'short',
+					day: 'numeric',
+					hour: 'numeric',
+					minute: '2-digit',
+				})
+			);
+		});
+
+		it("matches a bare toLocaleString for the 'full' style", () => {
+			const ts = otherDay.getTime();
+			expect(formatTimestamp(ts, 'full')).toBe(otherDay.toLocaleString());
+		});
+
+		it("returns time only for today in the 'smart' style", () => {
+			const ts = sameDayMorning.getTime();
+			expect(formatTimestamp(ts)).toBe(
+				sameDayMorning.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+			);
+		});
+
+		it("returns date and time for another day in the 'smart' style", () => {
+			const ts = otherDay.getTime();
+			expect(formatTimestamp(ts)).toBe(
+				otherDay.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+					' ' +
+					otherDay.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+			);
+		});
+
+		it('accepts an ISO string as well as a numeric timestamp', () => {
+			expect(formatTimestamp(otherDay.toISOString(), 'full')).toBe(
+				formatTimestamp(otherDay.getTime(), 'full')
+			);
+		});
+
+		it('returns a stable result across repeated calls (cached formatters)', () => {
+			const ts = otherDay.getTime();
+			expect(formatTimestamp(ts, 'datetime')).toBe(formatTimestamp(ts, 'datetime'));
+			expect(formatTimestamp(ts, 'time')).toBe(formatTimestamp(ts, 'time'));
 		});
 	});
 
@@ -419,6 +656,204 @@ describe('shared/formatters', () => {
 			expect(truncateCommand('')).toBe('');
 			expect(truncateCommand('   ')).toBe('');
 			expect(truncateCommand('\n\n')).toBe('');
+		});
+	});
+
+	// ==========================================================================
+	// abbreviateGroupName tests
+	// ==========================================================================
+	describe('abbreviateGroupName', () => {
+		it('returns short names unchanged', () => {
+			expect(abbreviateGroupName('Work')).toBe('Work');
+			expect(abbreviateGroupName('Personal')).toBe('Personal'); // 8 chars
+			expect(abbreviateGroupName('Side Gigs')).toBe('Side Gigs'); // 9 chars, under max
+			expect(abbreviateGroupName('TenChars10')).toBe('TenChars10'); // exactly max
+		});
+
+		it('preserves whitespace trimming', () => {
+			expect(abbreviateGroupName('  Work  ')).toBe('Work');
+		});
+
+		it('handles empty input', () => {
+			expect(abbreviateGroupName('')).toBe('');
+			expect(abbreviateGroupName('   ')).toBe('');
+		});
+
+		it('builds "&"-joined acronym for "X & Y" names', () => {
+			expect(abbreviateGroupName('AMINI & CONANT')).toBe('A&C');
+			expect(abbreviateGroupName('amini & conant')).toBe('A&C');
+			expect(abbreviateGroupName('Amini&Conant')).toBe('A&C');
+			expect(abbreviateGroupName('Foo & Bar & Baz')).toBe('F&B&B');
+		});
+
+		it('treats " and " as a conjunction', () => {
+			expect(abbreviateGroupName('Research and Development')).toBe('R&D');
+			expect(abbreviateGroupName('Sales AND Marketing')).toBe('S&M');
+		});
+
+		it('takes initials for multi-word names without conjunctions', () => {
+			expect(abbreviateGroupName('Acme Corporation Limited')).toBe('ACL');
+			expect(abbreviateGroupName('staging_environment_two')).toBe('SET');
+			expect(abbreviateGroupName('client-facing-team')).toBe('CFT');
+		});
+
+		it('drops leading numbering/bracket tokens from initials', () => {
+			expect(abbreviateGroupName('[1] Aleyemma/Money-Sessions')).toBe('AMS');
+			expect(abbreviateGroupName('(2) Research Operations')).toBe('RO');
+			expect(abbreviateGroupName('#3 backend-api-gateway')).toBe('BAG');
+		});
+
+		it('strips vowels from single long words, preserving the first character', () => {
+			expect(abbreviateGroupName('Engineering')).toBe('Engnrng');
+			expect(abbreviateGroupName('Documentation')).toBe('Dcmnttn');
+			expect(abbreviateGroupName('Astonishment')).toBe('Astnshmnt');
+		});
+
+		it('hard-truncates devoweled output that is still too long', () => {
+			// 23 chars, devowels to 19 → truncate at default max (10)
+			expect(abbreviateGroupName('Pneumonoultramicroscop')).toBe('Pnmnltrmcr');
+		});
+
+		it('respects custom target/max', () => {
+			expect(abbreviateGroupName('Engineering', { max: 5 })).toBe('Engnr');
+			expect(abbreviateGroupName('TenChars10', { max: 5 })).toBe('TnChr');
+		});
+
+		// Issue #1017: groups named like "[ARP] Auditoria Relatório Pessoal" used to
+		// fall into the multi-word initials path, which took just the leading "[" of
+		// the bracketed word and produced "[ARP" with the closing bracket dropped.
+		it('uses a bracketed tag prefix as the preferred short form', () => {
+			expect(abbreviateGroupName('[ARP] Auditoria Relatório Pessoal')).toBe('ARP');
+			expect(abbreviateGroupName('[CEDR] Conteúdo Educação Designer Reuniões')).toBe('CEDR');
+			expect(abbreviateGroupName('[GU] Generic User')).toBe('GU');
+			// Bracket prefix is honored even when the name is already short.
+			expect(abbreviateGroupName('[ARP]')).toBe('ARP');
+			// Tag itself is over max → fall through to initials, which skip the
+			// leading bracket entirely (no lopped "[" in the output).
+			expect(abbreviateGroupName('[VeryLongTagName] X', { max: 5 })).toBe('VX');
+			// Pure-numbering prefix is not a tag → dropped, initials of the rest win.
+			expect(abbreviateGroupName('[1] Aleyemma/Money-Sessions')).toBe('AMS');
+		});
+	});
+
+	// ==========================================================================
+	// isAbsolutePath tests
+	// ==========================================================================
+	describe('isAbsolutePath', () => {
+		it('recognizes Unix absolute paths', () => {
+			expect(isAbsolutePath('/Users/name/file.ts')).toBe(true);
+			expect(isAbsolutePath('/')).toBe(true);
+		});
+
+		it('recognizes Windows drive paths with either separator', () => {
+			expect(isAbsolutePath('C:\\Users\\name\\file.ts')).toBe(true);
+			expect(isAbsolutePath('C:/Users/name/file.ts')).toBe(true);
+			expect(isAbsolutePath('d:\\temp')).toBe(true);
+		});
+
+		it('recognizes backslash-prefixed (UNC / drive-relative) paths', () => {
+			expect(isAbsolutePath('\\\\server\\share')).toBe(true);
+			expect(isAbsolutePath('\\folder\\file')).toBe(true);
+		});
+
+		it('rejects relative paths and non-paths', () => {
+			expect(isAbsolutePath('')).toBe(false);
+			expect(isAbsolutePath('src/components/Foo.tsx')).toBe(false);
+			expect(isAbsolutePath('./file.ts')).toBe(false);
+			expect(isAbsolutePath('file.ts')).toBe(false);
+			expect(isAbsolutePath('C:file.ts')).toBe(false); // no separator after drive
+		});
+	});
+
+	// ==========================================================================
+	// getBasename tests
+	// ==========================================================================
+	describe('getBasename', () => {
+		it('extracts the final segment of a Unix path', () => {
+			expect(getBasename('/Users/name/file.ts')).toBe('file.ts');
+		});
+
+		it('extracts the final segment of a Windows path', () => {
+			expect(getBasename('C:\\Users\\name\\file.ts')).toBe('file.ts');
+		});
+
+		it('ignores a trailing separator', () => {
+			expect(getBasename('/Users/name/folder/')).toBe('folder');
+			expect(getBasename('C:\\Users\\name\\folder\\')).toBe('folder');
+		});
+
+		it('returns the input unchanged when there is no separator', () => {
+			expect(getBasename('file.ts')).toBe('file.ts');
+		});
+
+		it('handles empty input', () => {
+			expect(getBasename('')).toBe('');
+		});
+	});
+
+	// ==========================================================================
+	// joinPath tests
+	// ==========================================================================
+	describe('joinPath', () => {
+		it('joins segments onto a Unix base', () => {
+			expect(joinPath('/Users/name', 'a', 'b.svg')).toBe('/Users/name/a/b.svg');
+		});
+
+		it('uses backslashes for a Windows base', () => {
+			expect(joinPath('C:\\proj', '.maestro/diagrams', 'x.svg')).toBe(
+				'C:\\proj\\.maestro\\diagrams\\x.svg'
+			);
+		});
+
+		it('collapses duplicate separators at the seams', () => {
+			expect(joinPath('/proj/', '/a/', '/b')).toBe('/proj/a/b');
+		});
+
+		it('drops empty segments', () => {
+			expect(joinPath('/proj', '', 'a')).toBe('/proj/a');
+		});
+
+		it('returns the base when there is nothing to join', () => {
+			expect(joinPath('/proj/')).toBe('/proj');
+		});
+	});
+
+	// ==========================================================================
+	// formatSshTarget tests
+	// ==========================================================================
+	describe('formatSshTarget', () => {
+		it('shows user@host:port when all fields are present', () => {
+			expect(formatSshTarget({ host: '10.0.50.63', port: 2222, username: 'linvsw' })).toBe(
+				'linvsw@10.0.50.63:2222'
+			);
+		});
+
+		it('always shows the port, including the default 22 (the bug this prevents)', () => {
+			// A remote named "wsl ubuntu 2222" but saved with port 22 must reveal :22
+			expect(formatSshTarget({ host: '10.0.50.63', port: 22, username: 'linvsw' })).toBe(
+				'linvsw@10.0.50.63:22'
+			);
+		});
+
+		it('omits the user@ prefix when no username is set (no leading @)', () => {
+			expect(formatSshTarget({ host: 'maestro.gosubstrate.com', port: 22 })).toBe(
+				'maestro.gosubstrate.com:22'
+			);
+			expect(formatSshTarget({ host: 'host', port: 22, username: '   ' })).toBe('host:22');
+		});
+
+		it('defaults the port to 22 when omitted', () => {
+			expect(formatSshTarget({ host: 'host', username: 'me' })).toBe('me@host:22');
+		});
+	});
+
+	// Duration formatters live in shared/duration.ts and are covered by
+	// duration.test.ts. This asserts the compatibility re-export still resolves,
+	// since ~50 call sites import them from this module's path.
+	describe('duration re-exports', () => {
+		it('re-exports the duration formatters', () => {
+			expect(formatActiveTime(2 * 60 * 60 * 1000 + 30 * 60 * 1000)).toBe('2H 30M');
+			expect(formatElapsedTime(500)).toBe('500ms');
 		});
 	});
 });

@@ -1,8 +1,3 @@
----
-name: retrospective
-description: 'Post-epic review to extract lessons and assess success. Use when the user says "run a retrospective" or "lets retro the epic [epic]"'
----
-
 # Retrospective Workflow
 
 **Goal:** Post-epic review to extract lessons and assess success.
@@ -43,7 +38,6 @@ Load config from `{project-root}/_bmad/bmm/config.yaml` and resolve:
 
 ### Paths
 
-- `installed_path` = `{project-root}/_bmad/bmm/workflows/4-implementation/retrospective`
 - `sprint_status_file` = `{implementation_artifacts}/sprint-status.yaml`
 
 ### Input Files
@@ -455,6 +449,7 @@ Alice (Product Owner): "Good thinking - helps us connect what we learned to what
 - Deployment or environment setup
 
   <output>
+
 Bob (Scrum Master): "Alright, I've reviewed Epic {{next_epic_num}}: '{{next_epic_title}}'"
 
 Alice (Product Owner): "What are we looking at?"

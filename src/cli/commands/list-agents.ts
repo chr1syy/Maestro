@@ -27,7 +27,8 @@ export function listAgents(options: ListAgentsOptions): void {
 		}
 
 		if (options.json) {
-			// JSON array output
+			// JSON array output. Include sessionSshRemoteConfig so SSH execution
+			// state is verifiable without reading raw store files.
 			const output = sessions.map((s) => ({
 				id: s.id,
 				name: s.name,
@@ -35,6 +36,11 @@ export function listAgents(options: ListAgentsOptions): void {
 				cwd: s.cwd,
 				groupId: s.groupId,
 				autoRunFolderPath: s.autoRunFolderPath,
+				// Where this agent's worktrees go, so a caller can honor it instead of
+				// inventing a location the desktop never sees. Null when unset.
+				worktreeBasePath: s.worktreeConfig?.basePath ?? null,
+				bookmarked: !!s.bookmarked,
+				sessionSshRemoteConfig: s.sessionSshRemoteConfig ?? null,
 			}));
 			console.log(JSON.stringify(output, null, 2));
 		} else {
@@ -46,6 +52,7 @@ export function listAgents(options: ListAgentsOptions): void {
 				cwd: s.cwd,
 				groupId: s.groupId,
 				autoRunFolderPath: s.autoRunFolderPath,
+				bookmarked: !!s.bookmarked,
 			}));
 			console.log(formatAgents(displayAgents, groupName));
 		}

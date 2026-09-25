@@ -3,14 +3,15 @@
  * @description Tests for the AutoRunToolbar component
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import React from 'react';
 import {
 	AutoRunToolbar,
 	AutoRunToolbarProps,
 } from '../../../../renderer/components/AutoRun/AutoRunToolbar';
-import type { Theme } from '../../../../renderer/types';
+
+import { createMockTheme } from '../../../helpers/mockTheme';
 
 // jsdom converts shorthand hex colors to rgb() in computed styles.
 // This helper converts a shorthand or full hex color to its rgb() equivalent for assertions.
@@ -27,26 +28,6 @@ const hexToRgb = (hex: string): string => {
 	const b = parseInt(expanded.slice(4, 6), 16);
 	return `rgb(${r}, ${g}, ${b})`;
 };
-
-const createMockTheme = (): Theme => ({
-	id: 'test',
-	name: 'Test',
-	mode: 'dark' as const,
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgActivity: '#2d2d2d',
-		textMain: '#fff',
-		textDim: '#888',
-		accent: '#0066ff',
-		accentForeground: '#fff',
-		border: '#333',
-		highlight: '#0066ff33',
-		success: '#0a0',
-		warning: '#fa0',
-		error: '#f00',
-	},
-});
 
 const createDefaultProps = (overrides: Partial<AutoRunToolbarProps> = {}): AutoRunToolbarProps => ({
 	theme: createMockTheme(),
@@ -78,16 +59,28 @@ describe('AutoRunToolbar', () => {
 			expect(screen.queryByText('Run')).toBeNull();
 		});
 
-		it('is disabled when isAgentBusy', () => {
-			render(<AutoRunToolbar {...createDefaultProps({ isAgentBusy: true })} />);
-			const runBtn = screen.getByTitle('Cannot run while agent is thinking');
-			expect(runBtn.hasAttribute('disabled')).toBe(true);
+		it('stays clickable when isAgentBusy so user can still configure auto-run', () => {
+			const onOpenBatchRunner = vi.fn();
+			render(<AutoRunToolbar {...createDefaultProps({ isAgentBusy: true, onOpenBatchRunner })} />);
+			const runBtn = screen.getByRole('button', { name: /Run/ });
+			expect(runBtn.hasAttribute('disabled')).toBe(false);
+			fireEvent.click(runBtn);
+			expect(onOpenBatchRunner).toHaveBeenCalledTimes(1);
 		});
 
-		it('is enabled when agent is not busy', () => {
+		it('shows the "Agent is thinking" tooltip on the Run button when isAgentBusy', () => {
+			render(<AutoRunToolbar {...createDefaultProps({ isAgentBusy: true })} />);
+			// The "Agent thinking" badge itself lives on the Go button inside
+			// BatchRunnerModal - here we just verify the toolbar surfaces the
+			// busy state via its tooltip.
+			expect(screen.getByTitle(/Agent is thinking/)).toBeDefined();
+			expect(screen.queryByText('Agent thinking')).toBeNull();
+		});
+
+		it('uses the default Run tooltip when agent is not busy', () => {
 			render(<AutoRunToolbar {...createDefaultProps({ isAgentBusy: false })} />);
-			const runBtn = screen.getByTitle('Run auto-run on tasks');
-			expect(runBtn.hasAttribute('disabled')).toBe(false);
+			expect(screen.queryByText('Agent thinking')).toBeNull();
+			expect(screen.getByTitle('Run auto-run on tasks')).toBeDefined();
 		});
 
 		it('saves before running if dirty and opens runner only after save resolves', async () => {
@@ -274,5 +267,52 @@ describe('AutoRunToolbar', () => {
 			fireEvent.click(screen.getByTitle('Learn about Auto Runner'));
 			expect(onOpenHelp).toHaveBeenCalledTimes(1);
 		});
+	});
+});
+
+// Phone layout: the drawer is ~390px wide and the four buttons overflowed it by
+// a full button. On a phone the bar goes icon-only, each button keeping its
+// label as the accessible name.
+vi.mock('../../../../renderer/hooks/ui/useViewportBreakpoint', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../../../../renderer/hooks/ui/useViewportBreakpoint')>()),
+	usePhoneLayout: vi.fn(() => false),
+}));
+import { usePhoneLayout } from '../../../../renderer/hooks/ui/useViewportBreakpoint';
+
+describe('AutoRunToolbar on a phone', () => {
+	const mockedUsePhoneLayout = vi.mocked(usePhoneLayout);
+
+	beforeEach(() => {
+		mockedUsePhoneLayout.mockReturnValue(true);
+	});
+
+	afterEach(() => {
+		mockedUsePhoneLayout.mockReturnValue(false);
+	});
+
+	it('drops the labels but keeps every button reachable by name', () => {
+		render(
+			<AutoRunToolbar
+				{...createDefaultProps({
+					onOpenBatchRunner: vi.fn(),
+					onOpenMarketplace: vi.fn(),
+					onLaunchWizard: vi.fn(),
+				})}
+			/>
+		);
+		for (const name of ['Run', 'PlayBooks', 'Wizard', 'Help']) {
+			const btn = screen.getByRole('button', { name });
+			expect(btn).toBeDefined();
+			expect(btn.textContent).toBe('');
+		}
+	});
+
+	it('keeps Stop reachable by name while a run is active', () => {
+		const onStopBatchRun = vi.fn();
+		render(<AutoRunToolbar {...createDefaultProps({ isAutoRunActive: true, onStopBatchRun })} />);
+		const stop = screen.getByRole('button', { name: 'Stop' });
+		expect(stop.textContent).toBe('');
+		fireEvent.click(stop);
+		expect(onStopBatchRun).toHaveBeenCalledWith('test-session-1');
 	});
 });

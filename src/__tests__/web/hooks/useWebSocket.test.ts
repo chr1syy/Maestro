@@ -26,9 +26,11 @@ import {
 	type SessionExitMessage,
 	type UserInputMessage,
 	type ThemeMessage,
+	type BionifyReadingModeMessage,
 	type CustomCommandsMessage,
 	type AutoRunStateMessage,
 	type TabsChangedMessage,
+	type RenameTabResultMessage,
 	type ErrorMessage,
 	type CustomCommand,
 	type AITabData,
@@ -956,6 +958,37 @@ describe('useWebSocket', () => {
 			expect(onThemeUpdate).toHaveBeenCalledWith(theme);
 		});
 
+		it('handles bionify_reading_mode message', () => {
+			const onBionifyReadingModeUpdate = vi.fn();
+			const { result } = renderHook(() =>
+				useWebSocket({ handlers: { onBionifyReadingModeUpdate } })
+			);
+
+			act(() => {
+				result.current.connect();
+			});
+
+			const ws = MockWebSocket.getLastInstance();
+			act(() => {
+				ws.simulateOpen();
+				ws.simulateMessage({
+					type: 'connected',
+					clientId: 'client-123',
+					message: 'Connected',
+					authenticated: true,
+				} as ConnectedMessage);
+			});
+
+			act(() => {
+				ws.simulateMessage({
+					type: 'bionify_reading_mode',
+					enabled: true,
+				} as BionifyReadingModeMessage);
+			});
+
+			expect(onBionifyReadingModeUpdate).toHaveBeenCalledWith(true);
+		});
+
 		it('handles custom_commands message', () => {
 			const onCustomCommands = vi.fn();
 			const { result } = renderHook(() => useWebSocket({ handlers: { onCustomCommands } }));
@@ -1080,10 +1113,50 @@ describe('useWebSocket', () => {
 					sessionId: 'session-1',
 					aiTabs,
 					activeTabId: 'tab-2',
+					activeTabChanged: true,
 				} as TabsChangedMessage);
 			});
 
-			expect(onTabsChanged).toHaveBeenCalledWith('session-1', aiTabs, 'tab-2');
+			expect(onTabsChanged).toHaveBeenCalledWith('session-1', aiTabs, 'tab-2', true);
+		});
+
+		it('handles rename_tab_result message', () => {
+			const onRenameTabResult = vi.fn();
+			const { result } = renderHook(() => useWebSocket({ handlers: { onRenameTabResult } }));
+
+			act(() => {
+				result.current.connect();
+			});
+
+			const ws = MockWebSocket.getLastInstance();
+			act(() => {
+				ws.simulateOpen();
+				ws.simulateMessage({
+					type: 'connected',
+					clientId: 'client-123',
+					message: 'Connected',
+					authenticated: true,
+				} as ConnectedMessage);
+			});
+
+			act(() => {
+				ws.simulateMessage({
+					type: 'rename_tab_result',
+					success: false,
+					sessionId: 'session-1',
+					tabId: 'tab-1',
+					newName: 'New name',
+					error: 'Tab not found',
+				} as RenameTabResultMessage);
+			});
+
+			expect(onRenameTabResult).toHaveBeenCalledWith(
+				'session-1',
+				'tab-1',
+				false,
+				'New name',
+				'Tab not found'
+			);
 		});
 
 		it('handles error message', () => {

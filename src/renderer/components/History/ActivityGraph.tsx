@@ -1,14 +1,19 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Check } from 'lucide-react';
-import type { Theme, HistoryEntry } from '../../types';
-import { LOOKBACK_OPTIONS, CUE_COLOR } from './historyConstants';
+import type { Theme, HistoryEntry, HistoryEntryType } from '../../types';
+import { LOOKBACK_OPTIONS, CUE_COLOR, AGENT_COLOR } from './historyConstants';
+import { useContextMenuPosition } from '../../hooks/ui/useContextMenuPosition';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { COLORBLIND_STATUS_COLORS } from '../../constants/colorblindPalettes';
+import type { GraphBucket } from '../../../shared/history';
 
-/** Pre-computed activity graph bucket from backend */
-export interface GraphBucket {
-	auto: number;
-	user: number;
-	cue: number;
-}
+/**
+ * A `GraphBucket` as received/computed by the renderer, where `agent` may be
+ * absent: buckets cached to disk (or returned by an older backend) predate
+ * the AGENT series, and treating a missing count as 0 is correct - those
+ * entries were tallied into `auto` back when consults were written as AUTO.
+ */
+export type PrecomputedGraphBucket = Omit<GraphBucket, 'agent'> & { agent?: number };
 
 // Activity bar graph component with configurable lookback window
 export interface ActivityGraphProps {
@@ -19,9 +24,24 @@ export interface ActivityGraphProps {
 	lookbackHours: number | null; // null = all time
 	onLookbackChange: (hours: number | null) => void;
 	/** Pre-computed buckets from backend (uses all entries, not just first page) */
-	precomputedBuckets?: GraphBucket[];
+	precomputedBuckets?: PrecomputedGraphBucket[];
+	/**
+	 * Time range that `precomputedBuckets` actually spans. When the buckets
+	 * come from the server's all-time aggregate, the renderer's loaded
+	 * `entries` won't contain the earliest entry - so deriving the axis
+	 * range from `entries` would mismatch the buckets. Pass the server's
+	 * earliest/latest here to keep them aligned.
+	 */
+	precomputedRange?: { start: number; end: number };
 	/** Always show the viewport date label, repositioning near edges instead of hiding */
 	alwaysShowViewportLabel?: boolean;
+	/**
+	 * Active entry-type filters from the surrounding panel. When provided,
+	 * deselected types are zeroed out of every bucket so the graph stays in
+	 * sync with the list below (e.g. turning off the CUE chip hides the cyan
+	 * segments). Omit to show all types unconditionally.
+	 */
+	activeFilters?: Set<HistoryEntryType>;
 }
 
 export const ActivityGraph: React.FC<ActivityGraphProps> = ({
@@ -32,11 +52,21 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 	lookbackHours,
 	onLookbackChange,
 	precomputedBuckets,
+	precomputedRange,
 	alwaysShowViewportLabel = false,
+	activeFilters,
 }) => {
 	const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+	const colorBlindMode = useSettingsStore((s) => s.colorBlindMode);
+	const autoBarColor = colorBlindMode ? COLORBLIND_STATUS_COLORS.warning : theme.colors.warning;
 	const graphRef = useRef<HTMLDivElement>(null);
+	const contextMenuRef = useRef<HTMLDivElement>(null);
+	const {
+		left: contextMenuLeft,
+		top: contextMenuTop,
+		ready: contextMenuReady,
+	} = useContextMenuPosition(contextMenuRef, contextMenu?.x ?? 0, contextMenu?.y ?? 0);
 
 	// Get the current lookback config
 	const lookbackConfig = useMemo(
@@ -44,18 +74,22 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 		[lookbackHours]
 	);
 
-	// Always use current time as the end of the window (graph is static)
-	const endTime = Date.now();
+	// Always use current time as the end of the window (graph is static).
+	// When a precomputed range is provided, prefer its `end` so the axis
+	// stays consistent with the server's snapshot.
+	const endTime = precomputedRange?.end ?? Date.now();
 
 	// Calculate time range based on lookback setting
 	const { startTime, msPerBucket, bucketCount } = useMemo(() => {
 		if (lookbackHours === null) {
-			// All time: find earliest entry
+			// All time: server-side range wins when provided; otherwise fall
+			// back to deriving from currently-loaded entries.
 			const earliest =
-				entries.length > 0
+				precomputedRange?.start ??
+				(entries.length > 0
 					? Math.min(...entries.map((e) => e.timestamp))
-					: endTime - 24 * 60 * 60 * 1000;
-			const totalMs = endTime - earliest;
+					: endTime - 24 * 60 * 60 * 1000);
+			const totalMs = Math.max(endTime - earliest, 1);
 			const count = lookbackConfig.bucketCount;
 			return {
 				startTime: earliest,
@@ -70,55 +104,73 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 				bucketCount: lookbackConfig.bucketCount,
 			};
 		}
-	}, [entries, endTime, lookbackHours, lookbackConfig.bucketCount]);
+	}, [entries, endTime, lookbackHours, lookbackConfig.bucketCount, precomputedRange]);
 
-	// Group entries into buckets — use precomputed data from backend when available
+	// Group entries into buckets - use precomputed data from backend when available
 	const bucketData = useMemo(() => {
 		// Prefer backend-computed buckets (covers all entries, not just first page)
-		if (precomputedBuckets && precomputedBuckets.length === bucketCount) {
-			return precomputedBuckets;
-		}
+		const rawBuckets =
+			precomputedBuckets && precomputedBuckets.length === bucketCount
+				? precomputedBuckets
+				: (() => {
+						// Fallback: client-side bucketing from available entries
+						const buckets: PrecomputedGraphBucket[] = Array.from({ length: bucketCount }, () => ({
+							auto: 0,
+							user: 0,
+							cue: 0,
+							agent: 0,
+						}));
 
-		// Fallback: client-side bucketing from available entries
-		const buckets: { auto: number; user: number; cue: number }[] = Array.from(
-			{ length: bucketCount },
-			() => ({
-				auto: 0,
-				user: 0,
-				cue: 0,
-			})
-		);
+						entries.forEach((entry) => {
+							if (entry.timestamp >= startTime && entry.timestamp <= endTime) {
+								const bucketIndex = Math.min(
+									bucketCount - 1,
+									Math.floor((entry.timestamp - startTime) / msPerBucket)
+								);
+								if (bucketIndex >= 0 && bucketIndex < bucketCount) {
+									if (entry.type === 'AUTO') {
+										buckets[bucketIndex].auto++;
+									} else if (entry.type === 'USER') {
+										buckets[bucketIndex].user++;
+									} else if (entry.type === 'CUE') {
+										buckets[bucketIndex].cue++;
+									} else if (entry.type === 'AGENT') {
+										buckets[bucketIndex].agent = (buckets[bucketIndex].agent ?? 0) + 1;
+									}
+								}
+							}
+						});
 
-		entries.forEach((entry) => {
-			if (entry.timestamp >= startTime && entry.timestamp <= endTime) {
-				const bucketIndex = Math.min(
-					bucketCount - 1,
-					Math.floor((entry.timestamp - startTime) / msPerBucket)
-				);
-				if (bucketIndex >= 0 && bucketIndex < bucketCount) {
-					if (entry.type === 'AUTO') {
-						buckets[bucketIndex].auto++;
-					} else if (entry.type === 'USER') {
-						buckets[bucketIndex].user++;
-					} else if (entry.type === 'CUE') {
-						buckets[bucketIndex].cue++;
-					}
-				}
-			}
-		});
+						return buckets;
+					})();
 
-		return buckets;
-	}, [precomputedBuckets, entries, startTime, endTime, msPerBucket, bucketCount]);
+		// Mask out deselected types so the graph mirrors the filtered list.
+		if (!activeFilters) return rawBuckets;
+		return rawBuckets.map((b) => ({
+			auto: activeFilters.has('AUTO') ? b.auto : 0,
+			user: activeFilters.has('USER') ? b.user : 0,
+			cue: activeFilters.has('CUE') ? b.cue : 0,
+			agent: activeFilters.has('AGENT') ? (b.agent ?? 0) : 0,
+		}));
+	}, [precomputedBuckets, entries, startTime, endTime, msPerBucket, bucketCount, activeFilters]);
+
+	/** Total height of one bucket, across every series. */
+	const bucketTotal = (b: PrecomputedGraphBucket): number =>
+		b.auto + b.user + b.cue + (b.agent ?? 0);
 
 	// Find max value for scaling
 	const maxValue = useMemo(() => {
-		return Math.max(1, ...bucketData.map((h) => h.auto + h.user + h.cue));
+		return Math.max(1, ...bucketData.map(bucketTotal));
 	}, [bucketData]);
 
 	// Total counts for summary tooltip
 	const totalAuto = useMemo(() => bucketData.reduce((sum, h) => sum + h.auto, 0), [bucketData]);
 	const totalUser = useMemo(() => bucketData.reduce((sum, h) => sum + h.user, 0), [bucketData]);
 	const totalCue = useMemo(() => bucketData.reduce((sum, h) => sum + h.cue, 0), [bucketData]);
+	const totalAgent = useMemo(
+		() => bucketData.reduce((sum, h) => sum + (h.agent ?? 0), 0),
+		[bucketData]
+	);
 
 	// Get time range label for tooltip
 	const getTimeRangeLabel = (index: number) => {
@@ -157,7 +209,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 
 	// Handle bar click
 	const handleBarClick = (index: number) => {
-		const total = bucketData[index].auto + bucketData[index].user + bucketData[index].cue;
+		const total = bucketTotal(bucketData[index]);
 		if (total > 0 && onBarClick) {
 			const { start, end } = getBucketTimeRange(index);
 			onBarClick(start, end);
@@ -253,7 +305,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 			className="flex-1 min-w-0 flex flex-col relative mt-0.5"
 			title={
 				hoveredIndex === null
-					? `${lookbackConfig.label}: ${totalAuto} auto, ${totalUser} user${totalCue > 0 ? `, ${totalCue} cue` : ''} (right-click to change)`
+					? `${lookbackConfig.label}: ${totalAuto} auto, ${totalUser} user${totalCue > 0 ? `, ${totalCue} cue` : ''}${totalAgent > 0 ? `, ${totalAgent} agent` : ''} (right-click to change)`
 					: undefined
 			}
 			onContextMenu={handleContextMenu}
@@ -261,17 +313,19 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 			{/* Context menu for lookback options */}
 			{contextMenu && (
 				<div
+					ref={contextMenuRef}
 					className="fixed z-50 py-1 rounded border shadow-lg"
 					style={{
-						left: contextMenu.x,
-						top: contextMenu.y,
+						left: contextMenuLeft,
+						top: contextMenuTop,
 						backgroundColor: theme.colors.bgSidebar,
 						borderColor: theme.colors.border,
 						minWidth: '120px',
+						opacity: contextMenuReady ? 1 : 0,
 					}}
 				>
 					<div
-						className="px-3 py-1 text-[10px] font-bold uppercase"
+						className="px-3 py-1 text-2xs font-bold uppercase"
 						style={{ color: theme.colors.textDim }}
 					>
 						Lookback Period
@@ -300,7 +354,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 			{/* Hover tooltip - positioned below the graph */}
 			{hoveredIndex !== null && (
 				<div
-					className="absolute top-full mt-1 px-2 py-1.5 rounded text-[10px] font-mono whitespace-nowrap z-20 pointer-events-none"
+					className="absolute top-full mt-1 px-2 py-1.5 rounded text-2xs font-mono whitespace-nowrap z-20 pointer-events-none"
 					style={{
 						backgroundColor: theme.colors.bgSidebar,
 						border: `1px solid ${theme.colors.border}`,
@@ -319,8 +373,8 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 					</div>
 					<div className="flex flex-col gap-0.5">
 						<div className="flex items-center justify-between gap-3">
-							<span style={{ color: theme.colors.warning }}>Auto</span>
-							<span className="font-bold" style={{ color: theme.colors.warning }}>
+							<span style={{ color: autoBarColor }}>Auto</span>
+							<span className="font-bold" style={{ color: autoBarColor }}>
 								{bucketData[hoveredIndex].auto}
 							</span>
 						</div>
@@ -336,6 +390,12 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 								{bucketData[hoveredIndex].cue}
 							</span>
 						</div>
+						<div className="flex items-center justify-between gap-3">
+							<span style={{ color: AGENT_COLOR }}>Agent</span>
+							<span className="font-bold" style={{ color: AGENT_COLOR }}>
+								{bucketData[hoveredIndex].agent ?? 0}
+							</span>
+						</div>
 					</div>
 				</div>
 			)}
@@ -345,7 +405,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 				className="flex items-end gap-px h-6 rounded border px-1 pt-1 relative"
 				style={{ borderColor: theme.colors.border }}
 			>
-				{/* Viewport position indicator — shows where you are in the history */}
+				{/* Viewport position indicator - shows where you are in the history */}
 				{viewportIndicatorPercent !== null && (
 					<div
 						className="absolute top-0 bottom-0 pointer-events-none z-20"
@@ -358,10 +418,12 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 					/>
 				)}
 				{bucketData.map((bucket, index) => {
-					const total = bucket.auto + bucket.user + bucket.cue;
+					const total = bucketTotal(bucket);
+					const agentCount = bucket.agent ?? 0;
 					const heightPercent = total > 0 ? (total / maxValue) * 100 : 0;
 					const autoPercent = total > 0 ? (bucket.auto / total) * 100 : 0;
 					const cuePercent = total > 0 ? (bucket.cue / total) * 100 : 0;
+					const agentPercent = total > 0 ? (agentCount / total) * 100 : 0;
 					const userPercent = total > 0 ? (bucket.user / total) * 100 : 0;
 					const isHovered = hoveredIndex === index;
 
@@ -393,7 +455,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 									<div
 										style={{
 											height: `${autoPercent}%`,
-											backgroundColor: theme.colors.warning,
+											backgroundColor: autoBarColor,
 											minHeight: '1px',
 										}}
 									/>
@@ -404,6 +466,16 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 										style={{
 											height: `${cuePercent}%`,
 											backgroundColor: CUE_COLOR,
+											minHeight: '1px',
+										}}
+									/>
+								)}
+								{/* Agent portion (middle) - magenta */}
+								{agentCount > 0 && (
+									<div
+										style={{
+											height: `${agentPercent}%`,
+											backgroundColor: AGENT_COLOR,
 											minHeight: '1px',
 										}}
 									/>
@@ -448,7 +520,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 					return (
 						<span
 							key={`${label}-${index}`}
-							className="absolute text-[8px] font-mono"
+							className="absolute text-3xs font-mono"
 							style={{
 								color: theme.colors.textDim,
 								left: isLeftEdge
@@ -472,7 +544,7 @@ export const ActivityGraph: React.FC<ActivityGraphProps> = ({
 					(alwaysShowViewportLabel ||
 						(viewportIndicatorPercent > 12 && viewportIndicatorPercent < 88)) && (
 						<span
-							className="absolute text-[8px] font-mono"
+							className="absolute text-3xs font-mono"
 							data-testid="viewport-indicator-label"
 							style={{
 								color: theme.colors.error,

@@ -5,7 +5,7 @@
  * Fetches the current BMAD workflow catalog and prompt sources from GitHub,
  * then regenerates the bundled Maestro prompt files and command catalog.
  *
- * Usage: npm run refresh-bmad
+ * Usage: bun run refresh-bmad
  */
 
 import fs from 'fs';
@@ -22,7 +22,12 @@ const GITHUB_API = 'https://api.github.com';
 const RAW_GITHUB = 'https://raw.githubusercontent.com';
 const REPO_OWNER = 'bmad-code-org';
 const REPO_NAME = 'BMAD-METHOD';
-const REPO_REF = 'main';
+// Pinned to v6.2.0: the last BMAD release whose workflows are self-contained
+// `workflow.md` files usable as paste-in slash-command prompts. v6.2.1+ moved to
+// a multi-file "skills" model (SKILL.md + steps + customize.toml) that depends on
+// a local `_bmad/` install and a python resolver script, so those prompts cannot
+// run standalone inside Maestro.
+const REPO_REF = 'v6.2.0';
 const RAW_BASE = `${RAW_GITHUB}/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}`;
 
 const MODULE_HELP_FILES = ['src/core/module-help.csv', 'src/bmm/module-help.csv'];
@@ -52,7 +57,7 @@ function applyMaestroPromptFixes(id, prompt) {
 
 	if (id === 'retrospective') {
 		fixed = fixed.replace(
-			`- No time estimates — NEVER mention hours, days, weeks, months, or ANY time-based predictions. AI has fundamentally changed development speed.`,
+			`- No time estimates \u2014 NEVER mention hours, days, weeks, months, or ANY time-based predictions. AI has fundamentally changed development speed.`,
 			`- Do not invent time estimates or predictions. Only mention hours, days, sprints, or timelines when they are already present in project artifacts or completed work.`
 		);
 		fixed = fixed.replace('{planning*artifacts}/\\_epic*.md', '{planning_artifacts}/*epic*.md');
@@ -351,9 +356,18 @@ function buildCatalog(rows, treePaths) {
 		if (!rawCommand) continue;
 
 		const id = getPromptId(rawCommand);
-		const sourcePath = row['workflow-file']?.startsWith('skill:')
-			? resolveSkillWorkflowPath(row['workflow-file'].slice('skill:'.length), treePaths)
-			: normalizeWorkflowPath(row['workflow-file']);
+		let sourcePath;
+		try {
+			sourcePath = row['workflow-file']?.startsWith('skill:')
+				? resolveSkillWorkflowPath(row['workflow-file'].slice('skill:'.length), treePaths)
+				: normalizeWorkflowPath(row['workflow-file']);
+		} catch (error) {
+			// Some rows reference skills that have already migrated to the
+			// multi-file SKILL.md model (no self-contained workflow.md). Those
+			// can't be used as standalone Maestro prompts, so skip them.
+			console.warn(`   Skipping ${rawCommand}: ${error.message}`);
+			continue;
+		}
 
 		if (!sourcePath) {
 			continue;

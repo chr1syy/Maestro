@@ -1,5 +1,5 @@
 /**
- * useMergeTransferHandlers — extracted from App.tsx (Phase 2.5)
+ * useMergeTransferHandlers - extracted from App.tsx (Phase 2.5)
  *
  * Orchestrates merge-session and send-to-agent workflows:
  *   - useMergeSessionWithSessions (merge context between sessions)
@@ -11,7 +11,7 @@
  * Writes to: modalStore (merge/send-to-agent modal open state)
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import type { Session, ToolType, LogEntry, AITab } from '../../types';
 import type { GroomingProgress } from '../../types/contextMerge';
 import type { MergeOptions } from '../../components/MergeSessionModal';
@@ -19,16 +19,14 @@ import type { SendToAgentOptions } from '../../components/SendToAgentModal';
 import type { MergeState } from '../../stores/operationStore';
 import type { TransferState } from '../../stores/operationStore';
 import { useSessionStore, selectActiveSession } from '../../stores/sessionStore';
+import { useTabStore } from '../../stores/tabStore';
 import { getModalActions } from '../../stores/modalStore';
-import { notifyToast } from '../../stores/notificationStore';
-import { substituteTemplateVariables } from '../../utils/templateVariables';
-import { gitService } from '../../services/git';
-import { maestroSystemPrompt } from '../../../prompts';
-import { useSettingsStore } from '../../stores/settingsStore';
+import { notifyToast, showOsNotification } from '../../stores/notificationStore';
 import { useMergeSessionWithSessions } from './useMergeSession';
 import { useSendToAgentWithSessions } from './useSendToAgent';
 import { captureException } from '../../utils/sentry';
-import { getStdinFlags } from '../../utils/spawnHelpers';
+import { aiTabFocusFields } from '../../utils/tabHelpers';
+import { prepareMaestroSystemPrompt } from '../../utils/spawnHelpers';
 
 // ============================================================================
 // Dependencies interface
@@ -89,17 +87,18 @@ export function useMergeTransferHandlers(
 ): UseMergeTransferHandlersReturn {
 	const { sessionsRef, activeSessionIdRef, setActiveSessionId } = deps;
 
-	// --- Store subscriptions ---
-	const sessions = useSessionStore((s) => s.sessions);
-	const setSessions = useSessionStore((s) => s.setSessions);
-	const activeSession = useSessionStore(selectActiveSession);
+	// PERF: Never subscribe to full sessions / active Session. Streaming rebuilds
+	// would wake App. Merge/send resolve agents via getState(); useMergeSession
+	// only needs the active AI tab id for per-tab progress UI.
+	const setSessions = useMemo(() => useSessionStore.getState().setSessions, []);
+	const activeTabId = useSessionStore((s) => selectActiveSession(s)?.activeTabId);
 
 	// --- Transfer agent tracking state ---
 	const [transferSourceAgent, setTransferSourceAgent] = useState<ToolType | null>(null);
 	const [transferTargetAgent, setTransferTargetAgent] = useState<ToolType | null>(null);
 
 	// ====================================================================
-	// useMergeSessionWithSessions — merge context between sessions
+	// useMergeSessionWithSessions - merge context between sessions
 	// ====================================================================
 
 	const {
@@ -115,10 +114,12 @@ export function useMergeTransferHandlers(
 		clearTabState: clearMergeTabState,
 		reset: resetMerge,
 	} = useMergeSessionWithSessions({
-		sessions,
 		setSessions,
-		activeTabId: activeSession?.activeTabId,
+		activeTabId,
 		onSessionCreated: (info) => {
+			// Pin source tab before navigate so deferred clear does not race focus switch.
+			const sourceTabIdToClear = activeTabId;
+
 			// Navigate to the newly created merged session
 			setActiveSessionId(info.sessionId);
 			getModalActions().setMergeSessionModalOpen(false);
@@ -144,22 +145,28 @@ export function useMergeTransferHandlers(
 				sessionId: info.sessionId,
 			});
 
-			// Show desktop notification for visibility when app is not focused
-			window.maestro.notification.show(
+			// Show desktop notification for visibility when app is not focused. The
+			// toast above is already visible, so skip the web-desktop fallback toast.
+			showOsNotification(
 				'Session Merged',
-				`Created "${info.sessionName}" with merged context`
+				`Created "${info.sessionName}" with merged context`,
+				undefined,
+				undefined,
+				{
+					fallbackToast: false,
+				}
 			);
 
 			// Clear the merge state for the source tab after a short delay
-			if (activeSession?.activeTabId) {
+			if (sourceTabIdToClear) {
 				setTimeout(() => {
-					clearMergeTabState(activeSession.activeTabId);
+					clearMergeTabState(sourceTabIdToClear);
 				}, 1000);
 			}
 		},
 		onMergeComplete: (sourceTabId, result) => {
 			// For merge into existing tab, navigate to target and show toast
-			if (activeSession && result.success && result.targetSessionId) {
+			if (result.success && result.targetSessionId) {
 				const tokenInfo = result.estimatedTokens
 					? ` (~${result.estimatedTokens.toLocaleString()} tokens)`
 					: '';
@@ -176,13 +183,7 @@ export function useMergeTransferHandlers(
 					setSessions((prev) =>
 						prev.map((s) => {
 							if (s.id !== result.targetSessionId) return s;
-							return {
-								...s,
-								activeTabId: targetTabId,
-								activeFileTabId: null,
-								activeTerminalTabId: null,
-								inputMode: 'ai' as const,
-							};
+							return { ...s, ...aiTabFocusFields(targetTabId) };
 						})
 					);
 				}
@@ -206,7 +207,7 @@ export function useMergeTransferHandlers(
 	});
 
 	// ====================================================================
-	// useSendToAgentWithSessions — transfer context to a different agent
+	// useSendToAgentWithSessions - transfer context to a different agent
 	// ====================================================================
 
 	const {
@@ -217,7 +218,6 @@ export function useMergeTransferHandlers(
 		cancelTransfer,
 		reset: resetTransfer,
 	} = useSendToAgentWithSessions({
-		sessions,
 		setSessions,
 		onSessionCreated: (sessionId, sessionName) => {
 			// Navigate to the newly created transferred session
@@ -232,10 +232,14 @@ export function useMergeTransferHandlers(
 				sessionId,
 			});
 
-			// Show desktop notification for visibility when app is not focused
-			window.maestro.notification.show(
+			// Show desktop notification for visibility when app is not focused. The
+			// toast above is already visible, so skip the web-desktop fallback toast.
+			showOsNotification(
 				'Context Transferred',
-				`Created "${sessionName}" with transferred context`
+				`Created "${sessionName}" with transferred context`,
+				undefined,
+				undefined,
+				{ fallbackToast: false }
 			);
 
 			// Reset the transfer state after a short delay to allow progress modal to show "Complete"
@@ -262,6 +266,7 @@ export function useMergeTransferHandlers(
 			// Close the modal - merge will show in the input area overlay
 			getModalActions().setMergeSessionModalOpen(false);
 
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession) {
 				return { success: false as const, error: 'No active session' };
 			}
@@ -287,7 +292,7 @@ export function useMergeTransferHandlers(
 
 			return result;
 		},
-		[activeSession, executeMerge]
+		[executeMerge]
 	);
 
 	// TransferProgressModal handlers
@@ -295,6 +300,7 @@ export function useMergeTransferHandlers(
 		cancelTransfer();
 		setTransferSourceAgent(null);
 		setTransferTargetAgent(null);
+		useTabStore.getState().setPendingTerminalBufferSend(null);
 	}, [cancelTransfer]);
 
 	const handleCompleteTransfer = useCallback(() => {
@@ -305,16 +311,24 @@ export function useMergeTransferHandlers(
 
 	const handleSendToAgent = useCallback(
 		async (targetSessionId: string, options: SendToAgentOptions) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession) {
 				getModalActions().setSendToAgentModalOpen(false);
+				useTabStore.getState().setPendingTerminalBufferSend(null);
 				return { success: false, error: 'No active session' };
 			}
 
 			// Find the target session
-			const targetSession = sessions.find((s) => s.id === targetSessionId);
+			const targetSession = useSessionStore
+				.getState()
+				.sessions.find((s) => s.id === targetSessionId);
 			if (!targetSession) {
 				return { success: false, error: 'Target session not found' };
 			}
+
+			// Terminal-buffer transfer path: when a terminal tab queued its buffer for send,
+			// we bypass AI-log extraction and forward the raw buffer text as the message body.
+			const pendingBuffer = useTabStore.getState().pendingTerminalBufferSend;
 
 			// Store source and target agents for progress modal display
 			setTransferSourceAgent(activeSession.toolType);
@@ -325,34 +339,53 @@ export function useMergeTransferHandlers(
 
 			// Get source tab context
 			const sourceTab = activeSession.aiTabs.find((t) => t.id === activeSession.activeTabId);
-			if (!sourceTab) {
+			if (!pendingBuffer && !sourceTab) {
 				setTransferSourceAgent(null);
 				setTransferTargetAgent(null);
 				return { success: false, error: 'Source tab not found' };
 			}
 
 			// Format the context as text to be sent to the agent
-			// Only include user messages and AI responses, not system messages
-			const formattedContext = sourceTab.logs
-				.filter(
-					(log) =>
-						log.text &&
-						log.text.trim() &&
-						(log.source === 'user' || log.source === 'ai' || log.source === 'stdout')
-				)
-				.map((log) => {
-					const role = log.source === 'user' ? 'User' : 'Assistant';
-					return `${role}: ${log.text}`;
-				})
-				.join('\n\n');
+			// AI-tab path: only include user messages and AI responses, not system messages
+			const formattedContext = pendingBuffer
+				? pendingBuffer.content
+				: sourceTab!.logs
+						.filter(
+							(log) =>
+								log.text &&
+								log.text.trim() &&
+								(log.source === 'user' || log.source === 'ai' || log.source === 'stdout')
+						)
+						.map((log) => {
+							const role = log.source === 'user' ? 'User' : 'Assistant';
+							return `${role}: ${log.text}`;
+						})
+						.join('\n\n');
 
-			const sourceName =
-				activeSession.name || activeSession.projectRoot.split('/').pop() || 'Unknown';
+			const sourceName = pendingBuffer
+				? pendingBuffer.sourceName
+				: activeSession.name || activeSession.projectRoot.split('/').pop() || 'Unknown';
 			const sourceAgentName = activeSession.toolType;
 
 			// Create the context message to be sent directly to the agent
-			const contextMessage = formattedContext
-				? `# Context from Previous Session
+			const contextMessage = pendingBuffer
+				? formattedContext.trim()
+					? `# Terminal Buffer from "${sourceName}"
+
+The following is the complete output captured from a terminal session. Review it to understand the commands that were run, their output, and any errors or state that resulted.
+
+---
+
+${formattedContext}
+
+---
+
+# Your Task
+
+Based on the terminal output above, summarize what happened and ask what the user would like to do next.`
+					: 'No terminal output was captured.'
+				: formattedContext
+					? `# Context from Previous Session
 
 The following is a conversation from another session ("${sourceName}" using ${sourceAgentName}). Review this context to understand the prior work and decisions made.
 
@@ -365,7 +398,7 @@ ${formattedContext}
 # Your Task
 
 You are taking over this conversation. Based on the context above, provide a brief summary of where things left off and ask what the user would like to focus on next.`
-				: 'No context available from the previous session.';
+					: 'No context available from the previous session.';
 
 			// Transfer context to the target session's active tab
 			// Create a new tab in the target session and immediately send context to agent
@@ -374,9 +407,11 @@ You are taking over this conversation. Based on the context above, provide a bri
 				id: `transfer-notice-${Date.now()}`,
 				timestamp: Date.now(),
 				source: 'system',
-				text: `Context transferred from "${sourceName}" (${sourceAgentName})${
-					options.groomContext ? ' - cleaned to reduce size' : ''
-				}`,
+				text: pendingBuffer
+					? `Terminal buffer transferred from "${sourceName}"`
+					: `Context transferred from "${sourceName}" (${sourceAgentName})${
+							options.groomContext ? ' - cleaned to reduce size' : ''
+						}`,
 			};
 
 			// Create user message entry for the context being sent
@@ -411,10 +446,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 							busySource: 'ai',
 							thinkingStartTime: Date.now(),
 							aiTabs: [...s.aiTabs, newTab],
-							activeTabId: newTabId,
-							activeFileTabId: null,
-							activeTerminalTabId: null,
-							inputMode: 'ai' as const,
+							...aiTabFocusFields(newTabId),
 							unifiedTabOrder: [
 								...(s.unifiedTabOrder || []),
 								{ type: 'ai' as const, id: newTabId },
@@ -429,9 +461,11 @@ You are taking over this conversation. Based on the context above, provide a bri
 			setActiveSessionId(targetSessionId);
 
 			// Calculate estimated tokens for the toast
-			const estimatedTokens = sourceTab.logs
-				.filter((log) => log.text && log.source !== 'system')
-				.reduce((sum, log) => sum + Math.round((log.text?.length || 0) / 4), 0);
+			const estimatedTokens = pendingBuffer
+				? Math.round(pendingBuffer.content.length / 4)
+				: sourceTab!.logs
+						.filter((log) => log.text && log.source !== 'system')
+						.reduce((sum, log) => sum + Math.round((log.text?.length || 0) / 4), 0);
 			const tokenInfo = estimatedTokens > 0 ? ` (~${estimatedTokens.toLocaleString()} tokens)` : '';
 
 			// Show success toast
@@ -447,6 +481,8 @@ You are taking over this conversation. Based on the context above, provide a bri
 			resetTransfer();
 			setTransferSourceAgent(null);
 			setTransferTargetAgent(null);
+			// Clear pending terminal buffer so subsequent AI-tab sends use the normal path
+			useTabStore.getState().setPendingTerminalBufferSend(null);
 
 			// Spawn the agent with the context - do this after state updates
 			(async () => {
@@ -457,52 +493,16 @@ You are taking over this conversation. Based on the context above, provide a bri
 
 					const baseArgs = agent.args ?? [];
 					const commandToUse = agent.path || agent.command;
+					if (!commandToUse) {
+						throw new Error(`${targetSession.toolType} agent has no command configured`);
+					}
 
-					// Determine whether to send the prompt via stdin on Windows to avoid
-					// exceeding the command line length limit. Context transfer prompts
-					// contain the full conversation history and can easily exceed ~8KB.
-					const isSshSession = Boolean(targetSession.sessionSshRemoteConfig?.enabled);
-					const { sendPromptViaStdin, sendPromptViaStdinRaw } = getStdinFlags({
-						isSshSession,
-						supportsStreamJsonInput: agent.capabilities?.supportsStreamJsonInput ?? false,
-						hasImages: false, // Context transfer never sends images
-					});
-
-					// Build the full prompt with Maestro system prompt for new sessions
 					const effectivePrompt = contextMessage;
 
-					// Get git branch for template substitution
-					let gitBranch: string | undefined;
-					if (targetSession.isGitRepo) {
-						try {
-							const status = await gitService.getStatus(targetSession.cwd);
-							gitBranch = status.branch;
-						} catch (error) {
-							captureException(error, {
-								extra: {
-									cwd: targetSession.cwd,
-									sessionId: targetSessionId,
-									isGitRepo: targetSession.isGitRepo,
-									operation: 'git-status-for-transfer',
-								},
-							});
-						}
-					}
-
-					// Read conductorProfile from settings store at call time
-					const conductorProfile = useSettingsStore.getState().conductorProfile;
-
-					// Prepare Maestro system prompt separately for token-efficient delivery
-					let appendSystemPrompt: string | undefined;
-					if (maestroSystemPrompt) {
-						appendSystemPrompt = substituteTemplateVariables(maestroSystemPrompt, {
-							session: targetSession,
-							gitBranch,
-							groupId: targetSession.groupId,
-							activeTabId: newTabId,
-							conductorProfile,
-						});
-					}
+					const appendSystemPrompt = await prepareMaestroSystemPrompt({
+						session: targetSession,
+						activeTabId: newTabId,
+					});
 
 					// Spawn agent
 					const spawnSessionId = `${targetSessionId}-ai-${newTabId}`;
@@ -517,14 +517,13 @@ You are taking over this conversation. Based on the context above, provide a bri
 						// Per-session config overrides (if set)
 						sessionCustomPath: targetSession.customPath,
 						sessionCustomArgs: targetSession.customArgs,
+						sessionAdditionalDirectories: targetSession.additionalDirectories,
 						sessionCustomEnvVars: targetSession.customEnvVars,
 						sessionCustomModel: targetSession.customModel,
 						sessionCustomContextWindow: targetSession.customContextWindow,
 						sessionSshRemoteConfig: targetSession.sessionSshRemoteConfig,
 						// Windows stdin handling - context transfer prompts contain the
 						// full conversation history and can easily exceed shell limits
-						sendPromptViaStdin,
-						sendPromptViaStdinRaw,
 					});
 				} catch (error) {
 					captureException(error, {
@@ -567,26 +566,16 @@ You are taking over this conversation. Based on the context above, provide a bri
 
 			return { success: true, newSessionId: targetSessionId, newTabId };
 		},
-		[activeSession, sessions, setSessions, setActiveSessionId, resetTransfer]
+		[setSessions, setActiveSessionId, resetTransfer]
 	);
 
-	// Tab context menu handlers — switch to tab then open modal
+	// Tab context menu handlers - switch to tab then open modal
 	const handleMergeWith = useCallback(
 		(tabId: string) => {
 			const currentSession = sessionsRef.current.find((s) => s.id === activeSessionIdRef.current);
 			if (currentSession) {
 				setSessions((prev) =>
-					prev.map((s) =>
-						s.id === currentSession.id
-							? {
-									...s,
-									activeTabId: tabId,
-									activeFileTabId: null,
-									activeTerminalTabId: null,
-									inputMode: 'ai' as const,
-								}
-							: s
-					)
+					prev.map((s) => (s.id === currentSession.id ? { ...s, ...aiTabFocusFields(tabId) } : s))
 				);
 			}
 			getModalActions().setMergeSessionModalOpen(true);
@@ -599,17 +588,7 @@ You are taking over this conversation. Based on the context above, provide a bri
 			const currentSession = sessionsRef.current.find((s) => s.id === activeSessionIdRef.current);
 			if (currentSession) {
 				setSessions((prev) =>
-					prev.map((s) =>
-						s.id === currentSession.id
-							? {
-									...s,
-									activeTabId: tabId,
-									activeFileTabId: null,
-									activeTerminalTabId: null,
-									inputMode: 'ai' as const,
-								}
-							: s
-					)
+					prev.map((s) => (s.id === currentSession.id ? { ...s, ...aiTabFocusFields(tabId) } : s))
 				);
 			}
 			getModalActions().setSendToAgentModalOpen(true);

@@ -15,6 +15,7 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { CueYamlEditor } from '../../../renderer/components/CueYamlEditor';
 import type { Theme } from '../../../renderer/types';
 
+import { mockTheme } from '../../helpers/mockTheme';
 // Mock the Modal component
 vi.mock('../../../renderer/components/ui/Modal', () => ({
 	Modal: ({
@@ -108,6 +109,12 @@ vi.mock('../../../renderer/stores/sessionStore', () => ({
 
 // Mock buildSpawnConfigForAgent
 const mockBuildSpawnConfig = vi.fn();
+// The pattern preview acknowledges a copy with the shared clipboard flash.
+const mockFlashCopiedToClipboard = vi.fn();
+vi.mock('../../../renderer/utils/flashCopiedToClipboard', () => ({
+	flashCopiedToClipboard: (...args: unknown[]) => mockFlashCopiedToClipboard(...args),
+}));
+
 vi.mock('../../../renderer/utils/sessionHelpers', () => ({
 	buildSpawnConfigForAgent: (...args: any[]) => mockBuildSpawnConfig(...args),
 }));
@@ -174,27 +181,6 @@ afterEach(() => {
 	vi.restoreAllMocks();
 	(window as any).maestro = existingWindowMaestro;
 });
-
-const mockTheme: Theme = {
-	id: 'dracula',
-	name: 'Dracula',
-	mode: 'dark',
-	colors: {
-		bgMain: '#282a36',
-		bgSidebar: '#21222c',
-		bgActivity: '#343746',
-		textMain: '#f8f8f2',
-		textDim: '#6272a4',
-		accent: '#bd93f9',
-		accentForeground: '#f8f8f2',
-		border: '#44475a',
-		success: '#50fa7b',
-		warning: '#ffb86c',
-		error: '#ff5555',
-		scrollbar: '#44475a',
-		scrollbarHover: '#6272a4',
-	},
-};
 
 const defaultProps = {
 	isOpen: true,
@@ -678,7 +664,7 @@ describe('CueYamlEditor', () => {
 			fireEvent.click(screen.getByText('Save'));
 
 			await waitFor(() => {
-				expect(mockWriteYaml).toHaveBeenCalledWith('/test/project', 'new content');
+				expect(mockWriteYaml).toHaveBeenCalledWith('/test/project', 'new content', undefined);
 			});
 			expect(mockRefreshSession).toHaveBeenCalledWith('sess-1', '/test/project');
 			expect(defaultProps.onClose).toHaveBeenCalledOnce();
@@ -741,13 +727,13 @@ describe('CueYamlEditor', () => {
 	});
 
 	describe('navigation buttons (opened directly)', () => {
-		it('should show Dashboard and Pipeline Editor buttons when CueModal is not open', async () => {
+		it('should show Dashboard and Pipeline Graph buttons when CueModal is not open', async () => {
 			mockCueModalOpen = false;
 			render(<CueYamlEditor {...defaultProps} />);
 
 			await waitFor(() => {
 				expect(screen.getByText('Dashboard')).toBeInTheDocument();
-				expect(screen.getByText('Pipeline Editor')).toBeInTheDocument();
+				expect(screen.getByText('Pipeline Graph')).toBeInTheDocument();
 			});
 		});
 
@@ -760,7 +746,7 @@ describe('CueYamlEditor', () => {
 			});
 
 			expect(screen.queryByText('Dashboard')).not.toBeInTheDocument();
-			expect(screen.queryByText('Pipeline Editor')).not.toBeInTheDocument();
+			expect(screen.queryByText('Pipeline Graph')).not.toBeInTheDocument();
 		});
 
 		it('should close YAML editor and open CueModal with dashboard tab', async () => {
@@ -782,10 +768,10 @@ describe('CueYamlEditor', () => {
 			render(<CueYamlEditor {...defaultProps} />);
 
 			await waitFor(() => {
-				expect(screen.getByText('Pipeline Editor')).toBeInTheDocument();
+				expect(screen.getByText('Pipeline Graph')).toBeInTheDocument();
 			});
 
-			fireEvent.click(screen.getByText('Pipeline Editor'));
+			fireEvent.click(screen.getByText('Pipeline Graph'));
 
 			expect(defaultProps.onClose).toHaveBeenCalledOnce();
 			expect(mockOpenCueModalWithTab).toHaveBeenCalledWith('pipeline');
@@ -889,7 +875,10 @@ describe('CueYamlEditor', () => {
 				expect(mockWriteText).toHaveBeenCalledWith(expect.stringContaining('time.heartbeat'));
 			});
 
-			expect(screen.getByText('Copied')).toBeInTheDocument();
+			// The acknowledgment is the shared center flash, not an inline label.
+			await waitFor(() => {
+				expect(mockFlashCopiedToClipboard).toHaveBeenCalledWith(undefined, 'Pattern YAML Copied');
+			});
 		});
 
 		it('should close preview modal when close is triggered', async () => {

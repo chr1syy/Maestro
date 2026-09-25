@@ -8,10 +8,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { RefreshCw, RotateCcw, FolderOpen, AlertTriangle, Bot } from 'lucide-react';
 import type { Theme, AgentConfig } from '../../types';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import type { SerializableWizardState, WizardStep } from './WizardContext';
 import { STEP_INDEX, WIZARD_TOTAL_STEPS } from './WizardContext';
+import { ResizeHandles } from '../ui/ResizeHandles';
 
 interface WizardResumeModalProps {
 	theme: Theme;
@@ -55,8 +57,7 @@ export function WizardResumeModal({
 	onStartFresh,
 	onClose,
 }: WizardResumeModalProps) {
-	const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-	const layerIdRef = useRef<string>();
+	useModalLayer(MODAL_PRIORITIES.WIZARD_RESUME, 'Resume Setup Wizard', onClose);
 	const resumeButtonRef = useRef<HTMLButtonElement>(null);
 	const [focusedButton, setFocusedButton] = useState<'resume' | 'fresh'>('resume');
 	const [directoryValid, setDirectoryValid] = useState<boolean | null>(null);
@@ -128,32 +129,6 @@ export function WizardResumeModal({
 		resumeButtonRef.current?.focus();
 	}, []);
 
-	// Register layer on mount
-	useEffect(() => {
-		const id = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.WIZARD_RESUME,
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			ariaLabel: 'Resume Setup Wizard',
-			onEscape: onClose,
-		});
-		layerIdRef.current = id;
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [registerLayer, unregisterLayer]);
-
-	// Update handler when dependencies change
-	useEffect(() => {
-		if (layerIdRef.current) {
-			updateLayerHandler(layerIdRef.current, onClose);
-		}
-	}, [onClose, updateLayerHandler]);
-
 	// Handle resume click with validation status
 	const handleResume = () => {
 		onResume({
@@ -189,6 +164,11 @@ export function WizardResumeModal({
 
 	const progressPercentage = getProgressPercentage(resumeState.currentStep);
 	const stepDescription = getStepDescription(resumeState.currentStep);
+	const resizableModal = useResizableModal({
+		resizeKey: 'wizard-resume',
+		defaultSize: { width: 520, height: 620 },
+		minSize: { width: 340, height: 320 },
+	});
 
 	return (
 		<div
@@ -200,9 +180,22 @@ export function WizardResumeModal({
 			onKeyDown={handleKeyDown}
 		>
 			<div
-				className="w-[480px] border rounded-xl shadow-2xl overflow-hidden"
-				style={{ backgroundColor: theme.colors.bgSidebar, borderColor: theme.colors.border }}
+				ref={resizableModal.modalRef}
+				className="relative border rounded-xl shadow-2xl overflow-hidden flex flex-col"
+				style={{
+					...resizableModal.style,
+					backgroundColor: theme.colors.bgSidebar,
+					borderColor: theme.colors.border,
+				}}
+				data-modal-resize-key="wizard-resume"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div className="p-5 border-b" style={{ borderColor: theme.colors.border }}>
 					<h2 className="text-lg font-semibold" style={{ color: theme.colors.textMain }}>
@@ -214,7 +207,7 @@ export function WizardResumeModal({
 				</div>
 
 				{/* Progress Summary */}
-				<div className="p-5 space-y-4">
+				<div className="p-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
 					{/* Progress bar */}
 					<div>
 						<div className="flex justify-between mb-2">
@@ -318,7 +311,7 @@ export function WizardResumeModal({
 												style={{ color: theme.colors.warning }}
 											/>
 											<p className="text-xs" style={{ color: theme.colors.warning }}>
-												Agent no longer available — you'll need to select a different agent
+												Agent no longer available - you'll need to select a different agent
 											</p>
 										</div>
 									)}
@@ -357,7 +350,7 @@ export function WizardResumeModal({
 												style={{ color: theme.colors.warning }}
 											/>
 											<p className="text-xs" style={{ color: theme.colors.warning }}>
-												Directory no longer exists — you'll need to select a new location
+												Directory no longer exists - you'll need to select a new location
 											</p>
 										</div>
 									)}
@@ -441,14 +434,14 @@ export function WizardResumeModal({
 					<p className="text-center text-xs pt-2" style={{ color: theme.colors.textDim }}>
 						Press{' '}
 						<kbd
-							className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+							className="px-1.5 py-0.5 rounded text-2xs font-mono"
 							style={{ backgroundColor: theme.colors.bgActivity }}
 						>
 							Tab
 						</kbd>{' '}
 						to switch,{' '}
 						<kbd
-							className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+							className="px-1.5 py-0.5 rounded text-2xs font-mono"
 							style={{ backgroundColor: theme.colors.bgActivity }}
 						>
 							Enter

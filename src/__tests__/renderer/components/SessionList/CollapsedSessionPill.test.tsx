@@ -1,27 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { CollapsedSessionPill } from '../../../../renderer/components/SessionList/CollapsedSessionPill';
+import {
+	CollapsedSessionPill,
+	CollapsedSessionPillRows,
+} from '../../../../renderer/components/SessionList/CollapsedSessionPill';
 import type { Session, Theme } from '../../../../renderer/types';
 
+import { mockTheme } from '../../../helpers/mockTheme';
+import {
+	useCrossAgentInFlightStore,
+	type InFlightCrossAgentRequest,
+} from '../../../../renderer/stores/crossAgentInFlightStore';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-const mockTheme: Theme = {
-	name: 'test',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgSidebar: '#16213e',
-		bgInput: '#0f3460',
-		textMain: '#e0e0e0',
-		textDim: '#888888',
-		accent: '#e94560',
-		border: '#333333',
-		error: '#ff4444',
-		success: '#00cc66',
-		warning: '#ffaa00',
-	},
-} as Theme;
 
 let idCounter = 0;
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -72,9 +64,21 @@ function createDefaultProps(overrides: Partial<Parameters<typeof CollapsedSessio
 // Tests
 // ---------------------------------------------------------------------------
 
+function consult(targetSessionId: string): InFlightCrossAgentRequest {
+	return {
+		requestId: `req-${targetSessionId}`,
+		sourceSessionId: 'asker',
+		sourceTabId: 'tab-1',
+		targetSessionId,
+		targetAgentName: 'Target',
+		startedAt: Date.now(),
+	};
+}
+
 describe('CollapsedSessionPill', () => {
 	beforeEach(() => {
 		idCounter = 0;
+		useCrossAgentInFlightStore.setState({ requests: {} });
 	});
 
 	it('renders a single pill segment for a session without worktrees', () => {
@@ -171,6 +175,57 @@ describe('CollapsedSessionPill', () => {
 		expect(segment.style.backgroundColor).toBe('transparent');
 	});
 
+	/**
+	 * A consult never touches `session.state` (hidden tab, synthetic process id),
+	 * so the pill folds the in-flight store in beside Auto Run - otherwise a
+	 * consulted worktree segment stays green for the whole time it is working.
+	 */
+	it('applies busy styling to a consulted segment', () => {
+		const session = makeSession({ id: 'consulted' });
+		useCrossAgentInFlightStore.setState({ requests: { a: consult('consulted') } });
+
+		const { container } = render(<CollapsedSessionPill {...createDefaultProps({ session })} />);
+
+		const segment = container.firstElementChild!.firstElementChild! as HTMLElement;
+		expect(segment.className).toContain('animate-pulse');
+		expect(segment.style.backgroundColor).not.toBe('transparent');
+	});
+
+	// An unopened Claude agent is the COMMON consult target, so the hollow pill
+	// would mask exactly the case the consult signal exists to show.
+	it('outranks the unbound-Claude hollow pill', () => {
+		const session = makeSession({
+			id: 'consulted',
+			toolType: 'claude-code',
+			agentSessionId: undefined,
+		});
+		useCrossAgentInFlightStore.setState({ requests: { a: consult('consulted') } });
+
+		const { container } = render(<CollapsedSessionPill {...createDefaultProps({ session })} />);
+
+		const segment = container.firstElementChild!.firstElementChild! as HTMLElement;
+		expect(segment.style.border).toBe('');
+		expect(segment.style.backgroundColor).not.toBe('transparent');
+	});
+
+	// Segments are per-agent, so a consult on the parent must not light a
+	// worktree child sitting beside it.
+	it('lights only the consulted segment in a worktree pill', () => {
+		const parent = makeSession({ id: 'p1' });
+		const child = makeSession({ id: 'c1' });
+		useCrossAgentInFlightStore.setState({ requests: { a: consult('c1') } });
+
+		const { container } = render(
+			<CollapsedSessionPill
+				{...createDefaultProps({ session: parent, getWorktreeChildren: vi.fn(() => [child]) })}
+			/>
+		);
+
+		const segments = container.firstElementChild!.children;
+		expect(segments[0].className).not.toContain('animate-pulse');
+		expect(segments[1].className).toContain('animate-pulse');
+	});
+
 	it('renders tooltip content within each segment', () => {
 		const session = makeSession({ name: 'My Test Agent' });
 		const props = createDefaultProps({ session });
@@ -214,5 +269,120 @@ describe('CollapsedSessionPill', () => {
 		});
 		const { container: c2 } = render(<CollapsedSessionPill {...props2} />);
 		expect((c2.firstElementChild as HTMLElement).style.gap).toBe('1px');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// CollapsedSessionPillRows
+// ---------------------------------------------------------------------------
+
+function createRowsProps(
+	sessions: Session[],
+	overrides: Partial<Parameters<typeof CollapsedSessionPillRows>[0]> = {}
+) {
+	return {
+		sessions,
+		keyPrefix: 'rows-test',
+		onContainerClick: vi.fn(),
+		theme: mockTheme as Theme,
+		activeBatchSessionIds: [] as string[],
+		leftSidebarWidth: 300,
+		contextWarningYellowThreshold: 70,
+		contextWarningRedThreshold: 90,
+		getFileCount: vi.fn(() => 0),
+		getWorktreeChildren: vi.fn(() => [] as Session[]),
+		setActiveSessionId: vi.fn(),
+		...overrides,
+	};
+}
+
+describe('CollapsedSessionPillRows', () => {
+	beforeEach(() => {
+		idCounter = 0;
+	});
+
+	it('renders a single row when session count is at or below the per-row cap', () => {
+		const sessions = Array.from({ length: 20 }, () => makeSession());
+		const props = createRowsProps(sessions);
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+
+		const wrapper = container.firstElementChild as HTMLElement;
+		expect(wrapper.children.length).toBe(1);
+
+		const row = wrapper.firstElementChild as HTMLElement;
+		expect(row.children.length).toBe(20);
+		// No spacers should exist when there is only a single row
+		const spacers = row.querySelectorAll(':scope > div.flex-1:not(.rounded-full)');
+		expect(spacers.length).toBe(0);
+	});
+
+	it('wraps to a new row when exceeding the per-row cap', () => {
+		const sessions = Array.from({ length: 22 }, () => makeSession());
+		const props = createRowsProps(sessions);
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+
+		const wrapper = container.firstElementChild as HTMLElement;
+		expect(wrapper.children.length).toBe(2);
+
+		const firstRow = wrapper.children[0] as HTMLElement;
+		const secondRow = wrapper.children[1] as HTMLElement;
+		// First row is full (20 pills, no spacers)
+		expect(firstRow.children.length).toBe(20);
+		// Second row has 2 pills + 18 spacers so widths stay aligned with row above
+		expect(secondRow.children.length).toBe(20);
+	});
+
+	it('produces three rows for 41 sessions (20 + 20 + 1 + 19 spacers)', () => {
+		const sessions = Array.from({ length: 41 }, () => makeSession());
+		const props = createRowsProps(sessions);
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+
+		const wrapper = container.firstElementChild as HTMLElement;
+		expect(wrapper.children.length).toBe(3);
+		expect((wrapper.children[0] as HTMLElement).children.length).toBe(20);
+		expect((wrapper.children[1] as HTMLElement).children.length).toBe(20);
+		// Last row padded to 20 (1 pill + 19 spacers)
+		expect((wrapper.children[2] as HTMLElement).children.length).toBe(20);
+	});
+
+	it('honors a custom maxPerRow, wrapping and padding to that cap', () => {
+		const sessions = Array.from({ length: 12 }, () => makeSession());
+		const props = createRowsProps(sessions, { maxPerRow: 5 });
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+
+		const wrapper = container.firstElementChild as HTMLElement;
+		// 12 sessions at 5/row → 3 rows (5 + 5 + 2)
+		expect(wrapper.children.length).toBe(3);
+		expect((wrapper.children[0] as HTMLElement).children.length).toBe(5);
+		expect((wrapper.children[1] as HTMLElement).children.length).toBe(5);
+		// Last row padded to 5 (2 pills + 3 spacers)
+		expect((wrapper.children[2] as HTMLElement).children.length).toBe(5);
+	});
+
+	it('falls back to the default cap of 20 when maxPerRow is omitted', () => {
+		const sessions = Array.from({ length: 21 }, () => makeSession());
+		const props = createRowsProps(sessions);
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+
+		const wrapper = container.firstElementChild as HTMLElement;
+		expect(wrapper.children.length).toBe(2);
+		expect((wrapper.children[0] as HTMLElement).children.length).toBe(20);
+	});
+
+	it('fires onContainerClick when the wrapper is clicked', () => {
+		const sessions = [makeSession(), makeSession()];
+		const onContainerClick = vi.fn();
+		const props = createRowsProps(sessions, { onContainerClick });
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+
+		fireEvent.click(container.firstElementChild!);
+		expect(onContainerClick).toHaveBeenCalledTimes(1);
+	});
+
+	it('renders nothing inside the wrapper when sessions is empty', () => {
+		const props = createRowsProps([]);
+		const { container } = render(<CollapsedSessionPillRows {...props} />);
+		const wrapper = container.firstElementChild as HTMLElement;
+		expect(wrapper.children.length).toBe(0);
 	});
 });

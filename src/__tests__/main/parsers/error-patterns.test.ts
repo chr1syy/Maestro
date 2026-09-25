@@ -13,7 +13,9 @@ import {
 	getSshErrorPatterns,
 	registerErrorPatterns,
 	clearPatternRegistry,
+	ERROR_PATTERN_DEFAULT_MIN_CHUNK_LENGTH,
 	SSH_ERROR_PATTERNS,
+	isClaudeLimitNotice,
 	type AgentErrorPatterns,
 } from '../../../main/parsers/error-patterns';
 
@@ -139,6 +141,89 @@ describe('error-patterns', () => {
 					const result = matchErrorPattern(OPENCODE_ERROR_PATTERNS, text);
 					expect(result).toBeNull();
 				}
+			});
+		});
+
+		describe('session_not_found patterns', () => {
+			// Verified: opencode-ai v1.18.15, run locally.
+			// `opencode run "hi" --session ses_<bad-id>` -> "Error: Session not found"
+			// `opencode export ses_<bad-id>` -> "Error: Session not found: ses_<bad-id>"
+			it('should match the bare "Error: Session not found"', () => {
+				const result = matchErrorPattern(OPENCODE_ERROR_PATTERNS, 'Error: Session not found');
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('session_not_found');
+				expect(result?.recoverable).toBe(true);
+			});
+
+			it('should match "Session not found: ses_<id>"', () => {
+				const result = matchErrorPattern(
+					OPENCODE_ERROR_PATTERNS,
+					'Session not found: ses_abc123def456'
+				);
+				expect(result?.type).toBe('session_not_found');
+			});
+
+			it('should NOT match unrelated lines that merely mention "session" and "not found" separately', () => {
+				const falsePositives = [
+					'the session config file was not found',
+					'session store connection lost; retry not found necessary',
+				];
+
+				for (const text of falsePositives) {
+					const result = matchErrorPattern(OPENCODE_ERROR_PATTERNS, text);
+					expect(result).toBeNull();
+				}
+			});
+
+			// Regression: a bare INVALID_ARGUMENT status describes any rejected
+			// request, not just a corrupted stored session - e.g. an invalid model
+			// id. Classifying every occurrence as session_not_found would tell the
+			// user to abandon their conversation for a problem a fresh session
+			// can't fix, since the same bad model id fails identically again.
+			it('should NOT match an unrelated INVALID_ARGUMENT caused by something other than a dead session', () => {
+				const result = matchErrorPattern(
+					OPENCODE_ERROR_PATTERNS,
+					'{ "error": { "code": 400, "message": "Model \'foo-bar\' is not a valid model", "status": "INVALID_ARGUMENT" } }'
+				);
+				expect(result).toBeNull();
+			});
+			it('should NOT match normal text mentioning arguments', () => {
+				const falsePositives = [
+					'passing an invalid argument name would fail',
+					'the function takes three arguments',
+					'validate arguments before use',
+				];
+
+				for (const text of falsePositives) {
+					const result = matchErrorPattern(OPENCODE_ERROR_PATTERNS, text);
+					expect(result).toBeNull();
+				}
+			});
+			// Issue #307: Gemini rejects a malformed stored transcript with a bare
+			// 400 INVALID_ARGUMENT, and every later prompt on that session fails
+			// identically. Classifying it as session_not_found is what surfaces the
+			// "Start New Session" recovery action instead of a futile retry.
+			it('should match the Gemini "Request contains an invalid argument" 400', () => {
+				const result = matchErrorPattern(
+					OPENCODE_ERROR_PATTERNS,
+					'Request contains an invalid argument.'
+				);
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('session_not_found');
+				expect(result?.recoverable).toBe(true);
+			});
+			it('should match the INVALID_ARGUMENT status from a provider response body', () => {
+				const result = matchErrorPattern(
+					OPENCODE_ERROR_PATTERNS,
+					'{ "error": { "code": 400, "message": "Request contains an invalid argument.", "status": "INVALID_ARGUMENT" } }'
+				);
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('session_not_found');
+			});
+			it('should still match "session not found"', () => {
+				const result = matchErrorPattern(OPENCODE_ERROR_PATTERNS, 'session not found');
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('session_not_found');
 			});
 		});
 	});
@@ -560,6 +645,117 @@ describe('error-patterns', () => {
 					expect(result?.type).toBe('agent_crashed');
 				});
 			});
+
+			describe('session_not_found patterns', () => {
+				// Real stderr emitted by `codex exec resume <id>` (codex-cli 0.130.0)
+				// when the rollout file backing the thread is missing. Regression
+				// guard for #1042 - must NOT fall through to agent_crashed.
+				it('should match Codex "no rollout found for thread id" resume failure', () => {
+					const stderr =
+						'Error: thread/resume: thread/resume failed: no rollout found for thread id 019e4aa3-5e01-73e1-9f61-d3961386dafd (code -32600)';
+					const result = matchErrorPattern(CODEX_ERROR_PATTERNS, stderr);
+					expect(result).not.toBeNull();
+					expect(result?.type).toBe('session_not_found');
+					expect(result?.recoverable).toBe(true);
+				});
+
+				it('should match "rollout not found"', () => {
+					const result = matchErrorPattern(CODEX_ERROR_PATTERNS, 'rollout not found');
+					expect(result?.type).toBe('session_not_found');
+				});
+
+				it('should match generic "session not found"', () => {
+					const result = matchErrorPattern(CODEX_ERROR_PATTERNS, 'session not found');
+					expect(result?.type).toBe('session_not_found');
+				});
+			});
+		});
+
+		describe('Grok-specific patterns', () => {
+			const GROK_ERROR_PATTERNS = getErrorPatterns('grok');
+
+			describe('session_not_found patterns', () => {
+				// Real stderr from `grok -p "hi" --resume <bad-uuid>
+				// --output-format streaming-json` (grok v0.2.93). Stdout carries
+				// no JSON error event for this failure, so the stderr string is
+				// the only signal.
+				it('should match the Grok "Failed to restore session" resume failure', () => {
+					const stderr =
+						'Error: Failed to restore session from remote: fetching session record: session get failed: 404 Not Found';
+					const result = matchErrorPattern(GROK_ERROR_PATTERNS, stderr);
+					expect(result).not.toBeNull();
+					expect(result?.type).toBe('session_not_found');
+					expect(result?.recoverable).toBe(true);
+				});
+
+				it('should match the standalone "session get failed" cause', () => {
+					const result = matchErrorPattern(
+						GROK_ERROR_PATTERNS,
+						'session get failed: 404 Not Found'
+					);
+					expect(result?.type).toBe('session_not_found');
+				});
+
+				it('should NOT match the informational "not found locally" restore line', () => {
+					// This line also precedes successful remote restores.
+					const result = matchErrorPattern(
+						GROK_ERROR_PATTERNS,
+						'Session 019f47fb-2316-7f21-98db-55907d4ddb60 not found locally, restoring from remote...'
+					);
+					expect(result).toBeNull();
+				});
+			});
+
+			describe('auth_expired patterns', () => {
+				it('should match multi-token authentication failures', () => {
+					expect(
+						matchErrorPattern(GROK_ERROR_PATTERNS, 'Not authenticated. Please run grok login')?.type
+					).toBe('auth_expired');
+					expect(
+						matchErrorPattern(GROK_ERROR_PATTERNS, 'Authentication failed on remote host')?.type
+					).toBe('auth_expired');
+					expect(
+						matchErrorPattern(GROK_ERROR_PATTERNS, 'HTTP 401 Unauthorized request')?.type
+					).toBe('auth_expired');
+				});
+
+				it('should NOT match bare 401 status alone', () => {
+					// Bare codes misclassify unrelated failures into auth recovery UX.
+					expect(matchErrorPattern(GROK_ERROR_PATTERNS, 'Error 401')).toBeNull();
+					expect(matchErrorPattern(GROK_ERROR_PATTERNS, 'status 401')).not.toBeNull();
+				});
+			});
+
+			describe('rate_limited patterns', () => {
+				it('should match multi-token rate limit failures', () => {
+					expect(matchErrorPattern(GROK_ERROR_PATTERNS, 'Rate limit exceeded')?.type).toBe(
+						'rate_limited'
+					);
+					expect(matchErrorPattern(GROK_ERROR_PATTERNS, 'Too many requests, slow down')?.type).toBe(
+						'rate_limited'
+					);
+					expect(matchErrorPattern(GROK_ERROR_PATTERNS, 'HTTP 429 from API')?.type).toBe(
+						'rate_limited'
+					);
+				});
+
+				it('should NOT match bare 429 status alone', () => {
+					expect(matchErrorPattern(GROK_ERROR_PATTERNS, 'Error 429')).toBeNull();
+				});
+			});
+
+			describe('agent_crashed patterns', () => {
+				// Real message from `grok -p "hi" -m nonexistent-model-xyz`
+				// (grok v0.2.93).
+				it('should match the Grok bad-model failure', () => {
+					const message =
+						"Couldn't set model 'nonexistent-model-xyz': Invalid params: \"unknown model id\". Run 'grok models' to see available models.";
+					const result = matchErrorPattern(GROK_ERROR_PATTERNS, message);
+					expect(result).not.toBeNull();
+					expect(result?.type).toBe('agent_crashed');
+					expect(result?.recoverable).toBe(true);
+				});
+			});
 		});
 	});
 
@@ -758,6 +954,57 @@ describe('error-patterns', () => {
 			});
 		});
 
+		describe('Windows remote host (issue #995)', () => {
+			// Maestro builds the remote command for a POSIX shell
+			// (/bin/bash --norc --noprofile). On a Windows SSH remote the default
+			// shell (cmd.exe or PowerShell) cannot run it and the agent dies with a
+			// bare exit 1. These cases prove the cryptic crash now maps to a clear,
+			// actionable message naming the host-side fix (OpenSSH DefaultShell).
+			it('should map cmd.exe "is not recognized as an internal or external command" to the actionable message', () => {
+				const result = matchSshErrorPattern(
+					"'/bin/bash' is not recognized as an internal or external command, operable program or batch file."
+				);
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('agent_crashed');
+				expect(result?.recoverable).toBe(false);
+				expect(result?.message).toContain('Windows shell');
+				expect(result?.message).toContain('DefaultShell');
+			});
+
+			it('should map PowerShell "is not recognized as the name of a cmdlet" to the actionable message', () => {
+				const result = matchSshErrorPattern(
+					"/bin/bash : The term '/bin/bash' is not recognized as the name of a cmdlet, function, script file, or operable program."
+				);
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('agent_crashed');
+				expect(result?.message).toContain('Windows shell');
+				expect(result?.message).toContain('DefaultShell');
+			});
+
+			it('should map Windows "The system cannot find the path specified" to the actionable message', () => {
+				const result = matchSshErrorPattern('The system cannot find the path specified.');
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('agent_crashed');
+				expect(result?.message).toContain('Windows shell');
+				expect(result?.message).toContain('DefaultShell');
+			});
+
+			it('should NOT apply the Windows message to a POSIX remote failure (POSIX remotes unaffected)', () => {
+				// A real POSIX-remote "command not found" still maps to its own
+				// agent-specific message, never the Windows-remote message.
+				const result = matchSshErrorPattern('bash: claude: command not found');
+				expect(result).not.toBeNull();
+				expect(result?.type).toBe('agent_crashed');
+				expect(result?.message).toContain('Claude command not found');
+				expect(result?.message).not.toContain('Windows shell');
+			});
+
+			it('should return null for normal POSIX output mentioning bash (no false positive)', () => {
+				const result = matchSshErrorPattern('Running /bin/bash to set up the environment');
+				expect(result).toBeNull();
+			});
+		});
+
 		describe('non-matching lines', () => {
 			it('should return null for normal SSH output', () => {
 				const result = matchSshErrorPattern('Connected to example.com');
@@ -875,5 +1122,128 @@ describe('error-patterns', () => {
 			expect(getErrorPatterns('claude-code')).toEqual({});
 			expect(getErrorPatterns('opencode')).toEqual({});
 		});
+	});
+
+	// PR-D 1.8: streaming-path optimizations
+	describe('matchErrorPattern length guard + priority ordering', () => {
+		it('exposes a default minimum chunk length', () => {
+			expect(ERROR_PATTERN_DEFAULT_MIN_CHUNK_LENGTH).toBeGreaterThan(0);
+			// Real error strings (timeout=7) should not be skipped by default.
+			expect(ERROR_PATTERN_DEFAULT_MIN_CHUNK_LENGTH).toBeLessThanOrEqual(7);
+		});
+
+		it('skips the regex bank for chunks shorter than the threshold', () => {
+			// "abc" is 3 chars - below threshold. Even if the patterns somehow
+			// matched, the length guard short-circuits before any regex runs.
+			const result = matchErrorPattern(CLAUDE_ERROR_PATTERNS, 'abc');
+			expect(result).toBeNull();
+		});
+
+		it('honors a caller-supplied minLength override (0 disables the guard)', () => {
+			// "rate limit" - would match rate_limited under the default guard
+			// because it's 10 chars. With minLength: 0 the same behavior holds;
+			// just verifying the option is wired.
+			const noGuard = matchErrorPattern(CLAUDE_ERROR_PATTERNS, 'rate limit exceeded', {
+				minLength: 0,
+			});
+			expect(noGuard).not.toBeNull();
+			expect(noGuard?.type).toBe('rate_limited');
+		});
+
+		it('honors a caller-supplied minLength that is higher than default', () => {
+			// "rate limit exceeded" is 19 chars - well above default. Pass a
+			// minLength of 100 to force the guard to short-circuit.
+			const guarded = matchErrorPattern(CLAUDE_ERROR_PATTERNS, 'rate limit exceeded', {
+				minLength: 100,
+			});
+			expect(guarded).toBeNull();
+		});
+
+		it('returns null for empty string regardless of guard', () => {
+			expect(matchErrorPattern(CLAUDE_ERROR_PATTERNS, '')).toBeNull();
+			expect(matchErrorPattern(CLAUDE_ERROR_PATTERNS, '', { minLength: 0 })).toBeNull();
+		});
+
+		it('priority ordering keeps first-match early-return contract', () => {
+			// Multiple patterns can match overlapping strings; the function
+			// must return the first hit it finds, ordered by error type.
+			// The new hit-frequency order puts rate_limited first; verify
+			// that a rate-limit-only string returns rate_limited (not
+			// something else if patterns happen to overlap).
+			const result = matchErrorPattern(CLAUDE_ERROR_PATTERNS, 'rate limit exceeded');
+			expect(result?.type).toBe('rate_limited');
+		});
+	});
+});
+
+describe('Codex upstream HTTP status classification', () => {
+	const codex = getErrorPatterns('codex');
+
+	it('classifies a generic upstream status as a retryable provider failure', () => {
+		const m = matchErrorPattern(codex, 'unexpected status 404 Not Found: {"detail":"Not Found"}', {
+			minLength: 0,
+		});
+		expect(m?.type).toBe('network_error');
+	});
+
+	// network_error is matched BEFORE auth_expired, so an auth status caught by
+	// the generic matcher would tell the user to "retry" a bad API key forever.
+	it.each(['401 Unauthorized', '403 Forbidden'])(
+		'leaves %s to the auth bank instead of calling it a provider blip',
+		(status) => {
+			const m = matchErrorPattern(codex, `unexpected status ${status}`, { minLength: 0 });
+			expect(m?.type).toBe('auth_expired');
+		}
+	);
+});
+
+/**
+ * `isClaudeLimitNotice` gates the one place a SUCCESSFUL result event is treated
+ * as a failure, so its false-positive behavior matters more than its recall: a
+ * wrong `true` turns a normal answer into a phantom outage and hands the turn to
+ * the retry scheduler.
+ */
+describe('isClaudeLimitNotice', () => {
+	it.each([
+		"You've hit your session limit · resets 11:40am (America/Chicago)",
+		'You\u2019ve hit your session limit - resets 11:40am (America/Chicago)',
+		"You've hit your weekly limit · resets Monday at 9am (America/Chicago)",
+		"You've hit your 5-hour limit",
+		'Claude AI usage limit reached|1755500000',
+		'  Claude AI usage limit reached  ',
+	])('recognizes the standalone notice: %s', (text) => {
+		expect(isClaudeLimitNotice(text)).toBe(true);
+	});
+
+	it('requires the notice to START the string, not appear inside prose', () => {
+		expect(
+			isClaudeLimitNotice("Once you've hit your session limit, Maestro schedules a retry.")
+		).toBe(false);
+		expect(isClaudeLimitNotice('The CLI prints "Claude AI usage limit reached" and stops.')).toBe(
+			false
+		);
+	});
+
+	it('rejects a long body that merely opens with the wording', () => {
+		// A real notice is one short line. An answer that begins with the phrase and
+		// then explains it for a paragraph is prose, and this is the length cap that
+		// tells them apart.
+		const essay = `You've hit your session limit is the message Claude Code prints. ${'Here is why that happens and what Maestro does about it. '.repeat(
+			8
+		)}`;
+		expect(essay.length).toBeGreaterThan(300);
+		expect(isClaudeLimitNotice(essay)).toBe(false);
+	});
+
+	it('rejects empty, blank, and non-string input', () => {
+		expect(isClaudeLimitNotice('')).toBe(false);
+		expect(isClaudeLimitNotice('   \n  ')).toBe(false);
+		expect(isClaudeLimitNotice(undefined as unknown as string)).toBe(false);
+		expect(isClaudeLimitNotice(null as unknown as string)).toBe(false);
+	});
+
+	it('does not fire on limit kinds Claude never paints a plan banner for', () => {
+		expect(isClaudeLimitNotice("You've hit your disk limit")).toBe(false);
+		expect(isClaudeLimitNotice('Rate limit exceeded')).toBe(false);
 	});
 });

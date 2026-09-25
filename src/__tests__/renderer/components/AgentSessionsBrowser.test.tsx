@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { AgentSessionsBrowser } from '../../../renderer/components/AgentSessionsBrowser';
 import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
@@ -319,7 +320,7 @@ describe('AgentSessionsBrowser', () => {
 			});
 
 			// Total tokens = 500 + 200 = 700
-			expect(screen.getByText('700.0')).toBeInTheDocument();
+			expect(screen.getByText('700')).toBeInTheDocument();
 		});
 
 		it('formats thousands with k suffix', async () => {
@@ -348,8 +349,8 @@ describe('AgentSessionsBrowser', () => {
 				await vi.runAllTimersAsync();
 			});
 
-			// Total = 8000, should be 8.0k
-			expect(screen.getByText('8.0k')).toBeInTheDocument();
+			// Total = 8000, should be 8.0K
+			expect(screen.getByText('8.0K')).toBeInTheDocument();
 		});
 
 		it('formats millions with M suffix', async () => {
@@ -593,7 +594,7 @@ describe('AgentSessionsBrowser', () => {
 		});
 
 		it('handles API error gracefully', async () => {
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 			vi.mocked(window.maestro.agentSessions.listPaginated).mockRejectedValue(
 				new Error('API Error')
 			);
@@ -603,7 +604,11 @@ describe('AgentSessionsBrowser', () => {
 				await vi.runAllTimersAsync();
 			});
 
-			expect(consoleSpy).toHaveBeenCalledWith('Failed to load sessions:', expect.any(Error));
+			expect(consoleSpy).toHaveBeenCalledWith(
+				'Failed to load sessions:',
+				undefined,
+				expect.any(Error)
+			);
 			consoleSpy.mockRestore();
 		});
 
@@ -1521,6 +1526,184 @@ describe('AgentSessionsBrowser', () => {
 			expect(savedWithNewName).toBe(false);
 		});
 
+		it('enters rename on Cmd+E for the selected session', async () => {
+			const sessions = [createMockClaudeSession({ sessionId: 'session-1' })];
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions,
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...createDefaultProps()} />);
+				await vi.runAllTimersAsync();
+			});
+
+			expect(screen.queryByPlaceholderText('Enter session name...')).not.toBeInTheDocument();
+
+			await act(async () => {
+				document.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+						cancelable: true,
+					})
+				);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect(screen.getByPlaceholderText('Enter session name...')).toBeInTheDocument();
+		});
+
+		it('hands focus back to the list after Escape so arrow keys still work', async () => {
+			const sessions = [
+				createMockClaudeSession({ sessionId: 'session-1', sessionName: 'First' }),
+				createMockClaudeSession({ sessionId: 'session-2', sessionName: 'Second' }),
+			];
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions,
+				hasMore: false,
+				totalCount: 2,
+				nextCursor: null,
+			});
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...createDefaultProps()} />);
+				await vi.runAllTimersAsync();
+			});
+
+			const searchInput = screen.getByPlaceholderText(/Search all content/i);
+
+			await act(async () => {
+				document.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+						cancelable: true,
+					})
+				);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			// Rename input owns the keyboard while renaming
+			const renameInput = screen.getByPlaceholderText('Enter session name...');
+			expect(document.activeElement).toBe(renameInput);
+
+			await act(async () => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+				);
+				await vi.runAllTimersAsync();
+			});
+
+			// Focus is back where Up/Down are handled, not stranded on <body>
+			expect(document.activeElement).toBe(searchInput);
+
+			// ...and the arrows really do move the selection again: renaming now
+			// targets the second session, so Down was received.
+			await act(async () => {
+				fireEvent.keyDown(searchInput, { key: 'ArrowDown' });
+				await vi.runAllTimersAsync();
+			});
+			await act(async () => {
+				document.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+						cancelable: true,
+					})
+				);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect((screen.getByPlaceholderText('Enter session name...') as HTMLInputElement).value).toBe(
+				'Second'
+			);
+		});
+
+		it('does not save the escaped name when focus returns to the list', async () => {
+			const sessions = [createMockClaudeSession({ sessionId: 'session-1' })];
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions,
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...createDefaultProps()} />);
+				await vi.runAllTimersAsync();
+			});
+
+			await act(async () => {
+				document.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+						cancelable: true,
+					})
+				);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			const renameInput = screen.getByPlaceholderText('Enter session name...');
+			await act(async () => {
+				fireEvent.change(renameInput, { target: { value: 'Discarded Name' } });
+				await vi.runAllTimersAsync();
+			});
+
+			await act(async () => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+				);
+				await vi.runAllTimersAsync();
+			});
+
+			// Restoring focus must not trip the rename input's blur-to-submit
+			const calls = vi.mocked(window.maestro.claude.updateSessionName).mock.calls;
+			expect(calls.some((call) => call[2] === 'Discarded Name')).toBe(false);
+		});
+
+		it('exits rename on Escape without closing the modal', async () => {
+			const onClose = vi.fn();
+			const sessions = [createMockClaudeSession({ sessionId: 'session-1' })];
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions,
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...createDefaultProps({ onClose })} />);
+				await vi.runAllTimersAsync();
+			});
+
+			const editButtons = screen.getAllByTestId('icon-edit');
+			await act(async () => {
+				fireEvent.click(editButtons[0].closest('button')!);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect(screen.queryByPlaceholderText('Enter session name...')).toBeInTheDocument();
+
+			// The layer stack sees Escape at capture on window before the input does
+			await act(async () => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+				);
+				await vi.runAllTimersAsync();
+			});
+
+			expect(screen.queryByPlaceholderText('Enter session name...')).not.toBeInTheDocument();
+			expect(onClose).not.toHaveBeenCalled();
+		});
+
 		it('submits rename on blur', async () => {
 			const sessions = [createMockClaudeSession({ sessionId: 'session-1' })];
 			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
@@ -1863,7 +2046,7 @@ describe('AgentSessionsBrowser', () => {
 
 			expect(screen.getByText('$1.23')).toBeInTheDocument();
 			expect(screen.getByText('3m 5s')).toBeInTheDocument();
-			expect(screen.getByText('8.0k')).toBeInTheDocument(); // 5000 + 3000
+			expect(screen.getByText('8.0K')).toBeInTheDocument(); // 5000 + 3000
 			expect(screen.getByText('15')).toBeInTheDocument();
 		});
 
@@ -2362,6 +2545,65 @@ describe('AgentSessionsBrowser', () => {
 
 			expect(onResumeSession).toHaveBeenCalled();
 		});
+
+		it('resumes session with Cmd+R in detail view', async () => {
+			const session = createMockClaudeSession({ sessionId: 'session-1' });
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions: [session],
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			const onResumeSession = vi.fn();
+			const props = createDefaultProps({ onResumeSession });
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...props} />);
+				await vi.runAllTimersAsync();
+			});
+
+			const sessionItem = screen
+				.getByText(/Help me with this code/i)
+				.closest('div[class*="cursor-pointer"]');
+			await act(async () => {
+				fireEvent.click(sessionItem!);
+				await vi.runAllTimersAsync();
+			});
+
+			// The chord is claimed at the window level, so it fires wherever focus is
+			await act(async () => {
+				fireEvent.keyDown(window, { key: 'r', metaKey: true });
+				await vi.runAllTimersAsync();
+			});
+
+			expect(onResumeSession).toHaveBeenCalled();
+		});
+
+		it('ignores Cmd+R in the list view', async () => {
+			const session = createMockClaudeSession({ sessionId: 'session-1' });
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions: [session],
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			const onResumeSession = vi.fn();
+			const props = createDefaultProps({ onResumeSession });
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...props} />);
+				await vi.runAllTimersAsync();
+			});
+
+			await act(async () => {
+				fireEvent.keyDown(window, { key: 'r', metaKey: true });
+				await vi.runAllTimersAsync();
+			});
+
+			expect(onResumeSession).not.toHaveBeenCalled();
+		});
 	});
 
 	// ============================================================================
@@ -2738,6 +2980,85 @@ describe('AgentSessionsBrowser', () => {
 	// ============================================================================
 
 	describe('rename in detail view', () => {
+		it('enters rename on Cmd+E in the detail view', async () => {
+			const session = createMockClaudeSession({ sessionId: 'session-1' });
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions: [session],
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...createDefaultProps()} />);
+				await vi.runAllTimersAsync();
+			});
+
+			const sessionItem = screen
+				.getByText(/Help me with this code/i)
+				.closest('div[class*="cursor-pointer"]');
+			await act(async () => {
+				fireEvent.click(sessionItem!);
+				await vi.runAllTimersAsync();
+			});
+
+			await act(async () => {
+				document.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: 'e',
+						metaKey: true,
+						bubbles: true,
+						cancelable: true,
+					})
+				);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect(screen.getByPlaceholderText('Enter session name...')).toBeInTheDocument();
+		});
+
+		it('exits rename on Escape without leaving the detail view', async () => {
+			const session = createMockClaudeSession({ sessionId: 'session-1' });
+			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({
+				sessions: [session],
+				hasMore: false,
+				totalCount: 1,
+				nextCursor: null,
+			});
+
+			await act(async () => {
+				renderWithProvider(<AgentSessionsBrowser {...createDefaultProps()} />);
+				await vi.runAllTimersAsync();
+			});
+
+			const sessionItem = screen
+				.getByText(/Help me with this code/i)
+				.closest('div[class*="cursor-pointer"]');
+			await act(async () => {
+				fireEvent.click(sessionItem!);
+				await vi.runAllTimersAsync();
+			});
+
+			const editButtons = screen.getAllByTestId('icon-edit');
+			await act(async () => {
+				fireEvent.click(editButtons[0].closest('button')!);
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect(screen.queryByPlaceholderText('Enter session name...')).toBeInTheDocument();
+
+			await act(async () => {
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+				);
+				await vi.runAllTimersAsync();
+			});
+
+			// Rename ends, but the detail view stays open (Resume is detail-view only)
+			expect(screen.queryByPlaceholderText('Enter session name...')).not.toBeInTheDocument();
+			expect(screen.getByText('Resume')).toBeInTheDocument();
+		});
+
 		it('allows renaming in detail view header', async () => {
 			const session = createMockClaudeSession({ sessionId: 'session-1' });
 			vi.mocked(window.maestro.agentSessions.listPaginated).mockResolvedValue({

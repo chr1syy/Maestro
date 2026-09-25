@@ -1,13 +1,19 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
 	AutoRunDocumentSelector,
 	DocTreeNode,
 } from '../../../renderer/components/AutoRun/AutoRunDocumentSelector';
-import type { Theme } from '../../../renderer/types';
+import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
 
+import { mockTheme } from '../../helpers/mockTheme';
+
+// Wrap render with LayerStackProvider so useModalLayer (used by the doc
+// selector dropdown to own Escape) has the context it expects.
+const render = (ui: React.ReactElement, options?: Parameters<typeof rtlRender>[1]) =>
+	rtlRender(<LayerStackProvider>{ui}</LayerStackProvider>, options);
 // Mock lucide-react icons
 vi.mock('lucide-react', () => ({
 	ChevronDown: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
@@ -40,6 +46,11 @@ vi.mock('lucide-react', () => ({
 			📁
 		</span>
 	),
+	Search: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<span data-testid="search-icon" className={className} style={style}>
+			🔍
+		</span>
+	),
 }));
 
 // Mock theme utils (getExplorerFileIcon returns JSX with lucide-react icons)
@@ -49,25 +60,6 @@ vi.mock('../../../renderer/utils/theme', () => ({
 }));
 
 // Test theme
-const mockTheme: Theme = {
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgSidebar: '#16213e',
-		bgActivity: '#0f3460',
-		border: '#374151',
-		accent: '#6366f1',
-		accentForeground: '#ffffff',
-		textMain: '#e5e7eb',
-		textDim: '#9ca3af',
-		success: '#22c55e',
-		warning: '#eab308',
-		error: '#ef4444',
-		purple: '#8b5cf6',
-	},
-};
 
 const defaultProps = {
 	theme: mockTheme,
@@ -103,7 +95,8 @@ describe('AutoRunDocumentSelector', () => {
 
 		it('exports AutoRunDocumentSelector component', () => {
 			expect(AutoRunDocumentSelector).toBeDefined();
-			expect(typeof AutoRunDocumentSelector).toBe('function');
+			// forwardRef components are objects with a $$typeof tag, not plain functions
+			expect(AutoRunDocumentSelector).not.toBeNull();
 		});
 	});
 
@@ -143,6 +136,17 @@ describe('AutoRunDocumentSelector', () => {
 
 			const changeFolderButton = screen.getByTitle('Change folder');
 			expect(changeFolderButton).toBeInTheDocument();
+		});
+
+		it('does not render a Bionify toggle (toggled globally via Cmd+K)', () => {
+			render(<AutoRunDocumentSelector {...defaultProps} selectedDocument="doc1" />);
+
+			expect(
+				screen.queryByTitle('Enable Bionify for this document preview')
+			).not.toBeInTheDocument();
+			expect(
+				screen.queryByTitle('Disable Bionify for this document preview')
+			).not.toBeInTheDocument();
 		});
 
 		it('applies theme colors to dropdown button', () => {
@@ -228,17 +232,17 @@ describe('AutoRunDocumentSelector', () => {
 			const button = screen.getByRole('button', { name: /doc2\.md/i });
 			fireEvent.click(button);
 
-			// Find all elements with doc2.md text, find the one in the dropdown
-			const docElements = screen.getAllByText('doc2.md');
-			// The dropdown item is a span inside a button with hover:bg-white/5 class
-			const selectedDoc = docElements
-				.find((el) => {
-					const parent = el.closest('button');
-					return parent && parent.className.includes('hover:bg-white/5');
-				})
-				?.closest('button');
-			expect(selectedDoc).toHaveStyle({ color: mockTheme.colors.accent });
-			expect(selectedDoc).toHaveStyle({ backgroundColor: mockTheme.colors.bgActivity });
+			// In the flat list, the selected entry carries data-selected="true"
+			// and is also the initial keyboard highlight (highlightedIndex starts
+			// on the selected doc), so its background is the highlight tint.
+			const selectedEntry = document.querySelector(
+				'button[data-selected="true"][data-highlighted="true"]'
+			) as HTMLElement | null;
+			expect(selectedEntry).not.toBeNull();
+			expect(selectedEntry).toHaveStyle({ color: mockTheme.colors.accent });
+			expect(selectedEntry).toHaveStyle({
+				backgroundColor: `${mockTheme.colors.accent}25`,
+			});
 		});
 	});
 
@@ -253,132 +257,46 @@ describe('AutoRunDocumentSelector', () => {
 		});
 	});
 
-	describe('Tree Mode', () => {
-		const documentTree: DocTreeNode[] = [
-			{
-				name: 'folder1',
-				type: 'folder',
-				path: 'folder1',
-				children: [
-					{ name: 'nested-doc', type: 'file', path: 'folder1/nested-doc' },
-					{
-						name: 'subfolder',
-						type: 'folder',
-						path: 'folder1/subfolder',
-						children: [{ name: 'deep-doc', type: 'file', path: 'folder1/subfolder/deep-doc' }],
-					},
-				],
-			},
-			{ name: 'root-doc', type: 'file', path: 'root-doc' },
-		];
-
-		it('renders folder nodes with chevron icons', () => {
+	describe('Flat List Rendering (nested paths)', () => {
+		// The dropdown is now a single flat keyboard-navigable list. Nested
+		// document paths render as full path entries (e.g. "folder1/nested-doc.md")
+		// rather than as expandable folders.
+		it('renders nested documents as flat entries with full path', () => {
 			render(
 				<AutoRunDocumentSelector
 					{...defaultProps}
 					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
 				/>
 			);
 
 			const button = screen.getByRole('button', { name: /select a document/i });
 			fireEvent.click(button);
 
-			// Folder should be visible with chevron
-			expect(screen.getByText('folder1')).toBeInTheDocument();
+			expect(screen.getByText('folder1/nested-doc.md')).toBeInTheDocument();
+			expect(screen.getByText('folder1/subfolder/deep-doc.md')).toBeInTheDocument();
+			expect(screen.getByText('root-doc.md')).toBeInTheDocument();
 		});
 
-		it('expands folder when clicked', () => {
+		it('selects a nested document by clicking its flat entry', () => {
 			render(
 				<AutoRunDocumentSelector
 					{...defaultProps}
 					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
 				/>
 			);
 
 			const button = screen.getByRole('button', { name: /select a document/i });
 			fireEvent.click(button);
 
-			// Initially folder is collapsed, nested doc shouldn't be visible
-			expect(screen.queryByText('nested-doc.md')).not.toBeInTheDocument();
-
-			// Click folder to expand
-			const folderButton = screen.getByText('folder1');
-			fireEvent.click(folderButton);
-
-			// Now nested doc should be visible
-			expect(screen.getByText('nested-doc.md')).toBeInTheDocument();
-		});
-
-		it('collapses folder when clicked again', () => {
-			render(
-				<AutoRunDocumentSelector
-					{...defaultProps}
-					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
-				/>
-			);
-
-			const button = screen.getByRole('button', { name: /select a document/i });
-			fireEvent.click(button);
-
-			// Expand folder
-			const folderButton = screen.getByText('folder1');
-			fireEvent.click(folderButton);
-			expect(screen.getByText('nested-doc.md')).toBeInTheDocument();
-
-			// Collapse folder
-			fireEvent.click(folderButton);
-			expect(screen.queryByText('nested-doc.md')).not.toBeInTheDocument();
-		});
-
-		it('renders nested folders correctly', () => {
-			render(
-				<AutoRunDocumentSelector
-					{...defaultProps}
-					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
-				/>
-			);
-
-			const button = screen.getByRole('button', { name: /select a document/i });
-			fireEvent.click(button);
-
-			// Expand folder1
-			fireEvent.click(screen.getByText('folder1'));
-			expect(screen.getByText('subfolder')).toBeInTheDocument();
-
-			// Expand subfolder
-			fireEvent.click(screen.getByText('subfolder'));
-			expect(screen.getByText('deep-doc.md')).toBeInTheDocument();
-		});
-
-		it('selects file from tree', () => {
-			render(
-				<AutoRunDocumentSelector
-					{...defaultProps}
-					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
-				/>
-			);
-
-			const button = screen.getByRole('button', { name: /select a document/i });
-			fireEvent.click(button);
-
-			// Expand folder and select nested doc
-			fireEvent.click(screen.getByText('folder1'));
-			fireEvent.click(screen.getByText('nested-doc.md'));
-
+			fireEvent.click(screen.getByText('folder1/nested-doc.md'));
 			expect(defaultProps.onSelectDocument).toHaveBeenCalledWith('folder1/nested-doc');
 		});
 
-		it('auto-expands folders to reveal selected document when dropdown opens', () => {
+		it('marks the selected nested document with data-selected', () => {
 			render(
 				<AutoRunDocumentSelector
 					{...defaultProps}
 					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
 					selectedDocument="folder1/subfolder/deep-doc"
 				/>
 			);
@@ -386,43 +304,83 @@ describe('AutoRunDocumentSelector', () => {
 			const button = screen.getByRole('button', { name: /deep-doc\.md/i });
 			fireEvent.click(button);
 
-			// Both folder1 and folder1/subfolder should be auto-expanded
-			expect(screen.getByText('deep-doc.md')).toBeInTheDocument();
-			// The selected file should have data-selected attribute
-			const selectedButton = screen.getByText('deep-doc.md').closest('button');
-			expect(selectedButton).toHaveAttribute('data-selected', 'true');
+			// Both the trigger and the dropdown row show the doc text - pick
+			// the dropdown row by its data-selected marker.
+			const selectedButton = document.querySelector(
+				'button[data-selected="true"]'
+			) as HTMLElement | null;
+			expect(selectedButton).not.toBeNull();
+			expect(selectedButton?.textContent).toContain('folder1/subfolder/deep-doc.md');
 		});
+	});
 
-		it('auto-expands parent folder for single-level nested selection', () => {
+	describe('Tree Rendering (nested-only docs)', () => {
+		// Folders start collapsed on open and only reveal their files when the user
+		// expands them. The empty-state ("No matches") is gated on an active filter,
+		// so a collapsed folder with nothing selected must NOT show a false empty
+		// state.
+		const nestedTree: DocTreeNode[] = [
+			{
+				name: '2026-06-01-AI-Census',
+				type: 'folder',
+				path: '2026-06-01-AI-Census',
+				children: [
+					{
+						name: 'CENSUS-01',
+						type: 'file',
+						path: '2026-06-01-AI-Census/CENSUS-01',
+					},
+					{
+						name: 'CENSUS-02',
+						type: 'file',
+						path: '2026-06-01-AI-Census/CENSUS-02',
+					},
+				],
+			},
+		];
+		const nestedDocuments = ['2026-06-01-AI-Census/CENSUS-01', '2026-06-01-AI-Census/CENSUS-02'];
+
+		it('keeps folders collapsed on open and reveals files when expanded', () => {
 			render(
 				<AutoRunDocumentSelector
 					{...defaultProps}
-					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
-					selectedDocument="folder1/nested-doc"
-				/>
-			);
-
-			const button = screen.getByRole('button', { name: /nested-doc\.md/i });
-			fireEvent.click(button);
-
-			// folder1 should be auto-expanded, nested-doc visible
-			expect(screen.getByText('nested-doc.md')).toBeInTheDocument();
-		});
-
-		it('renders root-level file in tree', () => {
-			render(
-				<AutoRunDocumentSelector
-					{...defaultProps}
-					documents={['folder1/nested-doc', 'folder1/subfolder/deep-doc', 'root-doc']}
-					documentTree={documentTree}
+					documents={nestedDocuments}
+					documentTree={nestedTree}
+					selectedDocument={null}
 				/>
 			);
 
 			const button = screen.getByRole('button', { name: /select a document/i });
 			fireEvent.click(button);
 
-			expect(screen.getByText('root-doc.md')).toBeInTheDocument();
+			// Folder starts collapsed -> nested files hidden, but no false empty state.
+			expect(screen.queryByText('CENSUS-01.md')).not.toBeInTheDocument();
+			expect(screen.queryByText('CENSUS-02.md')).not.toBeInTheDocument();
+			expect(screen.queryByText(/No matches for/i)).not.toBeInTheDocument();
+
+			// Expanding the folder reveals its files.
+			fireEvent.click(screen.getByText('2026-06-01-AI-Census'));
+			expect(screen.getByText('CENSUS-01.md')).toBeInTheDocument();
+			expect(screen.getByText('CENSUS-02.md')).toBeInTheDocument();
+		});
+
+		it('shows "No matches" only when a filter query excludes everything', () => {
+			render(
+				<AutoRunDocumentSelector
+					{...defaultProps}
+					documents={nestedDocuments}
+					documentTree={nestedTree}
+					selectedDocument={null}
+				/>
+			);
+
+			const button = screen.getByRole('button', { name: /select a document/i });
+			fireEvent.click(button);
+
+			const filter = screen.getByPlaceholderText('Filter documents...');
+			fireEvent.change(filter, { target: { value: 'zzz-no-such-doc' } });
+
+			expect(screen.getByText(/No matches for/i)).toBeInTheDocument();
 		});
 	});
 
@@ -1117,10 +1075,13 @@ describe('AutoRunDocumentSelector', () => {
 			const button = screen.getByRole('button', { name: /select a document/i });
 			fireEvent.click(button);
 
-			// Find the dropdown menu - the doc text is in a span, inside a button, inside the menu container
+			// Find the dropdown menu - the doc text is in a span, inside a button,
+			// inside the scrollable list, inside the menu container (added when
+			// the filter input was introduced).
 			const docText = screen.getByText('doc1.md');
 			const docButton = docText.closest('button');
-			const menu = docButton?.parentElement;
+			const scrollList = docButton?.parentElement;
+			const menu = scrollList?.parentElement;
 			expect(menu).toHaveStyle({ backgroundColor: mockTheme.colors.bgSidebar });
 		});
 
@@ -1160,6 +1121,113 @@ describe('AutoRunDocumentSelector', () => {
 			expect(screen.getByTitle('Create new document')).toBeInTheDocument();
 			expect(screen.getByTitle('Refresh document list')).toBeInTheDocument();
 			expect(screen.getByTitle('Change folder')).toBeInTheDocument();
+		});
+	});
+
+	describe('Folder Task Progress Badges', () => {
+		const tree: DocTreeNode[] = [
+			{
+				name: 'phase-1',
+				type: 'folder',
+				path: 'phase-1',
+				children: [
+					{ name: 'A', type: 'file', path: 'phase-1/A' },
+					{ name: 'B', type: 'file', path: 'phase-1/B' },
+					{
+						name: 'inner',
+						type: 'folder',
+						path: 'phase-1/inner',
+						children: [{ name: 'C', type: 'file', path: 'phase-1/inner/C' }],
+					},
+				],
+			},
+			{
+				name: 'untracked',
+				type: 'folder',
+				path: 'untracked',
+				children: [{ name: 'D', type: 'file', path: 'untracked/D' }],
+			},
+		];
+		const docs = ['phase-1/A', 'phase-1/B', 'phase-1/inner/C', 'untracked/D'];
+		const taskCounts = new Map([
+			['phase-1/A', { completed: 2, total: 4 }],
+			['phase-1/B', { completed: 1, total: 2 }],
+			['phase-1/inner/C', { completed: 0, total: 2 }],
+		]);
+
+		const openDropdown = () =>
+			fireEvent.click(screen.getByRole('button', { name: /select a document/i }));
+
+		const folderRow = (name: string) =>
+			screen.getByText(name).closest('button') as HTMLButtonElement;
+
+		it('shows a rolled-up percentage on a collapsed folder', () => {
+			render(
+				<AutoRunDocumentSelector
+					{...defaultProps}
+					documents={docs}
+					documentTree={tree}
+					documentTaskCounts={taskCounts}
+				/>
+			);
+			openDropdown();
+
+			// 3 of 8 tasks across the whole subtree.
+			expect(folderRow('phase-1')).toHaveTextContent('38% (8)');
+		});
+
+		it('shows a nested folder its own rollup when expanded', () => {
+			render(
+				<AutoRunDocumentSelector
+					{...defaultProps}
+					documents={docs}
+					documentTree={tree}
+					documentTaskCounts={taskCounts}
+				/>
+			);
+			openDropdown();
+			fireEvent.click(screen.getByText('phase-1'));
+
+			expect(folderRow('inner')).toHaveTextContent('0% (2)');
+		});
+
+		it('omits the badge for a folder whose documents have no tasks', () => {
+			render(
+				<AutoRunDocumentSelector
+					{...defaultProps}
+					documents={docs}
+					documentTree={tree}
+					documentTaskCounts={taskCounts}
+				/>
+			);
+			openDropdown();
+
+			expect(folderRow('untracked')).not.toHaveTextContent('%');
+		});
+
+		it('keeps the folder badge describing the whole folder while filtering', () => {
+			render(
+				<AutoRunDocumentSelector
+					{...defaultProps}
+					documents={docs}
+					documentTree={tree}
+					documentTaskCounts={taskCounts}
+				/>
+			);
+			openDropdown();
+
+			fireEvent.change(screen.getByPlaceholderText('Filter documents...'), {
+				target: { value: 'A' },
+			});
+
+			expect(folderRow('phase-1')).toHaveTextContent('38% (8)');
+		});
+
+		it('renders no folder badge when no task counts are provided', () => {
+			render(<AutoRunDocumentSelector {...defaultProps} documents={docs} documentTree={tree} />);
+			openDropdown();
+
+			expect(folderRow('phase-1')).not.toHaveTextContent('%');
 		});
 	});
 });

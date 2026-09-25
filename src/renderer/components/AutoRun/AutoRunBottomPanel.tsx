@@ -72,7 +72,7 @@ export const AutoRunBottomPanel = memo(function AutoRunBottomPanel({
 				<div />
 			)}
 
-			{/* Center info: Reset button, Task count, and/or Token count */}
+			{/* Center info: Reset button, task progress, and/or Token count */}
 			<div className="flex items-center gap-3">
 				{/* Reset button - only show when there are completed tasks */}
 				{taskCounts.completed > 0 && !isLocked && (
@@ -129,7 +129,7 @@ export const AutoRunBottomPanel = memo(function AutoRunBottomPanel({
 					{/* Keyboard shortcut overlay on hover - only show in non-compact mode */}
 					{!isCompact && (
 						<span
-							className="absolute -top-7 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+							className="absolute -top-7 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-2xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
 							style={{
 								backgroundColor: theme.colors.bgMain,
 								color: theme.colors.textDim,

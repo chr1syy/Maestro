@@ -11,32 +11,51 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { renderHook, act, cleanup } from '@testing-library/react';
 
 // ============================================================================
-// Mocks — must be declared before importing the hook
+// Mocks - must be declared before importing the hook
 // ============================================================================
 
 // Mock tabStore
 const mockSetTabGistContent = vi.fn();
+const mockSetPendingTerminalBufferSend = vi.fn();
 vi.mock('../../../renderer/stores/tabStore', () => ({
 	useTabStore: {
 		getState: vi.fn(() => ({
 			setTabGistContent: mockSetTabGistContent,
+			setPendingTerminalBufferSend: mockSetPendingTerminalBufferSend,
 		})),
 	},
 }));
 
+// Mock modalStore (used by handleSendTextToAgent to open the Send to Agent modal)
+const mockSetSendToAgentModalOpen = vi.fn();
+vi.mock('../../../renderer/stores/modalStore', () => ({
+	getModalActions: vi.fn(() => ({
+		setSendToAgentModalOpen: mockSetSendToAgentModalOpen,
+	})),
+}));
+
 // Mock contextExtractor
 const mockFormatLogsForClipboard = vi.fn();
+const mockHasThinkingEntries = vi.fn();
 vi.mock('../../../renderer/utils/contextExtractor', () => ({
 	formatLogsForClipboard: (...args: unknown[]) => mockFormatLogsForClipboard(...args),
+	hasThinkingEntries: (...args: unknown[]) => mockHasThinkingEntries(...args),
 }));
 
 // Mock notificationStore
 const mockNotifyToast = vi.fn();
 vi.mock('../../../renderer/stores/notificationStore', () => ({
 	notifyToast: (...args: unknown[]) => mockNotifyToast(...args),
+}));
+
+// Mock flashCopiedToClipboard helper (used for clipboard-success acks)
+const mockFlashCopiedToClipboard = vi.fn();
+vi.mock('../../../renderer/utils/flashCopiedToClipboard', () => ({
+	flashCopiedToClipboard: (...args: unknown[]) => mockFlashCopiedToClipboard(...args),
 }));
 
 // Mock tabExport for dynamic import
@@ -53,7 +72,11 @@ import {
 	useTabExportHandlers,
 	type UseTabExportHandlersDeps,
 } from '../../../renderer/hooks/tabs/useTabExportHandlers';
-import type { Session, AITab, LogEntry, Theme } from '../../../renderer/types';
+import type { Session, AITab, LogEntry } from '../../../renderer/types';
+import { createMockAITab } from '../../helpers/mockTab';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
+
+import { createMockTheme } from '../../helpers/mockTheme';
 
 // ============================================================================
 // Helpers
@@ -70,78 +93,26 @@ function createLogEntry(overrides: Partial<LogEntry> = {}): LogEntry {
 }
 
 function createMockTab(overrides: Partial<AITab> = {}): AITab {
-	return {
-		id: 'tab-1',
+	return createMockAITab({
 		agentSessionId: 'agent-session-abc123',
 		name: 'My Tab',
-		starred: false,
 		logs: [
 			createLogEntry({ source: 'user', text: 'Hello' }),
 			createLogEntry({ source: 'ai', text: 'World' }),
 		],
-		inputValue: '',
-		stagedImages: [],
-		createdAt: Date.now(),
-		state: 'idle',
 		...overrides,
-	} as AITab;
+	});
 }
 
+// Thin wrapper: pre-populates an AI tab so tab export handlers have a tab
+// to export. Delegates to the shared factory for baseline fields.
 function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: 'session-1',
-		name: 'Test Agent',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test/project',
-		fullPath: '/test/project',
-		projectRoot: '/test/project',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
-		executionQueue: [],
-		activeTimeMs: 0,
+	return baseCreateMockSession({
 		aiTabs: [createMockTab()],
 		activeTabId: 'tab-1',
-		closedTabHistory: [],
-		filePreviewTabs: [],
-		activeFileTabId: null,
 		unifiedTabOrder: [{ type: 'ai' as const, id: 'tab-1' }],
-		unifiedClosedTabHistory: [],
-		terminalTabs: [],
-		activeTerminalTabId: null,
 		...overrides,
-	} as Session;
-}
-
-function createMockTheme(): Theme {
-	return {
-		id: 'dark',
-		name: 'Dark',
-		mode: 'dark',
-		colors: {
-			background: '#1e1e1e',
-			surface: '#252526',
-			text: '#d4d4d4',
-			primary: '#007acc',
-			secondary: '#3c3c3c',
-			border: '#454545',
-			error: '#f44747',
-			success: '#4ec9b0',
-			warning: '#dcdcaa',
-		},
-	} as unknown as Theme;
+	});
 }
 
 function createDeps(overrides: Partial<UseTabExportHandlersDeps> = {}): UseTabExportHandlersDeps {
@@ -156,10 +127,14 @@ function createDeps(overrides: Partial<UseTabExportHandlersDeps> = {}): UseTabEx
 }
 
 // ============================================================================
-// Clipboard mock
+// Clipboard mock - the hook rides the canonical safeClipboardWrite, which owns
+// the browser-vs-host decision and the insecure-context fallback.
 // ============================================================================
 
-const mockClipboardWriteText = vi.fn();
+const mockSafeClipboardWrite = vi.fn();
+vi.mock('../../../renderer/utils/clipboard', () => ({
+	safeClipboardWrite: (text: string) => mockSafeClipboardWrite(text),
+}));
 
 // ============================================================================
 // Setup / Teardown
@@ -169,19 +144,16 @@ beforeEach(() => {
 	vi.clearAllMocks();
 
 	// Default: clipboard succeeds
-	mockClipboardWriteText.mockResolvedValue(undefined);
+	mockSafeClipboardWrite.mockResolvedValue(true);
 
 	// Default: formatLogsForClipboard returns a predictable string
 	mockFormatLogsForClipboard.mockReturnValue('formatted conversation text');
 
+	// Default: tabs have no thinking entries. Individual tests override.
+	mockHasThinkingEntries.mockReturnValue(false);
+
 	// Default: downloadTabExport resolves
 	mockDownloadTabExport.mockResolvedValue(undefined);
-
-	Object.defineProperty(navigator, 'clipboard', {
-		value: { writeText: mockClipboardWriteText },
-		writable: true,
-		configurable: true,
-	});
 });
 
 afterEach(() => {
@@ -197,12 +169,15 @@ describe('useTabExportHandlers', () => {
 	// Return shape
 	// ========================================================================
 	describe('return shape', () => {
-		it('returns the three handler functions', () => {
+		it('returns the tab-scoped and raw-text handler functions', () => {
 			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
 
 			expect(typeof result.current.handleCopyContext).toBe('function');
 			expect(typeof result.current.handleExportHtml).toBe('function');
 			expect(typeof result.current.handlePublishTabGist).toBe('function');
+			expect(typeof result.current.handleCopyText).toBe('function');
+			expect(typeof result.current.handlePublishTextAsGist).toBe('function');
+			expect(typeof result.current.handleSendTextToAgent).toBe('function');
 		});
 	});
 
@@ -226,8 +201,10 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockFormatLogsForClipboard).toHaveBeenCalledWith(tab.logs);
-			expect(mockClipboardWriteText).toHaveBeenCalledWith('formatted conversation text');
+			expect(mockFormatLogsForClipboard).toHaveBeenCalledWith(tab.logs, {
+				includeThinking: false,
+			});
+			expect(mockSafeClipboardWrite).toHaveBeenCalledWith('formatted conversation text');
 		});
 
 		it('shows a success toast after writing to clipboard', async () => {
@@ -242,16 +219,77 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockNotifyToast).toHaveBeenCalledWith({
-				type: 'success',
-				title: 'Context Copied',
-				message: 'Conversation copied to clipboard.',
+			expect(mockFlashCopiedToClipboard).toHaveBeenCalledWith(undefined, 'Conversation Copied');
+		});
+
+		it('passes includeThinking through to formatLogsForClipboard', async () => {
+			const tab = createMockTab({ id: 'tab-1' });
+			const session = createMockSession({ aiTabs: [tab] });
+			const deps = createDeps({ sessionsRef: { current: [session] } });
+
+			const { result } = renderHook(() => useTabExportHandlers(deps));
+
+			await act(async () => {
+				result.current.handleCopyContext('tab-1', { includeThinking: true });
+				await Promise.resolve();
+			});
+
+			expect(mockFormatLogsForClipboard).toHaveBeenCalledWith(tab.logs, {
+				includeThinking: true,
 			});
 		});
 
+		it('uses the "with reasoning" flash label when the tab actually has thinking entries', async () => {
+			mockHasThinkingEntries.mockReturnValue(true);
+			const tab = createMockTab({
+				id: 'tab-1',
+				logs: [
+					createLogEntry({ source: 'user', text: 'Hi' }),
+					createLogEntry({ source: 'thinking', text: 'thinking step' }),
+					createLogEntry({ source: 'ai', text: 'Reply' }),
+				],
+			});
+			const session = createMockSession({ aiTabs: [tab] });
+			const deps = createDeps({ sessionsRef: { current: [session] } });
+
+			const { result } = renderHook(() => useTabExportHandlers(deps));
+
+			await act(async () => {
+				result.current.handleCopyContext('tab-1', { includeThinking: true });
+				await Promise.resolve();
+			});
+
+			expect(mockHasThinkingEntries).toHaveBeenCalledWith(tab.logs);
+			expect(mockFlashCopiedToClipboard).toHaveBeenCalledWith(
+				undefined,
+				'Conversation Copied (with reasoning)'
+			);
+		});
+
+		it('does not claim "with reasoning" when the flag is set but the tab has no thinking entries', async () => {
+			const tab = createMockTab({
+				id: 'tab-1',
+				logs: [
+					createLogEntry({ source: 'user', text: 'Hi' }),
+					createLogEntry({ source: 'ai', text: 'Reply' }),
+				],
+			});
+			const session = createMockSession({ aiTabs: [tab] });
+			const deps = createDeps({ sessionsRef: { current: [session] } });
+
+			const { result } = renderHook(() => useTabExportHandlers(deps));
+
+			await act(async () => {
+				result.current.handleCopyContext('tab-1', { includeThinking: true });
+				await Promise.resolve();
+			});
+
+			expect(mockFlashCopiedToClipboard).toHaveBeenCalledWith(undefined, 'Conversation Copied');
+		});
+
 		it('shows an error toast when clipboard write fails', async () => {
-			mockClipboardWriteText.mockRejectedValueOnce(new Error('Permission denied'));
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+			mockSafeClipboardWrite.mockResolvedValueOnce(false);
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			const tab = createMockTab({ id: 'tab-1' });
 			const session = createMockSession({ aiTabs: [tab] });
@@ -276,9 +314,8 @@ describe('useTabExportHandlers', () => {
 		});
 
 		it('logs the error to console when clipboard write fails', async () => {
-			const clipboardError = new Error('Permission denied');
-			mockClipboardWriteText.mockRejectedValueOnce(clipboardError);
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+			mockSafeClipboardWrite.mockResolvedValueOnce(false);
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			const tab = createMockTab({ id: 'tab-1' });
 			const session = createMockSession({ aiTabs: [tab] });
@@ -292,7 +329,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(consoleError).toHaveBeenCalledWith('Failed to copy context:', clipboardError);
+			expect(consoleError).toHaveBeenCalledWith('Failed to copy context: clipboard unavailable');
 
 			consoleError.mockRestore();
 		});
@@ -310,7 +347,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockClipboardWriteText).not.toHaveBeenCalled();
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
 			expect(mockNotifyToast).not.toHaveBeenCalled();
 		});
 
@@ -328,7 +365,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockClipboardWriteText).not.toHaveBeenCalled();
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
 		});
 
 		it('does nothing when the tab is not found in the session', async () => {
@@ -342,7 +379,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockClipboardWriteText).not.toHaveBeenCalled();
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
 		});
 
 		it('does nothing when the tab has no logs', async () => {
@@ -357,7 +394,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockClipboardWriteText).not.toHaveBeenCalled();
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
 			expect(mockNotifyToast).not.toHaveBeenCalled();
 		});
 
@@ -375,7 +412,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockClipboardWriteText).not.toHaveBeenCalled();
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
 		});
 	});
 
@@ -434,7 +471,7 @@ describe('useTabExportHandlers', () => {
 
 		it('shows an error toast when downloadTabExport throws', async () => {
 			mockDownloadTabExport.mockRejectedValueOnce(new Error('Write failed'));
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			const tab = createMockTab({ id: 'tab-1' });
 			const session = createMockSession({ aiTabs: [tab] });
@@ -458,7 +495,7 @@ describe('useTabExportHandlers', () => {
 		it('logs the error to console when export throws', async () => {
 			const exportError = new Error('Write failed');
 			mockDownloadTabExport.mockRejectedValueOnce(exportError);
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			const tab = createMockTab({ id: 'tab-1' });
 			const session = createMockSession({ aiTabs: [tab] });
@@ -470,7 +507,7 @@ describe('useTabExportHandlers', () => {
 				await result.current.handleExportHtml('tab-1');
 			});
 
-			expect(consoleError).toHaveBeenCalledWith('Failed to export tab:', exportError);
+			expect(consoleError).toHaveBeenCalledWith('Failed to export tab:', undefined, exportError);
 			consoleError.mockRestore();
 		});
 
@@ -554,7 +591,29 @@ describe('useTabExportHandlers', () => {
 			expect(mockSetTabGistContent).toHaveBeenCalledWith({
 				filename: 'My_Tab_context.md',
 				content: 'gist body content',
+				sourceLogs: tab.logs,
 			});
+		});
+
+		it('forwards raw logs as sourceLogs so the modal can re-format on toggle', () => {
+			const logs = [
+				createLogEntry({ source: 'user', text: 'Hi' }),
+				createLogEntry({ source: 'thinking', text: 'I should explain X' }),
+				createLogEntry({ source: 'ai', text: 'Hello' }),
+			];
+			const tab = createMockTab({ id: 'tab-1', logs });
+			const session = createMockSession({ aiTabs: [tab] });
+			const deps = createDeps({ sessionsRef: { current: [session] } });
+
+			const { result } = renderHook(() => useTabExportHandlers(deps));
+
+			act(() => {
+				result.current.handlePublishTabGist('tab-1');
+			});
+
+			expect(mockSetTabGistContent).toHaveBeenCalledWith(
+				expect.objectContaining({ sourceLogs: logs })
+			);
 		});
 
 		it('opens the gist publish modal', () => {
@@ -773,6 +832,184 @@ describe('useTabExportHandlers', () => {
 	});
 
 	// ========================================================================
+	// handleCopyText (terminal-buffer copy path)
+	// ========================================================================
+	describe('handleCopyText', () => {
+		it('writes the given text to the clipboard with a success toast', async () => {
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			await act(async () => {
+				result.current.handleCopyText('hello world', 'Terminal Buffer');
+				await Promise.resolve();
+			});
+
+			expect(mockSafeClipboardWrite).toHaveBeenCalledWith('hello world');
+			expect(mockFlashCopiedToClipboard).toHaveBeenCalledWith(undefined, 'Terminal Buffer Copied');
+		});
+
+		it('warns and skips the clipboard when the text is blank', () => {
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			act(() => {
+				result.current.handleCopyText('   \n', 'Terminal Buffer');
+			});
+
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
+			expect(mockNotifyToast).toHaveBeenCalledWith({
+				type: 'warning',
+				title: 'Nothing to Copy',
+				message: 'Terminal Buffer is empty.',
+			});
+		});
+
+		it('shows an error toast when the clipboard write is refused', async () => {
+			mockSafeClipboardWrite.mockResolvedValueOnce(false);
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			await act(async () => {
+				result.current.handleCopyText('payload', 'Terminal Buffer');
+				await Promise.resolve();
+				await Promise.resolve();
+			});
+
+			expect(mockNotifyToast).toHaveBeenCalledWith({
+				type: 'error',
+				title: 'Copy Failed',
+				message: 'Failed to copy terminal buffer to clipboard.',
+			});
+			consoleError.mockRestore();
+		});
+	});
+
+	// ========================================================================
+	// handlePublishTextAsGist (terminal-buffer gist path)
+	// ========================================================================
+	describe('handlePublishTextAsGist', () => {
+		it('stores the buffer content and opens the gist modal', () => {
+			const setGistPublishModalOpen = vi.fn();
+			const { result } = renderHook(() =>
+				useTabExportHandlers(createDeps({ setGistPublishModalOpen }))
+			);
+
+			act(() => {
+				result.current.handlePublishTextAsGist('line one\nline two', 'Terminal 1');
+			});
+
+			expect(mockSetTabGistContent).toHaveBeenCalledWith({
+				filename: 'Terminal_1_buffer.txt',
+				content: 'line one\nline two',
+			});
+			expect(setGistPublishModalOpen).toHaveBeenCalledWith(true);
+		});
+
+		it('falls back to "terminal" when the filename stem is empty', () => {
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			act(() => {
+				result.current.handlePublishTextAsGist('contents', '');
+			});
+
+			expect(mockSetTabGistContent).toHaveBeenCalledWith({
+				filename: 'terminal_buffer.txt',
+				content: 'contents',
+			});
+		});
+
+		it('replaces illegal filename characters with underscores', () => {
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			act(() => {
+				result.current.handlePublishTextAsGist('contents', 'zsh \u2014 /foo/bar');
+			});
+
+			expect(mockSetTabGistContent).toHaveBeenCalledWith({
+				filename: 'zsh____foo_bar_buffer.txt',
+				content: 'contents',
+			});
+		});
+
+		// A file publishes under its own name so the gist keeps the extension
+		// GitHub highlights by, and names its path so the URL is remembered
+		// against the file rather than the tab it was published from.
+		it('uses an explicit filename and file path when given', () => {
+			const setGistPublishModalOpen = vi.fn();
+			const { result } = renderHook(() =>
+				useTabExportHandlers(createDeps({ setGistPublishModalOpen }))
+			);
+
+			act(() => {
+				result.current.handlePublishTextAsGist('# Notes', 'my notes', {
+					filename: 'my notes.md',
+					filePath: '/tmp/my notes.md',
+				});
+			});
+
+			expect(mockSetTabGistContent).toHaveBeenCalledWith({
+				filename: 'my notes.md',
+				content: '# Notes',
+				filePath: '/tmp/my notes.md',
+			});
+			expect(setGistPublishModalOpen).toHaveBeenCalledWith(true);
+		});
+
+		it('does nothing when the buffer text is blank', () => {
+			const setGistPublishModalOpen = vi.fn();
+			const { result } = renderHook(() =>
+				useTabExportHandlers(createDeps({ setGistPublishModalOpen }))
+			);
+
+			act(() => {
+				result.current.handlePublishTextAsGist('   ', 'Terminal 1');
+			});
+
+			expect(mockSetTabGistContent).not.toHaveBeenCalled();
+			expect(setGistPublishModalOpen).not.toHaveBeenCalled();
+			expect(mockNotifyToast).toHaveBeenCalledWith({
+				type: 'warning',
+				title: 'Nothing to Publish',
+				message: 'Buffer is empty.',
+			});
+		});
+	});
+
+	// ========================================================================
+	// handleSendTextToAgent (terminal-buffer send-to-agent path)
+	// ========================================================================
+	describe('handleSendTextToAgent', () => {
+		it('queues the buffer content and opens the Send to Agent modal', () => {
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			act(() => {
+				result.current.handleSendTextToAgent('terminal contents', 'Terminal 1');
+			});
+
+			expect(mockSetPendingTerminalBufferSend).toHaveBeenCalledWith({
+				content: 'terminal contents',
+				sourceName: 'Terminal 1',
+			});
+			expect(mockSetSendToAgentModalOpen).toHaveBeenCalledWith(true);
+		});
+
+		it('does nothing when the buffer text is blank', () => {
+			const { result } = renderHook(() => useTabExportHandlers(createDeps()));
+
+			act(() => {
+				result.current.handleSendTextToAgent('\n\t ', 'Terminal 1');
+			});
+
+			expect(mockSetPendingTerminalBufferSend).not.toHaveBeenCalled();
+			expect(mockSetSendToAgentModalOpen).not.toHaveBeenCalled();
+			expect(mockNotifyToast).toHaveBeenCalledWith({
+				type: 'warning',
+				title: 'Nothing to Send',
+				message: 'Buffer is empty.',
+			});
+		});
+	});
+
+	// ========================================================================
 	// Multi-session scenarios
 	// ========================================================================
 	describe('multi-session scenarios', () => {
@@ -803,8 +1040,10 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockFormatLogsForClipboard).toHaveBeenCalledWith(activeTab.logs);
-			expect(mockFormatLogsForClipboard).not.toHaveBeenCalledWith(otherTab.logs);
+			expect(mockFormatLogsForClipboard).toHaveBeenCalledWith(activeTab.logs, {
+				includeThinking: false,
+			});
+			expect(mockFormatLogsForClipboard).not.toHaveBeenCalledWith(otherTab.logs, expect.anything());
 		});
 
 		it('does not find a tab from a non-active session', async () => {
@@ -833,7 +1072,7 @@ describe('useTabExportHandlers', () => {
 				await Promise.resolve();
 			});
 
-			expect(mockClipboardWriteText).not.toHaveBeenCalled();
+			expect(mockSafeClipboardWrite).not.toHaveBeenCalled();
 		});
 	});
 });

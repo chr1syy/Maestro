@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import path from 'path';
 
 // Mock chokidar
 const mockChokidarOn = vi.fn().mockReturnThis();
@@ -24,10 +25,21 @@ vi.mock('chokidar', () => ({
 // Mock fs
 const mockExistsSync = vi.fn();
 const mockReadFileSync = vi.fn();
-vi.mock('fs', () => ({
-	existsSync: (...args: unknown[]) => mockExistsSync(...args),
-	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
-}));
+// readPromptFile in cue-config-normalizer uses fs.realpathSync.native to harden
+// its containment check. These tests use fake paths (`/projects/test/...`) that
+// don't exist on disk, so we stub realpath as an identity function - the
+// mocked paths have no symlinks, making this the correct canonical path.
+const mockRealpathSyncNative = vi.fn((p: string) => p);
+vi.mock('fs', () => {
+	const realpathSync = (p: string) => mockRealpathSyncNative(p);
+	(realpathSync as unknown as { native: (p: string) => string }).native = (p: string) =>
+		mockRealpathSyncNative(p);
+	return {
+		existsSync: (...args: unknown[]) => mockExistsSync(...args),
+		readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
+		realpathSync,
+	};
+});
 
 // Must import after mocks
 import {
@@ -57,7 +69,9 @@ describe('cue-yaml-loader', () => {
 
 		it('loads from canonical .maestro/cue.yaml path first', () => {
 			// Canonical path exists
-			mockExistsSync.mockImplementation((p: string) => String(p).includes('.maestro/cue.yaml'));
+			mockExistsSync.mockImplementation((p: string) =>
+				String(p).replace(/\\/g, '/').includes('.maestro/cue.yaml')
+			);
 			mockReadFileSync.mockReturnValue(`
 subscriptions:
   - name: canonical-sub
@@ -71,11 +85,67 @@ subscriptions:
 			expect(result!.subscriptions[0].name).toBe('canonical-sub');
 		});
 
+		it('parses an action: command shell subscription with no prompt', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions:
+  - name: lint-on-save
+    event: file.changed
+    watch: 'src/**/*.ts'
+    action: command
+    command:
+      mode: shell
+      shell: npm run lint
+`);
+
+			const result = loadCueConfig('/projects/test');
+			expect(result).not.toBeNull();
+			expect(result!.subscriptions).toHaveLength(1);
+			const sub = result!.subscriptions[0];
+			expect(sub.action).toBe('command');
+			expect(sub.command).toEqual({ mode: 'shell', shell: 'npm run lint' });
+			// `prompt` is back-filled from the command spec so the dispatch sentinel is non-empty.
+			expect(sub.prompt).toBe('npm run lint');
+		});
+
+		it('parses an action: command cli send subscription', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions:
+  - name: relay
+    event: agent.completed
+    source_session: researcher
+    source_sub: researcher-step
+    action: command
+    command:
+      mode: cli
+      cli:
+        command: send
+        target: '{{CUE_FROM_AGENT}}'
+        message: 'Result: {{CUE_SOURCE_OUTPUT}}'
+`);
+
+			const result = loadCueConfig('/projects/test');
+			expect(result).not.toBeNull();
+			const sub = result!.subscriptions[0];
+			expect(sub.action).toBe('command');
+			expect(sub.source_sub).toBe('researcher-step');
+			expect(sub.command).toEqual({
+				mode: 'cli',
+				cli: {
+					command: 'send',
+					target: '{{CUE_FROM_AGENT}}',
+					message: 'Result: {{CUE_SOURCE_OUTPUT}}',
+				},
+			});
+		});
+
 		it('falls back to legacy maestro-cue.yaml when canonical does not exist', () => {
 			// Only legacy path exists
-			mockExistsSync.mockImplementation(
-				(p: string) => String(p).includes('maestro-cue.yaml') && !String(p).includes('.maestro/')
-			);
+			mockExistsSync.mockImplementation((p: string) => {
+				const norm = String(p).replace(/\\/g, '/');
+				return norm.includes('maestro-cue.yaml') && !norm.includes('.maestro/');
+			});
 			mockReadFileSync.mockReturnValue(`
 subscriptions:
   - name: legacy-sub
@@ -135,7 +205,7 @@ subscriptions:
 			expect(result!.settings.timeout_minutes).toBe(30);
 			expect(result!.settings.timeout_on_fail).toBe('break');
 			expect(result!.settings.max_concurrent).toBe(1);
-			expect(result!.settings.queue_size).toBe(10);
+			expect(result!.settings.queue_size).toBe(512);
 		});
 
 		it('defaults enabled to true when not specified', () => {
@@ -186,7 +256,7 @@ subscriptions:
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockImplementation((p: string) => {
 				readCallCount++;
-				if (String(p).endsWith('.maestro/prompts/worker-pipeline.md')) {
+				if (String(p).replace(/\\/g, '/').endsWith('.maestro/prompts/worker-pipeline.md')) {
 					return 'Prompt from external file';
 				}
 				return `
@@ -204,6 +274,53 @@ subscriptions:
 			// resolved content on `prompt`. The raw `prompt_file` field from YAML is
 			// internal-only (CueSubscriptionDocument) and not part of the runtime contract.
 			expect(result!.subscriptions[0].prompt).toBe('Prompt from external file');
+		});
+
+		describe('prompt_file behind a symlinked .maestro directory', () => {
+			// Two agents share one Cue config: /projects/cue/.maestro -> /projects/main/.maestro.
+			// The loader resolves every path, which on Windows adds a drive letter and
+			// backslashes, so the fixtures are built the same way rather than as literals.
+			const cueMaestro = path.resolve('/projects/cue/.maestro');
+			const mainMaestro = path.resolve('/projects/main/.maestro');
+			const sharedPrompt = path.join(mainMaestro, 'prompts', 'shared.md');
+			const evilPrompt = path.join(cueMaestro, 'prompts', 'evil.md');
+			const etcPasswd = path.resolve('/etc/passwd');
+			const canonicalize = (p: string) => p.replace(cueMaestro, mainMaestro);
+			const yamlWith = (promptFile: string) => `
+subscriptions:
+  - name: shared-sub
+    event: time.heartbeat
+    prompt_file: ${promptFile}
+    interval_minutes: 5
+`;
+
+			afterEach(() => {
+				mockRealpathSyncNative.mockImplementation((p: string) => p);
+			});
+
+			it('resolves the prompt through the link', () => {
+				mockRealpathSyncNative.mockImplementation(canonicalize);
+				mockExistsSync.mockReturnValue(true);
+				mockReadFileSync.mockImplementation((p: string) =>
+					String(p) === sharedPrompt ? 'Shared prompt' : yamlWith('.maestro/prompts/shared.md')
+				);
+
+				const result = loadCueConfig('/projects/cue');
+				expect(result!.subscriptions[0].prompt).toBe('Shared prompt');
+			});
+
+			it('still rejects a prompt file that escapes both the root and .maestro', () => {
+				mockRealpathSyncNative.mockImplementation((p: string) =>
+					p === evilPrompt ? etcPasswd : canonicalize(p)
+				);
+				mockExistsSync.mockReturnValue(true);
+				mockReadFileSync.mockImplementation((p: string) =>
+					String(p) === etcPasswd ? 'root:x:0:0' : yamlWith('.maestro/prompts/evil.md')
+				);
+
+				const result = loadCueConfig('/projects/cue');
+				expect(result!.subscriptions[0].prompt).toBe('');
+			});
 		});
 
 		it('keeps inline prompt when both prompt and prompt_file exist', () => {
@@ -224,7 +341,7 @@ subscriptions:
 		it('resolves output_prompt_file to output_prompt content', () => {
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockImplementation((p: string) => {
-				if (String(p).endsWith('.maestro/prompts/format-output.md')) {
+				if (String(p).replace(/\\/g, '/').endsWith('.maestro/prompts/format-output.md')) {
 					return 'Format the output as markdown';
 				}
 				return `
@@ -263,7 +380,7 @@ subscriptions:
 		it('sets output_prompt to undefined when output_prompt_file is missing', () => {
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockImplementation((p: string) => {
-				if (String(p).endsWith('.maestro/prompts/missing.md')) {
+				if (String(p).replace(/\\/g, '/').endsWith('.maestro/prompts/missing.md')) {
 					throw new Error('ENOENT: no such file or directory');
 				}
 				return `
@@ -295,6 +412,81 @@ subscriptions:
 
 			const result = loadCueConfig('/projects/test');
 			expect(result!.subscriptions[0].source_session).toEqual(['agent-1', 'agent-2']);
+		});
+
+		it('drops malformed target_node_key / fan_out_node_keys instead of leaking bad types', () => {
+			// Defense-in-depth: hand-edited YAML or a future serializer
+			// bug could produce non-string values. The normalizer's type
+			// guards must reject them so the renderer never sees a
+			// non-string node key (which would fail strict-equality
+			// dedup checks downstream).
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions:
+  - name: bad-key
+    event: time.scheduled
+    prompt: Run
+    schedule_times:
+      - '07:00'
+    target_node_key: 123
+  - name: bad-fanout-keys
+    event: time.heartbeat
+    interval_minutes: 10
+    prompt: Go
+    fan_out:
+      - worker-a
+      - worker-b
+    fan_out_node_keys:
+      - key-a
+      - 42
+  - name: empty-key
+    event: time.scheduled
+    prompt: Run
+    schedule_times:
+      - '08:00'
+    target_node_key: ''
+`);
+
+			const result = loadCueConfig('/projects/test');
+			// Numeric value rejected
+			expect(result!.subscriptions[0].target_node_key).toBeUndefined();
+			// Mixed string/non-string array rejected entirely
+			expect(result!.subscriptions[1].fan_out_node_keys).toBeUndefined();
+			// Empty string rejected so the loader's "key absent" branch fires
+			expect(result!.subscriptions[2].target_node_key).toBeUndefined();
+		});
+
+		it('preserves target_node_key on subscriptions through normalization', () => {
+			// Regression: the normalizer's allowlist used to drop these
+			// renderer-only fields, which silently re-merged distinct visual
+			// nodes by sessionName on every reload. The renderer needs the
+			// keys intact to round-trip "two visual nodes pointing at the
+			// same agent" as two separate nodes instead of one.
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions:
+  - name: morning
+    event: time.scheduled
+    agent_id: 8ba583cc-5ae7-4e66-b52e-4b6511e68548
+    prompt: Run
+    schedule_times:
+      - '07:00'
+    target_node_key: 7b1e9c84-4f3a-4d2b-8e95-6c7a2b1f3d8a
+  - name: fan-out
+    event: time.heartbeat
+    interval_minutes: 10
+    prompt: Go
+    fan_out:
+      - worker-a
+      - worker-b
+    fan_out_node_keys:
+      - key-a
+      - key-b
+`);
+
+			const result = loadCueConfig('/projects/test');
+			expect(result!.subscriptions[0].target_node_key).toBe('7b1e9c84-4f3a-4d2b-8e95-6c7a2b1f3d8a');
+			expect(result!.subscriptions[1].fan_out_node_keys).toEqual(['key-a', 'key-b']);
 		});
 	});
 
@@ -334,23 +526,47 @@ subscriptions:
 			}
 		});
 
-		it('returns { ok: false, reason: "invalid", errors } when validation fails', () => {
+		it('skips per-subscription validation errors and surfaces them as warnings', () => {
+			// Lenient loader: a single broken subscription must not block valid
+			// subs in the same YAML. The bad sub is dropped, others load, and
+			// the failure is surfaced as a warning so the user can fix it.
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockReturnValue(`
 subscriptions:
   - name: bad-sub
     event: time.heartbeat
     prompt: Hi
+  - name: good-sub
+    event: time.heartbeat
+    prompt: Check status
+    interval_minutes: 5
 `);
-			// Missing interval_minutes for time.heartbeat — validator rejects this.
+
+			const result = loadCueConfigDetailed('/projects/test');
+
+			expect(result.ok).toBe(true);
+			if (result.ok) {
+				expect(result.config.subscriptions.map((s) => s.name)).toEqual(['good-sub']);
+				expect(result.warnings).toEqual(
+					expect.arrayContaining([
+						expect.stringMatching(/Skipped invalid subscription.*interval_minutes/),
+					])
+				);
+			}
+		});
+
+		it('returns { ok: false, reason: "invalid" } only for config-level errors', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions: not-an-array
+`);
 
 			const result = loadCueConfigDetailed('/projects/test');
 
 			expect(result.ok).toBe(false);
 			if (!result.ok && result.reason === 'invalid') {
-				expect(result.errors.length).toBeGreaterThan(0);
 				expect(result.errors).toEqual(
-					expect.arrayContaining([expect.stringMatching(/interval_minutes/)])
+					expect.arrayContaining([expect.stringMatching(/subscriptions/)])
 				);
 			}
 		});
@@ -380,7 +596,7 @@ subscriptions:
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockImplementation((p: string) => {
 				readCount++;
-				if (String(p).endsWith('.maestro/prompts/missing.md')) {
+				if (String(p).replace(/\\/g, '/').endsWith('.maestro/prompts/missing.md')) {
 					throw new Error('ENOENT: no such file');
 				}
 				return `
@@ -406,7 +622,7 @@ subscriptions:
 		it('surfaces a warning when output_prompt_file references a missing file', () => {
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockImplementation((p: string) => {
-				if (String(p).endsWith('.maestro/prompts/missing-output.md')) {
+				if (String(p).replace(/\\/g, '/').endsWith('.maestro/prompts/missing-output.md')) {
 					throw new Error('ENOENT: no such file');
 				}
 				return `
@@ -432,7 +648,7 @@ subscriptions:
 		it('returns no warnings when prompt_file resolves successfully', () => {
 			mockExistsSync.mockReturnValue(true);
 			mockReadFileSync.mockImplementation((p: string) => {
-				if (String(p).endsWith('.maestro/prompts/exists.md')) {
+				if (String(p).replace(/\\/g, '/').endsWith('.maestro/prompts/exists.md')) {
 					return 'Resolved prompt body';
 				}
 				return `
@@ -460,10 +676,21 @@ subscriptions:
 			// Should watch both .maestro/cue.yaml (canonical) and maestro-cue.yaml (legacy)
 			expect(chokidar.watch).toHaveBeenCalledWith(
 				expect.arrayContaining([
-					expect.stringContaining('.maestro/cue.yaml'),
+					expect.stringContaining(path.join('.maestro', 'cue.yaml')),
 					expect.stringContaining('maestro-cue.yaml'),
 				]),
 				expect.objectContaining({ persistent: true, ignoreInitial: true })
+			);
+		});
+
+		it('also watches `.maestro/prompts/*.md` so late prompt-file writes trigger a reload', () => {
+			watchCueYaml('/projects/test', vi.fn());
+			// Without this, a "YAML written first, prompt files later" sequence
+			// strands the engine with empty cached prompts because the YAML
+			// watcher never fires again.
+			expect(chokidar.watch).toHaveBeenCalledWith(
+				expect.arrayContaining([expect.stringContaining(path.join('.maestro', 'prompts', '*.md'))]),
+				expect.anything()
 			);
 		});
 
@@ -478,7 +705,7 @@ subscriptions:
 			expect(changeHandler).toBeDefined();
 
 			changeHandler!();
-			expect(onChange).not.toHaveBeenCalled(); // Not yet — debounced
+			expect(onChange).not.toHaveBeenCalled(); // Not yet - debounced
 
 			vi.advanceTimersByTime(1000);
 			expect(onChange).toHaveBeenCalledTimes(1);
@@ -529,8 +756,14 @@ subscriptions:
 			expect(result.errors).toHaveLength(0);
 		});
 
-		it('rejects non-object config', () => {
+		it('treats null config as valid empty config (comments-only file)', () => {
 			const result = validateCueConfig(null);
+			expect(result.valid).toBe(true);
+			expect(result.errors).toHaveLength(0);
+		});
+
+		it('rejects non-object non-null config', () => {
+			const result = validateCueConfig(42);
 			expect(result.valid).toBe(false);
 			expect(result.errors[0]).toContain('non-null object');
 		});
@@ -577,6 +810,148 @@ subscriptions:
 			);
 		});
 
+		it('requires source_sub for agent.completed command subscriptions', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'cmd-chain',
+						event: 'agent.completed',
+						source_session: 'Builder',
+						action: 'command',
+						command: { mode: 'shell', shell: 'echo ok' },
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('source_sub')])
+			);
+		});
+
+		it('rejects source_sub/source_session array length mismatch', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fan-in',
+						event: 'agent.completed',
+						source_session: ['A', 'B'],
+						source_sub: ['fan-in-chain-a'],
+						prompt: '{{CUE_SOURCE_OUTPUT}}',
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining('source_sub" length (1) must match "source_session" length (2)'),
+				])
+			);
+		});
+
+		it('rejects source_sub array when source_session is a string', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fan-in-invalid-shape',
+						event: 'agent.completed',
+						source_session: 'A',
+						source_sub: ['chain-a', 'chain-b'],
+						prompt: '{{CUE_SOURCE_OUTPUT}}',
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"source_sub" must be a string when "source_session" is a string'
+					),
+				])
+			);
+		});
+
+		it('rejects source_sub string when source_session is an array', () => {
+			// Symmetric to the previous test - guards the opposite shape-mismatch
+			// branch (`source_session` is an array but `source_sub` is a plain
+			// string) so the error message stays specific.
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fan-in-invalid-shape-2',
+						event: 'agent.completed',
+						source_session: ['A', 'B'],
+						source_sub: 'chain-a',
+						prompt: '{{CUE_SOURCE_OUTPUT}}',
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"source_sub" must be an array when "source_session" is an array'
+					),
+				])
+			);
+		});
+
+		it('does not emit a misleading source_sub/source_session shape error when source_session is missing', () => {
+			// Regression: the type-shape consistency check used to fire
+			// "source_sub must be a string when source_session is a string" even
+			// though source_session was undefined (the required-field check above
+			// already errored). Verify that only the required-field error is
+			// surfaced for the missing source_session, not the shape error.
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'missing-source-session',
+						event: 'agent.completed',
+						source_sub: ['chain-a'],
+						prompt: '{{CUE_SOURCE_OUTPUT}}',
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('"source_session" is required')])
+			);
+			expect(result.errors).not.toEqual(
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"source_sub" must be a string when "source_session" is a string'
+					),
+				])
+			);
+		});
+
+		it('does not emit a misleading source_sub/source_session shape error when source_session is explicitly null', () => {
+			// YAML `source_session: ~` parses to null. The shape-check guard
+			// must treat null the same as undefined so a `~` value doesn't
+			// produce both a required-field error AND a misleading shape error.
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'null-source-session',
+						event: 'agent.completed',
+						source_session: null,
+						source_sub: ['chain-a'],
+						prompt: '{{CUE_SOURCE_OUTPUT}}',
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('"source_session" is required')])
+			);
+			expect(result.errors).not.toEqual(
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"source_sub" must be a string when "source_session" is a string'
+					),
+				])
+			);
+		});
+
 		it('accepts prompt_file as alternative to prompt', () => {
 			const result = validateCueConfig({
 				subscriptions: [
@@ -597,7 +972,74 @@ subscriptions:
 			});
 			expect(result.valid).toBe(false);
 			expect(result.errors).toEqual(
-				expect.arrayContaining([expect.stringContaining('"prompt" or "prompt_file"')])
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"prompt", "prompt_file", "fan_out_prompt_files", or "fan_out_prompts" is required'
+					),
+				])
+			);
+		});
+
+		it('accepts a fan-out subscription with fan_out_prompt_files and no prompt/prompt_file', () => {
+			// Regression: Commit 7 externalized per-agent fan-out prompts to
+			// individual files. The validator USED to require `prompt` or
+			// `prompt_file`, so these YAMLs were rejected by the lenient
+			// loader partition - which caused the entire pipeline to vanish
+			// from the UI when the user saved differing per-agent prompts.
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fan-out',
+						event: 'app.startup',
+						fan_out: ['A', 'B', 'C'],
+						fan_out_prompt_files: [
+							'.maestro/prompts/a.md',
+							'.maestro/prompts/b.md',
+							'.maestro/prompts/c.md',
+						],
+					},
+				],
+			});
+			expect(result.valid).toBe(true);
+			expect(result.errors).toEqual([]);
+		});
+
+		it('accepts a fan-out subscription with legacy inline fan_out_prompts', () => {
+			// Same requirement for the older inline array shape.
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'legacy-fan-out',
+						event: 'app.startup',
+						fan_out: ['A', 'B'],
+						fan_out_prompts: ['do A', 'do B'],
+					},
+				],
+			});
+			expect(result.valid).toBe(true);
+			expect(result.errors).toEqual([]);
+		});
+
+		it('rejects a fan-out subscription with empty fan_out_prompt_files array', () => {
+			// Empty array carries no prompts - don't let it slip past the
+			// "at least one prompt source" check.
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'empty-fan-out-files',
+						event: 'app.startup',
+						fan_out: ['A'],
+						fan_out_prompt_files: [],
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"prompt", "prompt_file", "fan_out_prompt_files", or "fan_out_prompts" is required'
+					),
+				])
 			);
 		});
 
@@ -678,10 +1120,10 @@ subscriptions:
 			);
 		});
 
-		it('rejects queue_size above 50', () => {
+		it('rejects queue_size above 10000', () => {
 			const result = validateCueConfig({
 				subscriptions: [],
-				settings: { queue_size: 51 },
+				settings: { queue_size: 10001 },
 			});
 			expect(result.valid).toBe(false);
 			expect(result.errors).toEqual(
@@ -693,6 +1135,128 @@ subscriptions:
 			const result = validateCueConfig({
 				subscriptions: [],
 				settings: { queue_size: 0 },
+			});
+			expect(result.valid).toBe(true);
+		});
+
+		// `timeout_minutes: 0` reaches `cue-run-manager` as a `0 ms` timeout
+		// and aborts every dispatched run on arrival - pipeline appears to do
+		// nothing with no obvious error. Validate it the same way as the other
+		// settings fields.
+		it('rejects timeout_minutes of 0', () => {
+			const result = validateCueConfig({
+				subscriptions: [],
+				settings: { timeout_minutes: 0 },
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('timeout_minutes')])
+			);
+		});
+
+		it('rejects negative timeout_minutes', () => {
+			const result = validateCueConfig({
+				subscriptions: [],
+				settings: { timeout_minutes: -5 },
+			});
+			expect(result.valid).toBe(false);
+		});
+
+		it('rejects non-integer timeout_minutes', () => {
+			const result = validateCueConfig({
+				subscriptions: [],
+				settings: { timeout_minutes: 1.5 },
+			});
+			expect(result.valid).toBe(false);
+		});
+
+		it('rejects timeout_minutes above 1440 (24 hours)', () => {
+			const result = validateCueConfig({
+				subscriptions: [],
+				settings: { timeout_minutes: 1441 },
+			});
+			expect(result.valid).toBe(false);
+		});
+
+		it('accepts valid timeout_minutes values', () => {
+			const result = validateCueConfig({
+				subscriptions: [],
+				settings: { timeout_minutes: 30 },
+			});
+			expect(result.valid).toBe(true);
+		});
+
+		// Same failure mode as timeout_minutes but per-subscription -
+		// `fan_in_timeout_minutes: 0` makes the fan-in tracker expire every
+		// fan-in immediately on the first source's arrival, so the converging
+		// agent never fires.
+		it('rejects fan_in_timeout_minutes of 0 on a subscription', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fanin',
+						event: 'agent.completed',
+						prompt: 'Do it',
+						source_session: ['a', 'b'],
+						fan_in_timeout_minutes: 0,
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('fan_in_timeout_minutes')])
+			);
+		});
+
+		it('accepts valid fan_in_timeout_minutes values', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fanin',
+						event: 'agent.completed',
+						prompt: 'Do it',
+						source_session: ['a', 'b'],
+						fan_in_timeout_minutes: 60,
+					},
+				],
+			});
+			expect(result.valid).toBe(true);
+		});
+
+		// `fan_out_ids` is the rename-stable mirror of `fan_out`. Mismatched
+		// length means the dispatcher would index out of bounds; an array
+		// containing non-strings would crash the id lookup.
+		it('rejects fan_out_ids whose length differs from fan_out', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fanout',
+						event: 'time.heartbeat',
+						interval_minutes: 5,
+						prompt: 'Do it',
+						fan_out: ['a', 'b'],
+						fan_out_ids: ['id-a'],
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('fan_out_ids')])
+			);
+		});
+
+		it('accepts fan_out_ids when length matches fan_out', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'fanout',
+						event: 'time.heartbeat',
+						interval_minutes: 5,
+						prompt: 'Do it',
+						fan_out: ['a', 'b'],
+						fan_out_ids: ['id-a', 'id-b'],
+					},
+				],
 			});
 			expect(result.valid).toBe(true);
 		});
@@ -849,6 +1413,168 @@ subscriptions:
 				const ghStateErrors = result.errors.filter((e: string) => e.includes('gh_state'));
 				expect(ghStateErrors).toHaveLength(0);
 			}
+		});
+
+		describe('action: command', () => {
+			it('accepts a shell command subscription with no prompt', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'lint',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							action: 'command',
+							command: { mode: 'shell', shell: 'npm run lint' },
+						},
+					],
+				});
+				expect(result.valid).toBe(true);
+				expect(result.errors).toHaveLength(0);
+			});
+
+			it('accepts a cli send subscription with target', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'forward',
+							event: 'agent.completed',
+							source_session: 'researcher',
+							source_sub: 'researcher-step',
+							action: 'command',
+							command: {
+								mode: 'cli',
+								cli: { command: 'send', target: '{{CUE_FROM_AGENT}}' },
+							},
+						},
+					],
+				});
+				expect(result.valid).toBe(true);
+				expect(result.errors).toHaveLength(0);
+			});
+
+			it('rejects a command subscription missing the command field', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'broken',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							action: 'command',
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"command" is required')])
+				);
+			});
+
+			it('rejects a shell command with empty shell string', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'broken',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							action: 'command',
+							command: { mode: 'shell', shell: '   ' },
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"command.shell" is required')])
+				);
+			});
+
+			it('rejects a cli command with missing target', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'broken',
+							event: 'agent.completed',
+							source_session: 'a',
+							action: 'command',
+							command: { mode: 'cli', cli: { command: 'send', target: '' } },
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"command.cli.target" is required')])
+				);
+			});
+
+			it('rejects a cli command with unsupported sub-command', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'broken',
+							event: 'agent.completed',
+							source_session: 'a',
+							action: 'command',
+							command: { mode: 'cli', cli: { command: 'broadcast', target: 'x' } },
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"command.cli.command" must be "send"')])
+				);
+			});
+
+			it('rejects an unknown action value', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'bad',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							prompt: 'x',
+							action: 'invalid',
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"action" must be')])
+				);
+			});
+
+			it('rejects an unknown command.mode', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'bad',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							action: 'command',
+							command: { mode: 'rocket', shell: 'true' },
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"command.mode" must be')])
+				);
+			});
+
+			it('still requires prompt or prompt_file when action is "prompt" (or omitted)', () => {
+				const result = validateCueConfig({
+					subscriptions: [
+						{
+							name: 'no-prompt',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							action: 'prompt',
+						},
+					],
+				});
+				expect(result.valid).toBe(false);
+				expect(result.errors).toEqual(
+					expect.arrayContaining([expect.stringContaining('"prompt", "prompt_file"')])
+				);
+			});
 		});
 	});
 
@@ -1080,6 +1806,141 @@ subscriptions:
 		});
 	});
 
+	describe('validateCueConfig for webhook.received events', () => {
+		it('accepts a webhook subscription with secret_env', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'pr-review',
+						event: 'webhook.received',
+						prompt: 'Review',
+						webhook: { path: 'gh-pr', secret_env: 'GH_WEBHOOK_SECRET' },
+					},
+				],
+			});
+			expect(result.valid).toBe(true);
+			expect(result.errors).toHaveLength(0);
+		});
+
+		it('accepts a literal secret with a signature header', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'pr-review',
+						event: 'webhook.received',
+						prompt: 'Review',
+						webhook: { secret: 'shhh', signature_header: 'X-Hub-Signature-256' },
+					},
+				],
+			});
+			expect(result.valid).toBe(true);
+		});
+
+		it('requires a webhook block', () => {
+			const result = validateCueConfig({
+				subscriptions: [{ name: 'pr-review', event: 'webhook.received', prompt: 'Review' }],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('"webhook" is required')])
+			);
+		});
+
+		it('rejects a webhook with no secret at all', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'pr-review',
+						event: 'webhook.received',
+						prompt: 'Review',
+						webhook: { path: 'gh-pr' },
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('webhook.secret_env')])
+			);
+		});
+
+		it('rejects secret and secret_env together', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'pr-review',
+						event: 'webhook.received',
+						prompt: 'Review',
+						webhook: { secret: 'shhh', secret_env: 'GH_WEBHOOK_SECRET' },
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('mutually exclusive')])
+			);
+		});
+
+		it('rejects a path that slugs to nothing', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'pr-review',
+						event: 'webhook.received',
+						prompt: 'Review',
+						webhook: { path: '///', secret_env: 'GH_WEBHOOK_SECRET' },
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('webhook.path')])
+			);
+		});
+
+		it('rejects a non-string webhook field', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'pr-review',
+						event: 'webhook.received',
+						prompt: 'Review',
+						webhook: { path: 42, secret_env: 'GH_WEBHOOK_SECRET' },
+					},
+				],
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual(
+				expect.arrayContaining([expect.stringContaining('must be a string')])
+			);
+		});
+	});
+
+	describe('loadCueConfig with webhook.received', () => {
+		it('parses the webhook block from YAML', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions:
+  - name: pr-review
+    event: webhook.received
+    prompt: Review the PR
+    webhook:
+      path: gh-pr
+      secret_env: GH_WEBHOOK_SECRET
+      signature_header: X-Hub-Signature-256
+    filter:
+      body.action: opened
+`);
+			const config = loadCueConfig('/project');
+			expect(config?.subscriptions[0].webhook).toEqual({
+				path: 'gh-pr',
+				secret: undefined,
+				secret_env: 'GH_WEBHOOK_SECRET',
+				signature_header: 'X-Hub-Signature-256',
+			});
+			expect(config?.subscriptions[0].filter).toEqual({ 'body.action': 'opened' });
+		});
+	});
+
 	describe('loadCueConfig with task.pending', () => {
 		it('parses watch and poll_minutes from YAML', () => {
 			mockExistsSync.mockReturnValue(true);
@@ -1242,7 +2103,7 @@ subscriptions:
 		});
 	});
 
-	describe('validateCueConfig — name validation', () => {
+	describe('validateCueConfig - name validation', () => {
 		it('rejects empty string subscription name', () => {
 			const result = validateCueConfig({
 				subscriptions: [
@@ -1312,7 +2173,7 @@ subscriptions:
 		});
 	});
 
-	describe('validateCueConfig — schedule_times range validation', () => {
+	describe('validateCueConfig - schedule_times range validation', () => {
 		it('rejects schedule_times with hour out of range (25:00)', () => {
 			const result = validateCueConfig({
 				subscriptions: [
@@ -1393,9 +2254,46 @@ subscriptions:
 			const timeErrors = result.errors.filter((e: string) => e.includes('invalid hour'));
 			expect(timeErrors).toHaveLength(0);
 		});
+
+		// The trigger config UI lets users type either `6:30` or `06:30`. Save
+		// emits canonical HH:MM, but legacy YAML and hand-edits may carry the
+		// short form - accept it at validation time and let the normalizer
+		// pad to two digits so the trigger source's includes-check still matches
+		// the wall clock.
+		it('accepts schedule_times with single-digit hour (6:30)', () => {
+			const result = validateCueConfig({
+				subscriptions: [
+					{
+						name: 'test',
+						event: 'time.scheduled',
+						prompt: 'Do it',
+						schedule_times: ['6:30'],
+					},
+				],
+			});
+			expect(result.valid).toBe(true);
+		});
+
+		it('normalizes single-digit hours to HH:MM when loading the config', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReadFileSync.mockReturnValue(`
+subscriptions:
+  - name: morning
+    event: time.scheduled
+    prompt: Do it
+    schedule_times:
+      - '6:30'
+      - '17:00'
+`);
+			const result = loadCueConfigDetailed('/projects/test');
+			expect(result.ok).toBe(true);
+			if (result.ok) {
+				expect(result.config.subscriptions[0].schedule_times).toEqual(['06:30', '17:00']);
+			}
+		});
 	});
 
-	describe('validateCueConfig — interval_minutes upper bound', () => {
+	describe('validateCueConfig - interval_minutes upper bound', () => {
 		it('rejects interval_minutes above 10080 (7 days)', () => {
 			const result = validateCueConfig({
 				subscriptions: [
@@ -1536,7 +2434,7 @@ subscriptions:
 		});
 
 		it('picomatch accepts unbalanced bracket pattern without throwing', () => {
-			// picomatch treats [*.ts as a literal — it does NOT throw
+			// picomatch treats [*.ts as a literal - it does NOT throw
 			// so the try/catch validation passes it as valid
 			const result = validateCueConfig({
 				subscriptions: [
@@ -1606,7 +2504,7 @@ subscriptions:
 		});
 	});
 
-	describe('validateCueConfig — app.startup', () => {
+	describe('validateCueConfig - app.startup', () => {
 		it('accepts a minimal app.startup subscription', () => {
 			const result = validateCueConfig({
 				subscriptions: [
@@ -1661,7 +2559,11 @@ subscriptions:
 			});
 			expect(result.valid).toBe(false);
 			expect(result.errors).toEqual(
-				expect.arrayContaining([expect.stringContaining('"prompt" or "prompt_file" is required')])
+				expect.arrayContaining([
+					expect.stringContaining(
+						'"prompt", "prompt_file", "fan_out_prompt_files", or "fan_out_prompts" is required'
+					),
+				])
 			);
 		});
 
@@ -1680,4 +2582,9 @@ subscriptions:
 			);
 		});
 	});
+
+	// findAncestorCueConfigRoot{,s} were removed when Cue moved to the
+	// per-agent-cwd model. Each session reads only its own cue.yaml; there
+	// is no parent-directory walk anymore. The tests for the removed
+	// functions were deleted with them - see git log for the prior cases.
 });

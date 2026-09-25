@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import type { Theme, Session, ToolType } from '../../types';
+import type { AdditionalDirectory, Theme, Session, ToolType } from '../../types';
 
 // Session Management Modal Components
 import { NewInstanceModal, EditAgentModal } from '../NewInstanceModal';
@@ -7,8 +7,11 @@ import { NewAgentChoiceModal } from '../NewAgentChoiceModal';
 import { RenameSessionModal } from '../RenameSessionModal';
 import { RenameTabModal } from '../RenameTabModal';
 import { TerminalTabRenameModal } from '../TerminalTabRenameModal';
+import { TerminalStartupCommandModal } from '../TerminalStartupCommandModal';
 import { getTerminalTabDisplayName } from '../../utils/terminalTabHelpers';
-import { useModalStore, selectModalOpen } from '../../stores/modalStore';
+import { useModalStore, selectModalOpen, selectModalData } from '../../stores/modalStore';
+import { useTabStore } from '../../stores/tabStore';
+import { useSessionStore } from '../../stores/sessionStore';
 
 /**
  * Props for the AppSessionModals component
@@ -27,6 +30,7 @@ export interface AppSessionModalsProps {
 		workingDir: string,
 		name: string,
 		nudgeMessage?: string,
+		newSessionMessage?: string,
 		customPath?: string,
 		customArgs?: string,
 		customEnvVars?: Record<string, string>,
@@ -37,10 +41,22 @@ export interface AppSessionModalsProps {
 			enabled: boolean;
 			remoteId: string | null;
 			workingDirOverride?: string;
-		}
+		},
+		customEffort?: string,
+		groupId?: string,
+		enableMaestroP?: boolean,
+		maestroPPath?: string,
+		maestroPMode?: 'interactive' | 'dynamic',
+		retryOnAvailabilityErrors?: boolean,
+		retryOnTokenExhaustion?: boolean,
+		additionalDirectories?: AdditionalDirectory[],
+		/** Codex only: spend a reset credit automatically on quota exhaustion. Defaults off. */
+		codexAutoResetOnExhaustion?: boolean
 	) => void;
 	existingSessions: Session[];
 	sourceSession?: Session; // For agent duplication
+	newInstancePresetGroupId?: string | null; // Group to place the new agent in
+	newInstancePresetWorkingDir?: string | null; // Working directory to seed the new agent with
 
 	// EditAgentModal
 	editAgentModalOpen: boolean;
@@ -50,16 +66,31 @@ export interface AppSessionModalsProps {
 		name: string,
 		toolType?: ToolType,
 		nudgeMessage?: string,
+		newSessionMessage?: string,
 		customPath?: string,
 		customArgs?: string,
 		customEnvVars?: Record<string, string>,
 		customModel?: string,
+		customEffort?: string,
 		customContextWindow?: number,
 		sessionSshRemoteConfig?: {
 			enabled: boolean;
 			remoteId: string | null;
 			workingDirOverride?: string;
-		}
+		},
+		enableMaestroP?: boolean,
+		maestroPPath?: string,
+		maestroPMode?: 'interactive' | 'dynamic',
+		retryOnAvailabilityErrors?: boolean,
+		retryOnTokenExhaustion?: boolean,
+		additionalDirectories?: AdditionalDirectory[],
+		/** Provenance of `customContextWindow` (finding AD1). */
+		contextWindowSource?: 'user-edited',
+		/** Env vars parked with the eye button: kept, but never handed to a spawn. */
+		customEnvVarsDisabled?: Record<string, string>,
+		workingDirectory?: string,
+		/** Codex only: spend a reset credit automatically on quota exhaustion. Defaults off. */
+		codexAutoResetOnExhaustion?: boolean
 	) => void;
 	editAgentSession: Session | null;
 
@@ -70,7 +101,7 @@ export interface AppSessionModalsProps {
 	onCloseRenameSessionModal: () => void;
 	setSessions: React.Dispatch<React.SetStateAction<Session[]>>;
 	renameSessionTargetId: string | null;
-	onAfterRename?: () => void;
+	onAfterRename?: (latestSessions?: Session[]) => void;
 
 	// RenameTabModal
 	renameTabModalOpen: boolean;
@@ -106,6 +137,8 @@ export const AppSessionModals = memo(function AppSessionModals({
 	onCreateSession,
 	existingSessions,
 	sourceSession,
+	newInstancePresetGroupId,
+	newInstancePresetWorkingDir,
 	// EditAgentModal
 	editAgentModalOpen,
 	onCloseEditAgentModal,
@@ -137,9 +170,19 @@ export const AppSessionModals = memo(function AppSessionModals({
 	const renamingTerminalTabIndex = renamingTerminalTab
 		? terminalTabs.findIndex((t) => t.id === renameTabId)
 		: -1;
+	// A rename targeting a tiled group id reuses the same modal with a group-aware title.
+	const renamingGroup = renameTabId
+		? activeSession?.tabGroups?.find((g) => g.id === renameTabId)
+		: undefined;
 
 	const newAgentChoiceOpen = useModalStore(selectModalOpen('newAgentChoice'));
 	const closeNewAgentChoice = () => useModalStore.getState().closeModal('newAgentChoice');
+
+	const startupCommandOpen = useModalStore(selectModalOpen('terminalStartupCommand'));
+	const startupCommandData = useModalStore(selectModalData('terminalStartupCommand'));
+	const setTerminalTabStartupCommand = useTabStore((s) => s.setTerminalTabStartupCommand);
+	const closeStartupCommandModal = () =>
+		useModalStore.getState().closeModal('terminalStartupCommand');
 
 	return (
 		<>
@@ -163,6 +206,8 @@ export const AppSessionModals = memo(function AppSessionModals({
 					theme={theme}
 					existingSessions={existingSessions}
 					sourceSession={sourceSession}
+					presetGroupId={newInstancePresetGroupId}
+					presetWorkingDir={newInstancePresetWorkingDir}
 				/>
 			)}
 
@@ -198,10 +243,11 @@ export const AppSessionModals = memo(function AppSessionModals({
 				<RenameTabModal
 					theme={theme}
 					initialName={renameTabInitialName}
+					title={renamingGroup ? 'Rename Tab Group' : 'Rename Tab'}
 					agentSessionId={activeSession?.aiTabs?.find((t) => t.id === renameTabId)?.agentSessionId}
 					onClose={onCloseRenameTabModal}
 					onRename={onRenameTab}
-					onAutoName={onAutoNameTab}
+					onAutoName={renamingGroup ? undefined : onAutoNameTab}
 					hasLogs={
 						(activeSession?.aiTabs?.find((t) => t.id === renameTabId)?.logs?.length ?? 0) > 0
 					}
@@ -217,6 +263,33 @@ export const AppSessionModals = memo(function AppSessionModals({
 					defaultName={getTerminalTabDisplayName(renamingTerminalTab, renamingTerminalTabIndex)}
 					onSave={onRenameTab}
 					onClose={onCloseRenameTabModal}
+				/>
+			)}
+
+			{/* --- TERMINAL STARTUP COMMAND MODAL --- */}
+			{startupCommandOpen && startupCommandData && (
+				<TerminalStartupCommandModal
+					theme={theme}
+					isOpen={true}
+					initialCommand={startupCommandData.initialCommand}
+					initialCwd={startupCommandData.initialCwd}
+					defaultCwd={startupCommandData.defaultCwd}
+					onSave={(command, cwd) => {
+						setTerminalTabStartupCommand(
+							startupCommandData.sessionId,
+							startupCommandData.tabId,
+							command,
+							cwd
+						);
+						// Force immediate persistence so a quick quit after Save
+						// doesn't lose the configuration to the 2s debounce. The
+						// store mutation above is synchronous, so reading it back
+						// here yields the post-mutation snapshot - pass it to flushNow
+						// so the flush sees the new startup command instead of the
+						// stale, pre-render sessions held by the persistence hook.
+						onAfterRename?.(useSessionStore.getState().sessions);
+					}}
+					onClose={closeStartupCommandModal}
 				/>
 			)}
 		</>

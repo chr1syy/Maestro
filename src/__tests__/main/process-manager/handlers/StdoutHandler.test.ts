@@ -42,13 +42,33 @@ vi.mock('../../../../main/parsers/usage-aggregator', () => ({
 }));
 
 vi.mock('../../../../main/parsers/error-patterns', () => ({
+	getErrorPatterns: vi.fn(() => ({})),
+	matchErrorPattern: vi.fn(() => null),
 	matchSshErrorPattern: vi.fn(() => null),
+	// The parser asks this of every assistant message. These tests feed ordinary
+	// tool and thinking events, none of which are plan-limit notices, so `false`
+	// is the answer that leaves the routing under test unchanged.
+	isClaudeLimitNotice: vi.fn(() => false),
 }));
 
 // ── Imports (after mocks) ──────────────────────────────────────────────────
 
-import { StdoutHandler } from '../../../../main/process-manager/handlers/StdoutHandler';
+import {
+	StdoutHandler,
+	pushResolvedOmpContextWindow,
+} from '../../../../main/process-manager/handlers/StdoutHandler';
+import { matchSshErrorPattern } from '../../../../main/parsers/error-patterns';
+import { ClaudeOutputParser } from '../../../../main/parsers/claude-output-parser';
+import { CopilotOutputParser } from '../../../../main/parsers/copilot-output-parser';
+import { OmpOutputParser } from '../../../../main/parsers/omp-output-parser';
 import type { ManagedProcess } from '../../../../main/process-manager/types';
+import { logger } from '../../../../main/utils/logger';
+import type { AgentOutputParser } from '../../../../main/parsers/agent-output-parser';
+import {
+	setOmpModelCatalog,
+	computeOmpCatalogKey,
+	__resetOmpModelCatalogForTests,
+} from '../../../../main/agents/omp-model-catalog';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -207,6 +227,554 @@ describe('StdoutHandler', () => {
 			handler.handleData(sessionId, '\n\n\n');
 			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
 		});
+
+		it('should process concatenated Copilot JSON objects without newlines', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const sessionIdSpy = vi.fn();
+			emitter.on('session-id', sessionIdSpy);
+
+			const payload = [
+				JSON.stringify({
+					type: 'assistant.message',
+					data: {
+						content: 'Working on it...',
+						phase: 'commentary',
+					},
+				}),
+				JSON.stringify({
+					type: 'assistant.message',
+					data: {
+						content: 'Final answer',
+						phase: 'final_answer',
+					},
+				}),
+				JSON.stringify({
+					type: 'result',
+					sessionId: 'copilot-session-123',
+					exitCode: 0,
+				}),
+			].join(' ');
+
+			handler.handleData(sessionId, payload);
+
+			expect(bufferManager.emitDataBuffered).toHaveBeenCalledWith(sessionId, 'Final answer');
+			expect(sessionIdSpy).toHaveBeenCalledWith(sessionId, 'copilot-session-123');
+			expect(proc.jsonBuffer).toBe('');
+		});
+
+		it('should buffer partial Copilot JSON objects across chunks', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const sessionIdSpy = vi.fn();
+			emitter.on('session-id', sessionIdSpy);
+
+			const chunkOne = JSON.stringify({
+				type: 'assistant.message',
+				data: {
+					content: 'Working on it...',
+					phase: 'commentary',
+				},
+			});
+			const chunkTwo = [
+				JSON.stringify({
+					type: 'assistant.message',
+					data: {
+						content: 'Final answer',
+						phase: 'final_answer',
+					},
+				}),
+				JSON.stringify({
+					type: 'result',
+					sessionId: 'copilot-session-456',
+					exitCode: 0,
+				}),
+			].join('');
+
+			handler.handleData(sessionId, chunkOne.slice(0, 25));
+			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
+			expect(proc.jsonBuffer).toBe(chunkOne.slice(0, 25));
+
+			handler.handleData(sessionId, chunkOne.slice(25) + chunkTwo);
+
+			expect(bufferManager.emitDataBuffered).toHaveBeenCalledWith(sessionId, 'Final answer');
+			expect(sessionIdSpy).toHaveBeenCalledWith(sessionId, 'copilot-session-456');
+			expect(proc.jsonBuffer).toBe('');
+		});
+
+		it('should drop oversized incomplete Copilot JSON buffers', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+
+			// Seed stale tool IDs to verify they get cleared on corruption
+			proc.emittedToolCallIds = new Set(['stale_call_1']);
+
+			const oversizedPayload =
+				'{"type":"assistant.message","data":{"content":"' + 'x'.repeat(1024 * 1024 + 64);
+
+			handler.handleData(sessionId, oversizedPayload);
+
+			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
+			expect(proc.jsonBuffer).toBe('');
+			expect(proc.jsonBufferCorrupted).toBe(true);
+			expect(proc.emittedToolCallIds?.size).toBe(0);
+			expect(logger.warn).toHaveBeenCalledWith(
+				'[ProcessManager] Dropping oversized Copilot JSON buffer remainder',
+				'ProcessManager',
+				expect.objectContaining({
+					sessionId,
+					bufferLength: oversizedPayload.length,
+					maxBufferLength: 1024 * 1024,
+				})
+			);
+		});
+
+		it('should resync after corrupted buffer on the next valid JSON object', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const sessionIdSpy = vi.fn();
+			emitter.on('session-id', sessionIdSpy);
+
+			// Force corrupted state with stale tool IDs
+			proc.jsonBufferCorrupted = true;
+			proc.emittedToolCallIds = new Set(['stale_call_2']);
+
+			// Send trailing garbage from old object, then a clean new object
+			const payload =
+				'leftover junk from old object"}' +
+				JSON.stringify({
+					type: 'assistant.message',
+					data: { content: 'Recovered', phase: 'final_answer' },
+				});
+
+			handler.handleData(sessionId, payload);
+
+			expect(proc.jsonBufferCorrupted).toBe(false);
+			expect(proc.emittedToolCallIds?.size).toBe(0);
+			expect(bufferManager.emitDataBuffered).toHaveBeenCalledWith(sessionId, 'Recovered');
+			expect(proc.jsonBuffer).toBe('');
+		});
+
+		it('should discard Copilot preamble noise once JSON output begins', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+
+			handler.handleData(
+				sessionId,
+				'Authenticating...\n' +
+					JSON.stringify({
+						type: 'assistant.message',
+						data: {
+							content: 'Final answer',
+							phase: 'final_answer',
+						},
+					})
+			);
+
+			expect(bufferManager.emitDataBuffered).toHaveBeenNthCalledWith(
+				1,
+				sessionId,
+				'Authenticating...'
+			);
+			expect(bufferManager.emitDataBuffered).toHaveBeenNthCalledWith(2, sessionId, 'Final answer');
+			expect(proc.jsonBuffer).toBe('');
+		});
+
+		it('should emit non-JSON Copilot output immediately when no JSON payload follows', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+
+			handler.handleData(sessionId, 'Authenticating...');
+
+			expect(bufferManager.emitDataBuffered).toHaveBeenCalledWith(sessionId, 'Authenticating...');
+			expect(proc.jsonBuffer).toBe('');
+		});
+
+		it('should capture Copilot content-bearing assistant.messages as streamedText without ever flushing in-flight', () => {
+			// Regression: Copilot CLI in batch mode emits `assistant.message`
+			// events with non-empty content and no `phase` field for BOTH
+			// intermediate narration ("I'll delegate this to...") and the
+			// real final answer. Stdout signals are not trustworthy for
+			// "session done":
+			//   - assistant.turn_end fires after every LLM turn,
+			//   - session.shutdown is never emitted to stdout in batch mode.
+			// StdoutHandler must therefore capture the latest such message
+			// as streamedText and NEVER flush during the run. The
+			// authoritative end-of-session signal lives in the on-disk
+			// events.jsonl; ExitHandler is responsible for awaiting it and
+			// flushing.
+			const parser = new CopilotOutputParser();
+			const { handler, bufferManager, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+
+			handler.handleData(sessionId, JSON.stringify({ type: 'assistant.turn_start' }));
+
+			// First (intermediate) assistant.message - narration before delegation.
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'assistant.message',
+					data: {
+						content: "I'll delegate this to the coding agent.",
+						toolRequests: [],
+					},
+				})
+			);
+
+			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
+			expect(proc.streamedText).toBe("I'll delegate this to the coding agent.");
+			expect(proc.resultEmitted).toBe(false);
+
+			// turn_end is NOT a session-end marker for Copilot batch.
+			handler.handleData(sessionId, JSON.stringify({ type: 'assistant.turn_end' }));
+			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
+			expect(proc.resultEmitted).toBe(false);
+
+			// Subsequent turn carries the actual final answer.
+			handler.handleData(sessionId, JSON.stringify({ type: 'assistant.turn_start' }));
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'assistant.message',
+					data: {
+						content: 'Subagent finished. Here is the final answer.',
+						toolRequests: [],
+					},
+				})
+			);
+			handler.handleData(sessionId, JSON.stringify({ type: 'assistant.turn_end' }));
+
+			// Latest content-bearing message wins; still no in-flight flush.
+			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
+			expect(proc.streamedText).toBe('Subagent finished. Here is the final answer.');
+			expect(proc.resultEmitted).toBe(false);
+		});
+
+		it('should record Copilot agentSessionId on the managed process for ExitHandler to consume', () => {
+			// ExitHandler reads `agentSessionId` to locate Copilot's on-disk
+			// events.jsonl for its post-exit shutdown wait. The session id
+			// only ever appears in `session.start`, so we have to stash it
+			// onto the managed process the first time we see it.
+			const parser = new CopilotOutputParser();
+			const { handler, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'session.start',
+					data: { sessionId: 'cp-session-abc' },
+				})
+			);
+
+			expect(proc.agentSessionId).toBe('cp-session-abc');
+			expect(proc.sessionIdEmitted).toBe(true);
+		});
+
+		it('should still emit Copilot session IDs from result events with non-zero exit codes', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const sessionIdSpy = vi.fn();
+			const errorSpy = vi.fn();
+			emitter.on('session-id', sessionIdSpy);
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'result',
+					sessionId: 'copilot-session-error',
+					exitCode: 1,
+				})
+			);
+
+			// Session ID should still be extracted from bare exit-code result events
+			expect(sessionIdSpy).toHaveBeenCalledWith(sessionId, 'copilot-session-error');
+			// Bare exit codes without error text should NOT trigger an inline error -
+			// the richer detectErrorFromExit() runs at process exit with stderr context
+			expect(errorSpy).not.toHaveBeenCalled();
+		});
+
+		it('should dedupe Copilot tool starts emitted from tool.execution_start and final toolUseBlocks', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const toolSpy = vi.fn();
+			emitter.on('tool-execution', toolSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'tool.execution_start',
+					data: {
+						toolCallId: 'call_123',
+						toolName: 'view',
+						arguments: { path: '/tmp/project' },
+					},
+				})
+			);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'assistant.message',
+					data: {
+						content: 'Done',
+						phase: 'final_answer',
+						toolRequests: [
+							{
+								toolCallId: 'call_123',
+								name: 'view',
+								arguments: { path: '/tmp/project' },
+							},
+						],
+					},
+				})
+			);
+
+			expect(toolSpy).toHaveBeenCalledTimes(1);
+			expect(toolSpy).toHaveBeenCalledWith(
+				sessionId,
+				expect.objectContaining({
+					toolName: 'view',
+					state: {
+						status: 'running',
+						input: { path: '/tmp/project' },
+					},
+				})
+			);
+		});
+
+		it('should forward parentToolUseId on claude subagent tool events', () => {
+			const parser = new ClaudeOutputParser();
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: parser,
+			});
+			const toolSpy = vi.fn();
+			emitter.on('tool-execution', toolSpy);
+
+			// Subagent tool_use start
+			sendJsonLine(handler, sessionId, {
+				type: 'assistant',
+				parent_tool_use_id: 'toolu_task_1',
+				message: {
+					role: 'assistant',
+					content: [{ type: 'tool_use', id: 'toolu_child', name: 'Grep', input: { pattern: 'x' } }],
+				},
+			});
+
+			// Subagent tool_result
+			sendJsonLine(handler, sessionId, {
+				type: 'user',
+				parent_tool_use_id: 'toolu_task_1',
+				message: {
+					role: 'user',
+					content: [{ type: 'tool_result', tool_use_id: 'toolu_child', content: 'no matches' }],
+				},
+			});
+
+			expect(toolSpy).toHaveBeenCalledTimes(2);
+			expect(toolSpy.mock.calls[0][1]).toMatchObject({
+				toolName: 'Grep',
+				toolCallId: 'toolu_child',
+				parentToolUseId: 'toolu_task_1',
+			});
+			expect(toolSpy.mock.calls[1][1]).toMatchObject({
+				toolCallId: 'toolu_child',
+				parentToolUseId: 'toolu_task_1',
+			});
+		});
+
+		it('should emit a terminal event for every parallel tool_result in one message', () => {
+			const parser = new ClaudeOutputParser();
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: parser,
+			});
+			const toolSpy = vi.fn();
+			emitter.on('tool-execution', toolSpy);
+
+			// Two parallel tool_use starts.
+			sendJsonLine(handler, sessionId, {
+				type: 'assistant',
+				message: {
+					role: 'assistant',
+					content: [
+						{ type: 'tool_use', id: 'toolu_a', name: 'Read', input: {} },
+						{ type: 'tool_use', id: 'toolu_b', name: 'Grep', input: { pattern: 'x' } },
+					],
+				},
+			});
+
+			// Both results bundled into a single user message.
+			sendJsonLine(handler, sessionId, {
+				type: 'user',
+				message: {
+					role: 'user',
+					content: [
+						{ type: 'tool_result', tool_use_id: 'toolu_a', content: 'a-out' },
+						{ type: 'tool_result', tool_use_id: 'toolu_b', content: 'b-out' },
+					],
+				},
+			});
+
+			// 2 running + 2 completed = 4 emissions; neither parallel call is left running.
+			const completed = toolSpy.mock.calls
+				.map((c) => c[1])
+				.filter((e) => e.state?.status === 'completed')
+				.map((e) => e.toolCallId)
+				.sort();
+			expect(completed).toEqual(['toolu_a', 'toolu_b']);
+		});
+
+		it('should omit parentToolUseId for main-transcript claude tool events', () => {
+			const parser = new ClaudeOutputParser();
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: parser,
+			});
+			const toolSpy = vi.fn();
+			emitter.on('tool-execution', toolSpy);
+
+			sendJsonLine(handler, sessionId, {
+				type: 'assistant',
+				message: {
+					role: 'assistant',
+					content: [{ type: 'tool_use', id: 'toolu_main', name: 'Read', input: {} }],
+				},
+			});
+
+			expect(toolSpy).toHaveBeenCalledTimes(1);
+			expect(toolSpy.mock.calls[0][1].parentToolUseId).toBeUndefined();
+		});
+
+		it('should not emit Copilot reasoning summaries as thinking chunks or final text', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const thinkingSpy = vi.fn();
+			emitter.on('thinking-chunk', thinkingSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'assistant.reasoning',
+					data: {
+						content: 'Analyzing the codebase before making edits...',
+					},
+				})
+			);
+
+			expect(thinkingSpy).not.toHaveBeenCalled();
+			expect(proc.streamedText).toBe('');
+		});
+
+		it('should not emit Copilot reasoning deltas as thinking chunks or final text', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const thinkingSpy = vi.fn();
+			emitter.on('thinking-chunk', thinkingSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'assistant.reasoning_delta',
+					data: {
+						deltaContent: 'Live reasoning chunk...',
+					},
+				})
+			);
+
+			expect(thinkingSpy).not.toHaveBeenCalled();
+			expect(proc.streamedText).toBe('');
+		});
+
+		it('should keep failed Copilot tool executions as tool events instead of agent errors', () => {
+			const parser = new CopilotOutputParser();
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'copilot-cli',
+				outputParser: parser,
+			});
+			const toolSpy = vi.fn();
+			const errorSpy = vi.fn();
+			emitter.on('tool-execution', toolSpy);
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({
+					type: 'tool.execution_complete',
+					data: {
+						toolCallId: 'call_456',
+						toolName: 'read_bash',
+						success: false,
+						error:
+							'Invalid shell ID: $SHELL_2. Please supply a valid shell ID to read output from. <no active shell sessions>',
+					},
+				})
+			);
+
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(toolSpy).toHaveBeenCalledWith(
+				sessionId,
+				expect.objectContaining({
+					state: {
+						status: 'failed',
+						output:
+							'Invalid shell ID: $SHELL_2. Please supply a valid shell ID to read output from. <no active shell sessions>',
+					},
+				})
+			);
+		});
 	});
 
 	// ── Legacy message handling (no outputParser) ──────────────────────────
@@ -248,6 +816,49 @@ describe('StdoutHandler', () => {
 			);
 			expect(resultCalls).toHaveLength(1);
 			expect(resultCalls[0][1]).toBe('First answer.');
+		});
+
+		it('does not mark resultEmitted for an omp agent_end whose final message has empty text', () => {
+			// Regression: an omp turn that reaches agent_end but whose final assistant
+			// message carries no text must NOT be recorded as a real result. Emitting an
+			// empty result would flip resultEmitted with nothing shown, silently
+			// defeating the ExitHandler omp silent-exit guard (which keys off
+			// !resultEmitted) - the reported "done after a second, nothing happened" turn.
+			const { handler, bufferManager, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'omp',
+				outputParser: new OmpOutputParser(),
+			});
+
+			sendJsonLine(handler, sessionId, {
+				type: 'agent_end',
+				messages: [
+					{ role: 'user', content: [{ type: 'text', text: 'hi' }] },
+					{ role: 'assistant', content: [{ type: 'text', text: '' }] },
+				],
+			});
+
+			expect(proc.resultEmitted).toBe(false);
+			expect(bufferManager.emitDataBuffered).not.toHaveBeenCalled();
+		});
+
+		it('marks resultEmitted and emits text for an omp agent_end with a real final answer', () => {
+			const { handler, bufferManager, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'omp',
+				outputParser: new OmpOutputParser(),
+			});
+
+			sendJsonLine(handler, sessionId, {
+				type: 'agent_end',
+				messages: [
+					{ role: 'user', content: [{ type: 'text', text: 'hi' }] },
+					{ role: 'assistant', content: [{ type: 'text', text: 'the answer' }] },
+				],
+			});
+
+			expect(proc.resultEmitted).toBe(true);
+			expect(bufferManager.emitDataBuffered).toHaveBeenCalledWith(sessionId, 'the answer');
 		});
 
 		it('should extract session_id and emit session-id event', () => {
@@ -496,6 +1107,136 @@ describe('StdoutHandler', () => {
 
 	// ── normalizeUsageToDelta (tested via outputParser path) ───────────────
 
+	describe('in-turn API error notices (Claude Code)', () => {
+		// Captured live: Claude Code emitted this mid-turn, retried the call itself,
+		// and kept working. Raising it at once put the tab into the blocking error
+		// state and queued the next message behind a process that was still busy.
+		const connectionLost = {
+			type: 'assistant',
+			error: 'server_error',
+			is_api_error_message: true,
+			message: {
+				model: '<synthetic>',
+				role: 'assistant',
+				content: [
+					{
+						type: 'text',
+						text: 'API Error: Connection lost mid-response. The response above may be incomplete.',
+					},
+				],
+			},
+			session_id: 'claude-session',
+		};
+
+		const modelToolUse = {
+			type: 'assistant',
+			message: {
+				model: 'claude-opus-5',
+				role: 'assistant',
+				content: [{ type: 'tool_use', id: 'toolu_1', name: 'Edit', input: {} }],
+			},
+			session_id: 'claude-session',
+		};
+
+		function claudeContext() {
+			const ctx = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: new ClaudeOutputParser(),
+			});
+			const errorSpy = vi.fn();
+			ctx.emitter.on('agent-error', errorSpy);
+			return { ...ctx, errorSpy };
+		}
+
+		it('holds the notice instead of raising an agent error', () => {
+			const { handler, sessionId, proc, errorSpy } = claudeContext();
+
+			sendJsonLine(handler, sessionId, connectionLost);
+
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(proc.errorEmitted).toBe(false);
+			expect(proc.provisionalError?.message).toBe('server_error');
+		});
+
+		it('drops the notice when the model keeps working', () => {
+			const { handler, sessionId, proc, errorSpy } = claudeContext();
+
+			sendJsonLine(handler, sessionId, connectionLost);
+			sendJsonLine(handler, sessionId, modelToolUse);
+
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(proc.provisionalError).toBeUndefined();
+			expect(proc.errorEmitted).toBe(false);
+		});
+
+		it('keeps holding across control-plane lines that say nothing about recovery', () => {
+			const { handler, sessionId, proc, errorSpy } = claudeContext();
+
+			sendJsonLine(handler, sessionId, connectionLost);
+			sendJsonLine(handler, sessionId, { type: 'system', subtype: 'api_retry', attempt: 1 });
+
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(proc.provisionalError?.message).toBe('server_error');
+		});
+
+		it('emits the notice once, ahead of the result, when the turn ends on it', () => {
+			const { handler, sessionId, proc, errorSpy, bufferManager } = claudeContext();
+
+			sendJsonLine(handler, sessionId, connectionLost);
+			sendJsonLine(handler, sessionId, {
+				type: 'result',
+				subtype: 'success',
+				is_error: true,
+				result: 'API Error: Connection lost mid-response.',
+				session_id: 'claude-session',
+			});
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			expect(errorSpy).toHaveBeenCalledWith(
+				sessionId,
+				expect.objectContaining({ message: 'server_error', sessionId })
+			);
+			expect(proc.errorEmitted).toBe(true);
+			expect(proc.provisionalError).toBeUndefined();
+			expect(errorSpy.mock.invocationCallOrder[0]).toBeLessThan(
+				bufferManager.emitDataBuffered.mock.invocationCallOrder[0]
+			);
+		});
+
+		it('does not raise a held notice from a result flushed after the user pressed Stop', () => {
+			const { handler, sessionId, proc, errorSpy } = claudeContext();
+
+			sendJsonLine(handler, sessionId, connectionLost);
+			// `interrupt()` sets this before signalling, while the notice is still held.
+			proc.interrupted = true;
+			sendJsonLine(handler, sessionId, {
+				type: 'result',
+				subtype: 'success',
+				is_error: true,
+				result: 'API Error: Connection lost mid-response.',
+				session_id: 'claude-session',
+			});
+
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(proc.errorEmitted).toBe(false);
+		});
+
+		it('emits an ordinary error at once and clears any held notice', () => {
+			const { handler, sessionId, proc, errorSpy } = claudeContext();
+
+			sendJsonLine(handler, sessionId, connectionLost);
+			sendJsonLine(handler, sessionId, { type: 'error', message: 'Invalid API key' });
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			expect(errorSpy).toHaveBeenCalledWith(
+				sessionId,
+				expect.objectContaining({ message: 'Invalid API key' })
+			);
+			expect(proc.provisionalError).toBeUndefined();
+		});
+	});
+
 	describe('normalizeUsageToDelta (via outputParser stream-JSON path)', () => {
 		/**
 		 * These tests exercise the normalizeUsageToDelta function indirectly
@@ -513,7 +1254,9 @@ describe('StdoutHandler', () => {
 				cacheCreationTokens?: number;
 				costUsd?: number;
 				contextWindow?: number;
+				contextWindowReported?: boolean;
 				reasoningTokens?: number;
+				model?: string;
 			} | null
 		) {
 			return {
@@ -643,8 +1386,288 @@ describe('StdoutHandler', () => {
 			expect(delta.totalCostUsd).toBe(0.09);
 			expect(delta.contextWindow).toBe(200000);
 
+			// Claude Code is NOT a combined-context provider: its per-call values are
+			// already the current context, so no absolute snapshot is attached even
+			// during a monotonic stretch (attaching one would let the timeline plot
+			// cumulative token spend as context fill).
+			expect(delta.absoluteUsage).toBeUndefined();
+
 			// usageIsCumulative should be set to true
 			expect(proc.usageIsCumulative).toBe(true);
+		});
+
+		it('attaches absoluteUsage on the delta event for Codex (combined-context cumulative provider)', () => {
+			let callCount = 0;
+			const usageSequence = [
+				{
+					inputTokens: 1000,
+					outputTokens: 500,
+					cacheReadTokens: 200,
+					cacheCreationTokens: 100,
+					costUsd: 0.05,
+					contextWindow: 200000,
+				},
+				{
+					inputTokens: 1800,
+					outputTokens: 900,
+					cacheReadTokens: 350,
+					cacheCreationTokens: 180,
+					costUsd: 0.09,
+					contextWindow: 200000,
+				},
+			];
+
+			const parser = createOutputParserMock(null);
+			parser.extractUsage.mockImplementation(() => usageSequence[callCount++] || null);
+
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'codex',
+				outputParser: parser as any,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'turn 1' });
+			// First event is raw (already absolute), so no snapshot rides along.
+			expect(usageSpy.mock.calls[0][1].absoluteUsage).toBeUndefined();
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'turn 2' });
+			const delta = usageSpy.mock.calls[1][1];
+			// Top-level fields are the per-turn delta...
+			expect(delta.inputTokens).toBe(800);
+			// ...while absoluteUsage carries the pre-normalization cumulative totals so
+			// the Context Timeline can plot true window occupancy.
+			expect(delta.absoluteUsage).toEqual({
+				inputTokens: 1800,
+				outputTokens: 900,
+				cacheReadInputTokens: 350,
+				cacheCreationInputTokens: 180,
+				reasoningTokens: 0,
+			});
+		});
+
+		it('sets contextWindowResolved when a non-omp parser flags a provider-reported window', () => {
+			// The parser saw the window in the provider's own payload (e.g. codex's
+			// model_context_window), so the value is authoritative and must outrank
+			// the session's stored customContextWindow in the renderer (finding P1).
+			const parser = createOutputParserMock({
+				inputTokens: 1000,
+				outputTokens: 500,
+				costUsd: 0.05,
+				contextWindow: 400000,
+				contextWindowReported: true,
+			});
+
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'codex',
+				// Spawn config carries a different number; the reported one wins.
+				contextWindow: 200000,
+				outputParser: parser as unknown as AgentOutputParser,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'hi' });
+
+			const stats = usageSpy.mock.calls[0][1];
+			expect(stats.contextWindow).toBe(400000);
+			expect(stats.contextWindowResolved).toBe(true);
+		});
+
+		it('does not set contextWindowResolved for an unflagged usage payload', () => {
+			// Same window value, but the parser injected it from config or a static
+			// table rather than reading it from the provider. Provenance is only
+			// knowable at the parser, so an unflagged window stays a fallback.
+			const parser = createOutputParserMock({
+				inputTokens: 1000,
+				outputTokens: 500,
+				costUsd: 0.05,
+				contextWindow: 400000,
+			});
+
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'codex',
+				contextWindow: 200000,
+				outputParser: parser as unknown as AgentOutputParser,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'hi' });
+
+			const stats = usageSpy.mock.calls[0][1];
+			expect(stats.contextWindow).toBe(400000);
+			expect(stats.contextWindowResolved).toBeUndefined();
+		});
+
+		it('resolves the omp model window from the local catalog and flags it authoritative', () => {
+			__resetOmpModelCatalogForTests();
+			const catalogKey = computeOmpCatalogKey('/usr/local/bin/omp', undefined);
+			setOmpModelCatalog([{ id: 'claude-opus-4-8', contextWindow: 1_000_000 }], catalogKey);
+			const parser = createOutputParserMock({
+				inputTokens: 1000,
+				outputTokens: 500,
+				cacheReadTokens: 0,
+				cacheCreationTokens: 0,
+				costUsd: 0.05,
+				contextWindow: 0,
+				model: 'claude-opus-4-8',
+			});
+
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'omp',
+				// Agent-level configured fallback (the misleading 200k default).
+				contextWindow: 200000,
+				ompModelCatalogKey: catalogKey,
+				outputParser: parser as unknown as AgentOutputParser,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'hi' });
+
+			const stats = usageSpy.mock.calls[0][1];
+			expect(stats.contextWindow).toBe(1_000_000);
+			expect(stats.contextWindowResolved).toBe(true);
+		});
+
+		it('pushes a corrected window once when a late catalog prime lands', () => {
+			__resetOmpModelCatalogForTests();
+			const catalogKey = computeOmpCatalogKey('/usr/local/bin/omp', undefined);
+			const parser = createOutputParserMock({
+				inputTokens: 1000,
+				outputTokens: 500,
+				cacheReadTokens: 0,
+				cacheCreationTokens: 0,
+				costUsd: 0.05,
+				contextWindow: 0,
+				model: 'claude-opus-4-8',
+			});
+
+			// The spawn stamped the key, but the prime exceeded the spawn cap so the
+			// catalog is still empty when the first turn's usage arrives.
+			const { handler, emitter, processes, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'omp',
+				contextWindow: 200000,
+				ompModelCatalogKey: catalogKey,
+				outputParser: parser as unknown as AgentOutputParser,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'hi' });
+
+			expect(usageSpy).toHaveBeenCalledTimes(1);
+			expect(usageSpy.mock.calls[0][1].contextWindow).toBe(200000);
+			expect(usageSpy.mock.calls[0][1].contextWindowResolved).toBeUndefined();
+			expect(proc.pendingOmpUsagePush?.model).toBe('claude-opus-4-8');
+
+			// Late prime lands: the corrected window is pushed without a second turn.
+			setOmpModelCatalog([{ id: 'claude-opus-4-8', contextWindow: 1_000_000 }], catalogKey);
+			expect(pushResolvedOmpContextWindow(processes, emitter, sessionId, catalogKey)).toBe(true);
+
+			expect(usageSpy).toHaveBeenCalledTimes(2);
+			const corrected = usageSpy.mock.calls[1][1];
+			expect(corrected.contextWindow).toBe(1_000_000);
+			expect(corrected.contextWindowResolved).toBe(true);
+			// Token/cost fields are zeroed AT THE SOURCE: the correction re-emits
+			// through the ProcessManager EventEmitter, so every on('usage') consumer
+			// sees it. Zeroing here keeps the replayed (already-counted) turn from
+			// landing twice in any accumulating consumer.
+			expect(corrected.inputTokens).toBe(0);
+			expect(corrected.outputTokens).toBe(0);
+			expect(corrected.cacheReadInputTokens).toBe(0);
+			expect(corrected.cacheCreationInputTokens).toBe(0);
+			expect(corrected.totalCostUsd).toBe(0);
+			expect(corrected.reasoningTokens).toBe(0);
+			// Flagged correction-only so accumulating consumers update the window
+			// without re-counting the replayed turn's tokens/cost.
+			expect(corrected.contextWindowCorrectionOnly).toBe(true);
+			expect(corrected.contextWindowModel).toBe('claude-opus-4-8');
+
+			// Pending payload is cleared, so a repeat call cannot double-emit.
+			expect(proc.pendingOmpUsagePush).toBeUndefined();
+			expect(pushResolvedOmpContextWindow(processes, emitter, sessionId, catalogKey)).toBe(false);
+			expect(usageSpy).toHaveBeenCalledTimes(2);
+		});
+
+		it('does not resolve a mismatched-identity catalog (different binary/env)', () => {
+			__resetOmpModelCatalogForTests();
+			// Catalog primed for one identity...
+			setOmpModelCatalog(
+				[{ id: 'claude-opus-4-8', contextWindow: 1_000_000 }],
+				computeOmpCatalogKey('/opt/other/omp', undefined)
+			);
+			const parser = createOutputParserMock({
+				inputTokens: 1000,
+				outputTokens: 500,
+				cacheReadTokens: 0,
+				cacheCreationTokens: 0,
+				costUsd: 0.05,
+				contextWindow: 0,
+				model: 'claude-opus-4-8',
+			});
+			// ...but this process ran a DIFFERENT binary, so it must not reuse it.
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'omp',
+				contextWindow: 200000,
+				ompModelCatalogKey: computeOmpCatalogKey('/usr/local/bin/omp', undefined),
+				outputParser: parser as unknown as AgentOutputParser,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'hi' });
+
+			const stats = usageSpy.mock.calls[0][1];
+			expect(stats.contextWindow).toBe(200000);
+			expect(stats.contextWindowResolved).toBeUndefined();
+		});
+
+		it('keeps the configured window for an SSH omp process (local catalog not trusted remotely)', () => {
+			__resetOmpModelCatalogForTests();
+			const catalogKey = computeOmpCatalogKey('/usr/local/bin/omp', undefined);
+			setOmpModelCatalog([{ id: 'claude-opus-4-8', contextWindow: 1_000_000 }], catalogKey);
+			const parser = createOutputParserMock({
+				inputTokens: 1000,
+				outputTokens: 500,
+				cacheReadTokens: 0,
+				cacheCreationTokens: 0,
+				costUsd: 0.05,
+				contextWindow: 0,
+				model: 'claude-opus-4-8',
+			});
+
+			// Even with a matching catalog + key, an SSH remote must NOT resolve from
+			// the local catalog and keeps the configured window.
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'omp',
+				contextWindow: 200000,
+				sshRemoteId: 'remote-1',
+				ompModelCatalogKey: catalogKey,
+				outputParser: parser as unknown as AgentOutputParser,
+			});
+
+			const usageSpy = vi.fn();
+			emitter.on('usage', usageSpy);
+
+			sendJsonLine(handler, sessionId, { type: 'message', text: 'hi' });
+
+			const stats = usageSpy.mock.calls[0][1];
+			expect(stats.contextWindow).toBe(200000);
+			expect(stats.contextWindowResolved).toBeUndefined();
 		});
 
 		it('should detect non-monotonic decrease and switch to raw mode', () => {
@@ -1493,7 +2516,7 @@ function createMinimalOutputParser(usageReturn: {
 
 // ── Performance: single JSON.parse per NDJSON line ──────────────────────
 
-describe('StdoutHandler — single JSON parse per line', () => {
+describe('StdoutHandler - single JSON parse per line', () => {
 	it('parses JSON exactly once per NDJSON line (output parser path)', () => {
 		// Instrument JSON.parse to count calls
 		const originalParse = JSON.parse;
@@ -1584,5 +2607,416 @@ describe('StdoutHandler — single JSON parse per line', () => {
 		// Should fall back to line-based detection since JSON.parse fails
 		expect(mockParser.detectErrorFromLine).toHaveBeenCalledTimes(1);
 		expect(mockParser.detectErrorFromParsed).not.toHaveBeenCalled();
+	});
+
+	describe('Grok thinking-chunk vs streamedText routing', () => {
+		it('emits thinking-chunk only for thought deltas; assistant text goes to streamedText', async () => {
+			const { GrokOutputParser } = await import('../../../../main/parsers/grok-output-parser');
+			const parser = new GrokOutputParser();
+			const { handler, emitter, sessionId, proc, bufferManager } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'grok',
+				outputParser: parser,
+			});
+			const thinkingSpy = vi.fn();
+			emitter.on('thinking-chunk', thinkingSpy);
+
+			handler.handleData(sessionId, '{"type":"thought","data":"planning..."}\n');
+			handler.handleData(sessionId, '{"type":"text","data":"{\\"confidence\\":40"}\n');
+			handler.handleData(
+				sessionId,
+				'{"type":"text","data":",\\"ready\\":false,\\"message\\":\\"hi\\"}"}\n'
+			);
+			handler.handleData(
+				sessionId,
+				'{"type":"end","stopReason":"EndTurn","sessionId":"sess-1","requestId":"req-1"}\n'
+			);
+
+			// Only reasoning deltas hit thinking-chunk (not assistant JSON fragments)
+			expect(thinkingSpy).toHaveBeenCalledTimes(1);
+			expect(thinkingSpy).toHaveBeenCalledWith(sessionId, 'planning...');
+			// Assistant text accumulates for the final result emit
+			expect(proc.streamedText).toBe('{"confidence":40,"ready":false,"message":"hi"}');
+			expect(bufferManager.emitDataBuffered).toHaveBeenCalledWith(
+				sessionId,
+				'{"confidence":40,"ready":false,"message":"hi"}'
+			);
+		});
+
+		it('still emits thinking-chunk for Factory Droid assistant partials without isReasoning', async () => {
+			const { FactoryDroidOutputParser } =
+				await import('../../../../main/parsers/factory-droid-output-parser');
+			const parser = new FactoryDroidOutputParser();
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'factory-droid',
+				outputParser: parser,
+			});
+			const thinkingSpy = vi.fn();
+			emitter.on('thinking-chunk', thinkingSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({ type: 'message', role: 'assistant', text: 'Hello from droid' }) + '\n'
+			);
+
+			// Factory Droid has no isReasoning split; keep live thinking-panel partials
+			expect(thinkingSpy).toHaveBeenCalledWith(sessionId, 'Hello from droid');
+			expect(proc.streamedText).toBe('Hello from droid');
+		});
+	});
+
+	describe('user-interrupted turns suppress in-band errors', () => {
+		// A CLI that flushes a terminal envelope on its way out of a deliberate
+		// Stop must not paint that as a turn failure. Grok is the concrete case:
+		// headless, it ends a cancelled turn with `stopReason: "cancelled"`, which
+		// the parser (correctly) classifies as a turn that died early.
+		it('does not emit agent-error for a cancelled grok end after interrupt', async () => {
+			const { GrokOutputParser } = await import('../../../../main/parsers/grok-output-parser');
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'grok',
+				outputParser: new GrokOutputParser(),
+				interrupted: true,
+			});
+			const errorSpy = vi.fn();
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				'{"type":"end","stopReason":"cancelled","sessionId":"sess-1"}\n'
+			);
+
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(proc.errorEmitted).toBe(false);
+		});
+
+		it('still emits agent-error for a cancelled grok end when the user did not stop it', async () => {
+			const { GrokOutputParser } = await import('../../../../main/parsers/grok-output-parser');
+			const { handler, emitter, sessionId } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'grok',
+				outputParser: new GrokOutputParser(),
+			});
+			const errorSpy = vi.fn();
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				'{"type":"end","stopReason":"cancelled","sessionId":"sess-1"}\n'
+			);
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			expect(errorSpy.mock.calls[0][1]).toMatchObject({
+				message: expect.stringContaining('cancelled'),
+			});
+		});
+
+		// Grok reports its session id ONLY on `end`. When that end is the one that
+		// died early, the error branch is the last place the id passes through -
+		// dropping it makes recovery resume into a brand-new conversation.
+		it('still captures the provider session id from a failing terminal envelope', async () => {
+			const { GrokOutputParser } = await import('../../../../main/parsers/grok-output-parser');
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'grok',
+				outputParser: new GrokOutputParser(),
+			});
+			const sessionIdSpy = vi.fn();
+			emitter.on('session-id', sessionIdSpy);
+
+			handler.handleData(
+				sessionId,
+				'{"type":"end","stopReason":"cancelled","sessionId":"grok-sess-9"}\n'
+			);
+
+			expect(sessionIdSpy).toHaveBeenCalledWith(sessionId, 'grok-sess-9');
+			expect(proc.agentSessionId).toBe('grok-sess-9');
+		});
+	});
+
+	describe('Claude thinking-chunk routing', () => {
+		// Regression: claude-code was lumped into the isReasoning gate meant for
+		// Grok/Codex/OpenCode. Claude's ordinary assistant text arrives as partials
+		// with isReasoning undefined, so the gate dropped every thinking-chunk on a
+		// normal (non-extended-thinking) turn and the inline thinking display stopped
+		// streaming (the busy-state ThinkingStatusPill is a separate concern).
+		it('emits thinking-chunk for ordinary assistant text partials (isReasoning undefined)', () => {
+			const parser = new ClaudeOutputParser();
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: parser,
+			});
+			const thinkingSpy = vi.fn();
+			emitter.on('thinking-chunk', thinkingSpy);
+
+			sendJsonLine(handler, sessionId, {
+				type: 'assistant',
+				session_id: 'sess-1',
+				message: { role: 'assistant', content: [{ type: 'text', text: 'Here is my answer' }] },
+			});
+
+			// Live preview streams to the thinking panel...
+			expect(thinkingSpy).toHaveBeenCalledTimes(1);
+			expect(thinkingSpy).toHaveBeenCalledWith(sessionId, 'Here is my answer');
+			// ...and the same text still accumulates for the final result emit.
+			expect(proc.streamedText).toBe('Here is my answer');
+		});
+
+		it('emits thinking-chunk for extended-thinking blocks and keeps them out of streamedText', () => {
+			const parser = new ClaudeOutputParser();
+			const { handler, emitter, sessionId, proc } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: parser,
+			});
+			const thinkingSpy = vi.fn();
+			emitter.on('thinking-chunk', thinkingSpy);
+
+			sendJsonLine(handler, sessionId, {
+				type: 'assistant',
+				session_id: 'sess-1',
+				message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Let me reason' }] },
+			});
+
+			expect(thinkingSpy).toHaveBeenCalledWith(sessionId, 'Let me reason');
+			// Reasoning is internal - it must not leak into the final response text.
+			expect(proc.streamedText).toBe('');
+		});
+	});
+
+	describe('SSH auth_expired login guidance by agentId', () => {
+		function mockAuthParser(agentId: string, message: string) {
+			return {
+				agentId,
+				parseJsonLine: vi.fn(() => null),
+				parseJsonObject: vi.fn(() => null),
+				isResultMessage: vi.fn(() => false),
+				extractSessionId: vi.fn(() => null),
+				extractUsage: vi.fn(() => null),
+				extractSlashCommands: vi.fn(() => null),
+				detectErrorFromLine: vi.fn(() => null),
+				detectErrorFromParsed: vi.fn(() => ({
+					type: 'auth_expired' as const,
+					message,
+					recoverable: true,
+					agentId,
+					timestamp: Date.now(),
+					raw: {},
+				})),
+				detectErrorFromExit: vi.fn(() => null),
+			};
+		}
+
+		it('uses the grok login command for grok on an SSH remote', () => {
+			const mockParser = mockAuthParser(
+				'grok',
+				'Not authenticated. Please run "grok login" to authenticate.'
+			);
+
+			const { handler, sessionId, emitter } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'grok',
+				outputParser: mockParser as any,
+				sshRemoteId: 'remote-1',
+				sshRemoteHost: 'build-box',
+			});
+
+			const errorSpy = vi.fn();
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({ type: 'error', message: 'not authenticated' }) + '\n'
+			);
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			const emitted = errorSpy.mock.calls[0][1];
+			expect(emitted.message).toBe(
+				'Authentication failed on remote host "build-box". SSH into the remote and run "grok login" to re-authenticate.'
+			);
+			expect(emitted.message).not.toContain('claude login');
+		});
+
+		it('uses the claude login command even when the pattern message is generic', () => {
+			// Pattern-58 style message: no login command in the text. The
+			// agentId map must still produce "claude /login" so Claude SSH
+			// users keep actionable guidance.
+			const mockParser = mockAuthParser(
+				'claude-code',
+				'Authentication failed. Please log in again.'
+			);
+
+			const { handler, sessionId, emitter } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: mockParser as any,
+				sshRemoteId: 'remote-1',
+				sshRemoteHost: 'build-box',
+			});
+
+			const errorSpy = vi.fn();
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({ type: 'error', message: 'authentication failed' }) + '\n'
+			);
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			const emitted = errorSpy.mock.calls[0][1];
+			expect(emitted.message).toBe(
+				'Authentication failed on remote host "build-box". SSH into the remote and run "claude /login" to re-authenticate.'
+			);
+			expect(emitted.message).toContain('claude /login');
+		});
+
+		it('omits a login command for agents without a known CLI login', () => {
+			const mockParser = mockAuthParser(
+				'hermes',
+				'Authentication required. Please configure your credentials.'
+			);
+
+			const { handler, sessionId, emitter } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'hermes',
+				outputParser: mockParser as any,
+				sshRemoteId: 'remote-1',
+				sshRemoteHost: 'build-box',
+			});
+
+			const errorSpy = vi.fn();
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({ type: 'error', message: 'authentication' }) + '\n'
+			);
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			const emitted = errorSpy.mock.calls[0][1];
+			expect(emitted.message).toBe(
+				'Authentication failed on remote host "build-box". SSH into the remote to re-authenticate.'
+			);
+			expect(emitted.message).not.toContain('claude /login');
+			expect(emitted.message).not.toContain('grok login');
+		});
+
+		it('names the TUI slash command for agents whose login is not a one-liner', () => {
+			const mockParser = mockAuthParser('factory-droid', 'Authentication failed.');
+
+			const { handler, sessionId, emitter } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'factory-droid',
+				outputParser: mockParser as any,
+				sshRemoteId: 'remote-1',
+				sshRemoteHost: 'build-box',
+			});
+
+			const errorSpy = vi.fn();
+			emitter.on('agent-error', errorSpy);
+
+			handler.handleData(
+				sessionId,
+				JSON.stringify({ type: 'error', message: 'authentication failed' }) + '\n'
+			);
+
+			const emitted = errorSpy.mock.calls[0][1];
+			expect(emitted.message).toBe(
+				'Authentication failed on remote host "build-box". SSH into the remote and run "droid" then type "/login" to re-authenticate.'
+			);
+		});
+	});
+
+	describe('SSH error pattern false-positive prevention', () => {
+		it('should NOT check SSH patterns on valid JSON lines (prevents false positives from response text)', () => {
+			const mockedMatchSsh = vi.mocked(matchSshErrorPattern);
+			mockedMatchSsh.mockReturnValue({
+				type: 'agent_crashed',
+				message: 'OpenCode command not found.',
+				recoverable: false,
+			});
+
+			const mockParser = {
+				agentId: 'claude-code',
+				parseJsonLine: vi.fn(() => null),
+				parseJsonObject: vi.fn(() => ({
+					type: 'text',
+					text: 'response with opencode command not found',
+				})),
+				isResultMessage: vi.fn(() => false),
+				extractSessionId: vi.fn(() => null),
+				extractUsage: vi.fn(() => null),
+				extractSlashCommands: vi.fn(() => null),
+				detectErrorFromLine: vi.fn(() => null),
+				detectErrorFromParsed: vi.fn(() => null),
+				detectErrorFromExit: vi.fn(() => null),
+			};
+
+			const { handler, sessionId, emitter } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: mockParser as any,
+				sshRemoteId: 'remote-1',
+			});
+
+			const errors: unknown[] = [];
+			emitter.on('agent-error', (...args: unknown[]) => errors.push(args));
+
+			// Send a valid JSON line whose text content would match SSH error patterns
+			const jsonLine = JSON.stringify({
+				type: 'assistant',
+				message: { content: [{ text: 'bash: opencode: command not found' }] },
+			});
+			handler.handleData(sessionId, jsonLine + '\n');
+
+			// SSH pattern check should NOT have been called for a valid JSON line
+			expect(mockedMatchSsh).not.toHaveBeenCalled();
+			expect(errors).toHaveLength(0);
+
+			mockedMatchSsh.mockReset();
+		});
+
+		it('should check SSH patterns on non-JSON lines for SSH sessions', () => {
+			const mockedMatchSsh = vi.mocked(matchSshErrorPattern);
+			mockedMatchSsh.mockReturnValue({
+				type: 'agent_crashed',
+				message: 'OpenCode command not found.',
+				recoverable: false,
+			});
+
+			const mockParser = {
+				agentId: 'claude-code',
+				parseJsonLine: vi.fn(() => null),
+				parseJsonObject: vi.fn(() => null),
+				isResultMessage: vi.fn(() => false),
+				extractSessionId: vi.fn(() => null),
+				extractUsage: vi.fn(() => null),
+				extractSlashCommands: vi.fn(() => null),
+				detectErrorFromLine: vi.fn(() => null),
+				detectErrorFromParsed: vi.fn(() => null),
+				detectErrorFromExit: vi.fn(() => null),
+			};
+
+			const { handler, sessionId, emitter } = createTestContext({
+				isStreamJsonMode: true,
+				toolType: 'claude-code',
+				outputParser: mockParser as any,
+				sshRemoteId: 'remote-1',
+			});
+
+			const errors: Array<[string, unknown]> = [];
+			emitter.on('agent-error', (sid: string, err: unknown) => errors.push([sid, err]));
+
+			// Send a plain text line (not JSON) - this is a real SSH error
+			handler.handleData(sessionId, 'bash: opencode: command not found\n');
+
+			// SSH pattern check SHOULD be called for non-JSON lines
+			expect(mockedMatchSsh).toHaveBeenCalledWith('bash: opencode: command not found');
+			expect(errors).toHaveLength(1);
+
+			mockedMatchSsh.mockReset();
+		});
 	});
 });

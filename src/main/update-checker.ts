@@ -5,11 +5,31 @@
 
 import { compareVersions } from '../shared/pathUtils';
 import { logger } from './utils/logger';
+import { fetchWithTimeout } from './utils/fetchWithTimeout';
 
 // GitHub repository information
 const GITHUB_OWNER = 'RunMaestro';
 const GITHUB_REPO = 'Maestro';
 const RELEASES_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases`;
+
+/** Request budget for the GitHub releases poll. */
+const RELEASES_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Build the generic-provider feed URL for a specific release tag.
+ *
+ * electron-updater's default GitHub provider fetches `releases.atom` to discover
+ * the latest version, and that dynamically-generated feed intermittently (and
+ * sometimes persistently) returns 504 Gateway Time-out. Release *assets* -
+ * including the `latest*.yml` channel files electron-builder publishes - are
+ * served from GitHub's reliable CDN instead. Pointing electron-updater at this
+ * per-tag download URL via a generic provider sidesteps the atom feed entirely.
+ *
+ * @param tag The release tag verbatim (e.g. `v1.2.3`), as returned in `tag_name`.
+ */
+export function getReleaseDownloadFeedUrl(tag: string): string {
+	return `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${tag}/`;
+}
 
 export interface ReleaseAsset {
 	name: string;
@@ -87,12 +107,16 @@ async function fetchReleases(includePrerelease: boolean = false): Promise<Releas
 		'UpdateChecker'
 	);
 
-	const response = await fetch(RELEASES_URL, {
-		headers: {
-			Accept: 'application/vnd.github.v3+json',
-			'User-Agent': 'Maestro-Update-Checker',
+	const response = await fetchWithTimeout(
+		RELEASES_URL,
+		{
+			headers: {
+				Accept: 'application/vnd.github.v3+json',
+				'User-Agent': 'Maestro-Update-Checker',
+			},
 		},
-	});
+		RELEASES_FETCH_TIMEOUT_MS
+	);
 
 	if (!response.ok) {
 		const errorMsg = `GitHub API error: ${response.status} ${response.statusText}`;

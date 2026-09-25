@@ -2,28 +2,10 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { ActivityGraph } from '../../../../renderer/components/History';
-import type { Theme, HistoryEntry, HistoryEntryType } from '../../../../renderer/types';
+import type { HistoryEntry, HistoryEntryType } from '../../../../renderer/types';
 
+import { mockTheme } from '../../../helpers/mockTheme';
 // Create mock theme
-const mockTheme: Theme = {
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1e1e1e',
-		bgSidebar: '#252526',
-		bgActivity: '#333333',
-		textMain: '#ffffff',
-		textDim: '#808080',
-		accent: '#007acc',
-		border: '#404040',
-		success: '#4ec9b0',
-		warning: '#dcdcaa',
-		error: '#f14c4c',
-		scrollbar: '#404040',
-		scrollbarHover: '#808080',
-	},
-};
 
 // Create mock history entry factory
 const createMockEntry = (overrides: Partial<HistoryEntry> = {}): HistoryEntry => ({
@@ -607,7 +589,7 @@ describe('ActivityGraph', () => {
 	it('falls back to client-side bucketing when precomputedBuckets length does not match', () => {
 		const entries = [createMockEntry({ type: 'AUTO', timestamp: NOW - 30 * 60 * 1000 })];
 
-		// Wrong number of buckets — should be ignored
+		// Wrong number of buckets - should be ignored
 		const wrongBuckets = [{ auto: 99, user: 0, cue: 0 }];
 
 		const { container } = render(

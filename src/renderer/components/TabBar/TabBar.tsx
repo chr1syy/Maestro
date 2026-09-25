@@ -1,17 +1,34 @@
 import React, { useState, useRef, useCallback, useEffect, memo, useMemo } from 'react';
 import { Bell } from 'lucide-react';
-import type { AITab } from '../../types';
-import { hasDraft } from '../../utils/tabHelpers';
+import type { AITab, UnifiedTabRef } from '../../types';
+import { hasDraft, hasUnreadVisibleTab, visibleAiTabs } from '../../utils/tabHelpers';
+import { updateSessionWith } from '../../stores/sessionStore';
+import { promotePaneToStandalone } from '../../utils/panelLayout';
+import {
+	writeTabTilePayload,
+	readTabTilePayload,
+	dragHasTabTilePayload,
+} from '../../utils/tabDragPayload';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useStuckTabSignature } from '../../stores/retryStore';
+import { useSessionStore } from '../../stores/sessionStore';
+import { useModalStore } from '../../stores/modalStore';
 import { AITab as AITabComponent } from './AITab';
 import { BrowserTabItem } from './BrowserTabItem';
 import { FileTab } from './FileTab';
 import { TerminalTabItem } from './TerminalTabItem';
+import { GroupTabChip } from './GroupTabChip';
 import { NewTabPopover } from './NewTabPopover';
 import { SearchPopover } from './SearchPopover';
 import { isUnifiedTabActive, getShortcutHint } from './tabBarUtils';
+import { buildFileTabDisplayNames } from '../../hooks/tabs/internal/filePreviewTabHelpers';
+import { useEventListener } from '../../hooks/utils/useEventListener';
+import { useWindowOwnsSession } from '../../contexts/WindowContext';
+import { useDragAutoScroll } from '../../hooks/ui/useDragAutoScroll';
 import type { TabBarProps } from './types';
+import { PluginUiItemsSlot } from '../plugins/PluginUiItemsSlot';
+import { logger } from '../../utils/logger';
 
 /** Approximate width of the sticky right "+" button area (px) */
 const STICKY_RIGHT_WIDTH = 48;
@@ -25,9 +42,11 @@ function TabBarInner({
 	activeTabId,
 	theme,
 	sessionId,
+	sessionAgentSessionId,
 	onTabSelect,
 	onTabClose,
 	onNewTab,
+	onNewFileTab,
 	onNewBrowserTab,
 	onNewTerminalTab,
 	onRequestRename,
@@ -39,12 +58,14 @@ function TabBarInner({
 	onSummarizeAndContinue,
 	onCopyContext,
 	onExportHtml,
+	onSnooze,
 	onPublishGist,
 	ghCliAvailable,
 	showUnreadOnly: showUnreadOnlyProp,
 	onToggleUnreadFilter,
 	onOpenTabSearch,
 	onOpenOutputSearch,
+	onOpenCrossTabSearch,
 	onCloseAllTabs,
 	onCloseOtherTabs,
 	onCloseTabsLeft,
@@ -53,24 +74,43 @@ function TabBarInner({
 	activeFileTabId,
 	onFileTabSelect,
 	onFileTabClose,
+	onFileTabRename,
 	activeBrowserTabId,
 	onBrowserTabSelect,
 	onBrowserTabClose,
+	onBrowserTabRename,
+	onBrowserTabResetName,
 	onUnifiedTabReorder,
 	activeTerminalTabId,
 	inputMode = 'ai',
 	onTerminalTabSelect,
 	onTerminalTabClose,
 	onTerminalTabRename,
+	onCopyTerminalBuffer,
+	onPublishTerminalBufferGist,
+	onPublishFileGist,
+	onSendTerminalBufferToAgent,
+	onTerminalTabConfigureStartupCommand,
+	onCopyBrowserContent,
+	onSendBrowserContentToAgent,
+	activeGroupId,
+	unreadGroupIds,
+	queuedTabIds,
+	onGroupSelect,
+	onGroupRename,
+	onGroupSetEmoji,
+	onGroupBreakApart,
 	colorBlindMode,
+	sshRemote,
+	leadingSlot,
 }: TabBarProps) {
 	// Dev-time warnings for missing handlers when unified tabs are provided
 	if (process.env.NODE_ENV !== 'production' && unifiedTabs) {
 		if (!onFileTabSelect || !onFileTabClose) {
-			console.warn('[TabBar] unifiedTabs provided but onFileTabSelect/onFileTabClose missing');
+			logger.warn('[TabBar] unifiedTabs provided but onFileTabSelect/onFileTabClose missing');
 		}
 		if (!onTerminalTabSelect || !onTerminalTabClose) {
-			console.warn(
+			logger.warn(
 				'[TabBar] unifiedTabs provided but onTerminalTabSelect/onTerminalTabClose missing'
 			);
 		}
@@ -80,13 +120,33 @@ function TabBarInner({
 	const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
 	const [showUnreadOnlyLocal, setShowUnreadOnlyLocal] = useState(false);
 	const showUnreadOnly = showUnreadOnlyProp ?? showUnreadOnlyLocal;
+	// Agent Resilience: tabs stuck auto-retrying an outage surface in the unread
+	// filter (needs attention). Stable Set keyed on a primitive store signature.
+	const stuckTabSignature = useStuckTabSignature(sessionId ?? '');
+	const stuckTabIds = useMemo(
+		() => new Set(stuckTabSignature ? stuckTabSignature.split(',') : []),
+		[stuckTabSignature]
+	);
 	const toggleUnreadFilter =
 		onToggleUnreadFilter ?? (() => setShowUnreadOnlyLocal((prev) => !prev));
 
 	const shortcuts = useSettingsStore((s) => s.shortcuts);
 	const tabShortcuts = useSettingsStore((s) => s.tabShortcuts);
+
+	// Snoozed tabs are a cross-agent concept, so the count and the list opener
+	// come straight from the stores rather than through TabBar's prop surface.
+	const snoozedTabCount = useSessionStore((s) =>
+		s.sessions.reduce((total, session) => total + (session.snoozedTabs?.length ?? 0), 0)
+	);
+	const openSnoozedTabs = useCallback(() => {
+		useModalStore.getState().openModal('snoozedTabs');
+	}, []);
 	const showStarredInUnreadFilter = useSettingsStore((s) => s.showStarredInUnreadFilter);
 	const showFilePreviewsInUnreadFilter = useSettingsStore((s) => s.showFilePreviewsInUnreadFilter);
+	const showTerminalTabsInUnreadFilter = useSettingsStore((s) => s.showTerminalTabsInUnreadFilter);
+	const showBrowserTabsInUnreadFilter = useSettingsStore((s) => s.showBrowserTabsInUnreadFilter);
+	const useCmd0AsLastTab = useSettingsStore((s) => s.useCmd0AsLastTab);
+	const tabBarWheelScroll = useSettingsStore((s) => s.tabBarWheelScroll);
 
 	const tabBarRef = useRef<HTMLDivElement>(null);
 	const stickyLeftRef = useRef<HTMLDivElement>(null);
@@ -96,13 +156,26 @@ function TabBarInner({
 	const activeTab = tabs.find((t) => t.id === activeTabId);
 	const activeTabName = activeTab?.name ?? null;
 
+	// Multi-window scoping: a window only renders the tab strip of an agent it
+	// owns. The primary window is the catch-all owner; a secondary window owns
+	// only its scoped agents, so it shows an empty tab area for any agent it
+	// doesn't own. Outside a WindowProvider (isolation tests) or without a
+	// sessionId, this resolves to true - single-window behaviour is unchanged.
+	const ownsActiveAgent = useWindowOwnsSession(sessionId);
+
 	// Scroll active tab into view
 	useEffect(() => {
 		requestAnimationFrame(() => {
 			requestAnimationFrame(() => {
 				const container = tabBarRef.current;
-				const targetTabId =
-					inputMode === 'terminal'
+				// A tiled group takes over the panel and IS the current tab, so it must
+				// win here too - its chip carries data-tab-id={group.id}, while the
+				// standalone active ids are cleared (and activeTabId is synced to a leaf
+				// pane that has no standalone chip). Without this, jumping to a group
+				// (e.g. Cmd+0 to a rightmost group) never scrolls the group chip into view.
+				const targetTabId = activeGroupId
+					? activeGroupId
+					: inputMode === 'terminal'
 						? activeTerminalTabId || activeTabId
 						: activeFileTabId || activeBrowserTabId || activeTabId;
 				const tabElement = container?.querySelector(
@@ -132,45 +205,110 @@ function TabBarInner({
 		activeFileTabId,
 		activeBrowserTabId,
 		activeTerminalTabId,
+		activeGroupId,
 		inputMode,
 		activeTabName,
 		showUnreadOnly,
 	]);
 
-	// Filter tabs for display
-	const displayedTabs = showUnreadOnly
-		? tabs.filter(
-				(t) =>
-					t.hasUnread ||
-					t.state === 'busy' ||
-					(inputMode === 'ai' && t.id === activeTabId) ||
-					hasDraft(t) ||
-					(showStarredInUnreadFilter && t.starred)
-			)
-		: tabs;
+	// Pan the horizontally-overflowing tab strip with the mouse wheel. A plain
+	// vertical wheel (deltaY) is translated into horizontal scroll, matching the
+	// VS Code convention; trackpads and Shift+wheel emit deltaX, so we follow
+	// whichever axis the device reports. Bound with passive: false because the
+	// handler calls preventDefault(), which passive wheel listeners (the browser
+	// default, and React's synthetic onWheel) are not allowed to do.
+	useEventListener(
+		'wheel',
+		(event) => {
+			const el = tabBarRef.current;
+			if (!el) return;
+			const e = event as WheelEvent;
+			const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+			if (delta === 0) return;
+			// Only claim the event when the strip can actually move in the delta's
+			// direction. At a clamped edge (or with no overflow at all) the wheel
+			// falls through to the surrounding content instead of being swallowed.
+			// The 1px slack absorbs fractional scrollLeft values.
+			const maxScrollLeft = el.scrollWidth - el.clientWidth;
+			const canPan =
+				maxScrollLeft > 0 && (delta > 0 ? el.scrollLeft < maxScrollLeft - 1 : el.scrollLeft > 1);
+			if (!canPan) return;
+			el.scrollLeft += delta;
+			e.preventDefault();
+		},
+		{ target: tabBarRef.current, enabled: tabBarWheelScroll, passive: false }
+	);
+
+	// Filter tabs for display. Memoized so the filter only re-runs when the
+	// inputs actually change - without this, every TabBar render (e.g. on input
+	// keystrokes or unrelated session updates) re-walks the tabs array.
+	const displayedTabs = useMemo(() => {
+		// Window doesn't own this agent: render an empty tab strip (scoped window).
+		if (!ownsActiveAgent) return [];
+		// Hidden consult tabs never get a chip, in either filter state. The unified
+		// path drops them in buildUnifiedTabs; this legacy path has to drop them itself.
+		const visible = visibleAiTabs(tabs);
+		return showUnreadOnly
+			? visible.filter(
+					(t) =>
+						t.hasUnread ||
+						t.state === 'busy' ||
+						stuckTabIds.has(t.id) ||
+						(inputMode === 'ai' && t.id === activeTabId) ||
+						hasDraft(t) ||
+						(showStarredInUnreadFilter && t.starred) ||
+						(queuedTabIds?.has(t.id) ?? false)
+				)
+			: visible;
+	}, [
+		tabs,
+		showUnreadOnly,
+		inputMode,
+		activeTabId,
+		showStarredInUnreadFilter,
+		stuckTabIds,
+		ownsActiveAgent,
+		queuedTabIds,
+	]);
 
 	const displayedUnifiedTabs = useMemo(() => {
 		if (!unifiedTabs) return null;
+		// Window doesn't own this agent: render an empty tab strip (scoped window).
+		if (!ownsActiveAgent) return [];
 		if (!showUnreadOnly) return unifiedTabs;
-		// In filter mode: AI tabs filtered by unread/busy/active/draft;
-		// file and terminal tabs always shown (they have no unread state,
-		// and hiding them causes navigation/display mismatch).
+		// In filter mode: AI tabs filtered by unread/busy/active/draft. File,
+		// terminal and browser tabs have no unread state, so each kind is hidden
+		// unless its opt-in setting is on - the currently active tab of that kind
+		// always stays visible so the user never loses sight of what's on screen.
 		return unifiedTabs.filter((ut) => {
 			if (ut.type === 'ai') {
 				return (
 					ut.data.hasUnread ||
 					ut.data.state === 'busy' ||
+					stuckTabIds.has(ut.id) ||
 					(inputMode === 'ai' && ut.id === activeTabId) ||
 					hasDraft(ut.data) ||
-					(showStarredInUnreadFilter && ut.data.starred)
+					(showStarredInUnreadFilter && ut.data.starred) ||
+					(queuedTabIds?.has(ut.id) ?? false)
 				);
 			}
-			// File preview tabs: hidden by default in unread filter, shown if setting enabled
+			// File preview tabs: hidden by default in unread filter, shown if setting
+			// enabled - but the currently active file tab is always visible so the user
+			// never loses sight of what they're looking at.
 			if (ut.type === 'file') {
-				return showFilePreviewsInUnreadFilter;
+				return showFilePreviewsInUnreadFilter || ut.id === activeFileTabId;
 			}
-			// Terminal tabs are always visible
-			return true;
+			// A tiled group is shown iff any of its collapsed members is unread. The set
+			// is precomputed from the full session (see computeUnreadGroupIds). When it's
+			// absent (not provided), fall back to showing the group.
+			if (ut.type === 'group') {
+				return unreadGroupIds ? unreadGroupIds.has(ut.id) : true;
+			}
+			if (ut.type === 'browser') {
+				return showBrowserTabsInUnreadFilter || ut.id === activeBrowserTabId;
+			}
+			// Terminal tabs
+			return showTerminalTabsInUnreadFilter || ut.id === activeTerminalTabId;
 		});
 	}, [
 		unifiedTabs,
@@ -181,14 +319,51 @@ function TabBarInner({
 		inputMode,
 		showStarredInUnreadFilter,
 		showFilePreviewsInUnreadFilter,
+		ownsActiveAgent,
+		unreadGroupIds,
+		showTerminalTabsInUnreadFilter,
+		showBrowserTabsInUnreadFilter,
+		activeBrowserTabId,
+		stuckTabIds,
+		queuedTabIds,
 	]);
 
+	// Dragging a tab toward either end of an overflowing bar scrolls the bar, so
+	// a reorder can reach tabs that are off screen instead of stopping at the
+	// last visible one. The bands start where the scrolling tabs actually are:
+	// the sticky search/filter cluster and the sticky "+" are painted over them.
+	const dragScrollStartInset = useCallback(() => stickyLeftRef.current?.offsetWidth ?? 0, []);
+	const dragScrollEndInset = useCallback(() => STICKY_RIGHT_WIDTH, []);
+	useDragAutoScroll(tabBarRef, {
+		active: draggingTabId !== null,
+		startInset: dragScrollStartInset,
+		endInset: dragScrollEndInset,
+	});
+
 	// Drag handlers
-	const handleDragStart = useCallback((tabId: string, e: React.DragEvent) => {
-		e.dataTransfer.effectAllowed = 'move';
-		e.dataTransfer.setData('text/plain', tabId);
-		setDraggingTabId(tabId);
-	}, []);
+	const handleDragStart = useCallback(
+		(tabId: string, e: React.DragEvent) => {
+			e.dataTransfer.effectAllowed = 'move';
+			// text/plain (the tab id) drives BOTH the in-bar reorder (onDrop against a
+			// sibling chip) and the multi-window drag-out/dock gesture. Untouched here.
+			e.dataTransfer.setData('text/plain', tabId);
+			// ADD (never replace) the tiling payload so a drop onto the tiled panel can
+			// identify this tab. Resolve the tab's type from the unified list (legacy
+			// mode is AI-only). A GROUP chip is deliberately excluded: a group drags for
+			// strip reordering (via text/plain) but carries no tile payload, so dropping
+			// it onto a tiled panel can't try to nest a group inside another group.
+			const unifiedType = unifiedTabs?.find((ut) => ut.id === tabId)?.type;
+			const ref: UnifiedTabRef | null =
+				unifiedType && unifiedType !== 'group'
+					? { type: unifiedType, id: tabId }
+					: unifiedTabs
+						? null
+						: { type: 'ai', id: tabId };
+			if (ref) writeTabTilePayload(e.dataTransfer, { ref, source: 'tab-bar' });
+			setDraggingTabId(tabId);
+		},
+		[unifiedTabs]
+	);
 
 	const handleDragOver = useCallback(
 		(tabId: string, e: React.DragEvent) => {
@@ -204,15 +379,69 @@ function TabBarInner({
 		setDragOverTabId(null);
 	}, []);
 
+	// Defensive cleanup for a stuck drag highlight. When a chip is dragged out of
+	// the strip and into a tiled group, its ref is pulled from unifiedTabOrder and
+	// the chip unmounts the instant the group takes over - often before the browser
+	// fires `dragend` on the source node, so handleDragEnd never runs and
+	// draggingTabId stays pinned to that id. It then rides along as `opacity-50`
+	// when the tab is later promoted back out (break-apart), leaving the chip
+	// visibly dimmed. Once the dragged tab is no longer in the strip, drop the stale
+	// id so a normal re-render restores full opacity.
+	useEffect(() => {
+		if (!draggingTabId) return;
+		const stillPresent = unifiedTabs
+			? unifiedTabs.some((ut) => ut.id === draggingTabId)
+			: tabs.some((t) => t.id === draggingTabId);
+		if (!stillPresent) {
+			setDraggingTabId(null);
+			setDragOverTabId(null);
+		}
+	}, [draggingTabId, unifiedTabs, tabs]);
+
+	// Promote a tiled pane back to a standalone tab when its title bar is dropped
+	// onto the tab bar. `insertIndex` is the target position in unifiedTabOrder
+	// (append when null). Reuses the pure promote helper (removes the leaf, re-adds
+	// the ref, auto-dissolves the group below two panes). No-op when the payload is
+	// not a pane drag or lacks the group/leaf ids.
+	const promotePaneFromDrag = useCallback(
+		(e: React.DragEvent, targetTabId: string | null): boolean => {
+			const payload = readTabTilePayload(e.dataTransfer);
+			if (!payload || payload.source !== 'pane' || !payload.groupId || !payload.leafId) {
+				return false;
+			}
+			if (!sessionId) return false;
+			const groupId = payload.groupId;
+			const leafId = payload.leafId;
+			updateSessionWith(sessionId, (s) => {
+				// Resolve the landing slot inside the updater, against the order itself:
+				// the chip's position in the STRIP is a different index space (hidden and
+				// tiled tabs keep refs the strip never renders).
+				const idx = targetTabId ? s.unifiedTabOrder.findIndex((r) => r.id === targetTabId) : -1;
+				return promotePaneToStandalone(
+					s,
+					groupId,
+					leafId,
+					idx === -1 ? s.unifiedTabOrder.length : idx
+				);
+			});
+			return true;
+		},
+		[sessionId]
+	);
+
 	const handleDrop = useCallback(
 		(targetTabId: string, e: React.DragEvent) => {
 			e.preventDefault();
+			// A tiled pane dropped onto a chip promotes out at that chip's position.
+			if (promotePaneFromDrag(e, targetTabId)) {
+				setDraggingTabId(null);
+				setDragOverTabId(null);
+				return;
+			}
 			const sourceTabId = e.dataTransfer.getData('text/plain');
 			if (sourceTabId && sourceTabId !== targetTabId) {
 				if (unifiedTabs && onUnifiedTabReorder) {
-					const si = unifiedTabs.findIndex((ut) => ut.id === sourceTabId);
-					const ti = unifiedTabs.findIndex((ut) => ut.id === targetTabId);
-					if (si !== -1 && ti !== -1) onUnifiedTabReorder(si, ti);
+					onUnifiedTabReorder(sourceTabId, targetTabId);
 				} else if (onTabReorder) {
 					const si = tabs.findIndex((t) => t.id === sourceTabId);
 					const ti = tabs.findIndex((t) => t.id === targetTabId);
@@ -222,7 +451,61 @@ function TabBarInner({
 			setDraggingTabId(null);
 			setDragOverTabId(null);
 		},
-		[tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder]
+		[tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder, promotePaneFromDrag]
+	);
+
+	// Drop onto the empty area of the tab bar (not a chip): only reacts to a pane
+	// promote-out (appended to the end of the strip). A plain tab-chip reorder or a
+	// multi-window drag-out is unaffected - those never target the bar background.
+	const handleBarDragOver = useCallback((e: React.DragEvent) => {
+		if (dragHasTabTilePayload(e.dataTransfer)) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = 'move';
+		}
+	}, []);
+
+	const handleBarDrop = useCallback(
+		(e: React.DragEvent) => {
+			// Only handle drops that land on the bar background, not bubbling from a
+			// chip (chips call handleDrop and stop there).
+			if (e.defaultPrevented) return;
+			if (promotePaneFromDrag(e, null)) {
+				e.preventDefault();
+				setDraggingTabId(null);
+				setDragOverTabId(null);
+				return;
+			}
+
+			// A chip released on the bar's own background: the strip's padding, the
+			// gap between two chips, or the empty space past the last one.
+			//
+			// This used to be inert for a defensible reason - the bar had no
+			// `dragover` handler at all, so the browser rejected the drop and the
+			// chip snapped back. Nothing happened, and the cursor said so. Tiling
+			// changed that without meaning to: every tab drag now carries a tile
+			// payload, `handleBarDragOver` accepts anything carrying one, and the
+			// cursor started promising a move that this handler then declined,
+			// because the only thing it knew was promoting a tiled pane.
+			//
+			// A target that advertises a drop has to honour it. Past the last chip
+			// reads as "put it at the end", so that is what it does.
+			const sourceTabId = e.dataTransfer.getData('text/plain');
+			if (!sourceTabId) return;
+			e.preventDefault();
+			if (unifiedTabs && onUnifiedTabReorder) {
+				// "Past the last chip" = dropped onto the last one, dragging forwards,
+				// which lands the tab just past it.
+				const lastId = unifiedTabs[unifiedTabs.length - 1]?.id;
+				if (lastId) onUnifiedTabReorder(sourceTabId, lastId);
+			} else if (onTabReorder) {
+				const si = tabs.findIndex((t) => t.id === sourceTabId);
+				const ti = tabs.length - 1;
+				if (si !== -1 && si !== ti) onTabReorder(si, ti);
+			}
+			setDraggingTabId(null);
+			setDragOverTabId(null);
+		},
+		[promotePaneFromDrag, tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder]
 	);
 
 	const handleRenameRequest = useCallback(
@@ -249,8 +532,9 @@ function TabBarInner({
 	const handleMoveToFirst = useCallback(
 		(tabId: string) => {
 			if (unifiedTabs && onUnifiedTabReorder) {
-				const i = unifiedTabs.findIndex((ut) => ut.id === tabId);
-				if (i > 0) onUnifiedTabReorder(i, 0);
+				// Dropped on the first chip, dragging backwards: lands in its slot.
+				const firstId = unifiedTabs[0]?.id;
+				if (firstId && firstId !== tabId) onUnifiedTabReorder(tabId, firstId);
 			} else if (onTabReorder) {
 				const i = tabs.findIndex((t) => t.id === tabId);
 				if (i > 0) onTabReorder(i, 0);
@@ -262,8 +546,9 @@ function TabBarInner({
 	const handleMoveToLast = useCallback(
 		(tabId: string) => {
 			if (unifiedTabs && onUnifiedTabReorder) {
-				const i = unifiedTabs.findIndex((ut) => ut.id === tabId);
-				if (i >= 0 && i < unifiedTabs.length - 1) onUnifiedTabReorder(i, unifiedTabs.length - 1);
+				// Dropped on the last chip, dragging forwards: lands just past it.
+				const lastId = unifiedTabs[unifiedTabs.length - 1]?.id;
+				if (lastId && lastId !== tabId) onUnifiedTabReorder(tabId, lastId);
 			} else if (onTabReorder) {
 				const i = tabs.findIndex((t) => t.id === tabId);
 				if (i < tabs.length - 1) onTabReorder(i, tabs.length - 1);
@@ -272,17 +557,20 @@ function TabBarInner({
 		[tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder]
 	);
 
-	// Close wrappers — adapt (tabId: string) => () signature for TabBar's parameterless close handlers
+	// Close wrappers - forward the clicked tab id as the pivot so the operation
+	// closes relative to the tab whose menu was used, not whatever happens to be
+	// the active tab. Dropping the id here was the cause of catastrophic
+	// wrong-set closes (e.g. "close tabs to right" closing every other tab).
 	const handleTabCloseOther = useCallback(
-		(_tabId: string) => onCloseOtherTabs?.(),
+		(tabId: string) => onCloseOtherTabs?.(tabId),
 		[onCloseOtherTabs]
 	);
 	const handleTabCloseLeft = useCallback(
-		(_tabId: string) => onCloseTabsLeft?.(),
+		(tabId: string) => onCloseTabsLeft?.(tabId),
 		[onCloseTabsLeft]
 	);
 	const handleTabCloseRight = useCallback(
-		(_tabId: string) => onCloseTabsRight?.(),
+		(tabId: string) => onCloseTabsRight?.(tabId),
 		[onCloseTabsRight]
 	);
 
@@ -293,6 +581,30 @@ function TabBarInner({
 
 	// Shared props computed once for the rendering loop
 	const allTabs = unifiedTabs ?? [];
+
+	// Map of terminal-tab id → display index, ordered by creation time so the
+	// "Terminal N" label reflects the order the user opened them - not the
+	// position in the visual tab strip. Without this, opening a 2nd terminal
+	// while an AI tab is active inserts the new terminal to the LEFT of the
+	// existing one (insertAfterActiveInUnifiedTabOrder), which would otherwise
+	// make the new tab "Terminal 1" and rename the original to "Terminal 2".
+	const terminalIndexById = useMemo(() => {
+		const terminals = allTabs.flatMap((ut) =>
+			ut.type === 'terminal' ? [{ id: ut.id, createdAt: ut.data.createdAt }] : []
+		);
+		terminals.sort((a, b) => a.createdAt - b.createdAt);
+		const map = new Map<string, number>();
+		terminals.forEach((t, idx) => map.set(t.id, idx));
+		return map;
+	}, [allTabs]);
+
+	// Folder-disambiguated display names for file tabs that share a filename.
+	// Computed over all file tabs (not just displayed) so labels stay stable when
+	// the unread filter hides siblings.
+	const fileTabDisplayNames = useMemo(
+		() => buildFileTabDisplayNames(allTabs.flatMap((ut) => (ut.type === 'file' ? [ut.data] : []))),
+		[allTabs]
+	);
 
 	/** Render a separator bar between inactive tabs */
 	const separator = (
@@ -318,6 +630,7 @@ function TabBarInner({
 		isActive,
 		theme,
 		sessionId,
+		sessionAgentSessionId,
 		canClose: true,
 		onSelect: onTabSelect,
 		onClose: onTabClose,
@@ -336,6 +649,7 @@ function TabBarInner({
 			onSummarizeAndContinue && (tab.logs?.length ?? 0) >= 5 ? onSummarizeAndContinue : undefined,
 		onCopyContext: onCopyContext && (tab.logs?.length ?? 0) >= 1 ? onCopyContext : undefined,
 		onExportHtml: onExportHtml || undefined,
+		onSnooze: onSnooze || undefined,
 		onPublishGist:
 			onPublishGist && ghCliAvailable && (tab.logs?.length ?? 0) >= 1 ? onPublishGist : undefined,
 		onMoveToFirst:
@@ -362,14 +676,26 @@ function TabBarInner({
 	return (
 		<div
 			ref={tabBarRef}
-			className="flex items-end gap-0.5 pt-2 border-b overflow-x-auto overflow-y-hidden no-scrollbar"
+			className="chrome-sheen flex items-end gap-0.5 pt-2 border-b overflow-x-auto overflow-y-hidden no-scrollbar transition-shadow duration-150"
 			data-tour="tab-bar"
-			style={{ backgroundColor: theme.colors.bgSidebar, borderColor: theme.colors.border }}
+			// Accept a tiled pane's title-bar drag dropped onto the bar background to
+			// promote it back to a standalone tab. Chip reorder is unaffected (it
+			// targets sibling chips).
+			onDragOver={handleBarDragOver}
+			onDrop={handleBarDrop}
+			style={{
+				backgroundColor: theme.colors.bgSidebar,
+				borderColor: theme.colors.border,
+			}}
 		>
-			{/* Sticky left: search + unread filter */}
+			{/* Sticky left: search + unread filter. It paints an opaque background so
+			    scrolling tabs pass underneath, so it has to carry the bar's own sheen
+			    and reach the bar's top edge (-mt-2 cancels the container's pt-2, and
+			    pt-2 puts the icons back where they were). Without that it reads as a
+			    flat patch with a gradient strip floating above it. */}
 			<div
 				ref={stickyLeftRef}
-				className="sticky left-0 flex items-center shrink-0 pl-2 pr-1 gap-1 self-stretch"
+				className="chrome-sheen sticky left-0 flex items-center shrink-0 -mt-2 pt-2 pl-2 pr-1 gap-1 self-stretch"
 				style={{ backgroundColor: theme.colors.bgSidebar, zIndex: 5 }}
 			>
 				{onOpenTabSearch && (
@@ -377,8 +703,13 @@ function TabBarInner({
 						theme={theme}
 						onSearchTabs={onOpenTabSearch}
 						onSearchMessages={onOpenOutputSearch ?? onOpenTabSearch}
+						onSearchAllTabs={onOpenCrossTabSearch}
 						tabSwitcherKeys={tabShortcuts.tabSwitcher?.keys ?? ['Alt', 'Meta', 't']}
 						searchOutputKeys={shortcuts.searchOutput?.keys ?? ['Meta', 'f']}
+						searchAllTabsKeys={shortcuts.searchAllTabs?.keys ?? ['Alt', 'Meta', 'f']}
+						openTabCount={unifiedTabs?.length ?? tabs.length}
+						onShowSnoozedTabs={openSnoozedTabs}
+						snoozedTabCount={snoozedTabCount}
 					/>
 				)}
 				<button
@@ -395,17 +726,27 @@ function TabBarInner({
 					}
 				>
 					<Bell className="w-4 h-4" />
-					{tabs.some((t) => t.hasUnread) && (
+					{hasUnreadVisibleTab(tabs) && (
 						<div
 							className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full"
 							style={{ backgroundColor: theme.colors.error }}
 						/>
 					)}
 				</button>
+				{leadingSlot && (
+					<span
+						aria-hidden="true"
+						className="mx-0.5 h-4 w-px shrink-0"
+						style={{ backgroundColor: theme.colors.border }}
+					/>
+				)}
+				{leadingSlot}
 			</div>
 
-			{/* Empty state when filter is on but no unread tabs */}
+			{/* Empty state when filter is on but no unread tabs (only for an owned agent;
+				a scoped window with no owned agent renders a plain empty tab area) */}
 			{showUnreadOnly &&
+				ownsActiveAgent &&
 				(displayedUnifiedTabs ? displayedUnifiedTabs.length === 0 : displayedTabs.length === 0) && (
 					<div
 						className="flex items-center px-3 py-1.5 text-xs italic shrink-0 self-center mb-1"
@@ -415,7 +756,7 @@ function TabBarInner({
 					</div>
 				)}
 
-			{/* Tab rendering — unified mode (AI + file + terminal tabs) */}
+			{/* Tab rendering - unified mode (AI + file + terminal tabs) */}
 			{displayedUnifiedTabs
 				? displayedUnifiedTabs.map((unifiedTab, index) => {
 						const isActive = isUnifiedTabActive(
@@ -424,7 +765,8 @@ function TabBarInner({
 							activeFileTabId,
 							activeBrowserTabId,
 							activeTerminalTabId,
-							inputMode
+							inputMode,
+							activeGroupId
 						);
 						const prevTab = index > 0 ? displayedUnifiedTabs[index - 1] : null;
 						const isPrevActive = prevTab
@@ -434,7 +776,8 @@ function TabBarInner({
 									activeFileTabId,
 									activeBrowserTabId,
 									activeTerminalTabId,
-									inputMode
+									inputMode,
+									activeGroupId
 								)
 							: false;
 
@@ -442,7 +785,13 @@ function TabBarInner({
 						const showSeparator = index > 0 && !isActive && !isPrevActive;
 						const isFirstTab = originalIndex === 0;
 						const isLastTab = originalIndex === allTabs.length - 1;
-						const shortcutHint = getShortcutHint(originalIndex, isLastTab, showUnreadOnly);
+						// When the unread filter is active, jump shortcuts (Cmd+N / Cmd+0) operate on
+						// the filtered list - so hints must reflect the displayed position, not the
+						// underlying unifiedTabs index.
+						const isLastDisplayed = index === displayedUnifiedTabs.length - 1;
+						const shortcutHint = showUnreadOnly
+							? getShortcutHint(index, isLastDisplayed, useCmd0AsLastTab)
+							: getShortcutHint(originalIndex, isLastTab, useCmd0AsLastTab);
 
 						if (unifiedTab.type === 'ai') {
 							return (
@@ -480,6 +829,9 @@ function TabBarInner({
 										isDragging={draggingTabId === fileTab.id}
 										isDragOver={dragOverTabId === fileTab.id}
 										registerRef={(el) => registerTabRef(fileTab.id, el)}
+										onRename={onFileTabRename}
+										onSnooze={onSnooze || undefined}
+										onPublishGist={ghCliAvailable ? onPublishFileGist : undefined}
 										onMoveToFirst={
 											!isFirstTab && onUnifiedTabReorder ? handleMoveToFirst : undefined
 										}
@@ -493,14 +845,14 @@ function TabBarInner({
 										tabIndex={originalIndex}
 										colorBlindMode={colorBlindMode}
 										shortcutHint={shortcutHint}
+										sshRemote={sshRemote}
+										displayName={fileTabDisplayNames.get(fileTab.id)}
 									/>
 								</React.Fragment>
 							);
 						} else if (unifiedTab.type === 'terminal') {
 							const terminalTab = unifiedTab.data;
-							const terminalIndex = allTabs
-								.filter((ut) => ut.type === 'terminal')
-								.findIndex((ut) => ut.id === unifiedTab.id);
+							const terminalIndex = terminalIndexById.get(unifiedTab.id) ?? 0;
 							return (
 								<React.Fragment key={unifiedTab.id}>
 									{showSeparator && separator}
@@ -519,6 +871,7 @@ function TabBarInner({
 										isDragging={draggingTabId === terminalTab.id}
 										isDragOver={dragOverTabId === terminalTab.id}
 										registerRef={(el) => registerTabRef(terminalTab.id, el)}
+										onSnooze={onSnooze || undefined}
 										onMoveToFirst={
 											!isFirstTab && onUnifiedTabReorder ? handleMoveToFirst : undefined
 										}
@@ -528,13 +881,17 @@ function TabBarInner({
 										onCloseOtherTabs={onCloseOtherTabs ? handleTabCloseOther : undefined}
 										onCloseTabsLeft={onCloseTabsLeft ? handleTabCloseLeft : undefined}
 										onCloseTabsRight={onCloseTabsRight ? handleTabCloseRight : undefined}
+										onCopyBuffer={onCopyTerminalBuffer}
+										onPublishBufferGist={ghCliAvailable ? onPublishTerminalBufferGist : undefined}
+										onSendBufferToAgent={onSendTerminalBufferToAgent}
+										onConfigureStartupCommand={onTerminalTabConfigureStartupCommand}
 										totalTabs={allTabs.length}
 										tabIndex={originalIndex}
 										shortcutHint={shortcutHint}
 									/>
 								</React.Fragment>
 							);
-						} else {
+						} else if (unifiedTab.type === 'browser') {
 							const browserTab = unifiedTab.data;
 							return (
 								<React.Fragment key={unifiedTab.id}>
@@ -545,6 +902,8 @@ function TabBarInner({
 										theme={theme}
 										onSelect={onBrowserTabSelect || (() => {})}
 										onClose={onBrowserTabClose || (() => {})}
+										onRename={onBrowserTabRename}
+										onResetName={onBrowserTabResetName}
 										onDragStart={handleDragStart}
 										onDragOver={handleDragOver}
 										onDragEnd={handleDragEnd}
@@ -552,6 +911,7 @@ function TabBarInner({
 										isDragging={draggingTabId === browserTab.id}
 										isDragOver={dragOverTabId === browserTab.id}
 										registerRef={(el) => registerTabRef(browserTab.id, el)}
+										onSnooze={onSnooze || undefined}
 										onMoveToFirst={
 											!isFirstTab && onUnifiedTabReorder ? handleMoveToFirst : undefined
 										}
@@ -561,15 +921,53 @@ function TabBarInner({
 										onCloseOtherTabs={onCloseOtherTabs ? handleTabCloseOther : undefined}
 										onCloseTabsLeft={onCloseTabsLeft ? handleTabCloseLeft : undefined}
 										onCloseTabsRight={onCloseTabsRight ? handleTabCloseRight : undefined}
+										onCopyContent={onCopyBrowserContent}
+										onSendContentToAgent={onSendBrowserContentToAgent}
 										totalTabs={allTabs.length}
 										tabIndex={originalIndex}
 										shortcutHint={shortcutHint}
 									/>
 								</React.Fragment>
 							);
+						} else if (unifiedTab.type === 'group') {
+							// A tiled group is one unified tab: render its chip inline at its order
+							// position (so navigation, indexing, and display all agree). Only the
+							// window that owns this agent shows the interactive chip.
+							if (!ownsActiveAgent) return null;
+							return (
+								<React.Fragment key={unifiedTab.id}>
+									{showSeparator && separator}
+									<GroupTabChip
+										group={unifiedTab.data}
+										isActive={isActive}
+										theme={theme}
+										onSelect={(groupId) => onGroupSelect?.(groupId)}
+										onRename={onGroupRename}
+										onSetEmoji={onGroupSetEmoji}
+										onBreakApart={onGroupBreakApart}
+										// Same handler the tab items use: the modal it opens resolves the
+										// id's kind for itself, so a group needs no separate entry point.
+										onSnooze={onSnooze || undefined}
+										onDragStart={handleDragStart}
+										onDragOver={handleDragOver}
+										onDragEnd={handleDragEnd}
+										onDrop={handleDrop}
+										isDragging={draggingTabId === unifiedTab.id}
+										isDragOver={dragOverTabId === unifiedTab.id}
+										registerRef={(el) => registerTabRef(unifiedTab.id, el)}
+										onMoveToFirst={
+											!isFirstTab && onUnifiedTabReorder ? handleMoveToFirst : undefined
+										}
+										onMoveToLast={!isLastTab && onUnifiedTabReorder ? handleMoveToLast : undefined}
+										isFirstTab={isFirstTab}
+										isLastTab={isLastTab}
+									/>
+								</React.Fragment>
+							);
 						}
+						return null;
 					})
-				: /* Legacy mode — AI tabs only */
+				: /* Legacy mode - AI tabs only */
 					displayedTabs.map((tab, index) => {
 						const isActive = tab.id === activeTabId && !activeFileTabId;
 						const prevTab = index > 0 ? displayedTabs[index - 1] : null;
@@ -578,7 +976,11 @@ function TabBarInner({
 						const showSeparator = index > 0 && !isActive && !isPrevActive;
 						const isFirstTab = originalIndex === 0;
 						const isLastTab = originalIndex === tabs.length - 1;
-						const shortcutHint = getShortcutHint(originalIndex, isLastTab, showUnreadOnly);
+						// Legacy mode: displayedTabs is the filtered list when unread filter is on.
+						const isLastDisplayed = index === displayedTabs.length - 1;
+						const shortcutHint = showUnreadOnly
+							? getShortcutHint(index, isLastDisplayed, useCmd0AsLastTab)
+							: getShortcutHint(originalIndex, isLastTab, useCmd0AsLastTab);
 
 						return (
 							<React.Fragment key={tab.id}>
@@ -599,13 +1001,23 @@ function TabBarInner({
 						);
 					})}
 
+			{/* Tab group chips render inline within the unified tab loop above (each
+			    tiled group is a first-class `group` unified tab, ordered by its ref in
+			    unifiedTabOrder), so no separate append here. */}
+
+			{/* Trailing plugin actions are host-rendered controls, never tab chips. */}
+			<PluginUiItemsSlot surface="tabBar" className="shrink-0 self-center mb-1" />
+
 			{/* New tab button + popover */}
 			<NewTabPopover
 				theme={theme}
 				onNewTab={onNewTab}
+				onNewFileTab={onNewFileTab}
 				onNewBrowserTab={onNewBrowserTab}
 				onNewTerminalTab={onNewTerminalTab}
 				newTabKeys={tabShortcuts.newTab?.keys ?? ['Meta', 't']}
+				fileTabKeys={tabShortcuts.newFileTab?.keys ?? ['Alt', 'n']}
+				browserTabKeys={tabShortcuts.newBrowserTab?.keys ?? ['Meta', 'b']}
 				terminalKeys={shortcuts.toggleMode?.keys ?? ['Meta', 'j']}
 				isOverflowing={isOverflowing}
 			/>

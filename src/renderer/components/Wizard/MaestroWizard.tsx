@@ -14,11 +14,13 @@ import {
 	INDEX_TO_STEP,
 	type WizardStep,
 } from './WizardContext';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { WizardExitConfirmModal } from './WizardExitConfirmModal';
 import { ScreenReaderAnnouncement } from './ScreenReaderAnnouncement';
 import type { Theme } from '../../types';
+import { ResizeHandles } from '../ui/ResizeHandles';
 
 /**
  * Selector for all focusable elements within a container
@@ -111,8 +113,6 @@ export function MaestroWizard({
 		getCurrentStepNumber,
 	} = useWizard();
 
-	const { registerLayer, unregisterLayer } = useLayerStack();
-
 	// State for exit confirmation modal
 	const [showExitConfirm, setShowExitConfirm] = useState(false);
 
@@ -168,8 +168,8 @@ export function MaestroWizard({
 	/**
 	 * Handle confirmed exit - saves state and closes wizard
 	 */
-	const handleConfirmExit = useCallback(() => {
-		saveStateForResumeRef.current();
+	const handleConfirmExit = useCallback(async () => {
+		await saveStateForResumeRef.current();
 		setShowExitConfirm(false);
 		// Record wizard abandonment for analytics
 		if (onWizardAbandon) {
@@ -188,8 +188,8 @@ export function MaestroWizard({
 	/**
 	 * Handle quit without saving - clears state, resets wizard, and closes
 	 */
-	const handleQuitWithoutSaving = useCallback(() => {
-		clearResumeStateRef.current();
+	const handleQuitWithoutSaving = useCallback(async () => {
+		await clearResumeStateRef.current();
 		resetWizardRef.current(); // Reset in-memory state so next open starts fresh
 		setShowExitConfirm(false);
 		// Record wizard abandonment for analytics
@@ -275,20 +275,9 @@ export function MaestroWizard({
 	}, [state.isOpen, displayedStep, isTransitioning]);
 
 	// Register with layer stack for Escape handling
-	useEffect(() => {
-		if (state.isOpen && !showExitConfirm) {
-			const id = registerLayer({
-				type: 'modal',
-				priority: MODAL_PRIORITIES.WIZARD,
-				blocksLowerLayers: true,
-				capturesFocus: true,
-				focusTrap: 'strict',
-				ariaLabel: 'Setup Wizard',
-				onEscape: handleCloseRequest,
-			});
-			return () => unregisterLayer(id);
-		}
-	}, [state.isOpen, showExitConfirm, registerLayer, unregisterLayer, handleCloseRequest]);
+	useModalLayer(MODAL_PRIORITIES.WIZARD, 'Setup Wizard', handleCloseRequest, {
+		enabled: state.isOpen && !showExitConfirm,
+	});
 
 	// Capture-phase handler for global shortcuts that should work anywhere in the modal
 	// This ensures Cmd+Shift+K (thinking toggle) works even when focus is on header elements
@@ -403,7 +392,7 @@ export function MaestroWizard({
 			case 'agent-selection':
 				return <AgentSelectionScreen theme={theme} />;
 			case 'directory-selection':
-				return <DirectorySelectionScreen theme={theme} />;
+				return <DirectorySelectionScreen theme={theme} onLaunchSession={onLaunchSession} />;
 			case 'conversation':
 				return (
 					<ConversationScreen
@@ -427,6 +416,13 @@ export function MaestroWizard({
 				return null;
 		}
 	}, [displayedStep, theme, onLaunchSession, onWizardComplete, showThinking]);
+	const resizableModal = useResizableModal({
+		resizeKey: 'wizard',
+		defaultSize: { width: 1200, height: 760 },
+		minSize: { width: 760, height: 500 },
+		enabled: state.isOpen,
+		externalRef: modalRef,
+	});
 
 	// Don't render if wizard is not open
 	if (!state.isOpen) {
@@ -456,15 +452,24 @@ export function MaestroWizard({
 
 			<div
 				ref={modalRef}
-				className="w-[1200px] max-w-[95vw] h-[85vh] rounded-xl border shadow-2xl flex flex-col overflow-hidden wizard-modal"
+				className="relative rounded-xl border shadow-2xl flex flex-col overflow-hidden wizard-modal"
 				style={{
+					...resizableModal.style,
 					backgroundColor: theme.colors.bgMain,
 					borderColor: theme.colors.border,
 				}}
+				data-modal-resize-key="wizard"
 				role="dialog"
 				aria-modal="true"
 				aria-labelledby="wizard-title"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div
 					className="flex items-center justify-between px-6 py-4 border-b wizard-header"
@@ -548,7 +553,7 @@ export function MaestroWizard({
 										goToStep(targetStep);
 									}
 								}}
-								className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-offset-1"
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-offset-1"
 								style={{
 									color: theme.colors.textDim,
 									['--tw-ring-color' as any]: theme.colors.accent,
@@ -557,7 +562,7 @@ export function MaestroWizard({
 								title="Go back"
 								aria-label="Go back to previous step"
 							>
-								<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path
 										strokeLinecap="round"
 										strokeLinejoin="round"

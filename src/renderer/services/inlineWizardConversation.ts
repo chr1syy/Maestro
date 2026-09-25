@@ -10,15 +10,51 @@
  */
 
 import type { ToolType, ProcessConfig } from '../types';
-import type { InlineWizardMessage } from '../hooks/batch/useInlineWizard';
+import type { InlineWizardMessage } from '../hooks/batch/inlineWizard/types';
 import type { ExistingDocument as BaseExistingDocument } from '../utils/existingDocsDetector';
 import { logger } from '../utils/logger';
-import { getStdinFlags } from '../utils/spawnHelpers';
-import { wizardInlineIteratePrompt, wizardInlineNewPrompt } from '../../prompts';
+import { extractGrokTextFromJsonl, GROK_WIZARD_DISCOVERY_ARGS } from '../utils/grokWizard';
 import {
 	parseStructuredOutput,
 	getConfidenceColor,
 } from '../components/Wizard/services/wizardPrompts';
+
+let cachedWizardInlineIteratePrompt: string | null = null;
+let cachedWizardInlineNewPrompt: string | null = null;
+let inlineWizardConversationPromptsLoaded = false;
+
+export async function loadInlineWizardConversationPrompts(force = false): Promise<void> {
+	if (inlineWizardConversationPromptsLoaded && !force) return;
+
+	const [iterateResult, newResult] = await Promise.all([
+		window.maestro.prompts.get('wizard-inline-iterate'),
+		window.maestro.prompts.get('wizard-inline-new'),
+	]);
+
+	if (!iterateResult.success) {
+		throw new Error(`Failed to load wizard-inline-iterate prompt: ${iterateResult.error}`);
+	}
+	if (!newResult.success) {
+		throw new Error(`Failed to load wizard-inline-new prompt: ${newResult.error}`);
+	}
+	cachedWizardInlineIteratePrompt = iterateResult.content!;
+	cachedWizardInlineNewPrompt = newResult.content!;
+	inlineWizardConversationPromptsLoaded = true;
+}
+
+function getWizardInlineIteratePrompt(): string {
+	if (!inlineWizardConversationPromptsLoaded || cachedWizardInlineIteratePrompt === null) {
+		return '';
+	}
+	return cachedWizardInlineIteratePrompt;
+}
+
+function getWizardInlineNewPrompt(): string {
+	if (!inlineWizardConversationPromptsLoaded || cachedWizardInlineNewPrompt === null) {
+		return '';
+	}
+	return cachedWizardInlineNewPrompt;
+}
 
 /**
  * Extended ExistingDocument interface that includes loaded content.
@@ -55,6 +91,12 @@ export interface WizardResponse {
 	ready: boolean;
 	/** The agent's message to display to the user */
 	message: string;
+	/**
+	 * Short human-readable name for the playbook (e.g. "HTML Chat Interface"),
+	 * extracted from the agent's JSON. Optional - older prompts may omit it,
+	 * and the wizard falls back to the session name when absent.
+	 */
+	projectName?: string;
 }
 
 /**
@@ -176,10 +218,13 @@ export const READY_CONFIDENCE_THRESHOLD = 80;
 
 /**
  * Suffix appended to each user message to remind the agent about JSON format.
+ * Keep discovery turns bounded: unbounded tool loops (especially agents that emit
+ * no tool events on stdout, like Grok) leave the wizard UI stuck on the last
+ * thought/text with isWaiting true until the process finally exits.
  */
 const STRUCTURED_OUTPUT_SUFFIX = `
 
-IMPORTANT: Remember to respond ONLY with valid JSON in this exact format:
+IMPORTANT: This is a discovery conversation. You may read files or fetch issue/docs URLs to scope the work, but do not implement changes or run long multi-step builds. Prefer short clarifying questions when context is thin. End every turn with ONLY valid JSON in this exact format:
 {"confidence": <0-100>, "ready": <true/false>, "message": "<your response>"}`;
 
 /**
@@ -201,10 +246,10 @@ export function generateInlineWizardPrompt(config: InlineWizardConversationConfi
 	// Select the base prompt based on mode
 	let basePrompt: string;
 	if (mode === 'iterate') {
-		basePrompt = wizardInlineIteratePrompt;
+		basePrompt = getWizardInlineIteratePrompt();
 	} else {
 		// 'new' mode uses the new plan prompt
-		basePrompt = wizardInlineNewPrompt;
+		basePrompt = getWizardInlineNewPrompt();
 	}
 
 	// Handle wizard-specific variables that have different semantics from the central template system
@@ -349,6 +394,7 @@ export function parseWizardResponse(response: string): WizardResponse | null {
 			confidence: result.structured.confidence,
 			ready: result.structured.ready && result.structured.confidence >= READY_CONFIDENCE_THRESHOLD,
 			message: result.structured.message,
+			projectName: result.structured.projectName,
 		};
 	}
 
@@ -358,6 +404,7 @@ export function parseWizardResponse(response: string): WizardResponse | null {
 			confidence: result.structured.confidence,
 			ready: result.structured.ready && result.structured.confidence >= READY_CONFIDENCE_THRESHOLD,
 			message: result.structured.message,
+			projectName: result.structured.projectName,
 		};
 	}
 
@@ -365,9 +412,8 @@ export function parseWizardResponse(response: string): WizardResponse | null {
 }
 
 /**
- * Extract the agent session ID (session_id) from Claude Code JSON output.
- * This is the Claude-side session ID that can be used to resume the session.
- * Returns the first session_id found in init or result messages.
+ * Extract the provider session ID from agent JSON output.
+ * Returns the first session identifier found in init or result-style messages.
  */
 function extractAgentSessionIdFromOutput(output: string): string | null {
 	try {
@@ -376,9 +422,14 @@ function extractAgentSessionIdFromOutput(output: string): string | null {
 			if (!line.trim()) continue;
 			try {
 				const msg = JSON.parse(line);
-				// session_id appears in init and result messages
 				if (msg.session_id) {
 					return msg.session_id;
+				}
+				if (msg.sessionId) {
+					return msg.sessionId;
+				}
+				if (msg.data?.sessionId) {
+					return msg.data.sessionId;
 				}
 			} catch {
 				// Ignore non-JSON lines
@@ -392,7 +443,7 @@ function extractAgentSessionIdFromOutput(output: string): string | null {
 
 /**
  * Extract the result text from agent JSON output.
- * Handles different agent output formats (Claude Code stream-json, etc.)
+ * Handles different agent output formats (Claude Code, Copilot, OpenCode, Codex, Grok).
  */
 function extractResultFromStreamJson(output: string, agentType: ToolType): string | null {
 	try {
@@ -443,6 +494,29 @@ function extractResultFromStreamJson(output: string, agentType: ToolType): strin
 			}
 		}
 
+		// For Grok: concatenate text deltas only (skip thought/reasoning deltas).
+		// The `end` event has sessionId but no result body, so the full answer is
+		// only available by joining {"type":"text","data":"..."} lines.
+		if (agentType === 'grok') {
+			const grokText = extractGrokTextFromJsonl(lines);
+			if (grokText) return grokText;
+		}
+
+		// For Copilot: final answers arrive as assistant.message with phase=final_answer
+		if (agentType === 'copilot-cli') {
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				try {
+					const msg = JSON.parse(line);
+					if (msg.type === 'assistant.message' && msg.data?.phase === 'final_answer') {
+						return typeof msg.data?.content === 'string' ? msg.data.content : null;
+					}
+				} catch {
+					// Ignore non-JSON lines
+				}
+			}
+		}
+
 		// For Claude Code: look for result message
 		for (const line of lines) {
 			if (!line.trim()) continue;
@@ -490,7 +564,7 @@ function buildArgsForAgent(agent: any): string[] {
 		}
 
 		case 'codex': {
-			// Return only base args — the IPC handler's buildAgentArgs() adds
+			// Return only base args - the IPC handler's buildAgentArgs() adds
 			// batchModePrefix, batchModeArgs, jsonOutputArgs, and workingDirArgs
 			// automatically when a prompt is present. Adding them here would
 			// duplicate flags and cause "unexpected argument" exit code 2.
@@ -508,6 +582,22 @@ function buildArgsForAgent(agent: any): string[] {
 				args.push(...agent.readOnlyArgs);
 			}
 
+			return args;
+		}
+
+		case 'copilot-cli': {
+			const args = [...(agent.args || [])];
+			if (agent.readOnlyArgs) {
+				args.push(...agent.readOnlyArgs);
+			}
+			return args;
+		}
+
+		case 'grok': {
+			// Shared discovery caps (always-approve, max-turns, no-subagents).
+			// Leave batch/json/cwd/prompt out - IPC buildAgentArgs adds those.
+			const args = [...(agent.args || [])];
+			args.push(...GROK_WIZARD_DISCOVERY_ARGS);
 			return args;
 		}
 
@@ -579,20 +669,6 @@ export async function sendWizardMessage(
 
 		// Build args for the agent
 		const argsForSpawn = agent ? buildArgsForAgent(agent) : [];
-
-		const { sendPromptViaStdin: sendViaStdin, sendPromptViaStdinRaw: sendViaStdinRaw } =
-			getStdinFlags({
-				isSshSession: !!session.sessionSshRemoteConfig?.enabled,
-				supportsStreamJsonInput: agent?.capabilities?.supportsStreamJsonInput ?? false,
-				hasImages: false, // Inline wizard never sends images
-			});
-		logger.info(`Using stdin for Windows`, '[InlineWizardConversation]', {
-			sessionId: session.sessionId,
-			platform: navigator.platform,
-			promptLength: fullPrompt.length,
-			sendViaStdin,
-			sendViaStdinRaw,
-		});
 
 		// Spawn agent and collect output
 		const result = await new Promise<InlineWizardSendResult>((resolve) => {
@@ -729,29 +805,26 @@ export async function sendWizardMessage(
 						// Extract the Claude agent session ID from output (for resume capability)
 						const agentSessionId = extractAgentSessionIdFromOutput(outputBuffer);
 
-						if (code === 0) {
-							// Extract result from stream-json format
-							const extractedResult = extractResultFromStreamJson(outputBuffer, session.agentType);
-							const textToParse = extractedResult || outputBuffer;
+						// Prefer a parseable structured reply even on non-zero exit
+						// (e.g. Grok `--max-turns` can exit 1 after useful text).
+						const extractedResult = extractResultFromStreamJson(outputBuffer, session.agentType);
+						const textToParse = extractedResult || outputBuffer;
+						const parsedResponse = textToParse.trim() ? parseWizardResponse(textToParse) : null;
 
-							// Parse the wizard response
-							const parsedResponse = parseWizardResponse(textToParse);
-
-							if (parsedResponse) {
-								resolve({
-									success: true,
-									response: parsedResponse,
-									rawOutput: outputBuffer,
-									agentSessionId: agentSessionId || undefined,
-								});
-							} else {
-								resolve({
-									success: false,
-									error: 'Failed to parse agent response',
-									rawOutput: outputBuffer,
-									agentSessionId: agentSessionId || undefined,
-								});
-							}
+						if (parsedResponse) {
+							resolve({
+								success: true,
+								response: parsedResponse,
+								rawOutput: outputBuffer,
+								agentSessionId: agentSessionId || undefined,
+							});
+						} else if (code === 0) {
+							resolve({
+								success: false,
+								error: 'Failed to parse agent response',
+								rawOutput: outputBuffer,
+								agentSessionId: agentSessionId || undefined,
+							});
 						} else {
 							resolve({
 								success: false,
@@ -778,7 +851,6 @@ export async function sendWizardMessage(
 				agentCommand: agent?.command,
 				cwd: session.directoryPath,
 				historyLength: conversationHistory.length,
-				sendViaStdin,
 				hasAgent: !!agent,
 				isRemote: isRemoteSession,
 			});
@@ -791,10 +863,6 @@ export async function sendWizardMessage(
 					command: commandToUse,
 					args: argsForSpawn,
 					prompt: fullPrompt,
-					// For stream-json agents (Claude Code, Codex): use JSON format via stdin
-					// For other agents (OpenCode, etc.): use raw text via stdin
-					sendPromptViaStdin: sendViaStdin,
-					sendPromptViaStdinRaw: sendViaStdinRaw,
 					// Pass SSH config for remote execution
 					sessionSshRemoteConfig: session.sessionSshRemoteConfig,
 					// Pass session-level overrides

@@ -6,7 +6,7 @@
  *
  * Each Maestro instance writes to its own file (history-<hostname>.jsonl) and
  * reads from all other files when loading history. This avoids write conflicts
- * entirely — each hostname owns its file exclusively.
+ * entirely - each hostname owns its file exclusively.
  *
  * File format: one JSON object per line (JSONL), append-only.
  */
@@ -19,12 +19,74 @@ import { captureException } from './utils/sentry';
 import { SHARED_HISTORY_DIR } from '../shared/maestro-paths';
 import { MAX_ENTRIES_PER_SESSION } from '../shared/history';
 import type { HistoryEntry, SshRemoteConfig } from '../shared/types';
-import { readFileRemote, writeFileRemote, readDirRemote, mkdirRemote } from './utils/remote-fs';
+import {
+	readFileRemote,
+	writeFileRemote,
+	mkdirRemote,
+	listDirWithStatsRemote,
+} from './utils/remote-fs';
 
 const LOG_CONTEXT = '[SharedHistory]';
 
-/** Cached hostname — resolved once per process */
+/** Cached hostname - resolved once per process */
 const LOCAL_HOSTNAME = os.hostname();
+
+/**
+ * Node fs error codes we expect from a best-effort write into a user-chosen
+ * project directory. The location may be permission-restricted (read-only
+ * Dropbox / CloudStorage team folders), read-only, or simply not exist. These
+ * are environmental, never a Maestro bug, so we keep the local warn but skip
+ * Sentry to avoid telemetry noise (MAESTRO-FM).
+ */
+const EXPECTED_FS_ERROR_CODES = new Set([
+	'EACCES',
+	'EPERM',
+	'EROFS',
+	'ENOENT',
+	'ENOTDIR',
+	'ENOSPC',
+]);
+
+function isExpectedFsError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return typeof code === 'string' && EXPECTED_FS_ERROR_CODES.has(code);
+}
+
+/**
+ * Per-file cache of parsed shared-history entries keyed by `(host, dir, filename)`.
+ *
+ * SSH-shared history reads were dominated by re-fetching every JSONL file on
+ * every navigation: each panel mount fired a fresh `readRemoteEntriesSsh()`
+ * which spawned one SSH call to list the directory plus N more to `cat` each
+ * file in full. With this cache, navigation back to an SSH-backed agent costs
+ * exactly one bulk-stat SSH call (`listDirWithStatsRemote`), and the file
+ * reads are skipped for any file whose `(size, mtime)` matches the prior
+ * fetch. Appends and rewrites both change either size or mtime, so genuine
+ * updates are picked up on the next call without manual invalidation.
+ *
+ * The local fs path is fast enough not to need this, but uses the same map
+ * for symmetry / readability.
+ */
+interface CachedSharedFile {
+	size: number;
+	mtime: number;
+	entries: HistoryEntry[];
+}
+const sharedFileCache = new Map<string, CachedSharedFile>();
+
+function sharedCacheKey(scope: string, dir: string, filename: string): string {
+	return `${scope}|${dir}|${filename}`;
+}
+
+function sshScopeKey(sshRemote: SshRemoteConfig): string {
+	const user = sshRemote.username?.trim() || '';
+	return `ssh:${user}@${sshRemote.host}:${sshRemote.port}`;
+}
+
+/** Test-only: clear the shared-history file cache between cases. */
+export function __resetSharedHistoryCacheForTest(): void {
+	sharedFileCache.clear();
+}
 
 /**
  * Build the JSONL filename for a given hostname.
@@ -93,7 +155,34 @@ export function writeEntryLocal(
 		logger.debug(`Wrote shared history entry to ${filePath}`, LOG_CONTEXT);
 	} catch (error) {
 		logger.warn(`Failed to write local shared history: ${error}`, LOG_CONTEXT);
-		captureException(error, { operation: 'sharedHistory:writeLocal', projectPath });
+		// Best-effort cross-host sync write - the primary history store is
+		// unaffected when this fails. Don't report expected filesystem errors
+		// (permission-denied / missing-path on a user-chosen project dir) to
+		// Sentry; only surface genuinely unexpected failures (MAESTRO-FM).
+		if (!isExpectedFsError(error)) {
+			captureException(error, { operation: 'sharedHistory:writeLocal', projectPath });
+		}
+	}
+}
+
+/**
+ * Cheap probe: does this project's local `.maestro/history/` directory
+ * contain any JSONL files from hosts OTHER than the running machine?
+ * Used by the history IPC handler to decide whether to bypass the
+ * bucket-aggregate cache (the cache only fingerprints the per-session
+ * file, so merged shared entries would otherwise be invisible to it).
+ */
+export function hasLocalSharedHistory(projectPath: string): boolean {
+	try {
+		const dir = path.join(projectPath, SHARED_HISTORY_DIR);
+		if (!fs.existsSync(dir)) return false;
+		const ownFilename = historyFilename(LOCAL_HOSTNAME);
+		const files = fs
+			.readdirSync(dir)
+			.filter((f) => f.startsWith('history-') && f.endsWith('.jsonl') && f !== ownFilename);
+		return files.length > 0;
+	} catch {
+		return false;
 	}
 }
 
@@ -132,10 +221,12 @@ export function readRemoteEntriesLocal(
 					entries.length > maxEntries ? entries.slice(entries.length - maxEntries) : entries;
 				allEntries.push(...trimmed);
 			} catch (error) {
+				void captureException(error);
 				logger.warn(`Failed to read shared history file ${file}: ${error}`, LOG_CONTEXT);
 			}
 		}
 	} catch (error) {
+		void captureException(error);
 		logger.warn(`Failed to list shared history directory: ${error}`, LOG_CONTEXT);
 	}
 
@@ -198,44 +289,67 @@ export async function readRemoteEntriesSsh(
 ): Promise<HistoryEntry[]> {
 	try {
 		const remoteDir = `${remoteCwd}/${SHARED_HISTORY_DIR}`;
-		const dirResult = await readDirRemote(remoteDir, sshRemote);
 
-		if (!dirResult.success || !dirResult.data) {
-			// Directory doesn't exist yet — no shared history
+		// One SSH round-trip: list every *.jsonl in the dir with size + mtime.
+		// `listDirWithStatsRemote` returns regular files only (skipping subdirs
+		// and symlinks), so we don't need a separate isDirectory filter.
+		const statsResult = await listDirWithStatsRemote(remoteDir, sshRemote, {
+			nameSuffix: '.jsonl',
+		});
+		if (!statsResult.success || !statsResult.data) {
+			// Directory doesn't exist yet - no shared history
 			return [];
 		}
 
 		const ownFilename = historyFilename(LOCAL_HOSTNAME);
-		const historyFiles = dirResult.data.filter(
+		const historyFiles = statsResult.data.filter(
 			(entry) =>
 				entry.name.startsWith('history-') &&
 				entry.name.endsWith('.jsonl') &&
-				!entry.isDirectory &&
 				entry.name !== ownFilename
 		);
 
+		const scope = sshScopeKey(sshRemote);
 		const allEntries: HistoryEntry[] = [];
 
 		for (const file of historyFiles) {
-			try {
-				const fileResult = await readFileRemote(`${remoteDir}/${file.name}`, sshRemote);
-				if (fileResult.success && fileResult.data) {
+			const cacheKey = sharedCacheKey(scope, remoteDir, file.name);
+			const cached = sharedFileCache.get(cacheKey);
+
+			let entries: HistoryEntry[];
+			if (cached && cached.size === file.size && cached.mtime === file.mtime) {
+				entries = cached.entries;
+			} else {
+				try {
+					const fileResult = await readFileRemote(`${remoteDir}/${file.name}`, sshRemote);
+					if (!fileResult.success || fileResult.data === undefined) {
+						continue;
+					}
 					const hostname = file.name.replace(/^history-/, '').replace(/\.jsonl$/, '');
-					const entries = parseJsonl(fileResult.data, hostname);
-					const trimmed =
-						entries.length > maxEntries ? entries.slice(entries.length - maxEntries) : entries;
-					allEntries.push(...trimmed);
+					entries = parseJsonl(fileResult.data, hostname);
+					sharedFileCache.set(cacheKey, {
+						size: file.size,
+						mtime: file.mtime,
+						entries,
+					});
+				} catch (error) {
+					void captureException(error);
+					logger.warn(
+						`Failed to read remote shared history file ${file.name}: ${error}`,
+						LOG_CONTEXT
+					);
+					continue;
 				}
-			} catch (error) {
-				logger.warn(
-					`Failed to read remote shared history file ${file.name}: ${error}`,
-					LOG_CONTEXT
-				);
 			}
+
+			const trimmed =
+				entries.length > maxEntries ? entries.slice(entries.length - maxEntries) : entries;
+			allEntries.push(...trimmed);
 		}
 
 		return allEntries;
 	} catch (error) {
+		void captureException(error);
 		logger.warn(`Failed to read remote shared history: ${error}`, LOG_CONTEXT);
 		return [];
 	}
@@ -263,6 +377,7 @@ function rotateLocalFile(filePath: string, maxEntries: number): void {
 			LOG_CONTEXT
 		);
 	} catch (error) {
+		void captureException(error);
 		logger.warn(`Failed to rotate shared history file: ${error}`, LOG_CONTEXT);
 	}
 }

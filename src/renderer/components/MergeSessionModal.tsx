@@ -16,15 +16,20 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import { Search, ChevronRight, ChevronDown, GitMerge, Clipboard, Check, X } from 'lucide-react';
+import { GhostIconButton } from './ui/GhostIconButton';
 import type { Theme, Session } from '../types';
 import type { MergeResult } from '../types/contextMerge';
 import { fuzzyMatchWithScore } from '../utils/search';
-import { useLayerStack } from '../contexts/LayerStackContext';
+import { useModalLayer } from '../hooks/ui/useModalLayer';
+import { useResizableModal } from '../hooks/ui/useResizableModal';
 import { useListNavigation } from '../hooks';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { formatTokensCompact } from '../utils/formatters';
+import { estimateTokensFromLogs } from '../../shared/formatters';
 import { ScreenReaderAnnouncement, useAnnouncement } from './Wizard/ScreenReaderAnnouncement';
-import { getTabDisplayName } from '../utils/tabHelpers';
+import { getTabDisplayName, visibleAiTabs } from '../utils/tabHelpers';
+import { logger } from '../utils/logger';
+import { ResizeHandles } from './ui/ResizeHandles';
 
 /**
  * View modes for the modal
@@ -76,30 +81,13 @@ export interface MergeSessionModalProps {
 	) => Promise<MergeResult>;
 }
 
-/**
- * Estimate token count from log entries
- * Uses a simple heuristic: ~4 characters per token (average for English text)
- */
-function estimateTokens(logs: { text: string }[]): number {
-	const totalChars = logs.reduce((sum, log) => sum + (log.text?.length || 0), 0);
-	return Math.round(totalChars / 4);
-}
+const estimateTokens = estimateTokensFromLogs;
 
 /**
  * Animated token display component that highlights when value changes
  */
 const AnimatedTokenCount = memo(
-	({
-		tokens,
-		accentColor,
-		textColor,
-		prefix = '~',
-	}: {
-		tokens: number;
-		accentColor: string;
-		textColor: string;
-		prefix?: string;
-	}) => {
+	({ tokens, textColor, prefix = '~' }: { tokens: number; textColor: string; prefix?: string }) => {
 		const [animating, setAnimating] = useState(false);
 		const prevTokensRef = useRef(tokens);
 
@@ -119,7 +107,6 @@ const AnimatedTokenCount = memo(
 				style={
 					{
 						color: textColor,
-						'--token-highlight': accentColor,
 						display: 'inline-block',
 					} as React.CSSProperties
 				}
@@ -182,7 +169,6 @@ export function MergeSessionModal({
 
 	// Refs
 	const inputRef = useRef<HTMLInputElement>(null);
-	const layerIdRef = useRef<string>();
 	const onCloseRef = useRef(onClose);
 	const scrollContainerRef = useRef<HTMLDivElement>(null);
 	const selectedItemRef = useRef<HTMLButtonElement>(null);
@@ -192,35 +178,13 @@ export function MergeSessionModal({
 		onCloseRef.current = onClose;
 	});
 
-	const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-
 	// Register layer on mount
-	useEffect(() => {
-		if (!isOpen) return;
-
-		layerIdRef.current = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.MERGE_SESSION,
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			ariaLabel: 'Merge Session Contexts',
-			onEscape: () => onCloseRef.current(),
-		});
-
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [isOpen, registerLayer, unregisterLayer]);
-
-	// Update handler when onClose changes
-	useEffect(() => {
-		if (layerIdRef.current) {
-			updateLayerHandler(layerIdRef.current, () => onCloseRef.current());
-		}
-	}, [updateLayerHandler]);
+	useModalLayer(
+		MODAL_PRIORITIES.MERGE_SESSION,
+		'Merge Session Contexts',
+		() => onCloseRef.current(),
+		{ enabled: isOpen }
+	);
 
 	// Focus input on mount
 	useEffect(() => {
@@ -251,8 +215,13 @@ export function MergeSessionModal({
 		}
 
 		for (const session of allSessions) {
+			// Hidden cross-agent consult tabs are not transfer targets: they have no
+			// chip, so picking one would move the user's context into a conversation
+			// they can't see.
+			const sessionTabs = visibleAiTabs(session.aiTabs);
+
 			// Add session tabs (if it has tabs)
-			if (session.aiTabs.length > 0) {
+			if (sessionTabs.length > 0) {
 				// Build display name - prefix worktree children with parent name
 				let displayName = getSessionDisplayName(session);
 				if (session.parentSessionId) {
@@ -262,7 +231,7 @@ export function MergeSessionModal({
 					}
 				}
 
-				for (const tab of session.aiTabs) {
+				for (const tab of sessionTabs) {
 					// Skip the source tab itself (but allow other tabs in same session)
 					if (session.id === sourceSession.id && tab.id === sourceTabId) continue;
 
@@ -456,7 +425,7 @@ export function MergeSessionModal({
 			await onMerge(target.sessionId, target.tabId, options);
 			onClose();
 		} catch (error) {
-			console.error('Merge failed:', error);
+			logger.error('Merge failed:', undefined, error);
 		} finally {
 			setIsMerging(false);
 		}
@@ -564,12 +533,18 @@ export function MergeSessionModal({
 		if (viewMode === 'paste') return pastedIdValid && pastedIdMatch !== null;
 		return selectedTarget !== null;
 	}, [viewMode, pastedIdValid, pastedIdMatch, selectedTarget, isMerging]);
+	const resizableModal = useResizableModal({
+		resizeKey: 'merge-session',
+		defaultSize: { width: 680, height: 720 },
+		minSize: { width: 500, height: 360 },
+		enabled: isOpen,
+	});
 
 	if (!isOpen) return null;
 
 	return (
 		<div
-			className="fixed inset-0 modal-overlay flex items-start justify-center pt-16 z-[9999] animate-in"
+			className="fixed inset-0 modal-overlay flex items-center justify-center p-8 z-[9999] animate-in"
 			role="dialog"
 			aria-modal="true"
 			aria-labelledby="merge-modal-title"
@@ -581,13 +556,21 @@ export function MergeSessionModal({
 			<ScreenReaderAnnouncement {...announcementProps} />
 
 			<div
-				className="w-[600px] rounded-xl shadow-2xl border outline-none flex flex-col animate-slide-up"
+				ref={resizableModal.modalRef}
+				className="relative rounded-xl shadow-2xl border outline-none flex flex-col animate-slide-up select-none"
 				style={{
+					...resizableModal.style,
 					backgroundColor: theme.colors.bgSidebar,
 					borderColor: theme.colors.border,
-					maxHeight: 'calc(100vh - 128px)',
 				}}
+				data-modal-resize-key="merge-session"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div
 					className="p-4 border-b flex items-center justify-between shrink-0"
@@ -607,15 +590,13 @@ export function MergeSessionModal({
 							Merge "{sourceTab ? getTabDisplayName(sourceTab) : 'Context'}" Into
 						</h2>
 					</div>
-					<button
-						type="button"
+					<GhostIconButton
 						onClick={onClose}
-						className="p-1 rounded hover:bg-white/10 transition-colors"
-						style={{ color: theme.colors.textDim }}
-						aria-label="Close merge dialog"
+						ariaLabel="Close merge dialog"
+						color={theme.colors.textDim}
 					>
 						<X className="w-4 h-4" aria-hidden="true" />
-					</button>
+					</GhostIconButton>
 				</div>
 
 				{/* Description for screen readers */}
@@ -874,7 +855,6 @@ export function MergeSessionModal({
 																			color: isTarget
 																				? theme.colors.accentForeground
 																				: theme.colors.textMain,
-																			'--pulse-color': `${theme.colors.accent}40`,
 																		} as React.CSSProperties
 																	}
 																>
@@ -889,7 +869,7 @@ export function MergeSessionModal({
 																			<span className="text-sm truncate">{item.tabName}</span>
 																			{item.agentSessionId && (
 																				<span
-																					className="text-[10px] px-1 py-0.5 rounded font-mono"
+																					className="text-2xs px-1 py-0.5 rounded font-mono"
 																					style={{
 																						backgroundColor: isTarget
 																							? 'rgba(255,255,255,0.2)'
@@ -978,7 +958,6 @@ export function MergeSessionModal({
 									</span>
 									<AnimatedTokenCount
 										tokens={estimatedMergedTokens}
-										accentColor={theme.colors.accent}
 										textColor={theme.colors.textMain}
 									/>
 								</div>

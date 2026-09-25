@@ -13,15 +13,13 @@
  * - Confidence badge for assistant messages (when confidence is available)
  */
 
-import React, { useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
+import React from 'react';
 import type { Theme } from '../../types';
 import { getConfidenceColor } from '../Wizard/services/wizardPrompts';
 import { formatAgentName } from '../Wizard/shared/wizardHelpers';
-import {
-	REMARK_GFM_PLUGINS,
-	createWizardBubbleMarkdownComponents,
-} from '../../utils/markdownConfig';
+import { Markdown } from '../Markdown';
+import { formatTimestamp } from '../../../shared/formatters';
+import { displayImageSrc } from '../../utils/sessionImageSrc';
 
 /**
  * Message structure for wizard conversations
@@ -57,14 +55,6 @@ export interface WizardMessageBubbleProps {
 }
 
 /**
- * Format timestamp for display
- */
-function formatTimestamp(timestamp: number): string {
-	const date = new Date(timestamp);
-	return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-/**
  * WizardMessageBubble - Individual conversation message display for inline wizard
  *
  * Memoized to prevent unnecessary re-renders when parent state changes
@@ -80,10 +70,6 @@ export const WizardMessageBubble = React.memo(function WizardMessageBubble({
 }: WizardMessageBubbleProps): JSX.Element {
 	const isUser = message.role === 'user';
 	const isSystem = message.role === 'system';
-	const wizardMarkdownComponents = useMemo(
-		() => createWizardBubbleMarkdownComponents(theme),
-		[theme]
-	);
 
 	return (
 		<div
@@ -147,9 +133,7 @@ export const WizardMessageBubble = React.memo(function WizardMessageBubble({
 					{isUser ? (
 						<span className="whitespace-pre-wrap">{message.content}</span>
 					) : (
-						<ReactMarkdown remarkPlugins={REMARK_GFM_PLUGINS} components={wizardMarkdownComponents}>
-							{message.content}
-						</ReactMarkdown>
+						<Markdown preset="wizard-bubble" theme={theme} content={message.content} />
 					)}
 				</div>
 
@@ -163,7 +147,8 @@ export const WizardMessageBubble = React.memo(function WizardMessageBubble({
 						{message.images.map((img, imgIdx) => (
 							<img
 								key={imgIdx}
-								src={img}
+								src={displayImageSrc(img)}
+								alt={`Attached image ${imgIdx + 1}`}
 								className="h-20 rounded border cursor-zoom-in shrink-0"
 								style={{
 									objectFit: 'contain',
@@ -184,7 +169,7 @@ export const WizardMessageBubble = React.memo(function WizardMessageBubble({
 					}}
 					data-testid="message-timestamp"
 				>
-					{formatTimestamp(message.timestamp)}
+					{formatTimestamp(message.timestamp, 'time')}
 				</div>
 			</div>
 		</div>

@@ -2,53 +2,27 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useAgentExecution } from '../../../renderer/hooks';
 import type { Session, AITab, UsageStats, QueuedItem } from '../../../renderer/types';
+import { createMockAITab } from '../../helpers/mockTab';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
+import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 
-const createMockTab = (overrides: Partial<AITab> = {}): AITab => ({
-	id: 'tab-1',
-	agentSessionId: null,
-	name: null,
-	starred: false,
-	logs: [],
-	inputValue: '',
-	stagedImages: [],
-	createdAt: 1700000000000,
-	state: 'idle',
-	saveToHistory: true,
-	...overrides,
-});
+const createMockTab = (overrides: Partial<AITab> = {}): AITab =>
+	createMockAITab({
+		createdAt: 1700000000000,
+		saveToHistory: true,
+		...overrides,
+	});
 
+// Thin wrapper: pre-populates an AI tab so agent execution has a tab
+// target for spawned processes.
 const createMockSession = (overrides: Partial<Session> = {}): Session => {
 	const baseTab = createMockTab();
-
-	return {
-		id: 'session-1',
-		name: 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test/project',
-		fullPath: '/test/project',
-		projectRoot: '/test/project',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
+	return baseCreateMockSession({
 		isGitRepo: true,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
 		aiTabs: [baseTab],
 		activeTabId: baseTab.id,
-		closedTabHistory: [],
-		executionQueue: [],
-		activeTimeMs: 0,
 		...overrides,
-	};
+	});
 };
 
 const baseUsage: UsageStats = {
@@ -115,6 +89,13 @@ describe('useAgentExecution', () => {
 				}),
 			},
 			process: mockProcess,
+			prompts: {
+				...window.maestro.prompts,
+				get: vi.fn().mockResolvedValue({
+					success: true,
+					content: 'Maestro System Context: {{AGENT_NAME}}',
+				}),
+			},
 		};
 	});
 
@@ -124,9 +105,13 @@ describe('useAgentExecution', () => {
 	});
 
 	it('spawns a batch agent and returns aggregated results', async () => {
+		// The tab is idle: a batch (Auto Run) spawn runs under its own `-batch-`
+		// process id and never marks a tab busy, so on exit there is no parallel
+		// thread to preserve and the session settles idle. The case where a tab IS
+		// still running is covered in useAgentExecution.exitQueueState.test.tsx.
 		const session = createMockSession({
 			state: 'busy',
-			aiTabs: [createMockTab({ state: 'busy' })],
+			aiTabs: [createMockTab({ state: 'idle' })],
 		});
 		const sessionsRef = { current: [session] };
 		const setSessions = vi.fn();
@@ -134,7 +119,7 @@ describe('useAgentExecution', () => {
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions,
 				processQueuedItemRef,
@@ -163,7 +148,7 @@ describe('useAgentExecution', () => {
 				outputTokens: 3,
 				totalCostUsd: 0.02,
 			});
-			onExitHandler?.(targetSessionId);
+			onExitHandler?.(targetSessionId, 0);
 		});
 
 		const resultData = await spawnPromise;
@@ -190,70 +175,222 @@ describe('useAgentExecution', () => {
 		expect(updatedSession.aiTabs[0].state).toBe('idle');
 	});
 
-	it('uses raw stdin prompt delivery for local Windows batch runs when stream-json input is unsupported', async () => {
-		const originalPlatform = (window as any).maestro?.platform;
-		(window as any).maestro = { ...((window as any).maestro || {}), platform: 'win32' };
-		const session = createMockSession({ toolType: 'codex' });
-		const sessionsRef = { current: [session] };
-		const setSessions = vi.fn();
-		const processQueuedItemRef = { current: null };
-
-		vi.mocked(window.maestro.agents.get).mockResolvedValueOnce({
-			id: 'codex',
-			command: 'codex',
-			args: ['exec', '--json'],
-			capabilities: { supportsStreamJsonInput: false },
+	it('forwards the Auto Run turn overrides to the spawn, and the agent config otherwise', async () => {
+		// The document's MAESTRO:MODEL hint arrives here as modelOverride /
+		// effortOverride. This is the last hop before the process, so a dropped
+		// value means the same playbook runs at a different setting in the app
+		// than it does under maestro-cli.
+		const session = createMockSession({
+			state: 'busy',
+			customModel: 'sonnet',
+			customEffort: 'medium',
+			aiTabs: [createMockTab({ state: 'busy' })],
 		});
+		const sessionsRef = { current: [session] };
+		const processQueuedItemRef = { current: null };
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
 				activeSession: session,
 				sessionsRef,
-				setSessions,
+				setSessions: vi.fn(),
 				processQueuedItemRef,
 				setFlashNotification: vi.fn(),
 				setSuccessFlashNotification: vi.fn(),
 			})
 		);
 
-		const spawnPromise = result.current.spawnAgentForSession(session.id, 'Test prompt');
+		result.current.spawnAgentForSession(session.id, 'Overridden task', undefined, {
+			isAutoRun: true,
+			modelOverride: 'opus',
+			effortOverride: 'max',
+		});
 
 		await waitFor(() => {
 			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
 		});
+		expect(mockProcess.spawn.mock.calls[0][0].sessionCustomModel).toBe('opus');
+		expect(mockProcess.spawn.mock.calls[0][0].sessionCustomEffort).toBe('max');
 
-		const spawnConfig = mockProcess.spawn.mock.calls[0][0];
-		expect(spawnConfig.sendPromptViaStdin).toBe(false);
-		expect(spawnConfig.sendPromptViaStdinRaw).toBe(true);
-
-		const targetSessionId = spawnConfig.sessionId as string;
-		act(() => {
-			onExitHandler?.(targetSessionId);
+		// Without overrides the agent's own configuration stands - including
+		// effort, which used to be dropped on this path only.
+		result.current.spawnAgentForSession(session.id, 'Plain task', undefined, {
+			isAutoRun: true,
 		});
-		await spawnPromise;
-		(window as any).maestro.platform = originalPlatform;
+
+		await waitFor(() => {
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(2);
+		});
+		expect(mockProcess.spawn.mock.calls[1][0].sessionCustomModel).toBe('sonnet');
+		expect(mockProcess.spawn.mock.calls[1][0].sessionCustomEffort).toBe('medium');
 	});
 
-	it('does not enable local stdin flags for SSH batch runs', async () => {
-		const platformSpy = vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('Win32');
+	it('pins a background synopsis to the cheapest model rather than the tab model', async () => {
+		const session = createMockSession();
+		const sessionsRef = { current: [session] };
+		const processQueuedItemRef = { current: null };
+
+		const { result } = renderHook(() =>
+			useAgentExecution({
+				activeSession: session,
+				sessionsRef,
+				setSessions: vi.fn(),
+				processQueuedItemRef,
+				setFlashNotification: vi.fn(),
+				setSuccessFlashNotification: vi.fn(),
+			})
+		);
+
+		result.current.spawnBackgroundSynopsis(
+			session.id,
+			session.cwd,
+			'resume-123',
+			'Summarize session',
+			'claude-code',
+			{ customModel: 'opus' }
+		);
+
+		await waitFor(() => {
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+		});
+
+		// A synopsis summarizes work that already happened, so it never inherits
+		// the expensive model the turn itself ran on.
+		expect(mockProcess.spawn.mock.calls[0][0].sessionCustomModel).toBe('haiku');
+		expect(mockProcess.spawn.mock.calls[0][0].sessionCustomEffort).toBe('low');
+	});
+
+	it('keeps the tab model when the cheap tier would shrink the context window', async () => {
+		// A synopsis RESUMES the transcript, so the cheap model has to hold the
+		// whole conversation. Downgrading a 1M-context agent onto a 200k model
+		// makes every synopsis of a long session fail with "Prompt is too long".
+		const session = createMockSession();
+		const sessionsRef = { current: [session] };
+		const processQueuedItemRef = { current: null };
+
+		const { result } = renderHook(() =>
+			useAgentExecution({
+				activeSessionId: session.id,
+				sessionsRef,
+				setSessions: vi.fn(),
+				processQueuedItemRef,
+				setFlashNotification: vi.fn(),
+				setSuccessFlashNotification: vi.fn(),
+			})
+		);
+
+		result.current.spawnBackgroundSynopsis(
+			session.id,
+			session.cwd,
+			'resume-123',
+			'Summarize session',
+			'claude-code',
+			{ customModel: 'opus[1m]' }
+		);
+
+		await waitFor(() => {
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+		});
+
+		expect(mockProcess.spawn.mock.calls[0][0].sessionCustomModel).toBe('opus[1m]');
+		// Effort still drops - reading a transcript back costs nothing extra.
+		expect(mockProcess.spawn.mock.calls[0][0].sessionCustomEffort).toBe('low');
+	});
+
+	it('reports a synopsis that printed a provider error as failed', async () => {
+		const session = createMockSession();
+		const sessionsRef = { current: [session] };
+		const processQueuedItemRef = { current: null };
+
+		const { result } = renderHook(() =>
+			useAgentExecution({
+				activeSessionId: session.id,
+				sessionsRef,
+				setSessions: vi.fn(),
+				processQueuedItemRef,
+				setFlashNotification: vi.fn(),
+				setSuccessFlashNotification: vi.fn(),
+			})
+		);
+
+		const spawnPromise = result.current.spawnBackgroundSynopsis(
+			session.id,
+			session.cwd,
+			'resume-123',
+			'Summarize session',
+			'claude-code'
+		);
+
+		await waitFor(() => {
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+		});
+
+		const targetSessionId = mockProcess.spawn.mock.calls[0][0].sessionId as string;
+
+		act(() => {
+			onDataHandler?.(targetSessionId, 'Prompt is too long');
+			onExitHandler?.(targetSessionId, 0);
+		});
+
+		const resultData = await spawnPromise;
+
+		// Exit code 0 with an error body: the failure is only visible in the text.
+		expect(resultData.success).toBe(false);
+		expect(resultData.error).toBe('Prompt is too long');
+	});
+
+	it('reports a non-zero synopsis exit as failed even with prose on stdout', async () => {
+		const session = createMockSession();
+		const sessionsRef = { current: [session] };
+		const processQueuedItemRef = { current: null };
+
+		const { result } = renderHook(() =>
+			useAgentExecution({
+				activeSessionId: session.id,
+				sessionsRef,
+				setSessions: vi.fn(),
+				processQueuedItemRef,
+				setFlashNotification: vi.fn(),
+				setSuccessFlashNotification: vi.fn(),
+			})
+		);
+
+		const spawnPromise = result.current.spawnBackgroundSynopsis(
+			session.id,
+			session.cwd,
+			'resume-123',
+			'Summarize session',
+			'claude-code'
+		);
+
+		await waitFor(() => {
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+		});
+
+		const targetSessionId = mockProcess.spawn.mock.calls[0][0].sessionId as string;
+
+		act(() => {
+			onDataHandler?.(targetSessionId, 'Partial summary');
+			onExitHandler?.(targetSessionId, 1);
+		});
+
+		const resultData = await spawnPromise;
+
+		expect(resultData.success).toBe(false);
+	});
+
+	it('includes appendSystemPrompt in batch spawns', async () => {
 		const session = createMockSession({
-			toolType: 'codex',
-			sessionSshRemoteConfig: { enabled: true, remoteId: 'remote-1' },
+			state: 'busy',
+			aiTabs: [createMockTab({ state: 'busy' })],
 		});
 		const sessionsRef = { current: [session] };
 		const setSessions = vi.fn();
 		const processQueuedItemRef = { current: null };
 
-		vi.mocked(window.maestro.agents.get).mockResolvedValueOnce({
-			id: 'codex',
-			command: 'codex',
-			args: ['exec', '--json'],
-			capabilities: { supportsStreamJsonInput: false },
-		});
-
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions,
 				processQueuedItemRef,
@@ -262,22 +399,191 @@ describe('useAgentExecution', () => {
 			})
 		);
 
-		const spawnPromise = result.current.spawnAgentForSession(session.id, 'Test prompt');
+		const spawnPromise = result.current.spawnAgentForSession(session.id, 'Batch task');
 
 		await waitFor(() => {
 			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
 		});
 
 		const spawnConfig = mockProcess.spawn.mock.calls[0][0];
-		expect(spawnConfig.sendPromptViaStdin).toBe(false);
-		expect(spawnConfig.sendPromptViaStdinRaw).toBe(false);
+		expect(spawnConfig.appendSystemPrompt).toBeDefined();
+		expect(typeof spawnConfig.appendSystemPrompt).toBe('string');
+		expect(window.maestro.prompts.get).toHaveBeenCalledWith('maestro-system-prompt');
 
+		// Clean up
 		const targetSessionId = spawnConfig.sessionId as string;
 		act(() => {
 			onExitHandler?.(targetSessionId);
 		});
 		await spawnPromise;
-		platformSpy.mockRestore();
+	});
+
+	it('spawns Auto Run batches with full-access permissionMode', async () => {
+		// Auto Run runs unattended in --print mode and must have the same
+		// permission level as an interactive "Full Access" tab. Without an
+		// explicit permissionMode: 'full', agents whose bypass is gated on full
+		// access (e.g. Claude Code) fall back to the default permission model,
+		// can't get non-interactive tool approvals, and deadlock the run.
+		const session = createMockSession({
+			state: 'busy',
+			aiTabs: [createMockTab({ state: 'busy' })],
+		});
+		const sessionsRef = { current: [session] };
+		const setSessions = vi.fn();
+		const processQueuedItemRef = { current: null };
+
+		const { result } = renderHook(() =>
+			useAgentExecution({
+				activeSessionId: session.id,
+				sessionsRef,
+				setSessions,
+				processQueuedItemRef,
+				setFlashNotification: vi.fn(),
+				setSuccessFlashNotification: vi.fn(),
+			})
+		);
+
+		const spawnPromise = result.current.spawnAgentForSession(session.id, 'Batch task');
+
+		await waitFor(() => {
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+		});
+
+		const spawnConfig = mockProcess.spawn.mock.calls[0][0];
+		expect(spawnConfig.permissionMode).toBe('full');
+		expect(spawnConfig.readOnlyMode).toBe(false);
+
+		// Clean up
+		const targetSessionId = spawnConfig.sessionId as string;
+		act(() => {
+			onExitHandler?.(targetSessionId);
+		});
+		await spawnPromise;
+	});
+
+	describe('per-run model/effort overrides', () => {
+		// The Auto Run spawn path has no active tab, so a run-scoped override
+		// simply has to win over the session's configured model/effort. Nothing
+		// is written back to the session: the override dies with the run.
+		const renderExecution = (session: Session) => {
+			const sessionsRef = { current: [session] };
+			return renderHook(() =>
+				useAgentExecution({
+					activeSessionId: session.id,
+					sessionsRef,
+					setSessions: vi.fn(),
+					processQueuedItemRef: { current: null },
+					setFlashNotification: vi.fn(),
+					setSuccessFlashNotification: vi.fn(),
+				})
+			);
+		};
+
+		it('lets modelOverride/effortOverride win over the session values', async () => {
+			const session = createMockSession({
+				state: 'busy',
+				customModel: 'session-model',
+				customEffort: 'low',
+				aiTabs: [createMockTab({ state: 'busy' })],
+			});
+
+			const { result } = renderExecution(session);
+
+			const spawnPromise = result.current.spawnAgentForSession(
+				session.id,
+				'Batch task',
+				undefined,
+				{
+					isAutoRun: true,
+					modelOverride: 'run-model',
+					effortOverride: 'high',
+				}
+			);
+
+			await waitFor(() => {
+				expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+			});
+
+			const spawnConfig = mockProcess.spawn.mock.calls[0][0];
+			expect(spawnConfig.sessionCustomModel).toBe('run-model');
+			expect(spawnConfig.sessionCustomEffort).toBe('high');
+
+			act(() => {
+				onExitHandler?.(spawnConfig.sessionId as string);
+			});
+			await spawnPromise;
+
+			// The override is spawn-scoped only, never persisted back.
+			expect(session.customModel).toBe('session-model');
+			expect(session.customEffort).toBe('low');
+		});
+
+		it('keeps the session values when no overrides are supplied', async () => {
+			const session = createMockSession({
+				state: 'busy',
+				customModel: 'session-model',
+				customEffort: 'low',
+				aiTabs: [createMockTab({ state: 'busy' })],
+			});
+
+			const { result } = renderExecution(session);
+
+			const spawnPromise = result.current.spawnAgentForSession(
+				session.id,
+				'Batch task',
+				undefined,
+				{
+					isAutoRun: true,
+				}
+			);
+
+			await waitFor(() => {
+				expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+			});
+
+			const spawnConfig = mockProcess.spawn.mock.calls[0][0];
+			expect(spawnConfig.sessionCustomModel).toBe('session-model');
+			expect(spawnConfig.sessionCustomEffort).toBe('low');
+
+			act(() => {
+				onExitHandler?.(spawnConfig.sessionId as string);
+			});
+			await spawnPromise;
+		});
+
+		it('falls back per-field when only one override is set', async () => {
+			const session = createMockSession({
+				state: 'busy',
+				customModel: 'session-model',
+				customEffort: 'low',
+				aiTabs: [createMockTab({ state: 'busy' })],
+			});
+
+			const { result } = renderExecution(session);
+
+			const spawnPromise = result.current.spawnAgentForSession(
+				session.id,
+				'Batch task',
+				undefined,
+				{
+					isAutoRun: true,
+					modelOverride: 'run-model',
+				}
+			);
+
+			await waitFor(() => {
+				expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+			});
+
+			const spawnConfig = mockProcess.spawn.mock.calls[0][0];
+			expect(spawnConfig.sessionCustomModel).toBe('run-model');
+			expect(spawnConfig.sessionCustomEffort).toBe('low');
+
+			act(() => {
+				onExitHandler?.(spawnConfig.sessionId as string);
+			});
+			await spawnPromise;
+		});
 	});
 
 	it('queues the next item and logs queued messages', async () => {
@@ -297,7 +603,7 @@ describe('useAgentExecution', () => {
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions,
 				processQueuedItemRef,
@@ -344,7 +650,7 @@ describe('useAgentExecution', () => {
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions,
 				processQueuedItemRef,
@@ -411,7 +717,7 @@ describe('useAgentExecution', () => {
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions: vi.fn(),
 				processQueuedItemRef: { current: null },
@@ -446,7 +752,7 @@ describe('useAgentExecution', () => {
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions,
 				processQueuedItemRef: { current: null },
@@ -496,7 +802,7 @@ describe('useAgentExecution', () => {
 
 		const { result } = renderHook(() =>
 			useAgentExecution({
-				activeSession: session,
+				activeSessionId: session.id,
 				sessionsRef,
 				setSessions: vi.fn(),
 				processQueuedItemRef: { current: null },
@@ -512,5 +818,155 @@ describe('useAgentExecution', () => {
 
 		// Should not have called kill
 		expect(mockKill).not.toHaveBeenCalled();
+	});
+
+	// ========================================================================
+	// Auto Run batch watchdog (inactivity + absolute max-duration)
+	// ========================================================================
+	//
+	// Regression for the multi-document Auto Run hang: a stuck-but-chatty agent
+	// keeps emitting output (resetting the silence timer) but never finishes, so
+	// the silence-based inactivity watchdog never fires and the per-document loop
+	// (which only advances once processTask resolves) hangs forever. The
+	// absolute max-duration cap resolves the task regardless of output so the
+	// batch loop can terminate the document and move on.
+	describe('batch watchdog', () => {
+		function renderForWatchdog(session: Session) {
+			return renderHook(() =>
+				useAgentExecution({
+					activeSessionId: session.id,
+					sessionsRef: { current: [session] },
+					setSessions: vi.fn(),
+					processQueuedItemRef: { current: null },
+					setFlashNotification: vi.fn(),
+					setSuccessFlashNotification: vi.fn(),
+				})
+			);
+		}
+
+		it('force-kills a chatty-but-stuck task once the absolute max-duration cap is exceeded, even while output keeps arriving', async () => {
+			vi.useFakeTimers();
+			const mockKill = vi.fn().mockResolvedValue(true);
+			window.maestro.process.kill = mockKill;
+			// Inactivity is generous; cap is short. Output keeps flowing so the
+			// silence watchdog can NEVER fire, only the absolute cap can.
+			useSettingsStore.setState({
+				autoRunInactivityTimeoutMin: 10,
+				autoRunMaxTaskDurationMin: 1,
+			} as any);
+
+			const session = createMockSession({ state: 'busy' });
+			const { result } = renderForWatchdog(session);
+
+			const spawnPromise = result.current.spawnAgentForSession(
+				session.id,
+				'Batch task',
+				undefined,
+				{
+					isAutoRun: true,
+				}
+			);
+
+			// Flush the async spawn setup so the process spawns and the watchdog
+			// interval is registered under fake timers.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(mockProcess.spawn).toHaveBeenCalledTimes(1);
+			const targetSessionId = mockProcess.spawn.mock.calls[0][0].sessionId as string;
+
+			// Emit output at 30s, keeps the silence timer well under the 10-min
+			// inactivity threshold for the rest of the run.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(30 * 1000);
+				onDataHandler?.(targetSessionId, 'still working...');
+			});
+			expect(mockKill).not.toHaveBeenCalled();
+
+			// Cross the 1-minute absolute cap.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(45 * 1000);
+			});
+
+			const res = await spawnPromise;
+			expect(mockKill).toHaveBeenCalledWith(targetSessionId);
+			expect(res.success).toBe(false);
+			expect(res.errorKind).toBe('watchdog-timeout');
+		});
+
+		it('still force-kills on silence via the inactivity watchdog when no max-duration cap is set', async () => {
+			vi.useFakeTimers();
+			const mockKill = vi.fn().mockResolvedValue(true);
+			window.maestro.process.kill = mockKill;
+			useSettingsStore.setState({
+				autoRunInactivityTimeoutMin: 1,
+				autoRunMaxTaskDurationMin: 0, // unlimited (absolute cap disabled)
+			} as any);
+
+			const session = createMockSession({ state: 'busy' });
+			const { result } = renderForWatchdog(session);
+
+			const spawnPromise = result.current.spawnAgentForSession(
+				session.id,
+				'Batch task',
+				undefined,
+				{
+					isAutoRun: true,
+				}
+			);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			const targetSessionId = mockProcess.spawn.mock.calls[0][0].sessionId as string;
+
+			// No output at all → silence crosses the 1-minute inactivity threshold.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(75 * 1000);
+			});
+
+			const res = await spawnPromise;
+			expect(mockKill).toHaveBeenCalledWith(targetSessionId);
+			expect(res.errorKind).toBe('watchdog-stalled');
+		});
+
+		it('never starts a watchdog when both inactivity and max-duration are unlimited (0)', async () => {
+			vi.useFakeTimers();
+			const mockKill = vi.fn().mockResolvedValue(true);
+			window.maestro.process.kill = mockKill;
+			useSettingsStore.setState({
+				autoRunInactivityTimeoutMin: 0,
+				autoRunMaxTaskDurationMin: 0,
+			} as any);
+
+			const session = createMockSession({ state: 'busy' });
+			const { result } = renderForWatchdog(session);
+
+			const spawnPromise = result.current.spawnAgentForSession(
+				session.id,
+				'Batch task',
+				undefined,
+				{
+					isAutoRun: true,
+				}
+			);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			const targetSessionId = mockProcess.spawn.mock.calls[0][0].sessionId as string;
+
+			// Advance well past any plausible cap; nothing should kill the task.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(13 * 60 * 60 * 1000);
+			});
+			expect(mockKill).not.toHaveBeenCalled();
+
+			// Clean up: exit so the promise resolves.
+			act(() => {
+				onExitHandler?.(targetSessionId);
+			});
+			await spawnPromise;
+		});
 	});
 });

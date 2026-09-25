@@ -23,6 +23,13 @@ import {
 } from '../../../../renderer/components/Wizard/WizardContext';
 import type { AgentConfig, ToolType } from '../../../../renderer/types';
 
+const sentryMocks = vi.hoisted(() => ({
+	captureException: vi.fn(),
+	captureMessage: vi.fn(),
+}));
+
+vi.mock('../../../../renderer/utils/sentry', () => sentryMocks);
+
 beforeEach(() => {
 	// Reset all mocks
 	vi.clearAllMocks();
@@ -269,7 +276,7 @@ describe('WizardContext', () => {
 			expect(result.current.state.currentStep).toBe('agent-selection');
 		});
 
-		it('resets state when opening wizard after completion (Issue #89 fix)', () => {
+		it('resets state when opening wizard after completion (Issue #89 fix)', async () => {
 			const { result } = renderHook(() => useWizard(), { wrapper });
 
 			// Complete a full wizard flow
@@ -279,7 +286,9 @@ describe('WizardContext', () => {
 				result.current.setAgentName('First Project');
 				result.current.goToStep('phase-review');
 				result.current.setGeneratedDocuments([createMockDocument()]);
-				result.current.completeWizard('session-123');
+			});
+			await act(async () => {
+				await result.current.completeWizard('session-123');
 			});
 
 			// Verify wizard is completed and closed
@@ -509,6 +518,18 @@ describe('WizardContext', () => {
 
 				expect(result.current.state.currentStep).toBe('agent-selection');
 				expect(result.current.canProceedToNext()).toBe(false);
+			});
+
+			it('returns true when an agent is selected and the name is left blank', () => {
+				const { result } = renderHook(() => useWizard(), { wrapper });
+
+				act(() => {
+					result.current.setSelectedAgent('claude-code');
+				});
+
+				// The name is optional - the directory step fills in the folder name.
+				expect(result.current.state.agentName).toBe('');
+				expect(result.current.canProceedToNext()).toBe(true);
 			});
 
 			it('returns true when agent is selected and name is provided', () => {
@@ -1079,7 +1100,7 @@ describe('WizardContext', () => {
 	});
 
 	describe('Wizard Completion', () => {
-		it('marks wizard as complete with session ID', () => {
+		it('marks wizard as complete with session ID', async () => {
 			const { result } = renderHook(() => useWizard(), { wrapper });
 
 			act(() => {
@@ -1087,8 +1108,8 @@ describe('WizardContext', () => {
 			});
 			expect(result.current.state.isOpen).toBe(true);
 
-			act(() => {
-				result.current.completeWizard('session-123');
+			await act(async () => {
+				await result.current.completeWizard('session-123');
 			});
 
 			expect(result.current.state.isComplete).toBe(true);
@@ -1096,25 +1117,48 @@ describe('WizardContext', () => {
 			expect(result.current.state.isOpen).toBe(false);
 		});
 
-		it('marks wizard as complete with null session ID', () => {
+		it('marks wizard as complete with null session ID', async () => {
 			const { result } = renderHook(() => useWizard(), { wrapper });
 
-			act(() => {
-				result.current.completeWizard(null);
+			await act(async () => {
+				await result.current.completeWizard(null);
 			});
 
 			expect(result.current.state.isComplete).toBe(true);
 			expect(result.current.state.createdSessionId).toBeNull();
 		});
 
-		it('clears resume state when completing wizard', () => {
+		it('clears resume state when completing wizard', async () => {
 			const { result } = renderHook(() => useWizard(), { wrapper });
 
-			act(() => {
-				result.current.completeWizard('session-123');
+			await act(async () => {
+				await result.current.completeWizard('session-123');
 			});
 
 			expect(window.maestro.settings.set).toHaveBeenCalledWith('wizardResumeState', null);
+		});
+
+		it('reports and rethrows resume clear failures when completing wizard', async () => {
+			const error = new Error('Storage error');
+			vi.mocked(window.maestro.settings.set).mockRejectedValueOnce(error);
+
+			const { result } = renderHook(() => useWizard(), { wrapper });
+
+			await act(async () => {
+				await expect(result.current.completeWizard('session-123')).rejects.toThrow('Storage error');
+			});
+
+			expect(result.current.state.isComplete).toBe(false);
+			expect(sentryMocks.captureException).toHaveBeenCalledWith(
+				error,
+				expect.objectContaining({
+					extra: expect.objectContaining({
+						source: 'WizardContext',
+						functionName: 'completeWizard',
+						setting: 'wizardResumeState',
+					}),
+				})
+			);
 		});
 	});
 
@@ -1139,6 +1183,7 @@ describe('WizardContext', () => {
 					selectedAgent: 'claude-code',
 					agentName: 'Test Project',
 					directoryPath: '/test/path',
+					additionalDirectories: [],
 					isGitRepo: true,
 					conversationHistory: [],
 					confidenceLevel: 50,
@@ -1146,7 +1191,7 @@ describe('WizardContext', () => {
 					generatedDocuments: [],
 					editedPhase1Content: null,
 					wantsTour: true,
-					runAllDocuments: false,
+					autoRunMode: 'all',
 					sessionSshRemoteConfig: undefined,
 				});
 			});
@@ -1175,7 +1220,7 @@ describe('WizardContext', () => {
 		});
 
 		describe('saveStateForResume', () => {
-			it('saves serializable state to settings', () => {
+			it('saves serializable state to settings', async () => {
 				const { result } = renderHook(() => useWizard(), { wrapper });
 
 				// First, update the state
@@ -1189,8 +1234,8 @@ describe('WizardContext', () => {
 
 				// Then call saveStateForResume in a separate act block
 				// to ensure state is updated before serialization
-				act(() => {
-					result.current.saveStateForResume();
+				await act(async () => {
+					await result.current.saveStateForResume();
 				});
 
 				expect(window.maestro.settings.set).toHaveBeenCalledWith(
@@ -1198,6 +1243,56 @@ describe('WizardContext', () => {
 					expect.objectContaining({
 						selectedAgent: 'claude-code',
 						directoryPath: '/test',
+					})
+				);
+			});
+
+			it('auto-saves SSH remote config when advancing past the first step', async () => {
+				const sshConfig = {
+					enabled: true,
+					remoteId: 'remote-1',
+					workingDirOverride: '/srv/project',
+				};
+				const { result } = renderHook(() => useWizard(), { wrapper });
+
+				act(() => {
+					result.current.setSelectedAgent('claude-code');
+					result.current.setAgentName('Remote Project');
+					result.current.setSessionSshRemoteConfig(sshConfig);
+					result.current.goToStep('directory-selection');
+				});
+
+				await waitFor(() => {
+					expect(window.maestro.settings.set).toHaveBeenCalledWith(
+						'wizardResumeState',
+						expect.objectContaining({
+							currentStep: 'directory-selection',
+							selectedAgent: 'claude-code',
+							agentName: 'Remote Project',
+							sessionSshRemoteConfig: sshConfig,
+						})
+					);
+				});
+			});
+
+			it('reports and rethrows settings write errors', async () => {
+				const error = new Error('Storage error');
+				vi.mocked(window.maestro.settings.set).mockRejectedValueOnce(error);
+
+				const { result } = renderHook(() => useWizard(), { wrapper });
+
+				await act(async () => {
+					await expect(result.current.saveStateForResume()).rejects.toThrow('Storage error');
+				});
+
+				expect(sentryMocks.captureException).toHaveBeenCalledWith(
+					error,
+					expect.objectContaining({
+						extra: expect.objectContaining({
+							source: 'WizardContext',
+							functionName: 'saveStateForResume',
+							setting: 'wizardResumeState',
+						}),
 					})
 				);
 			});
@@ -1318,8 +1413,10 @@ describe('WizardContext', () => {
 				expect(hasState!).toBe(false);
 			});
 
-			it('returns false on error', async () => {
-				vi.mocked(window.maestro.settings.get).mockRejectedValue(new Error('Storage error'));
+			it('returns false when resume state is not loadable', async () => {
+				vi.mocked(window.maestro.settings.get).mockResolvedValue({
+					currentStep: 'agent-selection',
+				});
 
 				const { result } = renderHook(() => useWizard(), { wrapper });
 
@@ -1329,6 +1426,27 @@ describe('WizardContext', () => {
 				});
 
 				expect(hasState!).toBe(false);
+			});
+
+			it('reports and rethrows settings read errors', async () => {
+				const error = new Error('Storage error');
+				vi.mocked(window.maestro.settings.get).mockRejectedValue(error);
+
+				const { result } = renderHook(() => useWizard(), { wrapper });
+
+				await act(async () => {
+					await expect(result.current.hasResumeState()).rejects.toThrow('Storage error');
+				});
+
+				expect(sentryMocks.captureException).toHaveBeenCalledWith(
+					error,
+					expect.objectContaining({
+						extra: expect.objectContaining({
+							context: 'wizardResumeState read',
+							functionName: 'hasResumeState',
+						}),
+					})
+				);
 			});
 		});
 
@@ -1345,6 +1463,7 @@ describe('WizardContext', () => {
 					isReadyToProceed: false,
 					generatedDocuments: [],
 					editedPhase1Content: null,
+					autoRunMode: 'all',
 					wantsTour: true,
 				};
 
@@ -1389,29 +1508,59 @@ describe('WizardContext', () => {
 				expect(loaded).toBeNull();
 			});
 
-			it('returns null on error', async () => {
-				vi.mocked(window.maestro.settings.get).mockRejectedValue(new Error('Storage error'));
+			it('reports and rethrows settings read errors', async () => {
+				const error = new Error('Storage error');
+				vi.mocked(window.maestro.settings.get).mockRejectedValue(error);
 
 				const { result } = renderHook(() => useWizard(), { wrapper });
 
-				let loaded: SerializableWizardState | null;
 				await act(async () => {
-					loaded = await result.current.loadResumeState();
+					await expect(result.current.loadResumeState()).rejects.toThrow('Storage error');
 				});
 
-				expect(loaded).toBeNull();
+				expect(sentryMocks.captureException).toHaveBeenCalledWith(
+					error,
+					expect.objectContaining({
+						extra: expect.objectContaining({
+							context: 'wizardResumeState read',
+							functionName: 'loadResumeState',
+						}),
+					})
+				);
 			});
 		});
 
 		describe('clearResumeState', () => {
-			it('clears saved resume state', () => {
+			it('clears saved resume state', async () => {
 				const { result } = renderHook(() => useWizard(), { wrapper });
 
-				act(() => {
-					result.current.clearResumeState();
+				await act(async () => {
+					await result.current.clearResumeState();
 				});
 
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('wizardResumeState', null);
+			});
+
+			it('reports and rethrows settings write errors', async () => {
+				const error = new Error('Storage error');
+				vi.mocked(window.maestro.settings.set).mockRejectedValueOnce(error);
+
+				const { result } = renderHook(() => useWizard(), { wrapper });
+
+				await act(async () => {
+					await expect(result.current.clearResumeState()).rejects.toThrow('Storage error');
+				});
+
+				expect(sentryMocks.captureException).toHaveBeenCalledWith(
+					error,
+					expect.objectContaining({
+						extra: expect.objectContaining({
+							source: 'WizardContext',
+							functionName: 'clearResumeState',
+							setting: 'wizardResumeState',
+						}),
+					})
+				);
 			});
 		});
 	});

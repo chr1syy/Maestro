@@ -9,6 +9,21 @@ import '@xterm/xterm/css/xterm.css';
 import type { Theme } from '../../shared/theme-types';
 import type { ITheme } from '@xterm/xterm';
 import { LinkContextMenu, type LinkContextMenuState } from './LinkContextMenu';
+import {
+	TerminalSelectionContextMenu,
+	type TerminalSelectionContextMenuState,
+} from './TerminalSelectionContextMenu';
+import { openUrl } from '../utils/openUrl';
+import { safeClipboardWrite } from '../utils/clipboard';
+import { toControlChar } from '../utils/terminalKeys';
+import { isTapGesture, type TouchPoint } from '../utils/touch';
+import { readLogicalLine } from '../utils/terminalBuffer';
+import { logger } from '../utils/logger';
+import {
+	createCanvasMeasureAdvance,
+	resolveTerminalFontFamily,
+	type MeasureAdvance,
+} from '../utils/fixedPitchFont';
 
 // ============================================================================
 // Custom key event handler logic
@@ -18,11 +33,15 @@ import { LinkContextMenu, type LinkContextMenuState } from './LinkContextMenu';
  * Determine how xterm should handle a keyboard event.
  *
  * Returns:
- * - 'passthrough': xterm should NOT handle this key (return false to xterm) —
+ * - 'passthrough': xterm should NOT handle this key (return false to xterm) -
  *   the event bubbles to Maestro's window-level shortcut handler instead.
  * - 'handle': xterm should handle this key normally (return true to xterm).
  */
-export type XtermKeyAction = 'passthrough' | 'handle' | { action: 'write'; data: string };
+export type XtermKeyAction =
+	| 'passthrough'
+	| 'handle'
+	| { action: 'write'; data: string }
+	| { action: 'scroll'; amount: number | 'top' | 'bottom' };
 
 /**
  * Return the escape sequence for a terminal-navigation key combo, or null
@@ -38,15 +57,15 @@ function getTerminalNavSequence(e: KeyboardEvent): string | null {
 
 	// Option (Alt) + Arrow → word navigation
 	if (e.altKey && !e.metaKey && !e.ctrlKey) {
-		if (e.key === 'ArrowLeft') return '\x1bb'; // ESC b — backward word
-		if (e.key === 'ArrowRight') return '\x1bf'; // ESC f — forward word
-		if (e.key === 'Backspace') return '\x1b\x7f'; // ESC DEL — backward kill word
+		if (e.key === 'ArrowLeft') return '\x1bb'; // ESC b - backward word
+		if (e.key === 'ArrowRight') return '\x1bf'; // ESC f - forward word
+		if (e.key === 'Backspace') return '\x1b\x7f'; // ESC DEL - backward kill word
 	}
 
 	// Cmd (Meta) + Arrow → line navigation
 	if (e.metaKey && !e.altKey && !e.ctrlKey) {
-		if (e.key === 'ArrowLeft') return '\x01'; // Ctrl-A — beginning of line
-		if (e.key === 'ArrowRight') return '\x05'; // Ctrl-E — end of line
+		if (e.key === 'ArrowLeft') return '\x01'; // Ctrl-A - beginning of line
+		if (e.key === 'ArrowRight') return '\x05'; // Ctrl-E - end of line
 	}
 
 	return null;
@@ -58,6 +77,20 @@ export function evaluateCustomKeyEvent(e: KeyboardEvent): XtermKeyAction {
 	const navSeq = getTerminalNavSequence(e);
 	if (navSeq) return { action: 'write', data: navSeq };
 
+	// Scrollback navigation (checked before the blanket Alt/Meta passthrough):
+	//   Option (Alt) + Up/Down → scroll the scrollback one line at a time
+	//   Cmd (Meta) + Up/Down   → jump to top/bottom of the scrollback
+	if (e.type === 'keydown') {
+		if (e.altKey && !e.metaKey && !e.ctrlKey) {
+			if (e.key === 'ArrowUp') return { action: 'scroll', amount: -1 };
+			if (e.key === 'ArrowDown') return { action: 'scroll', amount: 1 };
+		}
+		if (e.metaKey && !e.altKey && !e.ctrlKey) {
+			if (e.key === 'ArrowUp') return { action: 'scroll', amount: 'top' };
+			if (e.key === 'ArrowDown') return { action: 'scroll', amount: 'bottom' };
+		}
+	}
+
 	// Let Ctrl+Shift+` through for new-terminal-tab shortcut
 	if (e.ctrlKey && e.shiftKey && e.code === 'Backquote') return 'passthrough';
 	// Let all Meta (Cmd) key combos through so app shortcuts work
@@ -65,12 +98,12 @@ export function evaluateCustomKeyEvent(e: KeyboardEvent): XtermKeyAction {
 	// Let Ctrl+Shift combos through (cross-platform app shortcuts)
 	if (e.ctrlKey && e.shiftKey) return 'passthrough';
 	// Let Alt key combos through so Maestro shortcuts like Alt+Q (Cue),
-	// Alt+J (jump to terminal), Alt+Shift+U (toggle tab unread) work.
+	// Alt+J (jump to terminal), Alt+U (filter unread agents) work.
 	// macOptionIsMeta is not enabled, so Alt doesn't send escape sequences
-	// by default — these events would just produce dead/special characters
+	// by default - these events would just produce dead/special characters
 	// that aren't useful in the terminal context.
 	if (e.altKey) return 'passthrough';
-	// Let xterm.js handle Escape normally — it sends \x1b through the standard
+	// Let xterm.js handle Escape normally - it sends \x1b through the standard
 	// onData pipeline which writes to the PTY. Previous manual handling (writing
 	// \x1b directly and returning false on keydown) caused xterm's internal key
 	// processing state to become inconsistent (keydown blocked but keyup allowed),
@@ -177,13 +210,19 @@ export interface XTerminalHandle {
 	searchNext(): boolean;
 	searchPrevious(): boolean;
 	getSelection(): string;
+	/** Read the full scrollback + visible buffer as a newline-joined string (right-trimmed). */
+	getBuffer(): string;
 	resize(): void;
-	/** Force fit + full canvas repaint — call when the terminal becomes visible after being hidden */
+	/** Force fit + full canvas repaint - call when the terminal becomes visible after being hidden */
 	refresh(): void;
+	/** The measured grid, or null when the container is hidden and has never been fit. */
+	getSize(): { cols: number; rows: number } | null;
+	/** Publish the current grid size to the PTY. No-op when the shell already has it. */
+	syncSize(): void;
 }
 
 export interface XTerminalProps {
-	/** IPC routing key — format: `{sessionId}-terminal-{tabId}` */
+	/** IPC routing key - format: `{sessionId}-terminal-{tabId}` */
 	sessionId: string;
 	/** Active Maestro theme */
 	theme: Theme;
@@ -196,6 +235,18 @@ export interface XTerminalProps {
 	 *  renderer is disposed to free GPU resources; it is re-initialised when the
 	 *  tab becomes active again. Defaults to true. */
 	isActive?: boolean;
+	/** Called when the user chooses "Copy to Clipboard" on the selection right-click menu. */
+	onCopySelection?: (text: string) => void;
+	/** Called when the user chooses "Send to Agent" on the selection right-click menu. */
+	onSendSelectionToAgent?: (text: string) => void;
+	/** Sticky-Ctrl bridge for the touch key bar. When `isActive()` returns true,
+	 *  the next single character typed into the terminal is converted to its
+	 *  control code (Ctrl-C, etc.) and `onConsume()` clears the armed state. Inert
+	 *  (pure pass-through) when omitted, so the desktop app is unaffected. */
+	stickyCtrl?: {
+		isActive: () => boolean;
+		onConsume: () => void;
+	};
 }
 
 // ============================================================================
@@ -203,7 +254,19 @@ export interface XTerminalProps {
 // ============================================================================
 
 export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XTerminal(
-	{ sessionId, theme, fontFamily, fontSize = 12, onData, onResize, onTitleChange, isActive = true },
+	{
+		sessionId,
+		theme,
+		fontFamily,
+		fontSize = 12,
+		onData,
+		onResize,
+		onTitleChange,
+		isActive = true,
+		onCopySelection,
+		onSendSelectionToAgent,
+		stickyCtrl,
+	},
 	ref
 ) {
 	const containerRef = useRef<HTMLDivElement>(null);
@@ -211,19 +274,63 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 	const fitAddonRef = useRef<FitAddon | null>(null);
 	const searchAddonRef = useRef<SearchAddon | null>(null);
 	const resizeObserverRef = useRef<ResizeObserver | null>(null);
+	// Canvas used to check the configured font is fixed-pitch. Created once and
+	// reused: a terminal in a proportional font renders a broken grid, and the
+	// only way to detect that is to measure two glyphs.
+	const measureAdvanceRef = useRef<MeasureAdvance | null>(null);
+	if (measureAdvanceRef.current === null) {
+		measureAdvanceRef.current = createCanvasMeasureAdvance();
+	}
 	const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// The grid size the PTY has ACCEPTED, recorded only once the main process
+	// confirms it. `process:resize` resolves `false` (it does not throw) when the
+	// session id is unknown, which is exactly what happens when the first
+	// ResizeObserver fire beats the spawn. Latching the size unconditionally would
+	// treat that dropped resize as delivered and leave the shell stuck on its
+	// 80x24 spawn default, so full-screen programs (nano, vim, less) paint into a
+	// small box while ordinary command output still fills the pane.
+	const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+	const selectionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const lastAutoCopiedSelectionRef = useRef<string>('');
 	const lastSearchQueryRef = useRef<string>('');
 	// Deferred WebGL load: resolved when the async import completes but the container was hidden.
 	// Applied on the next visible resize or explicit refresh() call.
 	const pendingWebglLoadRef = useRef<(() => void) | null>(null);
-	// WebGL addon instance — stored in a ref so the isActive effect can dispose/re-init it.
+	// WebGL addon instance - stored in a ref so the isActive effect can dispose/re-init it.
 	const webglAddonRef = useRef<import('@xterm/addon-webgl').WebglAddon | null>(null);
-	// WebGL constructor class — cached after first dynamic import so re-init doesn't re-import.
+	// WebGL constructor class - cached after first dynamic import so re-init doesn't re-import.
 	const webglCtorRef = useRef<typeof import('@xterm/addon-webgl').WebglAddon | null>(null);
+	// `onContextLoss` returns a disposable that holds a closure reference to the
+	// addon and the logger. Without disposing it before throwing the addon away,
+	// every dispose/re-init cycle (each session switch under the active+visible
+	// gate added in commit 83e53fb75) leaks one subscription and root-holds the
+	// addon for GC. Tracked separately so the cleanup path can drop it.
+	const webglCtxLossDisposableRef = useRef<{ dispose: () => void } | null>(null);
+	// Consecutive WebGL context losses since the tab was last (re)activated. A lost
+	// context that immediately dies again on re-init (seen on some Windows ANGLE/D3D
+	// drivers) would otherwise loop dispose→re-init→loss forever; after a couple of
+	// failures we stop re-initialising and let xterm's DOM renderer take over. Reset
+	// to 0 when the tab becomes active again so a healthy visit gets WebGL back.
+	const webglContextLossCountRef = useRef(0);
 
 	// Link context menu state
 	const [linkMenu, setLinkMenu] = useState<LinkContextMenuState | null>(null);
 	const hoveredLinkRef = useRef<string | null>(null);
+
+	// Selection context menu state
+	const [selectionMenu, setSelectionMenu] = useState<TerminalSelectionContextMenuState | null>(
+		null
+	);
+	// Latest callback refs - the contextmenu listener is registered once in the mount
+	// effect (empty deps) so we can't capture fresh closures; read through refs instead.
+	const onCopySelectionRef = useRef(onCopySelection);
+	onCopySelectionRef.current = onCopySelection;
+	const onSendSelectionToAgentRef = useRef(onSendSelectionToAgent);
+	onSendSelectionToAgentRef.current = onSendSelectionToAgent;
+	// Sticky-Ctrl bridge read through a ref so the onData subscription (registered
+	// once per sessionId) always sees the latest armed state without re-subscribing.
+	const stickyCtrlRef = useRef(stickyCtrl);
+	stickyCtrlRef.current = stickyCtrl;
 
 	// Expose handle to parent
 	useImperativeHandle(
@@ -257,6 +364,21 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 			getSelection(): string {
 				return terminalRef.current?.getSelection() ?? '';
 			},
+			getBuffer(): string {
+				const term = terminalRef.current;
+				if (!term) return '';
+				const buffer = term.buffer.active;
+				const lines: string[] = [];
+				for (let i = 0; i < buffer.length; i++) {
+					const line = buffer.getLine(i);
+					if (line) lines.push(line.translateToString(true));
+				}
+				// Drop trailing empty lines (xterm pads the viewport even when idle)
+				while (lines.length > 0 && lines[lines.length - 1] === '') {
+					lines.pop();
+				}
+				return lines.join('\n');
+			},
 			resize() {
 				fitAddonRef.current?.fit();
 			},
@@ -277,10 +399,58 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 				}
 				fitAddon.fit();
 				term.refresh(0, term.rows - 1);
+				// fit() only changes xterm's own grid. Without this push the shell keeps
+				// whatever size it had while the pane was hidden, and the next TUI the
+				// user starts paints at that stale size.
+				pushPtySizeRef.current();
+			},
+			getSize() {
+				const term = terminalRef.current;
+				const container = containerRef.current;
+				// A hidden container has never been fit, so xterm still reports its
+				// constructor default. Report nothing rather than a measurement that
+				// isn't one.
+				if (!term || !container || container.offsetWidth === 0 || container.offsetHeight === 0) {
+					return null;
+				}
+				if (term.cols <= 0 || term.rows <= 0) return null;
+				return { cols: term.cols, rows: term.rows };
+			},
+			syncSize() {
+				pushPtySizeRef.current();
 			},
 		}),
 		[]
 	);
+
+	// Tell the PTY what the visible grid is. Cheap to call as often as you like: a
+	// size the shell already has is skipped, and a size it never received is
+	// retried on the next call, so this is the one place the winsize is published.
+	const pushPtySize = useCallback(() => {
+		const term = terminalRef.current;
+		if (!term || term.cols <= 0 || term.rows <= 0) return;
+		const { cols, rows } = term;
+		const last = lastSentSizeRef.current;
+		if (last && last.cols === cols && last.rows === rows) return;
+		onResize?.(cols, rows);
+		window.maestro.process
+			.resize(sessionId, cols, rows)
+			.then((delivered) => {
+				if (delivered) lastSentSizeRef.current = { cols, rows };
+			})
+			.catch(() => {
+				// Non-critical: the size stays unrecorded, so the next push retries it.
+			});
+	}, [sessionId, onResize]);
+	// The imperative handle is built once (empty deps), so it reaches the current
+	// callback through a ref rather than capturing a stale closure.
+	const pushPtySizeRef = useRef(pushPtySize);
+	pushPtySizeRef.current = pushPtySize;
+
+	// A different PTY knows nothing about what the previous one was told.
+	useEffect(() => {
+		lastSentSizeRef.current = null;
+	}, [sessionId]);
 
 	// Debounced resize handler
 	const handleResize = useCallback(() => {
@@ -309,13 +479,53 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 			// This handles the display:none → display:flex transition (returning from AI mode):
 			// fitAddon.fit() only resizes rows/cols but doesn't always repaint WebGL content.
 			term.refresh(0, term.rows - 1);
-			const { cols, rows } = term;
-			onResize?.(cols, rows);
-			window.maestro.process.resize(sessionId, cols, rows).catch(() => {
-				// Resize failures are non-critical; the PTY will resize on next interaction
-			});
+			pushPtySize();
 		}, 100);
-	}, [sessionId, onResize]);
+	}, [pushPtySize]);
+
+	// Create a WebGL renderer, wire its context-loss recovery, and attach it to the
+	// terminal. Shared by the initial load, tab reactivation, and post-loss recovery
+	// so the recovery behaviour lives in exactly one place (previously duplicated, with
+	// the re-init copy missing the repaint fix below).
+	//
+	// On context loss a disposed WebGL renderer leaves the viewport blank: xterm does
+	// not repaint on its own and a bare term.refresh() cannot redraw the dead canvas.
+	// We re-attach a renderer on the next frame so the buffer is drawn again; without
+	// this the terminal stays blank (shell still alive) until the next tab switch. This
+	// is the root cause of issue #1073, which surfaces on Windows ANGLE where the GL
+	// context is lost on tab/panel visibility flips. Re-init is capped (see
+	// webglContextLossCountRef) so a context that keeps dying settles on xterm's DOM
+	// renderer instead of looping dispose→re-init→loss.
+	const attachWebglRenderer = useCallback(
+		(WebglAddon: typeof import('@xterm/addon-webgl').WebglAddon, term: Terminal) => {
+			const addon = new WebglAddon();
+			// Capture the disposable so the cleanup path (and the inactive branch of the
+			// isActive effect) can drop the subscription before discarding the addon.
+			// Without this, every re-init leaks an EventEmitter slot.
+			const ctxLossDisposable = addon.onContextLoss(() => {
+				logger.warn('[XTerminal] WebGL context lost - recovering renderer');
+				ctxLossDisposable.dispose();
+				webglCtxLossDisposableRef.current = null;
+				addon.dispose();
+				webglAddonRef.current = null;
+				requestAnimationFrame(() => {
+					const c = containerRef.current;
+					if (!c || c.offsetWidth === 0 || c.offsetHeight === 0) return;
+					if (webglCtorRef.current && webglContextLossCountRef.current < 2) {
+						webglContextLossCountRef.current += 1;
+						attachWebglRenderer(webglCtorRef.current, term);
+					}
+					fitAddonRef.current?.fit();
+					term.refresh(0, term.rows - 1);
+				});
+			});
+			term.loadAddon(addon);
+			webglAddonRef.current = addon;
+			webglCtxLossDisposableRef.current = ctxLossDisposable;
+			webglCtorRef.current = WebglAddon;
+		},
+		[]
+	);
 
 	// Initialize terminal
 	useEffect(() => {
@@ -326,9 +536,32 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 			cursorStyle: 'block',
 			scrollback: 10000,
 			allowProposedApi: true,
-			fontFamily,
+			// Escape hatch for selecting text over a TUI that has mouse tracking on
+			// (Claude Code's login screen, etc). Without this, xterm hands drags to the
+			// app and there is NO way to drag-select on macOS. With it, Option+drag
+			// (macOS) / Shift+drag (win/linux) force a local selection so copy works
+			// regardless of what's running. Matches iTerm2 / Terminal.app muscle memory.
+			macOptionClickForcesSelection: true,
+			fontFamily: resolveTerminalFontFamily(fontFamily, fontSize, measureAdvanceRef.current),
 			fontSize,
 			theme: mapThemeToXterm(theme),
+			// Route OSC 8 hyperlinks (escape-code terminal links) through openUrl so they
+			// respect the useSystemBrowser setting. Without this, xterm's default activate
+			// shows a confirm() dialog and then calls window.open(), which Electron's
+			// setWindowOpenHandler blocks - clicks silently fail.
+			linkHandler: {
+				activate(event, text) {
+					// Only left-click opens the link; right-click is reserved for the context menu.
+					if (event.button !== 0) return;
+					openUrl(text, { ctrlKey: event.ctrlKey });
+				},
+				hover(_event, text) {
+					hoveredLinkRef.current = text;
+				},
+				leave() {
+					hoveredLinkRef.current = null;
+				},
+			},
 		});
 
 		const fitAddon = new FitAddon();
@@ -361,8 +594,10 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 							end: { x: startCol + url.length - 1, y: lineNumber },
 						},
 						text: url,
-						activate(_event, linkText) {
-							window.maestro.shell.openExternal(linkText);
+						activate(event, linkText) {
+							// Only left-click opens the link; right-click is reserved for the context menu.
+							if (event.button !== 0) return;
+							openUrl(linkText, { ctrlKey: event.ctrlKey });
 						},
 						hover(_event, linkText) {
 							hoveredLinkRef.current = linkText;
@@ -386,44 +621,70 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 		const tryLoadWebgl = (WebglAddon: typeof import('@xterm/addon-webgl').WebglAddon) => {
 			const container = containerRef.current;
 			if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) {
-				// Container is hidden — defer until it becomes visible
+				// Container is hidden - defer until it becomes visible
 				pendingWebglLoadRef.current = () => tryLoadWebgl(WebglAddon);
 				return;
 			}
 			pendingWebglLoadRef.current = null;
 			try {
-				const addon = new WebglAddon();
-				addon.onContextLoss(() => {
-					console.warn('[XTerminal] WebGL context lost — falling back to canvas renderer');
-					addon.dispose();
-					webglAddonRef.current = null;
-					// Force a full repaint so the fallback canvas renderer draws from the internal buffer.
-					term.refresh(0, term.rows - 1);
-				});
-				term.loadAddon(addon);
-				webglAddonRef.current = addon;
-				webglCtorRef.current = WebglAddon;
+				attachWebglRenderer(WebglAddon, term);
 			} catch (err) {
-				console.warn('[XTerminal] WebGL addon failed to load, using canvas renderer:', err);
+				logger.warn(
+					'[XTerminal] WebGL addon failed to load, using canvas renderer:',
+					undefined,
+					err
+				);
 			}
 		};
 
-		// Allow Maestro's Meta-key (Cmd on macOS) and Ctrl+Shift shortcuts to bubble to
-		// the window-level handler in useMainKeyboardHandler.  Without this, xterm captures
-		// the keydown event on its internal textarea/canvas and stopPropagation prevents
-		// shortcuts like Cmd+K (clear terminal), Cmd+J (new terminal tab), Cmd+W (close tab),
-		// Cmd+[ / Cmd+] (navigate tabs), etc. from reaching the app-level handler.
-		// Returning false from this handler tells xterm to NOT handle the key itself,
-		// so the browser's normal event propagation continues to the window listener.
+		// Forward passthrough shortcuts to Maestro's window-level handler. xterm
+		// captures keydown on its internal textarea and can prevent bubbling, so we
+		// stopPropagation the original event and re-dispatch a synthetic copy directly
+		// on window. This guarantees shortcuts like Cmd+K, Cmd+J, Cmd+W, Alt+Cmd+J
+		// (cycle terminals), etc. always reach useMainKeyboardHandler.
 		//
 		// NOTE: This only works if the macOS native menu (src/main/index.ts) does NOT
 		// register conflicting accelerators. E.g., { role: 'close' } would steal Cmd+W
 		// at the NSMenu level before it reaches the renderer.
 		term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+			// Clipboard shortcuts: keep terminal copy/paste ergonomic.
+			// - Cmd/Ctrl+C copies terminal selection when present
+			if (e.type === 'keydown' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+				const key = e.key.toLowerCase();
+				if (key === 'c') {
+					const selection = term.getSelection();
+					if (selection) {
+						void safeClipboardWrite(selection);
+						return false;
+					}
+				}
+			}
+
 			const action = evaluateCustomKeyEvent(e);
 			if (typeof action === 'object' && action.action === 'write') {
 				window.maestro.process.write(sessionId, action.data);
 				return false;
+			}
+			if (typeof action === 'object' && action.action === 'scroll') {
+				if (action.amount === 'top') term.scrollToTop();
+				else if (action.amount === 'bottom') term.scrollToBottom();
+				else term.scrollLines(action.amount);
+				return false;
+			}
+			if (action === 'passthrough' && e.type === 'keydown') {
+				e.stopPropagation();
+				window.dispatchEvent(
+					new KeyboardEvent('keydown', {
+						key: e.key,
+						code: e.code,
+						metaKey: e.metaKey,
+						ctrlKey: e.ctrlKey,
+						altKey: e.altKey,
+						shiftKey: e.shiftKey,
+						bubbles: true,
+						cancelable: true,
+					})
+				);
 			}
 			return action === 'handle';
 		});
@@ -437,7 +698,29 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 			fitAddon.fit();
 		}
 
-		// Right-click context menu for links
+		// Read the full logical line under a viewport Y coordinate straight from the
+		// buffer. This is the escape hatch for copying when a TUI has mouse tracking
+		// on (Claude Code, tmux, vim, ...): xterm hands drags to the app so there is
+		// no selection to copy, but the buffer contents are always readable. Rebuilds
+		// wrapped lines into one string so e.g. a URL that soft-wraps across three
+		// visual rows comes out whole.
+		const getLogicalLineAt = (clientY: number): string => {
+			const buf = term.buffer.active;
+			const rect = containerRef.current?.getBoundingClientRect();
+			if (!rect || term.rows <= 0) return '';
+			const rowHeight = rect.height / term.rows;
+			if (rowHeight <= 0) return '';
+			const row = Math.max(
+				0,
+				Math.min(term.rows - 1, Math.floor((clientY - rect.top) / rowHeight))
+			);
+			return readLogicalLine(buf, buf.viewportY + row);
+		};
+
+		// Right-click context menu: prefer the link menu when a URL is hovered;
+		// otherwise open the selection menu on the highlighted text, or - when
+		// nothing is highlighted (e.g. mouse-mode TUI ate the drag) - fall back to
+		// the logical line under the cursor so copy always has something to grab.
 		const termElement = containerRef.current;
 		const handleContextMenu = (e: MouseEvent) => {
 			const url = hoveredLinkRef.current;
@@ -445,9 +728,61 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 				e.preventDefault();
 				e.stopPropagation();
 				setLinkMenu({ x: e.clientX, y: e.clientY, url });
+				return;
+			}
+			const hasHandler = !!(onCopySelectionRef.current || onSendSelectionToAgentRef.current);
+			if (!hasHandler) return;
+			const text = term.getSelection() || getLogicalLineAt(e.clientY);
+			if (text) {
+				e.preventDefault();
+				e.stopPropagation();
+				setSelectionMenu({ x: e.clientX, y: e.clientY, selection: text });
 			}
 		};
 		termElement.addEventListener('contextmenu', handleContextMenu);
+
+		// Mobile: reliably summon the on-screen keyboard on tap. xterm focuses its
+		// hidden `.xterm-helper-textarea` on mousedown, but the synthesized mouse
+		// events from a touch are unreliable on phones - iOS in particular only shows
+		// the soft keyboard when .focus() runs synchronously inside a user gesture. We
+		// focus the terminal explicitly on touchend for a genuine tap (not a scroll or
+		// selection drag, guarded by the shared tap tolerance) so the keyboard appears
+		// every time. Inert on desktop: touch events never fire from a mouse.
+		let touchStart: TouchPoint | null = null;
+		const handleTouchStart = (e: TouchEvent) => {
+			const touch = e.touches[0];
+			touchStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+		};
+		const handleTouchEnd = (e: TouchEvent) => {
+			if (!touchStart) return;
+			const touch = e.changedTouches[0];
+			const end: TouchPoint = touch ? { x: touch.clientX, y: touch.clientY } : touchStart;
+			if (isTapGesture(touchStart, end)) {
+				term.focus();
+			}
+			touchStart = null;
+		};
+		termElement.addEventListener('touchstart', handleTouchStart, { passive: true });
+		termElement.addEventListener('touchend', handleTouchEnd, { passive: true });
+
+		const selectionChangeDisposable = term.onSelectionChange(() => {
+			if (selectionCopyTimerRef.current) {
+				clearTimeout(selectionCopyTimerRef.current);
+			}
+			selectionCopyTimerRef.current = setTimeout(() => {
+				const selection = term.getSelection();
+				if (!selection) {
+					lastAutoCopiedSelectionRef.current = '';
+					return;
+				}
+				if (selection === lastAutoCopiedSelectionRef.current) return;
+				void safeClipboardWrite(selection).then((copied) => {
+					if (copied) {
+						lastAutoCopiedSelectionRef.current = selection;
+					}
+				});
+			}, 120);
+		});
 
 		// Load WebGL addon after open() so xterm's internal link layer is initialised.
 		import('@xterm/addon-webgl')
@@ -455,12 +790,17 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 				tryLoadWebgl(WebglAddon);
 			})
 			.catch((err) => {
-				console.warn('[XTerminal] WebGL addon import failed, using canvas renderer:', err);
+				logger.warn(
+					'[XTerminal] WebGL addon import failed, using canvas renderer:',
+					undefined,
+					err
+				);
 			});
 
-		if (onTitleChange) {
-			term.onTitleChange(onTitleChange);
-		}
+		// Capture the title-change disposable so `term.dispose()` doesn't have to
+		// fan it out for us - and so a future "react to onTitleChange prop change"
+		// effect can't accidentally stack subscriptions.
+		const titleChangeDisposable = onTitleChange ? term.onTitleChange(onTitleChange) : null;
 
 		terminalRef.current = term;
 		fitAddonRef.current = fitAddon;
@@ -473,9 +813,16 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 
 		return () => {
 			termElement.removeEventListener('contextmenu', handleContextMenu);
+			termElement.removeEventListener('touchstart', handleTouchStart);
+			termElement.removeEventListener('touchend', handleTouchEnd);
+			selectionChangeDisposable.dispose();
 			linkProviderDisposable.dispose();
+			titleChangeDisposable?.dispose();
 			resizeObserver.disconnect();
 			if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+			if (selectionCopyTimerRef.current) clearTimeout(selectionCopyTimerRef.current);
+			webglCtxLossDisposableRef.current?.dispose();
+			webglCtxLossDisposableRef.current = null;
 			webglAddonRef.current?.dispose();
 			webglAddonRef.current = null;
 			term.dispose();
@@ -483,7 +830,7 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 			fitAddonRef.current = null;
 			searchAddonRef.current = null;
 		};
-	}, []); // Mount once — other effects handle dynamic prop changes
+	}, []); // Mount once - other effects handle dynamic prop changes
 
 	// IPC: receive data from PTY → write to terminal
 	useEffect(() => {
@@ -501,10 +848,19 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 		if (!term) return;
 
 		const disposable = term.onData((data: string) => {
-			window.maestro.process.write(sessionId, data).catch(() => {
+			// Sticky-Ctrl (touch key bar): when armed, fold the next single typed
+			// character into its control code, then disarm. Multi-byte input (paste,
+			// IME) is left untouched by toControlChar and does not consume the arm.
+			let out = data;
+			const sticky = stickyCtrlRef.current;
+			if (sticky?.isActive() && data.length === 1) {
+				out = toControlChar(data);
+				sticky.onConsume();
+			}
+			window.maestro.process.write(sessionId, out).catch(() => {
 				// Write failures are surfaced by the process exit handler
 			});
-			onData?.(data);
+			onData?.(out);
 		});
 
 		return () => disposable.dispose();
@@ -520,7 +876,11 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 	// Update font settings when props change
 	useEffect(() => {
 		if (terminalRef.current) {
-			terminalRef.current.options.fontFamily = fontFamily;
+			terminalRef.current.options.fontFamily = resolveTerminalFontFamily(
+				fontFamily,
+				fontSize,
+				measureAdvanceRef.current
+			);
 			terminalRef.current.options.fontSize = fontSize;
 			// Guard: skip fit() when the container is hidden (display:none → offsetWidth/Height = 0).
 			// Calling fit() on a zero-size container resizes the terminal to the minimum (2×2),
@@ -534,43 +894,42 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 
 	// Dispose the WebGL renderer when this terminal tab becomes inactive to free GPU resources.
 	// Re-initialise it when the tab becomes active again. Each live WebGL context holds GPU
-	// memory and a compositing layer — with multiple terminal tabs this adds up fast.
+	// memory and a compositing layer - with multiple terminal tabs this adds up fast.
 	useEffect(() => {
 		const term = terminalRef.current;
 		if (!term) return;
 
 		if (!isActive) {
-			// Going inactive — dispose WebGL, fall back to the built-in canvas renderer
+			// Going inactive - dispose WebGL, fall back to the built-in canvas renderer.
+			// Drop the onContextLoss subscription first so the addon's callback closure
+			// (which root-holds the addon + term + logger) can be GC'd.
 			if (webglAddonRef.current) {
+				webglCtxLossDisposableRef.current?.dispose();
+				webglCtxLossDisposableRef.current = null;
 				webglAddonRef.current.dispose();
 				webglAddonRef.current = null;
 			}
 		} else {
-			// Becoming active — re-init WebGL if we have the constructor cached
+			// Becoming active - re-init WebGL if we have the constructor cached.
 			if (!webglAddonRef.current && webglCtorRef.current) {
+				// Fresh visit: let the context-loss recovery try WebGL again from scratch.
+				webglContextLossCountRef.current = 0;
 				const container = containerRef.current;
 				if (container && container.offsetWidth > 0 && container.offsetHeight > 0) {
 					try {
-						const addon = new webglCtorRef.current();
-						addon.onContextLoss(() => {
-							console.warn('[XTerminal] WebGL context lost — falling back to canvas renderer');
-							addon.dispose();
-							webglAddonRef.current = null;
-							term.refresh(0, term.rows - 1);
-						});
-						term.loadAddon(addon);
-						webglAddonRef.current = addon;
+						attachWebglRenderer(webglCtorRef.current, term);
 					} catch {
-						// WebGL re-init failed — canvas renderer remains active
+						// WebGL re-init failed - canvas renderer remains active
 					}
 				}
 				// Full repaint to sync the freshly-attached WebGL renderer with the terminal buffer
 				term.refresh(0, term.rows - 1);
 			}
 		}
-	}, [isActive]);
+	}, [isActive, attachWebglRenderer]);
 
 	const dismissLinkMenu = useCallback(() => setLinkMenu(null), []);
+	const dismissSelectionMenu = useCallback(() => setSelectionMenu(null), []);
 
 	return (
 		<div
@@ -584,6 +943,15 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
 		>
 			<div ref={containerRef} style={{ width: '100%', height: '100%', overflow: 'hidden' }} />
 			{linkMenu && <LinkContextMenu menu={linkMenu} theme={theme} onDismiss={dismissLinkMenu} />}
+			{selectionMenu && (
+				<TerminalSelectionContextMenu
+					menu={selectionMenu}
+					theme={theme}
+					onDismiss={dismissSelectionMenu}
+					onCopy={onCopySelection}
+					onSendToAgent={onSendSelectionToAgent}
+				/>
+			)}
 		</div>
 	);
 });

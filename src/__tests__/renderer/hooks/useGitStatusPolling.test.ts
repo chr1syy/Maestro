@@ -5,50 +5,38 @@
  * Tests cover:
  * - Clearing stale git status data when no git repos remain
  * - Polling when the document is hidden and pauseWhenHidden is disabled
+ * - Demoting a session whose directory stopped being a git repo
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useGitStatusPolling, getScaledPollInterval } from '../../../renderer/hooks';
 import type { Session } from '../../../renderer/types';
+import { createMockSession } from '../../helpers/mockSession';
 import { gitService } from '../../../renderer/services/git';
+import { updateSessionWith } from '../../../renderer/stores/sessionStore';
 
 vi.mock('../../../renderer/services/git', () => ({
 	gitService: {
 		getStatus: vi.fn(),
 		getNumstat: vi.fn(),
+		isRepo: vi.fn().mockResolvedValue(false),
 	},
 }));
 
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: 'session-1',
-	name: 'Test Session',
-	toolType: 'claude-code',
-	state: 'idle',
-	cwd: '/test/project',
-	fullPath: '/test/project',
-	projectRoot: '/test/project',
-	aiLogs: [],
-	shellLogs: [],
-	workLog: [],
-	contextUsage: 0,
-	inputMode: 'ai',
-	aiPid: 0,
-	terminalPid: 0,
-	port: 0,
-	isLive: false,
-	changedFiles: [],
-	isGitRepo: false,
-	fileTree: [],
-	fileExplorerExpanded: [],
-	fileExplorerScrollPos: 0,
-	executionQueue: [],
-	activeTimeMs: 0,
-	aiTabs: [],
-	activeTabId: 'tab-1',
-	closedTabHistory: [],
-	...overrides,
-});
+vi.mock('../../../renderer/stores/sessionStore', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../../../renderer/stores/sessionStore')>()),
+	updateSessionWith: vi.fn(),
+}));
+
+/** Apply the updater the hook handed to updateSessionWith. */
+const applyLastUpdate = (session: Session): Session => {
+	const updater = vi.mocked(updateSessionWith).mock.calls.at(-1)?.[1];
+	if (!updater) throw new Error('updateSessionWith was not called');
+	return updater(session) as Session;
+};
+
+// createMockSession imported from shared helper
 
 const setDocumentHidden = (hidden: boolean) => {
 	Object.defineProperty(document, 'hidden', {
@@ -107,6 +95,70 @@ describe('useGitStatusPolling', () => {
 
 		await waitFor(() => {
 			expect(gitService.getStatus).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe('when a git agent stops being a repo', () => {
+		it('demotes the session and drops it from the status map', async () => {
+			vi.mocked(gitService.getStatus).mockResolvedValue({
+				files: [],
+				branch: undefined,
+				notARepo: true,
+			});
+			const session = createMockSession({
+				id: 'was-git',
+				cwd: '/projects/multi',
+				isGitRepo: true,
+				gitBranches: ['main'],
+				gitTags: ['v1'],
+				gitRefsCacheTime: 123,
+			});
+
+			const { result } = renderHook(() => useGitStatusPolling([session]));
+
+			await waitFor(() => {
+				expect(updateSessionWith).toHaveBeenCalledWith('was-git', expect.any(Function));
+			});
+			const demoted = applyLastUpdate(session);
+			expect(demoted.isGitRepo).toBe(false);
+			expect(demoted.gitBranches).toBeUndefined();
+			expect(demoted.gitTags).toBeUndefined();
+			expect(demoted.gitRefsCacheTime).toBeUndefined();
+			expect(result.current.gitStatusMap.has('was-git')).toBe(false);
+		});
+
+		it('keeps the flag when only the terminal cd-ed out of the repo', async () => {
+			vi.mocked(gitService.getStatus).mockImplementation(async (cwd: string) =>
+				cwd === '/tmp'
+					? { files: [], branch: undefined, notARepo: true }
+					: { files: [], branch: 'main' }
+			);
+			const session = createMockSession({
+				id: 'still-git',
+				cwd: '/projects/repo',
+				shellCwd: '/tmp',
+				inputMode: 'terminal',
+				isGitRepo: true,
+			});
+
+			renderHook(() => useGitStatusPolling([session]));
+
+			await waitFor(() => {
+				expect(gitService.getStatus).toHaveBeenCalledWith('/projects/repo', undefined);
+			});
+			expect(updateSessionWith).not.toHaveBeenCalled();
+		});
+
+		it('does not demote on a failure that is not "not a git repository"', async () => {
+			vi.mocked(gitService.getStatus).mockResolvedValue({ files: [], branch: undefined });
+			const session = createMockSession({ id: 'ssh-drop', isGitRepo: true });
+
+			renderHook(() => useGitStatusPolling([session]));
+
+			await waitFor(() => {
+				expect(gitService.getStatus).toHaveBeenCalled();
+			});
+			expect(updateSessionWith).not.toHaveBeenCalled();
 		});
 	});
 

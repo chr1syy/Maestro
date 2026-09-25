@@ -12,6 +12,11 @@ import {
 } from '../../../../../renderer/components/CuePipelineEditor/utils/yamlToPipeline';
 import type { CueSubscription, CueGraphSession } from '../../../../../main/cue/cue-types';
 import type { SessionInfo } from '../../../../../shared/types';
+import type {
+	AgentNodeData,
+	CommandNodeData,
+	PipelineNode,
+} from '../../../../../shared/cue-pipeline-types';
 
 const makeSessions = (...names: string[]): SessionInfo[] =>
 	names.map((name, i) => ({
@@ -56,16 +61,18 @@ describe('subscriptionsToPipelines', () => {
 			config: { interval_minutes: 10 },
 		});
 
-		// Agent should have the input prompt
+		// Agent carries the session identity but NOT the prompt - trigger-fed
+		// prompts live on the edge (single source of truth for that path).
 		expect(agents[0].data).toMatchObject({
 			sessionName: 'worker',
-			inputPrompt: 'Do the work',
+			inputPrompt: undefined,
 		});
 
-		// Should have one edge connecting them
+		// Should have one edge connecting them, carrying the prompt.
 		expect(pipelines[0].edges).toHaveLength(1);
 		expect(pipelines[0].edges[0].source).toBe(triggers[0].id);
 		expect(pipelines[0].edges[0].target).toBe(agents[0].id);
+		expect(pipelines[0].edges[0].prompt).toBe('Do the work');
 	});
 
 	it('converts trigger -> agent1 -> agent2 chain', () => {
@@ -381,9 +388,11 @@ describe('subscriptionsToPipelines', () => {
 		expect(agentNames).toContain('tester');
 	});
 
-	it('overrides stale agent_id when subscription name matches a different session', () => {
-		// Bug scenario: agent_id was corrupted (points to Maestro) but subscription
-		// name "Pedsidian" matches the Pedsidian session. Name match should win.
+	it('trusts explicit agent_id even when subscription name matches a different session', () => {
+		// Per-project-root YAML partitioning guarantees agent_id is the source
+		// of truth. A coincidental pipeline-name/session-name overlap must NOT
+		// flip the resolved agent - doing so caused the "Maestro swap reverts"
+		// bug where replacing an agent would snap back on reload.
 		const subs: CueSubscription[] = [
 			{
 				name: 'Pedsidian',
@@ -392,7 +401,7 @@ describe('subscriptionsToPipelines', () => {
 				prompt: 'Do briefing',
 				schedule_times: ['08:30'],
 				schedule_days: ['mon', 'tue', 'wed', 'thu', 'fri'],
-				agent_id: 'maestro-uuid', // Wrong! Should be pedsidian-uuid
+				agent_id: 'maestro-uuid',
 			},
 		];
 		const sessions: SessionInfo[] = [
@@ -417,9 +426,9 @@ describe('subscriptionsToPipelines', () => {
 
 		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
 		expect(agents).toHaveLength(1);
-		// Should resolve to Pedsidian (name match), not Maestro (stale agent_id)
-		expect((agents[0].data as { sessionName: string }).sessionName).toBe('Pedsidian');
-		expect((agents[0].data as { sessionId: string }).sessionId).toBe('pedsidian-uuid');
+		// agent_id wins - resolves to Maestro despite the name match on Pedsidian.
+		expect((agents[0].data as { sessionName: string }).sessionName).toBe('Maestro');
+		expect((agents[0].data as { sessionId: string }).sessionId).toBe('maestro-uuid');
 	});
 
 	it('uses subscription name to find target when agent_id is absent', () => {
@@ -578,6 +587,441 @@ describe('subscriptionsToPipelines', () => {
 			expect(edge.mode).toBe('pass');
 		}
 	});
+
+	// Regression: the trigger→agent prompt used to be mirrored onto both
+	// `edge.prompt` AND `agentData.inputPrompt`. The AgentConfigPanel textarea
+	// wrote to inputPrompt while `pipelineToYaml` read edge.prompt first, so
+	// user edits silently dropped on save. The mirror is gone; edge.prompt is
+	// the single source of truth for trigger-fed agents.
+	it('trigger→agent prompt loads to edge.prompt only and leaves agent inputPrompt undefined', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'pr-triage',
+				event: 'github.pull_request',
+				enabled: true,
+				repo: 'foo/bar',
+				poll_minutes: 30,
+				prompt: 'Review the PR carefully',
+				agent_id: 'session-0',
+			},
+		];
+		const sessions = makeSessions('reviewer');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agentNode = pipelines[0].nodes.find((n) => n.type === 'agent');
+		const triggerEdge = pipelines[0].edges.find((e) => e.target === agentNode!.id);
+
+		expect(triggerEdge?.prompt).toBe('Review the PR carefully');
+		expect((agentNode!.data as AgentNodeData).inputPrompt).toBeUndefined();
+	});
+});
+
+describe('subscriptionsToPipelines - target_node_key dedup', () => {
+	it('keeps two subs targeting the same agent_id but different target_node_key as separate nodes', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'multi-trigger',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Morning run',
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				target_node_key: 'key-A',
+				pipeline_name: 'multi-trigger',
+			},
+			{
+				name: 'multi-trigger-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Outreach run',
+				schedule_times: ['06:30'],
+				agent_id: 'session-0',
+				target_node_key: 'key-B',
+				pipeline_name: 'multi-trigger',
+			},
+		];
+		const sessions = makeSessions('Pedsidian');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		expect(pipelines).toHaveLength(1);
+
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		const triggers = pipelines[0].nodes.filter((n) => n.type === 'trigger');
+		// Two distinct visual agent nodes (the round-trip behavior the user
+		// expects when they dropped the same agent twice).
+		expect(agents).toHaveLength(2);
+		expect(triggers).toHaveLength(2);
+		// Each trigger has its own dedicated downstream agent node - no merge.
+		const edgeTargets = pipelines[0].edges.map((e) => e.target).sort();
+		const agentIds = agents.map((a) => a.id).sort();
+		expect(edgeTargets).toEqual(agentIds);
+		// nodeKey is propagated onto AgentNodeData so subsequent saves re-emit
+		// the same key (round-trip stability).
+		const keys = agents.map((a) => (a.data as AgentNodeData).nodeKey).sort();
+		expect(keys).toEqual(['key-A', 'key-B']);
+	});
+
+	it('merges two subs sharing the same target_node_key onto one node (explicit fan-in)', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'shared-target',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Run A',
+				schedule_times: ['06:00'],
+				agent_id: 'session-0',
+				target_node_key: 'shared-key',
+				pipeline_name: 'shared-target',
+			},
+			{
+				name: 'shared-target-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Run B',
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				target_node_key: 'shared-key',
+				pipeline_name: 'shared-target',
+			},
+		];
+		const sessions = makeSessions('Pedsidian');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		const triggers = pipelines[0].nodes.filter((n) => n.type === 'trigger');
+		expect(agents).toHaveLength(1);
+		expect(triggers).toHaveLength(2);
+		// Both triggers point at the one shared agent node.
+		const targets = pipelines[0].edges.map((e) => e.target);
+		expect(new Set(targets).size).toBe(1);
+		expect(targets[0]).toBe(agents[0].id);
+	});
+
+	it('falls back to legacy sessionName dedup when target_node_key is absent (backwards compat)', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'legacy-pipeline',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Run A',
+				schedule_times: ['06:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'legacy-pipeline',
+			},
+			{
+				name: 'legacy-pipeline-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Run B',
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'legacy-pipeline',
+			},
+		];
+		const sessions = makeSessions('Pedsidian');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		// Legacy YAML: dedup by sessionName → one merged node (preserves
+		// pre-fix behavior so older pipelines keep loading without surprise).
+		expect(agents).toHaveLength(1);
+		expect((agents[0].data as AgentNodeData).nodeKey).toBeUndefined();
+	});
+
+	it('uses fan_out_node_keys to keep distinct fan-out positions as distinct nodes', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'fanout-distinct',
+				event: 'time.heartbeat',
+				enabled: true,
+				prompt: 'Go',
+				interval_minutes: 10,
+				fan_out: ['worker', 'worker'],
+				fan_out_ids: ['session-0', 'session-0'],
+				fan_out_node_keys: ['key-1', 'key-2'],
+				pipeline_name: 'fanout-distinct',
+			},
+		];
+		const sessions = makeSessions('worker');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		// Two distinct fan-out positions resolve to two visual nodes even
+		// though both target the same session - the keys disambiguate.
+		expect(agents).toHaveLength(2);
+		const keys = agents.map((a) => (a.data as AgentNodeData).nodeKey).sort();
+		expect(keys).toEqual(['key-1', 'key-2']);
+	});
+
+	it('chain target with target_node_key creates an independent visual node for A → B → A shapes when keys differ', () => {
+		// When the same session appears at multiple chain positions with
+		// distinct keys, each occurrence renders as its own node - no
+		// back-edge to the earlier occurrence.
+		const subs: CueSubscription[] = [
+			{
+				name: 'aba-pipeline',
+				event: 'time.heartbeat',
+				enabled: true,
+				prompt: 'first A',
+				interval_minutes: 5,
+				agent_id: 'session-0',
+				target_node_key: 'a-1',
+				pipeline_name: 'aba-pipeline',
+			},
+			{
+				name: 'aba-pipeline-chain-1',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'B',
+				source_session: 'A',
+				source_session_ids: 'session-0',
+				agent_id: 'session-1',
+				target_node_key: 'b-1',
+				pipeline_name: 'aba-pipeline',
+			},
+			{
+				name: 'aba-pipeline-chain-2',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'second A',
+				source_session: 'B',
+				source_session_ids: 'session-1',
+				agent_id: 'session-0',
+				target_node_key: 'a-2',
+				pipeline_name: 'aba-pipeline',
+			},
+		];
+		const sessions: SessionInfo[] = [
+			{ id: 'session-0', name: 'A', toolType: 'claude-code', cwd: '/tmp', projectRoot: '/tmp' },
+			{ id: 'session-1', name: 'B', toolType: 'claude-code', cwd: '/tmp', projectRoot: '/tmp' },
+		];
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		// 3 nodes: first-A, B, second-A - the keys keep the second-A
+		// distinct from the first.
+		expect(agents).toHaveLength(3);
+	});
+
+	it('handles mixed keyed/unkeyed YAML: keyed subs use key path, unkeyed subs use legacy sessionName dedup', () => {
+		// Realistic mid-migration shape: one sub from before the fix (no
+		// key) and three from after (with keys). The unkeyed sub creates
+		// a node via the legacy path; the keyed subs each create their
+		// own node, untouched by the legacy sessionName loop.
+		const subs: CueSubscription[] = [
+			{
+				name: 'mixed',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Legacy run',
+				schedule_times: ['06:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'mixed',
+			},
+			{
+				name: 'mixed-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Keyed run A',
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				target_node_key: 'k-A',
+				pipeline_name: 'mixed',
+			},
+			{
+				name: 'mixed-chain-2',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Keyed run B',
+				schedule_times: ['08:00'],
+				agent_id: 'session-0',
+				target_node_key: 'k-B',
+				pipeline_name: 'mixed',
+			},
+		];
+		const sessions = makeSessions('Worker');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		// 3 distinct nodes: legacy unkeyed + 2 keyed. The keyed subs do
+		// not collapse into the legacy node despite sharing sessionName,
+		// because the legacy dedup loop is skipped when a key is present.
+		expect(agents).toHaveLength(3);
+		const keys = agents
+			.map((a) => (a.data as AgentNodeData).nodeKey)
+			.filter(Boolean)
+			.sort();
+		expect(keys).toEqual(['k-A', 'k-B']);
+	});
+
+	it('positions two distinct trigger-target agents at distinct Y coords (no pixel-perfect stacking)', () => {
+		// Regression: when two separate triggers each had a single target,
+		// the loader computed `pos.y = baseY + branchRow * spacing` with
+		// `branchRow=0` for both, landing both targets at the same y.
+		// They rendered as one node visually even though the model held
+		// two - only the "(2)" instance label hinted otherwise. The fix
+		// anchors target Y to the owning trigger's Y instead of a constant
+		// baseY, so distinct triggers produce distinct target rows.
+		const subs: CueSubscription[] = [
+			{
+				name: 'overlap-test',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Daily',
+				schedule_times: ['06:00'],
+				agent_id: 'session-0',
+				target_node_key: 'k-daily',
+				pipeline_name: 'overlap-test',
+			},
+			{
+				name: 'overlap-test-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'Weekly',
+				schedule_times: ['08:00'],
+				schedule_days: ['sun'],
+				agent_id: 'session-0',
+				target_node_key: 'k-weekly',
+				pipeline_name: 'overlap-test',
+			},
+		];
+		const sessions = makeSessions('Polymarket');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		expect(agents).toHaveLength(2);
+		// The two agents must not occupy identical positions, otherwise
+		// the canvas paints them on top of each other and the user sees
+		// one node where the model has two.
+		const positions = agents.map((a) => `${a.position.x},${a.position.y}`);
+		expect(new Set(positions).size).toBe(2);
+	});
+
+	it('merges two trigger subs targeting one command node via shared target_node_key', () => {
+		// Explicit fan-in onto a command node - same shape as agent
+		// fan-in but for a `action: command` target. Both trigger subs
+		// reference the same `target_node_key`, so the loader returns
+		// the same command node for both, producing one node with two
+		// incoming trigger edges.
+		const subs: CueSubscription[] = [
+			{
+				name: 'cmd-fanin',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'noop',
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				action: 'command',
+				command: { mode: 'shell', shell: 'echo morning' },
+				target_node_key: 'cmd-key',
+				pipeline_name: 'cmd-fanin',
+			},
+			{
+				name: 'cmd-fanin-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'noop',
+				schedule_times: ['18:00'],
+				agent_id: 'session-0',
+				action: 'command',
+				command: { mode: 'shell', shell: 'echo morning' },
+				target_node_key: 'cmd-key',
+				pipeline_name: 'cmd-fanin',
+			},
+		];
+		const sessions = makeSessions('Owner');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const commands = pipelines[0].nodes.filter((n) => n.type === 'command');
+		const triggers = pipelines[0].nodes.filter((n) => n.type === 'trigger');
+		expect(commands).toHaveLength(1);
+		expect(triggers).toHaveLength(2);
+		// Both trigger edges land on the single command node.
+		const targets = pipelines[0].edges.map((e) => e.target);
+		expect(new Set(targets).size).toBe(1);
+		expect(targets[0]).toBe(commands[0].id);
+		expect((commands[0].data as CommandNodeData).nodeKey).toBe('cmd-key');
+	});
+});
+
+describe('subscriptionsToPipelines - full round-trip via pipelineToYamlSubscriptions', () => {
+	it('round-trips two distinct visual nodes (same agent_id, different nodeKey) without merging', async () => {
+		const { pipelineToYamlSubscriptions } =
+			await import('../../../../../renderer/components/CuePipelineEditor/utils/pipelineToYaml');
+		const pipeline = {
+			id: 'p1',
+			name: 'multi-trigger',
+			color: '#06b6d4',
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger' as const,
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.scheduled' as const,
+						label: 'Scheduled',
+						customLabel: 'Aziz Outreach',
+						config: { schedule_times: ['06:30'] },
+					},
+				},
+				{
+					id: 't2',
+					type: 'trigger' as const,
+					position: { x: 0, y: 200 },
+					data: {
+						eventType: 'time.scheduled' as const,
+						label: 'Scheduled',
+						customLabel: 'Morning Briefing',
+						config: { schedule_times: ['07:00'] },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent' as const,
+					position: { x: 400, y: 0 },
+					data: {
+						sessionId: 'session-0',
+						sessionName: 'Pedsidian',
+						toolType: 'claude-code',
+						inputPrompt: 'Outreach prompt',
+						nodeKey: 'pedsidian-1',
+					},
+				},
+				{
+					id: 'a2',
+					type: 'agent' as const,
+					position: { x: 400, y: 200 },
+					data: {
+						sessionId: 'session-0',
+						sessionName: 'Pedsidian',
+						toolType: 'claude-code',
+						inputPrompt: 'Briefing prompt',
+						nodeKey: 'pedsidian-2',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' as const },
+				{ id: 'e2', source: 't2', target: 'a2', mode: 'pass' as const },
+			],
+		};
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		// Inject pipeline_name like pipelinesToYaml would, since
+		// subscriptionsToPipelines uses pipeline_name to group.
+		const tagged = subs.map((s) => ({ ...s, pipeline_name: pipeline.name }));
+		const sessions = makeSessions('Pedsidian');
+		const reloaded = subscriptionsToPipelines(tagged, sessions);
+
+		expect(reloaded).toHaveLength(1);
+		const agents = reloaded[0].nodes.filter((n) => n.type === 'agent');
+		const triggers = reloaded[0].nodes.filter((n) => n.type === 'trigger');
+		// The fix: two distinct visual agent nodes round-trip as two
+		// distinct visual agent nodes - exactly what the user expected.
+		expect(agents).toHaveLength(2);
+		expect(triggers).toHaveLength(2);
+		const reloadedKeys = agents.map((a) => (a.data as AgentNodeData).nodeKey).sort();
+		expect(reloadedKeys).toEqual(['pedsidian-1', 'pedsidian-2']);
+	});
 });
 
 describe('graphSessionsToPipelines', () => {
@@ -651,6 +1095,44 @@ describe('graphSessionsToPipelines', () => {
 		expect(pipelines[0].edges.length).toBeGreaterThanOrEqual(2);
 	});
 
+	it('keeps webhook triggers with different paths as separate nodes', () => {
+		// The trigger group key must include the webhook block. Without it these
+		// two collapse into one visual trigger and the next save rewrites both
+		// subscriptions to a single path, silently breaking a live endpoint.
+		const graphSessions: CueGraphSession[] = [
+			{
+				sessionId: 's1',
+				sessionName: 'worker',
+				toolType: 'claude-code',
+				subscriptions: [
+					{
+						name: 'hooks',
+						event: 'webhook.received',
+						enabled: true,
+						prompt: 'Handle',
+						webhook: { path: 'from-github', secret_env: 'GH_SECRET' },
+					},
+					{
+						name: 'hooks-chain-2',
+						event: 'webhook.received',
+						enabled: true,
+						prompt: 'Handle',
+						pipeline_name: 'hooks',
+						webhook: { path: 'from-ci', secret_env: 'CI_SECRET' },
+					},
+				],
+			},
+		];
+		const sessions = makeSessions('worker');
+
+		const pipelines = graphSessionsToPipelines(graphSessions, sessions);
+		const triggers = pipelines.flatMap((p) => p.nodes.filter((n) => n.type === 'trigger'));
+		expect(triggers).toHaveLength(2);
+		expect(
+			triggers.map((t) => (t.data as { config: { webhook_path?: string } }).config.webhook_path)
+		).toEqual(expect.arrayContaining(['from-github', 'from-ci']));
+	});
+
 	it('returns empty array for no graph sessions', () => {
 		const result = graphSessionsToPipelines([], []);
 		expect(result).toEqual([]);
@@ -700,6 +1182,55 @@ describe('graphSessionsToPipelines', () => {
 		expect(agents).toHaveLength(1);
 		expect((agents[0].data as { sessionName: string }).sessionName).toBe('PedTome RSSidian');
 		expect((agents[0].data as { sessionId: string }).sessionId).toBe('real-uuid-123');
+	});
+
+	it('uses owning graph session for the agent node when other sessions appear earlier in sessions.json (issue #912)', () => {
+		// Repro for issue #912: a cue.yaml in an Obsidian project defines an
+		// initial trigger with no agent_id and no chain successor. The Obsidian
+		// session is the only owner, but other unrelated sessions (e.g., a
+		// "Server" opencode session) appear earlier in the global sessions list.
+		// Without owner-aware fallback, findTargetSession would return
+		// sessions[0] - "Server" - instead of the Obsidian session that
+		// actually owns the YAML.
+		const graphSessions: CueGraphSession[] = [
+			{
+				sessionId: 'obsidian-id',
+				sessionName: 'Pedsidian',
+				toolType: 'claude-code',
+				subscriptions: [
+					{
+						name: 'note-watcher',
+						event: 'file.changed',
+						enabled: true,
+						prompt: 'Process note',
+						watch: '**/*.md',
+					},
+				],
+			},
+		];
+		const sessions: SessionInfo[] = [
+			{
+				id: 'server-id',
+				name: 'Server',
+				toolType: 'opencode',
+				cwd: '/tmp',
+				projectRoot: '/tmp/server',
+			},
+			{
+				id: 'obsidian-id',
+				name: 'Pedsidian',
+				toolType: 'claude-code',
+				cwd: '/tmp/pedsidian',
+				projectRoot: '/tmp/pedsidian',
+			},
+		];
+
+		const pipelines = graphSessionsToPipelines(graphSessions, sessions);
+		expect(pipelines).toHaveLength(1);
+
+		const agents = pipelines[0].nodes.filter((n) => n.type === 'agent');
+		expect(agents).toHaveLength(1);
+		expect((agents[0].data as AgentNodeData).sessionName).toBe('Pedsidian');
 	});
 
 	it('correctly maps agents when multiple sessions share subscriptions', () => {
@@ -874,5 +1405,559 @@ describe('auto-injected source output prefix stripping', () => {
 			(n) => n.type === 'agent' && (n.data as { sessionName: string }).sessionName === 'tester'
 		);
 		expect((testerNode!.data as { inputPrompt?: string }).inputPrompt).toBeUndefined();
+	});
+
+	describe('command node deserialization', () => {
+		it('reconstructs trigger -> command(shell) from action: command subscription', () => {
+			const subs: CueSubscription[] = [
+				{
+					name: 'lint-on-save',
+					event: 'file.changed',
+					enabled: true,
+					prompt: 'npm run lint',
+					action: 'command',
+					command: { mode: 'shell', shell: 'npm run lint' },
+					watch: 'src/**/*.ts',
+					agent_id: 'session-0',
+				} as CueSubscription,
+			];
+			const sessions: SessionInfo[] = [
+				{
+					id: 'session-0',
+					name: 'agent-A',
+					toolType: 'claude-code' as const,
+					cwd: '/tmp',
+					projectRoot: '/tmp',
+				},
+			];
+
+			const pipelines = subscriptionsToPipelines(subs, sessions);
+			expect(pipelines).toHaveLength(1);
+			const trigger = pipelines[0].nodes.find((n) => n.type === 'trigger');
+			const command = pipelines[0].nodes.find((n) => n.type === 'command');
+			expect(trigger).toBeDefined();
+			expect(command).toBeDefined();
+			const data = command!.data as {
+				name: string;
+				mode: string;
+				shell?: string;
+				owningSessionId: string;
+				owningSessionName: string;
+			};
+			expect(data.mode).toBe('shell');
+			expect(data.shell).toBe('npm run lint');
+			expect(data.owningSessionId).toBe('session-0');
+			expect(data.owningSessionName).toBe('agent-A');
+			expect(pipelines[0].edges).toHaveLength(1);
+			expect(pipelines[0].edges[0].source).toBe(trigger!.id);
+			expect(pipelines[0].edges[0].target).toBe(command!.id);
+		});
+
+		it('reconstructs agent -> command(cli) chain', () => {
+			const subs: CueSubscription[] = [
+				{
+					name: 'pipe',
+					event: 'time.heartbeat',
+					enabled: true,
+					prompt: 'do work',
+					interval_minutes: 5,
+					agent_id: 'session-0',
+				},
+				{
+					// Auto-named command follows `<pipeline>-cmd-<base36>` so the
+					// deserializer's base-name strip groups it with the parent pipeline.
+					name: 'pipe-cmd-abc12',
+					event: 'agent.completed',
+					enabled: true,
+					prompt: 'session-research',
+					action: 'command',
+					command: {
+						mode: 'cli',
+						cli: { command: 'send', target: '{{CUE_FROM_AGENT}}' },
+					},
+					source_session: 'researcher',
+					agent_id: 'session-0',
+				} as CueSubscription,
+			];
+			const sessions: SessionInfo[] = [
+				{
+					id: 'session-0',
+					name: 'researcher',
+					toolType: 'claude-code' as const,
+					cwd: '/tmp',
+					projectRoot: '/tmp',
+				},
+			];
+
+			const pipelines = subscriptionsToPipelines(subs, sessions);
+			expect(pipelines).toHaveLength(1);
+			const commandNode = pipelines[0].nodes.find((n) => n.type === 'command');
+			const agentNode = pipelines[0].nodes.find((n) => n.type === 'agent');
+			expect(commandNode).toBeDefined();
+			expect(agentNode).toBeDefined();
+			const data = commandNode!.data as {
+				mode: string;
+				cliCommand?: string;
+				cliTarget?: string;
+			};
+			expect(data.mode).toBe('cli');
+			expect(data.cliCommand).toBe('send');
+			expect(data.cliTarget).toBe('{{CUE_FROM_AGENT}}');
+			const edge = pipelines[0].edges.find(
+				(e) => e.source === agentNode!.id && e.target === commandNode!.id
+			);
+			expect(edge).toBeDefined();
+		});
+
+		it('silently migrates legacy cli_output: { target } into a downstream command(cli) node', () => {
+			const subs: CueSubscription[] = [
+				{
+					name: 'old-pipe',
+					event: 'time.heartbeat',
+					enabled: true,
+					prompt: 'do work',
+					interval_minutes: 5,
+					agent_id: 'session-0',
+					cli_output: { target: 'session-downstream' },
+				} as CueSubscription,
+			];
+			const sessions: SessionInfo[] = [
+				{
+					id: 'session-0',
+					name: 'agent-A',
+					toolType: 'claude-code' as const,
+					cwd: '/tmp',
+					projectRoot: '/tmp',
+				},
+			];
+
+			const pipelines = subscriptionsToPipelines(subs, sessions);
+			expect(pipelines).toHaveLength(1);
+			const commandNode = pipelines[0].nodes.find((n) => n.type === 'command');
+			expect(commandNode).toBeDefined();
+			const data = commandNode!.data as {
+				mode: string;
+				cliCommand?: string;
+				cliTarget?: string;
+				owningSessionId: string;
+			};
+			expect(data.mode).toBe('cli');
+			expect(data.cliCommand).toBe('send');
+			expect(data.cliTarget).toBe('session-downstream');
+			expect(data.owningSessionId).toBe('session-0');
+			// Edge from the agent (the upstream of the old cli_output) to the new command node.
+			const agentNode = pipelines[0].nodes.find((n) => n.type === 'agent');
+			expect(agentNode).toBeDefined();
+			expect(
+				pipelines[0].edges.some((e) => e.source === agentNode!.id && e.target === commandNode!.id)
+			).toBe(true);
+		});
+	});
+});
+
+describe('trigger node subscriptionName population', () => {
+	// Regression guard for the "GitHub chain trigger Play button fires the
+	// wrong sub" bug. Every trigger node must carry the subscription name it
+	// represents so the UI can fire the correct sub - using pipeline.name
+	// alone only matched the first trigger, leaving chain triggers (GitHub
+	// PR/Issue polls, scheduled, etc.) unreachable from the editor.
+	it('stamps each trigger node with its owning subscription name', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'Pipeline 1',
+				event: 'app.startup',
+				enabled: true,
+				prompt: 'startup',
+				agent_id: 's1',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'Pipeline 1-chain-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'scheduled',
+				schedule_times: ['00:00'],
+				agent_id: 's1',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'Pipeline 1-chain-2',
+				event: 'github.pull_request',
+				enabled: true,
+				prompt: 'review PR',
+				repo: 'owner/repo',
+				poll_minutes: 1,
+				agent_id: 's1',
+				pipeline_name: 'Pipeline 1',
+			},
+		];
+		const sessions = [
+			{
+				id: 's1',
+				name: 'Worker',
+				toolType: 'claude-code' as const,
+				cwd: '/tmp',
+				projectRoot: '/tmp',
+			},
+		];
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		expect(pipelines).toHaveLength(1);
+
+		const triggerNodes = pipelines[0].nodes.filter((n) => n.type === 'trigger');
+		expect(triggerNodes).toHaveLength(3);
+
+		const subNames = triggerNodes
+			.map((n) => (n.data as { subscriptionName?: string }).subscriptionName)
+			.sort();
+		expect(subNames).toEqual(['Pipeline 1', 'Pipeline 1-chain-1', 'Pipeline 1-chain-2']);
+	});
+
+	it('single-trigger pipelines also stamp the subscription name on the trigger node', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'solo',
+				event: 'app.startup',
+				enabled: true,
+				prompt: 'x',
+				agent_id: 's1',
+				pipeline_name: 'solo',
+			},
+		];
+		const sessions = [
+			{
+				id: 's1',
+				name: 'agent',
+				toolType: 'claude-code' as const,
+				cwd: '/tmp',
+				projectRoot: '/tmp',
+			},
+		];
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const triggerNode = pipelines[0].nodes.find((n) => n.type === 'trigger')!;
+		expect((triggerNode.data as { subscriptionName?: string }).subscriptionName).toBe('solo');
+	});
+});
+
+describe('subscriptionsToPipelines - parallel branch subs share a trigger node', () => {
+	// The serializer emits `Schedule → [Cmd1, Cmd2]` as two independent
+	// subscriptions that share the trigger event config but name distinct
+	// targets. On load, those subs must collapse back onto a single visual
+	// trigger with two outgoing edges - otherwise the graph grows a phantom
+	// trigger per reload and confuses the user.
+
+	it('groups command-branch subs under one trigger when event config matches', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'run-script-1',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: './script1.sh',
+				action: 'command',
+				command: { mode: 'shell', shell: './script1.sh' },
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'run-script-2',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: './script2.sh',
+				action: 'command',
+				command: { mode: 'shell', shell: './script2.sh' },
+				schedule_times: ['07:00'],
+				agent_id: 'session-1',
+				pipeline_name: 'Pipeline 1',
+			},
+		];
+		const sessions = makeSessions('Cue Test 1', 'Cue Test 2');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		expect(pipelines).toHaveLength(1);
+
+		const triggers = pipelines[0].nodes.filter((n) => n.type === 'trigger');
+		const commands = pipelines[0].nodes.filter((n) => n.type === 'command');
+		// Collapsed onto a single trigger, two outgoing edges to two commands.
+		expect(triggers).toHaveLength(1);
+		expect(commands).toHaveLength(2);
+		const triggerId = triggers[0].id;
+		const edgesFromTrigger = pipelines[0].edges.filter((e) => e.source === triggerId);
+		expect(edgesFromTrigger).toHaveLength(2);
+	});
+
+	it('keeps triggers separate when event config diverges', () => {
+		// A pipeline that legitimately has two independent triggers (different
+		// schedule times) must NOT be collapsed - the grouping is keyed on
+		// identical event config, not on pipeline name alone.
+		const subs: CueSubscription[] = [
+			{
+				name: 'morning',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'morning work',
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'evening',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: 'evening work',
+				schedule_times: ['19:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+			},
+		];
+		const sessions = makeSessions('worker');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const triggers = pipelines[0].nodes.filter((n) => n.type === 'trigger');
+		expect(triggers).toHaveLength(2);
+	});
+});
+
+describe('subscriptionsToPipelines - chain subs resolve upstream via source_sub', () => {
+	// Regression guard for the `Cmd(owner=S) → Agent(S)` class of pipeline.
+	// Without source_sub-aware resolution, yamlToPipeline routed the chain's
+	// source via session-name lookup - which matched either the agent sharing
+	// that session or invented a phantom agent node, producing a self-loop
+	// edge and leaving the Cmd → Agent connection missing on the canvas.
+
+	function commandAgentMainYaml(): CueSubscription[] {
+		// Mirrors what pipelineToYaml produces for:
+		//   Schedule ─┬─> Cmd1(owner=S1) ─> Agent1(S1) ─┐
+		//             └─> Cmd2(owner=S2) ─> Agent2(S2) ─┴─> Main(S3)
+		return [
+			{
+				name: 'Pipeline 1-cmd-a',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: './script1.sh',
+				action: 'command',
+				command: { mode: 'shell', shell: './script1.sh' },
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'Pipeline 1-cmd-b',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: './script2.sh',
+				action: 'command',
+				command: { mode: 'shell', shell: './script2.sh' },
+				schedule_times: ['07:00'],
+				agent_id: 'session-1',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'Pipeline 1-chain-1',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'report output',
+				source_session: 'Cue Test 1',
+				source_session_ids: 'session-0',
+				source_sub: 'Pipeline 1-cmd-a',
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'Pipeline 1-chain-2',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'aggregate',
+				source_session: ['Cue Test 1', 'Cue Test 2'],
+				source_session_ids: ['session-0', 'session-1'],
+				source_sub: ['Pipeline 1-chain-1', 'Pipeline 1-chain-4'],
+				agent_id: 'session-2',
+				pipeline_name: 'Pipeline 1',
+			},
+			{
+				name: 'Pipeline 1-chain-4',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'report output',
+				source_session: 'Cue Test 2',
+				source_session_ids: 'session-1',
+				source_sub: 'Pipeline 1-cmd-b',
+				agent_id: 'session-1',
+				pipeline_name: 'Pipeline 1',
+			},
+		];
+	}
+
+	it('creates the complete graph shape and no phantom/self-loop edges', () => {
+		const subs = commandAgentMainYaml();
+		const sessions = makeSessions('Cue Test 1', 'Cue Test 2', 'Cue Test Main');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		expect(pipelines).toHaveLength(1);
+		const p = pipelines[0];
+
+		const triggers = p.nodes.filter((n) => n.type === 'trigger');
+		const commands = p.nodes.filter((n) => n.type === 'command');
+		const agents = p.nodes.filter((n) => n.type === 'agent');
+		const errors = p.nodes.filter((n) => n.type === 'error');
+
+		// Must not collapse or duplicate: one trigger, two commands, three
+		// agents (Test 1, Test 2, Main). Before the source_sub fix, chain-1
+		// and chain-4 invented extra agent nodes that overlapped the command
+		// nodes, and chain-2's sources fell back to session-name lookup and
+		// sometimes matched the same invented agents.
+		expect(triggers).toHaveLength(1);
+		expect(commands).toHaveLength(2);
+		expect(agents).toHaveLength(3);
+		expect(errors).toHaveLength(0);
+
+		const agentNames = agents.map((a) => (a.data as AgentNodeData).sessionName).sort();
+		expect(agentNames).toEqual(['Cue Test 1', 'Cue Test 2', 'Cue Test Main']);
+
+		// No edge may connect a node to itself. Self-loops were the visual
+		// symptom of the old session-name resolver picking the same node
+		// for both source and target.
+		for (const edge of p.edges) {
+			expect(edge.source).not.toBe(edge.target);
+		}
+	});
+
+	it('wires the Cmd → Agent edges through source_sub', () => {
+		const subs = commandAgentMainYaml();
+		const sessions = makeSessions('Cue Test 1', 'Cue Test 2', 'Cue Test Main');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		const p = pipelines[0];
+
+		const commands = p.nodes.filter((n) => n.type === 'command');
+		const agents = p.nodes.filter((n) => n.type === 'agent');
+		const cmd1 = commands.find((n) => (n.data as CommandNodeData).name === 'Pipeline 1-cmd-a')!;
+		const cmd2 = commands.find((n) => (n.data as CommandNodeData).name === 'Pipeline 1-cmd-b')!;
+		const agent1 = agents.find((n) => (n.data as AgentNodeData).sessionName === 'Cue Test 1')!;
+		const agent2 = agents.find((n) => (n.data as AgentNodeData).sessionName === 'Cue Test 2')!;
+		const main = agents.find((n) => (n.data as AgentNodeData).sessionName === 'Cue Test Main')!;
+
+		const edgeExists = (from: PipelineNode, to: PipelineNode) =>
+			p.edges.some((e) => e.source === from.id && e.target === to.id);
+
+		expect(edgeExists(cmd1, agent1)).toBe(true);
+		expect(edgeExists(cmd2, agent2)).toBe(true);
+		expect(edgeExists(agent1, main)).toBe(true);
+		expect(edgeExists(agent2, main)).toBe(true);
+		// And the trigger must fan out to BOTH commands, not fewer.
+		const trigger = p.nodes.find((n) => n.type === 'trigger')!;
+		expect(edgeExists(trigger, cmd1)).toBe(true);
+		expect(edgeExists(trigger, cmd2)).toBe(true);
+	});
+
+	// Regression: when chain subs carry `target_node_key` (the keyed dedup
+	// path in `getOrCreateAgentNode`), the legacy sessionName fallback is
+	// skipped. If chain-2 (fan-in) is processed before chain-4 because of
+	// the chain-index sort, chain-2's source_sub → chain-4 lookup fails to
+	// find the not-yet-created chain-4 target node and falls back to a
+	// session-name resolver that invents a phantom agent. Then chain-4's
+	// keyed target creates a SECOND agent for the same session - and the
+	// real chain-4 target ends up disconnected from chain-2 on the canvas.
+	// Reproduces the Obsidian Daily Pipe shape from the user bug report.
+	it('keeps fan-in wiring intact when chains carry target_node_key and chain-index ordering misranks dependencies', () => {
+		const subs: CueSubscription[] = [
+			{
+				name: 'Pipeline 1-cmd-a',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: './script1.sh',
+				action: 'command',
+				command: { mode: 'shell', shell: './script1.sh' },
+				schedule_times: ['07:00'],
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+				target_node_key: 'cmd-a-key',
+			},
+			{
+				name: 'Pipeline 1-cmd-b',
+				event: 'time.scheduled',
+				enabled: true,
+				prompt: './script2.sh',
+				action: 'command',
+				command: { mode: 'shell', shell: './script2.sh' },
+				schedule_times: ['07:00'],
+				agent_id: 'session-1',
+				pipeline_name: 'Pipeline 1',
+				target_node_key: 'cmd-b-key',
+			},
+			{
+				name: 'Pipeline 1-chain-1',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'report output',
+				source_session: 'Cue Test 1',
+				source_session_ids: 'session-0',
+				source_sub: 'Pipeline 1-cmd-a',
+				agent_id: 'session-0',
+				pipeline_name: 'Pipeline 1',
+				target_node_key: 'chain-1-key',
+			},
+			{
+				// Fan-in (chain-2) is misranked under chain-index sort:
+				// it sources chain-4 (idx 4) but its own idx is 2.
+				name: 'Pipeline 1-chain-2',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'aggregate',
+				source_session: ['Cue Test 1', 'Cue Test 2'],
+				source_session_ids: ['session-0', 'session-1'],
+				source_sub: ['Pipeline 1-chain-1', 'Pipeline 1-chain-4'],
+				agent_id: 'session-2',
+				pipeline_name: 'Pipeline 1',
+				target_node_key: 'chain-2-key',
+			},
+			{
+				name: 'Pipeline 1-chain-4',
+				event: 'agent.completed',
+				enabled: true,
+				prompt: 'report output',
+				source_session: 'Cue Test 2',
+				source_session_ids: 'session-1',
+				source_sub: 'Pipeline 1-cmd-b',
+				agent_id: 'session-1',
+				pipeline_name: 'Pipeline 1',
+				target_node_key: 'chain-4-key',
+			},
+		];
+		const sessions = makeSessions('Cue Test 1', 'Cue Test 2', 'Cue Test Main');
+
+		const pipelines = subscriptionsToPipelines(subs, sessions);
+		expect(pipelines).toHaveLength(1);
+		const p = pipelines[0];
+
+		const triggers = p.nodes.filter((n) => n.type === 'trigger');
+		const commands = p.nodes.filter((n) => n.type === 'command');
+		const agents = p.nodes.filter((n) => n.type === 'agent');
+		const errors = p.nodes.filter((n) => n.type === 'error');
+
+		expect(errors).toHaveLength(0);
+		expect(triggers).toHaveLength(1);
+		expect(commands).toHaveLength(2);
+		// Exactly three agents: Cue Test 1, Cue Test 2, Cue Test Main -
+		// no phantom duplicates from premature creation.
+		expect(agents).toHaveLength(3);
+		const agentNames = agents.map((a) => (a.data as AgentNodeData).sessionName).sort();
+		expect(agentNames).toEqual(['Cue Test 1', 'Cue Test 2', 'Cue Test Main']);
+
+		const cmdA = commands.find((n) => (n.data as CommandNodeData).name === 'Pipeline 1-cmd-a')!;
+		const cmdB = commands.find((n) => (n.data as CommandNodeData).name === 'Pipeline 1-cmd-b')!;
+		const a1 = agents.find((n) => (n.data as AgentNodeData).sessionName === 'Cue Test 1')!;
+		const a2 = agents.find((n) => (n.data as AgentNodeData).sessionName === 'Cue Test 2')!;
+		const main = agents.find((n) => (n.data as AgentNodeData).sessionName === 'Cue Test Main')!;
+
+		const edgeExists = (from: PipelineNode, to: PipelineNode) =>
+			p.edges.some((e) => e.source === from.id && e.target === to.id);
+
+		// Full chain must be connected end-to-end.
+		expect(edgeExists(cmdA, a1)).toBe(true);
+		expect(edgeExists(cmdB, a2)).toBe(true);
+		expect(edgeExists(a1, main)).toBe(true);
+		expect(edgeExists(a2, main)).toBe(true);
 	});
 });

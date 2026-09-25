@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { RefObject } from 'react';
 import { useAgentSessionManagement } from '../../../renderer/hooks';
+import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import type { Session, AITab, LogEntry } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 import type { RightPanelHandle } from '../../../renderer/components/RightPanel';
+import { createMockAITab } from '../../helpers/mockTab';
 
 type MaestroHistoryApi = typeof window.maestro.history;
 
@@ -11,53 +14,32 @@ type MaestroAgentSessionsApi = typeof window.maestro.agentSessions;
 
 type MaestroClaudeApi = typeof window.maestro.claude;
 
-const createMockTab = (overrides: Partial<AITab> = {}): AITab => ({
-	id: 'tab-1',
-	agentSessionId: null,
-	name: null,
-	starred: false,
-	logs: [],
-	inputValue: '',
-	stagedImages: [],
-	createdAt: 1700000000000,
-	state: 'idle',
-	saveToHistory: true,
-	...overrides,
-});
+const createMockTab = (overrides: Partial<AITab> = {}): AITab =>
+	createMockAITab({
+		createdAt: 1700000000000,
+		saveToHistory: true,
+		...overrides,
+	});
 
+// Thin wrapper: pre-populates an AI tab so the hook has session state to
+// write history entries against.
 const createMockSession = (overrides: Partial<Session> = {}): Session => {
 	const baseTab = createMockTab();
-
-	return {
-		id: 'session-1',
-		name: 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test/project',
-		fullPath: '/test/project',
-		projectRoot: '/test/project',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
+	return baseCreateMockSession({
 		isGitRepo: true,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
 		aiTabs: [baseTab],
 		activeTabId: baseTab.id,
-		closedTabHistory: [],
-		executionQueue: [],
-		activeTimeMs: 0,
 		...overrides,
-	};
+	});
 };
+
+function seedActiveSession(session: Session | null) {
+	if (session) {
+		useSessionStore.setState({ sessions: [session], activeSessionId: session.id } as any);
+	} else {
+		useSessionStore.setState({ sessions: [], activeSessionId: null } as any);
+	}
+}
 
 describe('useAgentSessionManagement', () => {
 	const originalMaestro = { ...window.maestro };
@@ -106,9 +88,9 @@ describe('useAgentSessionManagement', () => {
 		const rightPanelRef = createRightPanelRef();
 		const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1700000000123);
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions: vi.fn(),
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -158,9 +140,9 @@ describe('useAgentSessionManagement', () => {
 
 		const rightPanelRef = createRightPanelRef();
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions: vi.fn(),
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -200,9 +182,9 @@ describe('useAgentSessionManagement', () => {
 
 		const rightPanelRef = createRightPanelRef();
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions: vi.fn(),
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -242,9 +224,9 @@ describe('useAgentSessionManagement', () => {
 		const setSessions = vi.fn();
 		const setActiveAgentSessionId = vi.fn();
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId,
 				setAgentSessionsOpen: vi.fn(),
@@ -283,9 +265,9 @@ describe('useAgentSessionManagement', () => {
 		});
 		const setSessions = vi.fn();
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -310,7 +292,7 @@ describe('useAgentSessionManagement', () => {
 		const existingTab = createMockTab({
 			id: 'tab-existing',
 			agentSessionId: 'agent-123',
-			logs: [], // Empty logs — should trigger reload from disk
+			logs: [], // Empty logs - should trigger reload from disk
 		});
 		const activeSession = createMockSession({
 			aiTabs: [createMockTab({ id: 'tab-1' }), existingTab],
@@ -339,9 +321,9 @@ describe('useAgentSessionManagement', () => {
 			hasMore: false,
 		});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId,
 				setAgentSessionsOpen: vi.fn(),
@@ -370,6 +352,62 @@ describe('useAgentSessionManagement', () => {
 		expect(reloadedTab.logs[1].text).toBe('Hi there');
 	});
 
+	it('does not create a duplicate tab when a concurrent resume already opened the session', async () => {
+		// handleResumeSession is async (awaits disk read), so two activations of the
+		// same starred session can both pass the pre-await dedup with no tab present.
+		// The functional setSessions update must re-check FRESH state and focus the
+		// already-created tab instead of appending a second one. There must never be
+		// two tabs for one agent session.
+		const activeSession = createMockSession({
+			aiTabs: [createMockTab({ id: 'tab-1', agentSessionId: null })],
+			activeTabId: 'tab-1',
+			projectRoot: '/test/project',
+		});
+		const setSessions = vi.fn();
+
+		window.maestro.agentSessions.read = vi.fn().mockResolvedValue({
+			messages: [
+				{ type: 'user', content: 'Hello', timestamp: '2024-01-01T00:00:00.000Z', uuid: 'msg-1' },
+			],
+			total: 1,
+			hasMore: false,
+		});
+
+		seedActiveSession(activeSession);
+		const { result } = renderHook(() =>
+			useAgentSessionManagement({
+				setSessions,
+				setActiveAgentSessionId: vi.fn(),
+				setAgentSessionsOpen: vi.fn(),
+				rightPanelRef: createRightPanelRef(),
+				defaultSaveToHistory: true,
+			})
+		);
+
+		// At call time activeSession has NO tab for 'agent-race', so the resume goes
+		// through the disk-read + createTab path and returns a functional updater.
+		await act(async () => {
+			await result.current.handleResumeSession('agent-race');
+		});
+
+		const updateFn = setSessions.mock.calls[0][0];
+
+		// Simulate the concurrent first-resume having already committed its tab into
+		// the store before this updater runs.
+		const raceTab = createMockTab({ id: 'tab-race', agentSessionId: 'agent-race', logs: [] });
+		const committedSession = {
+			...activeSession,
+			aiTabs: [...activeSession.aiTabs, raceTab],
+		};
+
+		const [updatedSession] = updateFn([committedSession]);
+
+		// Exactly one tab for 'agent-race' (the first one), focused - no duplicate.
+		const raceTabs = updatedSession.aiTabs.filter((t: AITab) => t.agentSessionId === 'agent-race');
+		expect(raceTabs).toHaveLength(1);
+		expect(updatedSession.activeTabId).toBe('tab-race');
+	});
+
 	it('clears activeFileTabId when resuming a new agent session from file preview', async () => {
 		const activeSession = createMockSession({
 			activeFileTabId: 'file-tab-1',
@@ -385,9 +423,9 @@ describe('useAgentSessionManagement', () => {
 			hasMore: false,
 		});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -405,6 +443,56 @@ describe('useAgentSessionManagement', () => {
 
 		expect(updatedSession.activeFileTabId).toBeNull();
 		expect(updatedSession.inputMode).toBe('ai');
+	});
+
+	it('reads an SSH agent transcript from the remote before the agent has spawned', async () => {
+		// After a restart the runtime `sshRemoteId` is cleared and only comes back
+		// when the agent spawns. Opening a history entry before then must still
+		// read from the configured remote, not the local disk.
+		const activeSession = createMockSession({
+			projectRoot: '/test/project',
+			sshRemoteId: undefined,
+			sessionSshRemoteConfig: { enabled: true, remoteId: 'studio' },
+		});
+
+		window.maestro.agentSessions.read = vi.fn().mockResolvedValue({
+			messages: [
+				{ type: 'user', content: 'Hello', timestamp: '2024-01-01T00:00:00.000Z', uuid: 'msg-1' },
+			],
+			total: 1,
+			hasMore: false,
+		});
+		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
+		seedActiveSession(activeSession);
+
+		const { result } = renderHook(() =>
+			useAgentSessionManagement({
+				setSessions: vi.fn(),
+				setActiveAgentSessionId: vi.fn(),
+				setAgentSessionsOpen: vi.fn(),
+				rightPanelRef: createRightPanelRef(),
+				defaultSaveToHistory: true,
+			})
+		);
+
+		await act(async () => {
+			await result.current.handleResumeSession(
+				'agent-remote',
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				'/remote/project'
+			);
+		});
+
+		expect(window.maestro.agentSessions.read).toHaveBeenCalledWith(
+			'claude-code',
+			'/remote/project',
+			'agent-remote',
+			{ offset: 0, limit: 500 },
+			'studio'
+		);
 	});
 
 	it('loads messages and metadata when resuming a new agent session', async () => {
@@ -434,9 +522,9 @@ describe('useAgentSessionManagement', () => {
 			'agent-456': { sessionName: 'Loaded Session', starred: true },
 		});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId,
 				setAgentSessionsOpen: vi.fn(),
@@ -453,7 +541,8 @@ describe('useAgentSessionManagement', () => {
 			'claude-code',
 			'/test/project',
 			'agent-456',
-			{ offset: 0, limit: 500 }
+			{ offset: 0, limit: 500 },
+			undefined
 		);
 		expect(window.maestro.claude.getSessionOrigins).toHaveBeenCalledOnce();
 		expect(setActiveAgentSessionId).toHaveBeenCalledWith('agent-456');
@@ -520,9 +609,9 @@ describe('useAgentSessionManagement', () => {
 
 		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId,
 				setAgentSessionsOpen: vi.fn(),
@@ -552,9 +641,9 @@ describe('useAgentSessionManagement', () => {
 		const activeSession = createMockSession({ projectRoot: '/test/project' });
 		const setSessions = vi.fn();
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -623,9 +712,9 @@ describe('useAgentSessionManagement', () => {
 		});
 		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId,
 				setAgentSessionsOpen: vi.fn(),
@@ -662,9 +751,9 @@ describe('useAgentSessionManagement', () => {
 			.mockRejectedValue(new Error('ENOENT: no such file or directory'));
 		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -714,9 +803,9 @@ describe('useAgentSessionManagement', () => {
 		});
 		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
 
+		seedActiveSession(activeSession);
 		const { result } = renderHook(() =>
 			useAgentSessionManagement({
-				activeSession,
 				setSessions,
 				setActiveAgentSessionId: vi.fn(),
 				setAgentSessionsOpen: vi.fn(),
@@ -732,5 +821,145 @@ describe('useAgentSessionManagement', () => {
 
 		expect(showFlash).toHaveBeenCalledWith('Session has no displayable messages');
 		expect(setSessions).not.toHaveBeenCalled();
+	});
+
+	it('returns true when a session resumes successfully', async () => {
+		const activeSession = createMockSession({ projectRoot: '/test/project' });
+
+		window.maestro.agentSessions.read = vi.fn().mockResolvedValue({
+			messages: [
+				{ type: 'user', content: 'Hello', timestamp: '2024-01-01T00:00:00.000Z', uuid: 'msg-1' },
+			],
+			total: 1,
+			hasMore: false,
+		});
+		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
+
+		seedActiveSession(activeSession);
+		const { result } = renderHook(() =>
+			useAgentSessionManagement({
+				setSessions: vi.fn(),
+				setActiveAgentSessionId: vi.fn(),
+				setAgentSessionsOpen: vi.fn(),
+				rightPanelRef: createRightPanelRef(),
+				defaultSaveToHistory: true,
+			})
+		);
+
+		let resumed: boolean | undefined;
+		await act(async () => {
+			resumed = await result.current.handleResumeSession('agent-ok');
+		});
+
+		expect(resumed).toBe(true);
+	});
+
+	it('returns false without flashing when suppressUnavailableFlash is set and no messages load', async () => {
+		const activeSession = createMockSession({ projectRoot: '/test/project' });
+		const showFlash = vi.fn();
+
+		// Aged-out session: read resolves with no messages.
+		window.maestro.agentSessions.read = vi
+			.fn()
+			.mockResolvedValue({ messages: [], total: 0, hasMore: false });
+		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
+
+		seedActiveSession(activeSession);
+		const { result } = renderHook(() =>
+			useAgentSessionManagement({
+				setSessions: vi.fn(),
+				setActiveAgentSessionId: vi.fn(),
+				setAgentSessionsOpen: vi.fn(),
+				rightPanelRef: createRightPanelRef(),
+				defaultSaveToHistory: true,
+				showFlash,
+			})
+		);
+
+		let resumed: boolean | undefined;
+		await act(async () => {
+			resumed = await result.current.handleResumeSession(
+				'aged-out',
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ suppressUnavailableFlash: true }
+			);
+		});
+
+		expect(resumed).toBe(false);
+		expect(showFlash).not.toHaveBeenCalled();
+	});
+
+	it('resumes into targetSessionId resolved from the store, not the active session', async () => {
+		// Active session (stale closure value) lives in a different project than the
+		// target we explicitly ask to resume into.
+		const activeSession = createMockSession({
+			id: 'active-agent',
+			projectRoot: '/active/project',
+			toolType: 'claude-code',
+		});
+		const targetSession = createMockSession({
+			id: 'target-agent',
+			projectRoot: '/target/project',
+			toolType: 'codex',
+		});
+
+		const previousStore = useSessionStore.getState();
+		useSessionStore.setState({
+			sessions: [activeSession, targetSession],
+			activeSessionId: activeSession.id,
+		});
+
+		const setActiveAgentSessionId = vi.fn();
+		window.maestro.agentSessions.read = vi.fn().mockResolvedValue({
+			messages: [
+				{ type: 'user', content: 'Hi', timestamp: '2024-01-01T00:00:00.000Z', uuid: 'msg-1' },
+			],
+			total: 1,
+			hasMore: false,
+		});
+		window.maestro.claude.getSessionOrigins = vi.fn().mockResolvedValue({});
+
+		try {
+			const { result } = renderHook(() =>
+				useAgentSessionManagement({
+					setSessions: vi.fn(),
+					setActiveAgentSessionId,
+					setAgentSessionsOpen: vi.fn(),
+					rightPanelRef: createRightPanelRef(),
+					defaultSaveToHistory: true,
+					defaultShowThinking: 'off',
+				})
+			);
+
+			let resumed: boolean | undefined;
+			await act(async () => {
+				resumed = await result.current.handleResumeSession(
+					'agent-x',
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					{ targetSessionId: 'target-agent' }
+				);
+			});
+
+			expect(resumed).toBe(true);
+			// Reads against the target's agent + projectRoot, not the active session's.
+			expect(window.maestro.agentSessions.read).toHaveBeenCalledWith(
+				'codex',
+				'/target/project',
+				'agent-x',
+				{ offset: 0, limit: 500 },
+				undefined
+			);
+			expect(setActiveAgentSessionId).toHaveBeenCalledWith('agent-x');
+		} finally {
+			useSessionStore.setState({ sessions: previousStore.sessions });
+		}
 	});
 });

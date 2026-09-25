@@ -4,20 +4,27 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { Group, SessionInfo, HistoryEntry } from '../../shared/types';
+import type { Group, SessionInfo, HistoryEntry, SshRemoteConfig } from '../../shared/types';
 import {
-	HISTORY_VERSION,
-	MAX_ENTRIES_PER_SESSION,
+	HISTORY_JSONL_EXT,
+	HISTORY_LEGACY_JSON_EXT,
+	parseHistoryJsonl,
+	serializeHistoryEntryLine,
 	HistoryFileData,
 	PaginationOptions,
 	PaginatedResult,
 	sanitizeSessionId,
 	paginateEntries,
 	sortEntriesByTimestamp,
+	normalizeHistoryEntries,
 } from '../../shared/history';
 
 // Get the Maestro config directory path
-function getConfigDir(): string {
+export function getConfigDir(): string {
+	// Allow overriding the data directory (e.g. for dev mode: maestro-dev)
+	if (process.env.MAESTRO_USER_DATA) {
+		return path.resolve(process.env.MAESTRO_USER_DATA);
+	}
 	const platform = os.platform();
 	const home = os.homedir();
 
@@ -65,6 +72,8 @@ function writeStoreFile<T>(filename: string, data: T): void {
 // Store file structures (as used by Electron Store)
 interface SessionsStore {
 	sessions: SessionInfo[];
+	/** Agent the desktop UI currently has selected (400ms-debounced write). */
+	activeSessionId?: string;
 }
 
 interface GroupsStore {
@@ -90,6 +99,17 @@ interface AgentConfigsStore {
 export function readSessions(): SessionInfo[] {
 	const data = readStoreFile<SessionsStore>('maestro-sessions.json');
 	return data?.sessions || [];
+}
+
+/**
+ * The agent the desktop UI currently has selected, or null when the app has
+ * never recorded one. Lives in the sessions store file next to the agents
+ * themselves, so this is the same read `readSessions` already does.
+ */
+export function readActiveAgentId(): string | null {
+	const data = readStoreFile<SessionsStore>('maestro-sessions.json');
+	const id = data?.activeSessionId;
+	return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
 /**
@@ -124,37 +144,70 @@ function getHistoryDir(): string {
  */
 function getSessionHistoryPath(sessionId: string): string {
 	const safeId = sanitizeSessionId(sessionId);
-	return path.join(getHistoryDir(), `${safeId}.json`);
+	return path.join(getHistoryDir(), `${safeId}${HISTORY_JSONL_EXT}`);
 }
 
 /**
- * Read history entries for a specific session (new per-session format)
+ * Get file path for a session's legacy single-object history file. Present
+ * only until the desktop app migrates that session to JSONL.
+ */
+function getLegacySessionHistoryPath(sessionId: string): string {
+	const safeId = sanitizeSessionId(sessionId);
+	return path.join(getHistoryDir(), `${safeId}${HISTORY_LEGACY_JSON_EXT}`);
+}
+
+/**
+ * Read history entries for a specific session, newest first.
+ *
+ * Reads JSONL when present and falls back to the legacy object otherwise. The
+ * CLI deliberately does NOT migrate: the desktop app owns that conversion, and
+ * having two processes race to rewrite the same file is what this format change
+ * exists to eliminate. Reading both means the CLI stays correct either way.
  */
 function readSessionHistory(sessionId: string): HistoryEntry[] {
-	const filePath = getSessionHistoryPath(sessionId);
-	if (!fs.existsSync(filePath)) {
+	const jsonlPath = getSessionHistoryPath(sessionId);
+	if (fs.existsSync(jsonlPath)) {
+		try {
+			// File order is oldest-first; callers expect newest-first.
+			return normalizeHistoryEntries(
+				parseHistoryJsonl(fs.readFileSync(jsonlPath, 'utf-8')).entries.reverse()
+			);
+		} catch {
+			return [];
+		}
+	}
+
+	const legacyPath = getLegacySessionHistoryPath(sessionId);
+	if (!fs.existsSync(legacyPath)) {
 		return [];
 	}
 	try {
-		const data: HistoryFileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-		return data.entries || [];
+		const data: HistoryFileData = JSON.parse(fs.readFileSync(legacyPath, 'utf-8'));
+		// Re-map legacy cross-agent consults (written as AUTO before the AGENT type
+		// existed), matching HistoryManager.getEntries in the app.
+		return normalizeHistoryEntries(data.entries || []);
 	} catch {
 		return [];
 	}
 }
 
 /**
- * List all sessions that have history files
+ * List all sessions that have history files, in either format.
  */
 function listSessionsWithHistory(): string[] {
 	const historyDir = getHistoryDir();
 	if (!fs.existsSync(historyDir)) {
 		return [];
 	}
-	return fs
-		.readdirSync(historyDir)
-		.filter((f) => f.endsWith('.json'))
-		.map((f) => f.replace('.json', ''));
+	const sessionIds = new Set<string>();
+	for (const file of fs.readdirSync(historyDir)) {
+		if (file.endsWith(HISTORY_JSONL_EXT)) {
+			sessionIds.add(file.slice(0, -HISTORY_JSONL_EXT.length));
+		} else if (file.endsWith(HISTORY_LEGACY_JSON_EXT)) {
+			sessionIds.add(file.slice(0, -HISTORY_LEGACY_JSON_EXT.length));
+		}
+	}
+	return Array.from(sessionIds);
 }
 
 /**
@@ -436,11 +489,57 @@ export function resolveAgentId(partialId: string): string {
 		throw new Error(`Ambiguous agent ID '${partialId}'. Matches:\n${matchList}`);
 	}
 
-	if (!resolution.id) {
-		throw new Error(`Agent not found: ${partialId}`);
+	if (resolution.id) {
+		return resolution.id;
 	}
 
-	return resolution.id;
+	// Fall back to an exact, case-insensitive display-name match so callers can
+	// pass an agent's name and not just its ID. Group-chat participants know
+	// their own name (via {{PARTICIPANT_NAME}}) but not their session ID, so
+	// `--agent "<name>"` must work for them.
+	const lower = partialId.toLowerCase();
+	const byName = sessions.filter((s) => s.name.toLowerCase() === lower);
+	if (byName.length === 1) {
+		return byName[0].id;
+	}
+	if (byName.length > 1) {
+		const matchList = byName.map((s) => `  ${s.id.slice(0, 8)}  ${s.name}`).join('\n');
+		throw new Error(`Ambiguous agent name '${partialId}'. Matches:\n${matchList}`);
+	}
+
+	// Last resort: match on the READABLE name, ignoring leading/trailing
+	// decoration. Users prefix agent names with an emoji far more often than not
+	// ("📜 Substrate PedTome"), and both a human and an agent will type the name
+	// they READ, which is the part after the glyph. Without this the exact match
+	// above fails on a name that is on screen, and the caller concludes the agent
+	// does not exist.
+	const readable = readableAgentName(partialId);
+	if (readable) {
+		const byReadable = sessions.filter((s) => readableAgentName(s.name) === readable);
+		if (byReadable.length === 1) {
+			return byReadable[0].id;
+		}
+		if (byReadable.length > 1) {
+			const matchList = byReadable.map((s) => `  ${s.id.slice(0, 8)}  ${s.name}`).join('\n');
+			throw new Error(`Ambiguous agent name '${partialId}'. Matches:\n${matchList}`);
+		}
+	}
+
+	throw new Error(`Agent not found: ${partialId}`);
+}
+
+/**
+ * An agent name reduced to what a person would read aloud: lowercased, with
+ * leading and trailing non-alphanumerics (emoji, symbols, whitespace) removed.
+ * Returns '' for a name that is nothing but decoration, which never matches -
+ * two emoji-only names are not the same agent.
+ */
+function readableAgentName(name: string): string {
+	return name
+		.toLowerCase()
+		.replace(/^[^\p{L}\p{N}]+/u, '')
+		.replace(/[^\p{L}\p{N}]+$/u, '')
+		.trim();
 }
 
 /**
@@ -467,6 +566,19 @@ export function resolveGroupId(partialId: string): string {
 	}
 
 	return resolution.id;
+}
+
+/**
+ * Returns the mtime (ms since epoch) of a session's history file as a cheap
+ * recency proxy. Returns 0 when the file doesn't exist or can't be stat'd, so
+ * sessions that have never been used sort below ones that have.
+ */
+export function getSessionHistoryMtimeMs(sessionId: string): number {
+	try {
+		return fs.statSync(getSessionHistoryPath(sessionId)).mtimeMs;
+	} catch {
+		return 0;
+	}
 }
 
 /**
@@ -539,41 +651,23 @@ export function addHistoryEntry(entry: HistoryEntry): void {
 				fs.mkdirSync(historyDir, { recursive: true });
 			}
 
-			const filePath = getSessionHistoryPath(sessionId);
-			let data: HistoryFileData;
-
-			if (fs.existsSync(filePath)) {
-				try {
-					data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-				} catch {
-					data = {
-						version: HISTORY_VERSION,
-						sessionId,
-						projectPath: entry.projectPath,
-						entries: [],
-					};
-				}
-			} else {
-				data = {
-					version: HISTORY_VERSION,
-					sessionId,
-					projectPath: entry.projectPath,
-					entries: [],
-				};
-			}
-
-			// Add to beginning (most recent first)
-			data.entries.unshift(entry);
-
-			// Trim to max entries
-			if (data.entries.length > MAX_ENTRIES_PER_SESSION) {
-				data.entries = data.entries.slice(0, MAX_ENTRIES_PER_SESSION);
-			}
-
-			// Update projectPath if it changed
-			data.projectPath = entry.projectPath;
-
-			fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+			// Append one line. `appendFileSync` opens with O_APPEND, so the
+			// kernel seeks to EOF as part of the write and this cannot overwrite
+			// bytes the desktop app is writing concurrently. Critically there is
+			// no read-modify-write here any more: the old version read the whole
+			// file, unshifted, and rewrote it, which could silently drop an entry
+			// the app added in between (a cross-process lost update the in-process
+			// write queue could not prevent).
+			//
+			// Trimming is deliberately NOT done here. Rotation is the one
+			// remaining whole-file rewrite and the desktop app owns it; a second
+			// process trimming the same file is exactly the destructive race this
+			// format change removes.
+			fs.appendFileSync(
+				getSessionHistoryPath(sessionId),
+				serializeHistoryEntryLine(entry),
+				'utf-8'
+			);
 		} else {
 			// Use legacy format
 			const filePath = path.posix.join(getConfigDir(), 'maestro-history.json');
@@ -589,4 +683,49 @@ export function addHistoryEntry(entry: HistoryEntry): void {
 			`[WARNING] Failed to write history entry: ${error instanceof Error ? error.message : String(error)}`
 		);
 	}
+}
+
+// ============================================================================
+// SSH Remote Helpers
+// ============================================================================
+
+/**
+ * Read all SSH remote configurations from settings
+ */
+export function readSshRemotes(): SshRemoteConfig[] {
+	const settings = readSettings();
+	return (settings.sshRemotes as SshRemoteConfig[]) || [];
+}
+
+/**
+ * Write SSH remotes array back to settings
+ */
+export function writeSshRemotes(remotes: SshRemoteConfig[]): void {
+	writeSettingValue('sshRemotes', remotes);
+}
+
+/**
+ * Resolve an SSH remote ID (partial or full)
+ * Throws if ambiguous or not found
+ */
+export function resolveSshRemoteId(partialId: string): string {
+	const remotes = readSshRemotes();
+	const allIds = remotes.map((r) => r.id);
+	const resolution = resolveId(partialId, allIds);
+
+	if (resolution.ambiguous) {
+		const matchList = resolution.matches
+			.map((id) => {
+				const remote = remotes.find((r) => r.id === id);
+				return `  ${id.slice(0, 8)}  ${remote?.name || 'Unknown'}`;
+			})
+			.join('\n');
+		throw new Error(`Ambiguous SSH remote ID '${partialId}'. Matches:\n${matchList}`);
+	}
+
+	if (!resolution.id) {
+		throw new Error(`SSH remote not found: ${partialId}`);
+	}
+
+	return resolution.id;
 }

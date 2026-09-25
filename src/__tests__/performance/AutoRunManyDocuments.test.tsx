@@ -17,7 +17,8 @@ import {
 } from '../../renderer/components/AutoRunDocumentSelector';
 import { AutoRun, AutoRunHandle } from '../../renderer/components/AutoRun';
 import { LayerStackProvider } from '../../renderer/contexts/LayerStackContext';
-import type { Theme } from '../../renderer/types';
+
+import { createMockTheme } from '../helpers/mockTheme';
 
 // Helper to wrap component in LayerStackProvider with custom rerender
 const renderWithProviders = (ui: React.ReactElement) => {
@@ -30,6 +31,13 @@ const renderWithProviders = (ui: React.ReactElement) => {
 };
 
 // Mock dependencies for AutoRun component
+// CodeMirror cannot lay itself out in jsdom, so the Auto Run source editor is
+// swapped for the shared textarea double (it still implements the editor handle).
+vi.mock('../../renderer/components/FilePreview/markdownEditor', async () => {
+	const { markdownEditorModuleMock } = await import('../helpers/mockMarkdownEditor');
+	return markdownEditorModuleMock();
+});
+
 vi.mock('react-markdown', () => ({
 	default: ({ children }: { children: string }) => (
 		<div data-testid="react-markdown">{children}</div>
@@ -192,28 +200,6 @@ vi.mock('lucide-react', () => ({
 }));
 
 // Helper to create mock theme
-const createMockTheme = (): Theme => ({
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgActivity: '#2d2d2d',
-		bgSidebar: '#202020',
-		bgHover: '#353535',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		highlight: '#0066ff33',
-		success: '#00aa00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-		purple: '#8b5cf6',
-	},
-});
 
 // Setup window.maestro mock
 const setupMaestroMock = () => {

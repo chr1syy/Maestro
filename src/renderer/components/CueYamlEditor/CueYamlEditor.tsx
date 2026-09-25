@@ -1,5 +1,5 @@
 /**
- * CueYamlEditor — Modal for editing .maestro/cue.yaml configuration.
+ * CueYamlEditor - Modal for editing .maestro/cue.yaml configuration.
  *
  * Thin shell: load/save, validation, modal coordination.
  * Sub-components handle YAML editing, AI chat, and pattern browsing.
@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { CheckCircle, XCircle, Zap, LayoutDashboard, GitFork, X } from 'lucide-react';
+import { GhostIconButton } from '../ui/GhostIconButton';
 import type { CuePattern } from '../../constants/cuePatterns';
 import { Modal, ModalFooter } from '../ui/Modal';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
@@ -20,6 +21,9 @@ import { PatternPicker } from './PatternPicker';
 import { PatternPreviewModal } from './PatternPreviewModal';
 import { CueAiChat } from './CueAiChat';
 import { YamlTextEditor } from './YamlTextEditor';
+import { cueService } from '../../services/cue';
+import { captureException } from '../../utils/sentry';
+import { notifyToast } from '../../stores/notificationStore';
 
 interface CueYamlEditorProps {
 	isOpen: boolean;
@@ -47,7 +51,7 @@ export function CueYamlEditor({
 	const session = useSessionStore(selectSessionById(sessionId));
 
 	// If the CueModal dashboard is NOT open, we were opened directly (e.g., from agent context menu).
-	// In that case, show nav buttons to jump to Dashboard or Pipeline Editor.
+	// In that case, show nav buttons to jump to Dashboard or Pipeline Graph.
 	const cueModalOpen = useModalStore(selectModalOpen('cueModal'));
 	const openedDirectly = !cueModalOpen;
 
@@ -59,22 +63,37 @@ export function CueYamlEditor({
 		async function loadYaml() {
 			setLoading(true);
 			try {
-				const content = await window.maestro.cue.readYaml(projectRoot);
+				const content = await cueService.readYaml(projectRoot);
 				if (cancelled) return;
 				const initial = content ?? CUE_YAML_TEMPLATE;
 				setYamlContent(initial);
 				setOriginalContent(initial);
 				try {
-					const validationResult = await window.maestro.cue.validateYaml(initial);
+					const validationResult = await cueService.validateYaml(initial);
 					if (!cancelled) {
 						setIsValid(validationResult.valid);
 						setValidationErrors(validationResult.errors);
 					}
-				} catch {
-					// Validation failure on load is non-fatal
+				} catch (err: unknown) {
+					// Gate the Save button when validation fails to actually run -
+					// otherwise isValid keeps its initial `true` and the user
+					// could save unvalidated YAML. Surface the error to telemetry
+					// AND to the user via setValidationErrors so they know what
+					// happened. Not re-thrown: the outer catch handles readYaml
+					// failures, not validateYaml; consolidating recovery here.
+					captureException(err, {
+						extra: { operation: 'cueYamlEditor.loadValidate', projectRoot },
+					});
+					if (!cancelled) {
+						setIsValid(false);
+						setValidationErrors([
+							`Failed to validate YAML: ${err instanceof Error ? err.message : String(err)}`,
+						]);
+					}
 				}
-			} catch {
+			} catch (err: unknown) {
 				if (cancelled) return;
+				captureException(err, { extra: { operation: 'cueYamlEditor.loadRead', projectRoot } });
 				setYamlContent(CUE_YAML_TEMPLATE);
 				setOriginalContent(CUE_YAML_TEMPLATE);
 			} finally {
@@ -95,7 +114,7 @@ export function CueYamlEditor({
 		}
 		validateTimerRef.current = setTimeout(async () => {
 			try {
-				const result = await window.maestro.cue.validateYaml(content);
+				const result = await cueService.validateYaml(content);
 				setIsValid(result.valid);
 				setValidationErrors(result.errors);
 			} catch {
@@ -124,8 +143,26 @@ export function CueYamlEditor({
 
 	const handleSave = useCallback(async () => {
 		if (!isValid) return;
-		await window.maestro.cue.writeYaml(projectRoot, yamlContent);
-		await window.maestro.cue.refreshSession(sessionId, projectRoot);
+		await cueService.writeYaml(projectRoot, yamlContent);
+		// Write succeeded, so the YAML IS on disk - but if refreshSession
+		// fails the engine keeps serving the stale config until the next app
+		// start. Surface that as a toast so the user knows to retry rather
+		// than thinking the save silently reverted.
+		try {
+			await cueService.refreshSession(sessionId, projectRoot);
+		} catch (err) {
+			captureException(err, {
+				extra: { operation: 'cueYamlEditor.refreshSession', projectRoot, sessionId },
+			});
+			notifyToast({
+				type: 'warning',
+				title: 'Cue config saved but engine did not reload',
+				message:
+					err instanceof Error
+						? `${err.message} - reopen the editor to retry.`
+						: 'Reopen the editor to retry the reload.',
+			});
+		}
 		onClose();
 	}, [isValid, projectRoot, yamlContent, sessionId, onClose]);
 
@@ -134,20 +171,33 @@ export function CueYamlEditor({
 
 	const refreshYamlFromDisk = useCallback(async () => {
 		try {
-			const content = await window.maestro.cue.readYaml(projectRoot);
-			if (content) {
+			const content = await cueService.readYaml(projectRoot);
+			// `if (content)` would skip an intentionally empty YAML - an empty
+			// string is a legitimate result (e.g. user cleared the file) and
+			// should still trigger state updates and revalidation. Only skip
+			// when the read returned null (no file on disk).
+			if (content != null) {
 				setYamlContent(content);
 				setOriginalContent(content);
 				try {
-					const result = await window.maestro.cue.validateYaml(content);
+					const result = await cueService.validateYaml(content);
 					setIsValid(result.valid);
 					setValidationErrors(result.errors);
-				} catch {
-					// non-fatal
+				} catch (err: unknown) {
+					// Same gating as loadValidate: don't leave isValid=true after
+					// a validation failure or the user could save unvalidated
+					// content from a refresh.
+					captureException(err, {
+						extra: { operation: 'cueYamlEditor.refreshValidate', projectRoot },
+					});
+					setIsValid(false);
+					setValidationErrors([
+						`Failed to validate YAML: ${err instanceof Error ? err.message : String(err)}`,
+					]);
 				}
 			}
-		} catch {
-			// non-fatal
+		} catch (err: unknown) {
+			captureException(err, { extra: { operation: 'cueYamlEditor.refreshRead', projectRoot } });
 		}
 	}, [projectRoot]);
 
@@ -204,7 +254,7 @@ export function CueYamlEditor({
 	if (!isOpen) return null;
 
 	const isDirty = yamlContent !== originalContent;
-	const modalTitle = `Edit .maestro/cue.yaml${session?.name ? ` — ${session.name}` : ''}`;
+	const modalTitle = `Edit .maestro/cue.yaml${session?.name ? ` - ${session.name}` : ''}`;
 
 	// Custom header with nav buttons when opened directly (not from CueModal)
 	const directNavHeader = openedDirectly ? (
@@ -237,19 +287,13 @@ export function CueYamlEditor({
 						style={{ color: theme.colors.textDim }}
 					>
 						<GitFork className="w-3.5 h-3.5" />
-						Pipeline Editor
+						Pipeline Graph
 					</button>
 				</div>
 			</div>
-			<button
-				type="button"
-				onClick={handleClose}
-				className="p-1 rounded hover:bg-white/10 transition-colors"
-				style={{ color: theme.colors.textDim }}
-				aria-label="Close modal"
-			>
+			<GhostIconButton onClick={handleClose} ariaLabel="Close modal" color={theme.colors.textDim}>
 				<X className="w-4 h-4" />
-			</button>
+			</GhostIconButton>
 		</div>
 	) : undefined;
 

@@ -9,6 +9,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ipcMain } from 'electron';
 import { registerGitHandlers } from '../../../../main/ipc/handlers/git';
 import * as execFile from '../../../../main/utils/execFile';
+import {
+	markWorktreeCreatedByMaestro,
+	isWorktreeCreatedByMaestro,
+	clearWorktreeCreationMarks,
+} from '../../../../main/ipc/handlers/git/worktreeCreationMarks';
+import { captureException } from '../../../../main/utils/sentry';
 import path from 'path';
 
 // Mock electron's ipcMain
@@ -25,6 +31,13 @@ vi.mock('electron', () => ({
 // Mock the execFile module
 vi.mock('../../../../main/utils/execFile', () => ({
 	execFileNoThrow: vi.fn(),
+	execFileBufferNoThrow: vi.fn(),
+	execFileStreaming: vi.fn(),
+}));
+
+// Mock the SSH command builder (used by the streaming git:runCommand path)
+vi.mock('../../../../main/utils/ssh-command-builder', () => ({
+	buildSshCommand: vi.fn().mockResolvedValue({ command: 'ssh', args: ['host', 'git push'] }),
 }));
 
 // Mock the logger
@@ -37,11 +50,21 @@ vi.mock('../../../../main/utils/logger', () => ({
 	},
 }));
 
+// Mock the web-desktop bridge fanout so we can assert that worktree watcher
+// events reach browser clients even when no desktop window is available.
+const { mockBroadcastBridgeEvent } = vi.hoisted(() => ({
+	mockBroadcastBridgeEvent: vi.fn(),
+}));
+vi.mock('../../../../main/web-server/handlers/bridgeHandlers', () => ({
+	broadcastBridgeEvent: mockBroadcastBridgeEvent,
+}));
+
 // Mock the cliDetection module
 vi.mock('../../../../main/utils/cliDetection', () => ({
 	resolveGhPath: vi.fn().mockResolvedValue('gh'),
 	getCachedGhStatus: vi.fn().mockReturnValue(null),
 	setCachedGhStatus: vi.fn(),
+	getExpandedEnv: vi.fn().mockReturnValue({ PATH: '/expanded/path:/usr/bin' }),
 }));
 
 // Mock fs/promises
@@ -50,6 +73,14 @@ vi.mock('fs/promises', () => ({
 		access: vi.fn(),
 		readdir: vi.fn(),
 		rmdir: vi.fn(),
+		// realpath: identity by default so symlink-resolution paths in scanWorktreeDirectory
+		// and the chokidar discovery validator behave like a no-op in tests. Individual
+		// tests can override this via vi.mocked(fs.realpath).mockResolvedValue(...) to
+		// exercise the symlink-resolution behavior.
+		// Separators are normalized to '/' so that on Windows, product paths built with
+		// path.join (backslashes) compare equal to the POSIX paths returned by the mocked
+		// `git rev-parse --show-toplevel`. On POSIX this is a no-op.
+		realpath: vi.fn().mockImplementation(async (p: string) => String(p).replace(/\\/g, '/')),
 	},
 }));
 
@@ -81,7 +112,12 @@ vi.mock('../../../../main/utils/remote-git', () => ({
 	execGit: vi.fn(),
 }));
 
-// Mock the stores module — git.ts now imports getSshRemoteById from here
+// Mock remote-fs (used by scanWorktreeDirectory's SSH branch)
+vi.mock('../../../../main/utils/remote-fs', () => ({
+	readDirRemote: vi.fn(),
+}));
+
+// Mock the stores module - git.ts now imports getSshRemoteById from here
 // instead of receiving it via dependency injection. We delegate to the
 // mockSettingsStore so existing tests can still drive SSH remote lookups
 // by configuring `mockSettingsStore.get.mockReturnValue([...])`.
@@ -103,23 +139,40 @@ const { mockSpawnSync } = vi.hoisted(() => ({
 	mockSpawnSync: vi.fn(),
 }));
 
-vi.mock('child_process', () => ({
-	spawnSync: mockSpawnSync,
-	// Include other exports that might be needed
-	spawn: vi.fn(),
-	exec: vi.fn(),
-	execSync: vi.fn(),
-	execFile: vi.fn(),
-	execFileSync: vi.fn(),
-	fork: vi.fn(),
+vi.mock('child_process', () => {
+	const mock = {
+		spawnSync: mockSpawnSync,
+		// Include other exports that might be needed
+		spawn: vi.fn(),
+		exec: vi.fn(),
+		execSync: vi.fn(),
+		execFile: vi.fn(),
+		execFileSync: vi.fn(),
+		fork: vi.fn(),
+	};
+	// Also expose as default for modules that import via CJS interop
+	return { ...mock, default: mock };
+});
+
+vi.mock('../../../../main/utils/sentry', () => ({
+	captureException: vi.fn(),
+	captureMessage: vi.fn(),
 }));
 
 describe('Git IPC handlers', () => {
 	let handlers: Map<string, Function>;
+	// Worktree watcher events now route through safeSend(getMainWindow); each
+	// test that exercises a watcher assigns its mock window here so the send
+	// path has a live window to target.
+	let currentMockWindow: any = null;
 
 	beforeEach(async () => {
 		// Clear mocks
 		vi.clearAllMocks();
+		currentMockWindow = null;
+		// The "Maestro created this worktree" registry is module-level process
+		// state; a mark left by one test would suppress another's discovery event.
+		clearWorktreeCreationMarks();
 
 		// Reset hoisted settings store mock to a clean state for each test
 		mockSettingsStore.get.mockReturnValue([]);
@@ -133,6 +186,7 @@ describe('Git IPC handlers', () => {
 		// Register handlers with mock settings store
 		registerGitHandlers({
 			settingsStore: mockSettingsStore,
+			getMainWindow: () => currentMockWindow,
 		});
 
 		// Set up execGit mock to dispatch to local or remote
@@ -151,11 +205,13 @@ describe('Git IPC handlers', () => {
 	});
 
 	describe('registration', () => {
-		it('should register all 26 git handlers', () => {
+		it('should register all git handlers', () => {
 			const expectedChannels = [
 				'git:status',
 				'git:diff',
 				'git:isRepo',
+				'git:init',
+				'git:commitAll',
 				'git:numstat',
 				'git:branch',
 				'git:remote',
@@ -163,12 +219,16 @@ describe('Git IPC handlers', () => {
 				'git:tags',
 				'git:info',
 				'git:log',
+				'git:runCommand',
+				'git:cancelCommand',
+				'git:checkoutBranch',
 				'git:commitCount',
 				'git:show',
 				'git:showFile',
 				'git:worktreeInfo',
 				'git:getRepoRoot',
 				'git:worktreeSetup',
+				'git:worktreeRunSetup',
 				'git:worktreeCheckout',
 				'git:createPR',
 				'git:checkGhCli',
@@ -179,9 +239,11 @@ describe('Git IPC handlers', () => {
 				'git:unwatchWorktreeDirectory',
 				'git:removeWorktree',
 				'git:createGist',
+				'git:graph',
+				'git:switch',
 			];
 
-			expect(handlers.size).toBe(26);
+			expect(handlers.size).toBe(expectedChannels.length);
 			for (const channel of expectedChannels) {
 				expect(handlers.has(channel)).toBe(true);
 			}
@@ -1209,6 +1271,308 @@ COMMIT_STARTdef987654321|Jane Smith|2024-01-14T09:00:00+00:00||Add feature
 		});
 	});
 
+	describe('git:runCommand', () => {
+		/** Fake streaming handle: emits chunks, then resolves with the result. */
+		function mockStreaming(
+			chunks: Array<[string, 'stdout' | 'stderr']>,
+			result: { stdout?: string; stderr?: string; exitCode: number | string }
+		) {
+			vi.mocked(execFile.execFileStreaming).mockImplementation((_cmd, _args, options) => {
+				for (const [chunk, stream] of chunks) {
+					options.onChunk(chunk, stream);
+				}
+				return {
+					result: Promise.resolve({
+						stdout: result.stdout ?? '',
+						stderr: result.stderr ?? '',
+						exitCode: result.exitCode,
+					}),
+					cancel: vi.fn(),
+				};
+			});
+		}
+
+		function mockEvent() {
+			return {
+				sender: { isDestroyed: () => false, send: vi.fn() },
+			} as any;
+		}
+
+		it('streams chunks to the requesting window and reports success', async () => {
+			mockStreaming(
+				[
+					['Fetching origin\n', 'stderr'],
+					['Already up to date.\n', 'stdout'],
+				],
+				{ exitCode: 0 }
+			);
+			const event = mockEvent();
+
+			const handler = handlers.get('git:runCommand');
+			const result = await handler!(event, {
+				runId: 'run-1',
+				operation: 'pull',
+				cwd: '/test/repo',
+			});
+
+			expect(execFile.execFileStreaming).toHaveBeenCalledWith(
+				'git',
+				['-c', 'color.ui=always', 'pull', '--progress'],
+				expect.objectContaining({ cwd: '/test/repo' })
+			);
+			expect(event.sender.send).toHaveBeenCalledWith('git:commandOutput', {
+				runId: 'run-1',
+				stream: 'stderr',
+				chunk: 'Fetching origin\n',
+			});
+			expect(event.sender.send).toHaveBeenCalledTimes(2);
+			expect(result).toEqual({
+				success: true,
+				exitCode: 0,
+				cancelled: false,
+				error: undefined,
+			});
+		});
+
+		it('surfaces stderr as the error on failure', async () => {
+			mockStreaming([], { stderr: 'fatal: could not read from remote\n', exitCode: 128 });
+
+			const handler = handlers.get('git:runCommand');
+			const result = await handler!(mockEvent(), {
+				runId: 'run-2',
+				operation: 'push',
+				cwd: '/test/repo',
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.cancelled).toBe(false);
+			expect(result.error).toBe('fatal: could not read from remote');
+		});
+
+		it('strips ANSI colors and progress overwrites from the failure message', async () => {
+			// What a colored pre-push hook plus `--progress` actually leaves on stderr.
+			mockStreaming([], {
+				stderr:
+					'\x1b[33mwarn\x1b[39m index.html\n' +
+					'Writing objects:  50% (1/2)\rWriting objects: 100% (2/2), done.\n' +
+					"\x1b[31merror: failed to push some refs to 'origin'\x1b[0m\n",
+				exitCode: 1,
+			});
+
+			const handler = handlers.get('git:runCommand');
+			const result = await handler!(mockEvent(), {
+				runId: 'run-2b',
+				operation: 'push',
+				cwd: '/test/repo',
+			});
+
+			expect(result.error).toBe(
+				'warn index.html\n' +
+					'Writing objects: 100% (2/2), done.\n' +
+					"error: failed to push some refs to 'origin'"
+			);
+		});
+
+		it('reports a SIGTERM exit as cancelled rather than failed', async () => {
+			mockStreaming([], { exitCode: 'SIGTERM' });
+
+			const handler = handlers.get('git:runCommand');
+			const result = await handler!(mockEvent(), {
+				runId: 'run-3',
+				operation: 'push',
+				cwd: '/test/repo',
+			});
+
+			expect(result).toEqual({
+				success: false,
+				exitCode: 'SIGTERM',
+				cancelled: true,
+				error: undefined,
+			});
+		});
+
+		it('resolves the branch name when pushing with setUpstream', async () => {
+			vi.mocked(execFile.execFileNoThrow).mockResolvedValue({
+				stdout: 'feature/login\n',
+				stderr: '',
+				exitCode: 0,
+			});
+			mockStreaming([], { exitCode: 0 });
+
+			const handler = handlers.get('git:runCommand');
+			await handler!(mockEvent(), {
+				runId: 'run-4',
+				operation: 'push',
+				cwd: '/test/repo',
+				setUpstream: true,
+			});
+
+			expect(execFile.execFileStreaming).toHaveBeenCalledWith(
+				'git',
+				[
+					'-c',
+					'color.ui=always',
+					'push',
+					'--progress',
+					'--set-upstream',
+					'origin',
+					'feature/login',
+				],
+				expect.anything()
+			);
+		});
+
+		it('forces color from git and from whatever its hooks run', async () => {
+			mockStreaming([], { exitCode: 0 });
+
+			const handler = handlers.get('git:runCommand');
+			await handler!(mockEvent(), {
+				runId: 'run-color',
+				operation: 'push',
+				cwd: '/test/repo',
+			});
+
+			// The console renders ANSI, but nothing in this chain is a TTY: git
+			// needs color.ui=always and a pre-push hook's tooling needs FORCE_COLOR,
+			// or the whole transcript arrives gray.
+			const [, args, options] = vi.mocked(execFile.execFileStreaming).mock.calls[0];
+			expect(args.slice(0, 2)).toEqual(['-c', 'color.ui=always']);
+			expect(options?.env).toMatchObject({ FORCE_COLOR: '1', CLICOLOR_FORCE: '1' });
+		});
+
+		it('fails loudly when the requested SSH remote cannot be resolved', async () => {
+			mockStreaming([], { exitCode: 0 });
+
+			const handler = handlers.get('git:runCommand');
+			const result = await handler!(mockEvent(), {
+				runId: 'run-5',
+				operation: 'pull',
+				cwd: '/test/repo',
+				sshRemoteId: 'missing-remote',
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.error).toContain('missing-remote');
+			// Never silently falls back to the local repo.
+			expect(execFile.execFileStreaming).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('git:cancelCommand', () => {
+		it('cancels a running command and reports whether it was found', async () => {
+			const cancel = vi.fn();
+			let resolveRun: (value: any) => void = () => {};
+			vi.mocked(execFile.execFileStreaming).mockImplementation(() => ({
+				result: new Promise((resolve) => {
+					resolveRun = resolve;
+				}),
+				cancel,
+			}));
+
+			const runPromise = handlers.get('git:runCommand')!(
+				{ sender: { isDestroyed: () => false, send: vi.fn() } } as any,
+				{ runId: 'run-cancel', operation: 'push', cwd: '/test/repo' }
+			);
+			// The run registers its cancel callback only after awaiting the shell
+			// PATH lookup, so let the microtask queue drain before cancelling.
+			await vi.waitFor(() => expect(execFile.execFileStreaming).toHaveBeenCalled());
+
+			const cancelHandler = handlers.get('git:cancelCommand');
+			expect(await cancelHandler!({} as any, 'run-cancel')).toEqual({ success: true });
+			expect(cancel).toHaveBeenCalled();
+
+			resolveRun({ stdout: '', stderr: '', exitCode: 'SIGTERM' });
+			await runPromise;
+		});
+
+		it('honours a cancel that arrives before the process is spawned', async () => {
+			const cancel = vi.fn();
+			let resolveRun: (value: any) => void = () => {};
+			vi.mocked(execFile.execFileStreaming).mockImplementation(() => ({
+				result: new Promise((resolve) => {
+					resolveRun = resolve;
+				}),
+				cancel,
+			}));
+
+			// Cancel is clickable while the run is still resolving the shell PATH
+			// and building its command; that click has to survive to the spawn.
+			expect(await handlers.get('git:cancelCommand')!({} as any, 'run-early')).toEqual({
+				success: true,
+			});
+
+			const runPromise = handlers.get('git:runCommand')!(
+				{ sender: { isDestroyed: () => false, send: vi.fn() } } as any,
+				{ runId: 'run-early', operation: 'push', cwd: '/test/repo' }
+			);
+			await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+
+			resolveRun({ stdout: '', stderr: '', exitCode: 'SIGTERM' });
+			expect(await runPromise).toEqual(expect.objectContaining({ cancelled: true }));
+		});
+	});
+
+	describe('git:checkoutBranch', () => {
+		it('checks out an existing branch', async () => {
+			vi.mocked(execFile.execFileNoThrow).mockResolvedValue({
+				stdout: '',
+				stderr: "Switched to branch 'main'\n",
+				exitCode: 0,
+			});
+
+			const handler = handlers.get('git:checkoutBranch');
+			const result = await handler!({} as any, '/test/repo', 'main');
+
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'git',
+				['checkout', 'main'],
+				'/test/repo'
+			);
+			expect(result).toEqual({ success: true, output: "Switched to branch 'main'" });
+		});
+
+		it('creates a tracking branch when createTracking is set', async () => {
+			vi.mocked(execFile.execFileNoThrow).mockResolvedValue({
+				stdout: '',
+				stderr: '',
+				exitCode: 0,
+			});
+
+			const handler = handlers.get('git:checkoutBranch');
+			await handler!({} as any, '/test/repo', 'feature/x', true);
+
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'git',
+				['checkout', '-b', 'feature/x', '--track', 'origin/feature/x'],
+				'/test/repo'
+			);
+		});
+
+		it('returns the git error when the checkout fails', async () => {
+			vi.mocked(execFile.execFileNoThrow).mockResolvedValue({
+				stdout: '',
+				stderr: 'error: Your local changes would be overwritten\n',
+				exitCode: 1,
+			});
+
+			const handler = handlers.get('git:checkoutBranch');
+			const result = await handler!({} as any, '/test/repo', 'main');
+
+			expect(result).toEqual({
+				success: false,
+				error: 'error: Your local changes would be overwritten',
+			});
+		});
+
+		it('fails loudly when the requested SSH remote cannot be resolved', async () => {
+			const handler = handlers.get('git:checkoutBranch');
+			const result = await handler!({} as any, '/test/repo', 'main', false, 'missing-remote');
+
+			expect(result).toEqual({ success: false, error: 'SSH remote not found: missing-remote' });
+			expect(execFile.execFileNoThrow).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('git:commitCount', () => {
 		it('should return commit count number', async () => {
 			vi.mocked(execFile.execFileNoThrow).mockResolvedValue({
@@ -1592,30 +1956,48 @@ export function Component() {
 			});
 		});
 
-		// Note: Image file handling tests use spawnSync which is mocked via vi.hoisted.
-		// The handler uses require('child_process') at runtime, which interacts with
-		// the mock through the gif error test below. Full success path testing for
-		// image files requires integration tests.
-
-		it('should recognize image files and use spawnSync for them', async () => {
-			// The handler takes different code paths for images vs text files.
-			// This test verifies that image files (gif) trigger the spawnSync path
-			// by checking the error response when spawnSync returns a failure status.
-			mockSpawnSync.mockReturnValue({
+		it('should recognize image files and read them via the async buffer exec', async () => {
+			// Image files take a different code path than text files: they read raw
+			// binary via execFileBufferNoThrow (async, non-blocking) instead of
+			// execFileNoThrow. Verify the image path by checking the error response
+			// when the buffer exec returns a non-zero exit code.
+			vi.mocked(execFile.execFileBufferNoThrow).mockResolvedValue({
 				stdout: Buffer.from(''),
-				stderr: undefined,
-				status: 1,
-				pid: 1234,
-				output: [null, Buffer.from(''), undefined],
-				signal: null,
+				stderr: '',
+				exitCode: 1,
 			});
 
 			const handler = handlers.get('git:showFile');
 			const result = await handler!({} as any, '/test/repo', 'HEAD', 'assets/logo.gif');
 
-			// The fact we get this specific error proves the spawnSync path was taken
+			// Reaching this specific error proves the image (buffer-exec) path was taken.
+			expect(execFile.execFileBufferNoThrow).toHaveBeenCalledWith(
+				'git',
+				['show', 'HEAD:assets/logo.gif'],
+				'/test/repo',
+				50 * 1024 * 1024
+			);
 			expect(result).toEqual({
 				error: 'Failed to read file from git',
+			});
+		});
+
+		it('should return a base64 data URL for an image read successfully', async () => {
+			// Success path is now unit-testable because the binary read goes through
+			// the mockable execFileBufferNoThrow helper (previously it used spawnSync
+			// and required integration tests).
+			const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+			vi.mocked(execFile.execFileBufferNoThrow).mockResolvedValue({
+				stdout: pngBytes,
+				stderr: '',
+				exitCode: 0,
+			});
+
+			const handler = handlers.get('git:showFile');
+			const result = await handler!({} as any, '/test/repo', 'HEAD', 'assets/logo.png');
+
+			expect(result).toEqual({
+				content: `data:image/png;base64,${pngBytes.toString('base64')}`,
 			});
 		});
 
@@ -1655,15 +2037,12 @@ export function Component() {
 			);
 		});
 
-		it('should return fallback error when image spawnSync fails without stderr', async () => {
-			// When spawnSync fails without a stderr message, we get the fallback error
-			mockSpawnSync.mockReturnValue({
+		it('should return fallback error when image buffer exec fails without stderr', async () => {
+			// When the buffer exec fails without a stderr message, we get the fallback error.
+			vi.mocked(execFile.execFileBufferNoThrow).mockResolvedValue({
 				stdout: Buffer.from(''),
-				stderr: Buffer.from(''),
-				status: 128,
-				pid: 1234,
-				output: [null, Buffer.from(''), Buffer.from('')],
-				signal: null,
+				stderr: '',
+				exitCode: 128,
 			});
 
 			const handler = handlers.get('git:showFile');
@@ -2090,6 +2469,80 @@ export function Component() {
 			});
 		});
 
+		it('should pass baseBranch to git worktree add when branch is new', async () => {
+			// Regression: the UI's "Base Branch" dropdown (and the CLI's
+			// --base-branch flag) historically dropped this value, so new branches
+			// always started from the main repo's HEAD instead of the user's
+			// chosen base. This test pins the wiring end-to-end.
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({
+					// branch doesn't exist yet
+					stdout: '',
+					stderr: 'fatal: Needed a single revision',
+					exitCode: 128,
+				})
+				.mockResolvedValueOnce({
+					stdout: "Preparing worktree (new branch 'feature-from-rc')",
+					stderr: '',
+					exitCode: 0,
+				});
+
+			const handler = handlers.get('git:worktreeSetup');
+			await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/feature',
+				'feature-from-rc',
+				undefined, // sshRemoteId
+				'rc' // baseBranch
+			);
+
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'git',
+				['worktree', 'add', '-b', 'feature-from-rc', '/worktrees/feature', 'rc'],
+				'/main/repo'
+			);
+		});
+
+		it('should ignore baseBranch when the branch already exists', async () => {
+			// Once the branch exists, `git worktree add <path> <branch>` adopts it;
+			// baseBranch would be a no-op so the handler must not pass it.
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({
+					// branch already exists
+					stdout: 'abc123',
+					stderr: '',
+					exitCode: 0,
+				})
+				.mockResolvedValueOnce({
+					stdout: '',
+					stderr: '',
+					exitCode: 0,
+				});
+
+			const handler = handlers.get('git:worktreeSetup');
+			await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/existing',
+				'already-exists',
+				undefined,
+				'rc' // baseBranch - ignored when branch already exists
+			);
+
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'git',
+				['worktree', 'add', '/worktrees/existing', 'already-exists'],
+				'/main/repo'
+			);
+		});
+
 		it('should create worktree with existing branch', async () => {
 			// Mock fs.access to throw (path doesn't exist)
 			const fsPromises = await import('fs/promises');
@@ -2359,8 +2812,155 @@ export function Component() {
 			});
 		});
 
-		it('should handle git worktree creation failure', async () => {
-			// Mock fs.access to throw (path doesn't exist)
+		it('should recover when branch is already checked out at another worktree', async () => {
+			// fs.access is called twice:
+			//  1) for the requested /worktrees/feature path (must reject - doesn't exist)
+			//  2) for the recovered /existing/wt/feature-branch path (must resolve - does exist)
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockImplementation(async (p: any) => {
+				if (String(p) === '/existing/wt/feature-branch') return undefined;
+				throw new Error('ENOENT');
+			});
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({
+					// git rev-parse --verify branchName (branch exists)
+					stdout: 'abc123456789',
+					stderr: '',
+					exitCode: 0,
+				})
+				.mockResolvedValueOnce({
+					// git worktree add fails because branch already attached elsewhere
+					stdout: '',
+					stderr: "fatal: 'feature-branch' is already checked out at '/existing/wt/feature-branch'",
+					exitCode: 128,
+				})
+				.mockResolvedValueOnce({
+					// findLocalWorktreeForBranch → git worktree list --porcelain
+					stdout: [
+						'worktree /main/repo',
+						'HEAD aaa',
+						'branch refs/heads/main',
+						'',
+						'worktree /existing/wt/feature-branch',
+						'HEAD bbb',
+						'branch refs/heads/feature-branch',
+						'',
+					].join('\n'),
+					stderr: '',
+					exitCode: 0,
+				});
+
+			const handler = handlers.get('git:worktreeSetup');
+			const result = await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/feature',
+				'feature-branch'
+			);
+
+			expect(result).toEqual({
+				success: true,
+				created: false,
+				alreadyExisted: true,
+				existingPath: '/existing/wt/feature-branch',
+				currentBranch: 'feature-branch',
+				requestedBranch: 'feature-branch',
+				branchMismatch: false,
+			});
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'git',
+				['worktree', 'list', '--porcelain'],
+				'/main/repo'
+			);
+		});
+
+		it('should fall through to error when porcelain returns a stale worktree path that no longer exists on disk', async () => {
+			// fs.access rejects → recovered path is stale, treat as no match
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({
+					stdout: 'abc123',
+					stderr: '',
+					exitCode: 0,
+				})
+				.mockResolvedValueOnce({
+					stdout: '',
+					stderr: "fatal: 'feature-branch' is already checked out at '/stale/path'",
+					exitCode: 128,
+				})
+				.mockResolvedValueOnce({
+					// porcelain returns the stale path
+					stdout: [
+						'worktree /main/repo',
+						'HEAD aaa',
+						'branch refs/heads/main',
+						'',
+						'worktree /stale/path',
+						'HEAD bbb',
+						'branch refs/heads/feature-branch',
+						'',
+					].join('\n'),
+					stderr: '',
+					exitCode: 0,
+				});
+
+			const handler = handlers.get('git:worktreeSetup');
+			const result = await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/feature',
+				'feature-branch'
+			);
+
+			expect(result).toEqual({
+				success: false,
+				error: "fatal: 'feature-branch' is already checked out at '/stale/path'",
+			});
+			expect(fsPromises.default.access).toHaveBeenCalledWith('/stale/path');
+		});
+
+		it('should still surface error when branch is "already used" but porcelain lookup yields no match', async () => {
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({
+					// git rev-parse --verify branchName (branch exists)
+					stdout: 'abc123',
+					stderr: '',
+					exitCode: 0,
+				})
+				.mockResolvedValueOnce({
+					// git worktree add fails
+					stdout: '',
+					stderr: "fatal: 'feature-branch' is already used by worktree at '/gone'",
+					exitCode: 128,
+				})
+				.mockResolvedValueOnce({
+					// porcelain returns nothing matching
+					stdout: 'worktree /main/repo\nHEAD aaa\nbranch refs/heads/main\n',
+					stderr: '',
+					exitCode: 0,
+				});
+
+			const handler = handlers.get('git:worktreeSetup');
+			const result = await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/feature',
+				'feature-branch'
+			);
+
+			expect(result).toEqual({
+				success: false,
+				error: "fatal: 'feature-branch' is already used by worktree at '/gone'",
+			});
+		});
+
+		it('should surface unrelated git worktree creation failures unchanged', async () => {
 			const fsPromises = await import('fs/promises');
 			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
 
@@ -2372,9 +2972,9 @@ export function Component() {
 					exitCode: 128,
 				})
 				.mockResolvedValueOnce({
-					// git worktree add -b fails
+					// git worktree add -b fails for an unrelated reason
 					stdout: '',
-					stderr: "fatal: 'feature-branch' is already checked out at '/other/path'",
+					stderr: 'fatal: permission denied',
 					exitCode: 128,
 				});
 
@@ -2388,8 +2988,130 @@ export function Component() {
 
 			expect(result).toEqual({
 				success: false,
-				error: "fatal: 'feature-branch' is already checked out at '/other/path'",
+				error: 'fatal: permission denied',
 			});
+			// porcelain lookup must NOT run for non-"already used" errors
+			expect(execFile.execFileNoThrow).not.toHaveBeenCalledWith(
+				'git',
+				['worktree', 'list', '--porcelain'],
+				'/main/repo'
+			);
+		});
+
+		// Issue #1506: `worktree:discovered` is broadcast to EVERY renderer - each
+		// Electron window and every connected web-desktop client - and each of them
+		// answers it by building a child agent with a fresh id. Only the renderer
+		// that asked for the worktree knows it is already creating that child, so
+		// the claim has to be recorded here, in the one process they all share.
+		it('marks the requested worktree path as created by Maestro', async () => {
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({
+					stdout: '',
+					stderr: 'fatal: Needed a single revision',
+					exitCode: 128,
+				})
+				.mockResolvedValueOnce({
+					stdout: "Preparing worktree (new branch 'feature-branch')",
+					stderr: '',
+					exitCode: 0,
+				});
+
+			expect(isWorktreeCreatedByMaestro('/worktrees/feature')).toBe(false);
+
+			const handler = handlers.get('git:worktreeSetup');
+			await handler!({} as any, '/main/repo', '/worktrees/feature', 'feature-branch');
+
+			expect(isWorktreeCreatedByMaestro(path.resolve('/main/repo', '/worktrees/feature'))).toBe(
+				true
+			);
+		});
+
+		it('resolves a relative worktree path from the main repository before marking it', async () => {
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({ stdout: '', stderr: 'missing branch', exitCode: 128 })
+				.mockResolvedValueOnce({ stdout: 'Preparing worktree', stderr: '', exitCode: 0 });
+
+			const handler = handlers.get('git:worktreeSetup');
+			await handler!({} as any, '/main/repo', '../worktrees/feature', 'feature-branch');
+
+			const expectedPath = path.resolve('/main/repo', '../worktrees/feature');
+			expect(isWorktreeCreatedByMaestro(expectedPath)).toBe(true);
+			expect(isWorktreeCreatedByMaestro('../worktrees/feature')).toBe(false);
+		});
+
+		it('releases the requested path mark when setup fails', async () => {
+			const fsPromises = await import('fs/promises');
+			vi.mocked(fsPromises.default.access).mockRejectedValue(new Error('ENOENT'));
+			vi.mocked(fsPromises.default.realpath).mockResolvedValueOnce('/physical/worktrees');
+			vi.mocked(execFile.execFileNoThrow)
+				.mockResolvedValueOnce({ stdout: '', stderr: 'missing branch', exitCode: 128 })
+				.mockResolvedValueOnce({ stdout: '', stderr: 'fatal: permission denied', exitCode: 128 });
+
+			const handler = handlers.get('git:worktreeSetup');
+			const result = await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/feature',
+				'feature-branch'
+			);
+
+			expect(result.success).toBe(false);
+			expect(isWorktreeCreatedByMaestro('/worktrees/feature')).toBe(false);
+			expect(isWorktreeCreatedByMaestro('/physical/worktrees/feature')).toBe(false);
+		});
+
+		it('marks the recovered existing path when the branch is already checked out', async () => {
+			const fsPromises = await import('fs/promises');
+			// The requested path must NOT exist (so we take the create branch), while
+			// the recovered path must exist (or the recovery treats it as stale).
+			vi.mocked(fsPromises.default.access).mockImplementation(async (target: any) => {
+				if (String(target) === '/elsewhere/feature') return undefined as any;
+				throw new Error('ENOENT');
+			});
+			vi.mocked(fsPromises.default.realpath)
+				.mockResolvedValueOnce('/worktrees')
+				.mockResolvedValueOnce('/physical/elsewhere');
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (_cmd, args) => {
+				if (args?.includes('--verify')) {
+					return { stdout: 'abc123', stderr: '', exitCode: 0 };
+				}
+				if (args?.[0] === 'worktree' && args?.[1] === 'add') {
+					return {
+						stdout: '',
+						stderr: "fatal: 'feature-branch' is already used by worktree at '/elsewhere/feature'",
+						exitCode: 128,
+					};
+				}
+				if (args?.[0] === 'worktree' && args?.[1] === 'list') {
+					return {
+						stdout: 'worktree /elsewhere/feature\nHEAD abc123\nbranch refs/heads/feature-branch\n',
+						stderr: '',
+						exitCode: 0,
+					};
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			const handler = handlers.get('git:worktreeSetup');
+			const result = await handler!(
+				{} as any,
+				'/main/repo',
+				'/worktrees/feature',
+				'feature-branch'
+			);
+
+			// The caller opens the recovered path, so that is the one the watcher
+			// must stay quiet about.
+			expect(result.existingPath).toBe('/elsewhere/feature');
+			expect(isWorktreeCreatedByMaestro('/elsewhere/feature')).toBe(true);
+			expect(isWorktreeCreatedByMaestro('/physical/elsewhere/feature')).toBe(true);
 		});
 	});
 
@@ -2951,8 +3673,12 @@ export function Component() {
 			const handler = handlers.get('git:checkGhCli');
 			const result = await handler!({} as any);
 
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['--version']);
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['auth', 'status']);
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['--version'], undefined, {
+				PATH: '/expanded/path:/usr/bin',
+			});
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['auth', 'status'], undefined, {
+				PATH: '/expanded/path:/usr/bin',
+			});
 			expect(result).toEqual({
 				installed: true,
 				authenticated: true,
@@ -2971,7 +3697,9 @@ export function Component() {
 			const result = await handler!({} as any);
 
 			expect(execFile.execFileNoThrow).toHaveBeenCalledTimes(1);
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['--version']);
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['--version'], undefined, {
+				PATH: '/expanded/path:/usr/bin',
+			});
 			expect(result).toEqual({
 				installed: false,
 				authenticated: false,
@@ -2996,8 +3724,12 @@ export function Component() {
 			const handler = handlers.get('git:checkGhCli');
 			const result = await handler!({} as any);
 
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['--version']);
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['auth', 'status']);
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['--version'], undefined, {
+				PATH: '/expanded/path:/usr/bin',
+			});
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('gh', ['auth', 'status'], undefined, {
+				PATH: '/expanded/path:/usr/bin',
+			});
 			expect(result).toEqual({
 				installed: true,
 				authenticated: false,
@@ -3016,6 +3748,8 @@ export function Component() {
 
 			// Should not call execFileNoThrow because cached result is used
 			expect(execFile.execFileNoThrow).not.toHaveBeenCalled();
+			// The verdict is keyed by the resolved command, not shared across binaries.
+			expect(cliDetection.getCachedGhStatus).toHaveBeenCalledWith('gh');
 			expect(result).toEqual({
 				installed: true,
 				authenticated: true,
@@ -3051,11 +3785,18 @@ export function Component() {
 
 			// Should bypass cache and check with custom path
 			expect(cliDetection.resolveGhPath).toHaveBeenCalledWith('/opt/homebrew/bin/gh');
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('/opt/homebrew/bin/gh', ['--version']);
-			expect(execFile.execFileNoThrow).toHaveBeenCalledWith('/opt/homebrew/bin/gh', [
-				'auth',
-				'status',
-			]);
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'/opt/homebrew/bin/gh',
+				['--version'],
+				undefined,
+				{ PATH: '/expanded/path:/usr/bin' }
+			);
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'/opt/homebrew/bin/gh',
+				['auth', 'status'],
+				undefined,
+				{ PATH: '/expanded/path:/usr/bin' }
+			);
 			expect(result).toEqual({
 				installed: true,
 				authenticated: false,
@@ -3083,7 +3824,7 @@ export function Component() {
 			await handler!({} as any);
 
 			// Should cache the result
-			expect(cliDetection.setCachedGhStatus).toHaveBeenCalledWith(true, true);
+			expect(cliDetection.setCachedGhStatus).toHaveBeenCalledWith('gh', true, true);
 		});
 
 		it('should not cache result when using custom ghPath', async () => {
@@ -3109,6 +3850,62 @@ export function Component() {
 
 			// Should NOT cache when custom path is used
 			expect(cliDetection.setCachedGhStatus).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('git:createGist', () => {
+		// The gist call passes BOTH the gist body on stdin and the expanded PATH,
+		// which only works via the structured option object. Dropping either one
+		// breaks it silently: no env means a gh shim cannot reach its parent tool,
+		// and no input means an empty gist.
+		it('sends the content on stdin AND the expanded env', async () => {
+			const cliDetection = await import('../../../../main/utils/cliDetection');
+			vi.mocked(cliDetection.resolveGhPath).mockResolvedValue('gh');
+			vi.mocked(execFile.execFileNoThrow).mockResolvedValueOnce({
+				stdout: 'https://gist.github.com/user/abc123\n',
+				stderr: '',
+				exitCode: 0,
+			});
+
+			const handler = handlers.get('git:createGist');
+			const result = await handler!(
+				{} as any,
+				'log.txt',
+				'gist body contents',
+				'a description',
+				false
+			);
+
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'gh',
+				expect.arrayContaining(['gist', 'create', '--filename', 'log.txt']),
+				undefined,
+				{ input: 'gist body contents', env: { PATH: '/expanded/path:/usr/bin' } }
+			);
+			expect(result).toEqual({
+				success: true,
+				gistUrl: 'https://gist.github.com/user/abc123',
+			});
+		});
+
+		it('honors a custom ghPath', async () => {
+			const cliDetection = await import('../../../../main/utils/cliDetection');
+			vi.mocked(cliDetection.resolveGhPath).mockResolvedValue('/custom/bin/gh');
+			vi.mocked(execFile.execFileNoThrow).mockResolvedValueOnce({
+				stdout: 'https://gist.github.com/user/def456\n',
+				stderr: '',
+				exitCode: 0,
+			});
+
+			const handler = handlers.get('git:createGist');
+			await handler!({} as any, 'log.txt', 'body', '', false, '/custom/bin/gh');
+
+			expect(execFile.execFileNoThrow).toHaveBeenCalledWith(
+				'/custom/bin/gh',
+				expect.any(Array),
+				undefined,
+				expect.objectContaining({ env: { PATH: '/expanded/path:/usr/bin' } })
+			);
 		});
 	});
 
@@ -3777,11 +4574,46 @@ branch refs/heads/bugfix-123
 			const handler = handlers.get('git:scanWorktreeDirectory');
 			const result = await handler!({} as any, '/nonexistent/path');
 
-			// The handler catches errors and returns empty gitSubdirs
+			// The handler catches errors and returns empty gitSubdirs along with
+			// scanFailed: true so the renderer knows not to bulk-remove sessions.
 			expect(result).toEqual({
 				success: true,
 				gitSubdirs: [],
+				scanFailed: true,
 			});
+		});
+
+		// Regression (MAESTRO-VQ): the parent path is user-supplied and can sit
+		// behind macOS TCC (Documents, Desktop) or simply carry permissions we
+		// don't hold, so readdir rejects with EPERM/EACCES. The renderer still
+		// needs scanFailed, but there is no bug of ours to report.
+		it.each(['EPERM', 'EACCES'])(
+			'reports scanFailed without a Sentry report when readdir fails with %s',
+			async (code) => {
+				vi.mocked(mockFs.readdir).mockRejectedValue(
+					Object.assign(new Error(`${code}: operation not permitted, scandir '/protected'`), {
+						code,
+					})
+				);
+
+				const handler = handlers.get('git:scanWorktreeDirectory');
+				const result = await handler!({} as any, '/protected');
+
+				expect(result).toEqual({ success: true, gitSubdirs: [], scanFailed: true });
+				expect(captureException).not.toHaveBeenCalled();
+			}
+		);
+
+		it('still reports an unexpected scan failure to Sentry', async () => {
+			vi.mocked(mockFs.readdir).mockRejectedValue(
+				Object.assign(new Error('EIO: i/o error, scandir'), { code: 'EIO' })
+			);
+
+			const handler = handlers.get('git:scanWorktreeDirectory');
+			const result = await handler!({} as any, '/failing/disk');
+
+			expect(result).toEqual({ success: true, gitSubdirs: [], scanFailed: true });
+			expect(captureException).toHaveBeenCalled();
 		});
 
 		it('should handle null branch when git branch command fails', async () => {
@@ -3873,7 +4705,7 @@ branch refs/heads/bugfix-123
 			] as any);
 
 			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
-				const cwdStr = String(cwd);
+				const cwdStr = String(cwd).replace(/\\/g, '/');
 
 				if (cwdStr.endsWith('actual-worktree')) {
 					if (args?.includes('--is-inside-work-tree')) {
@@ -3925,7 +4757,7 @@ branch refs/heads/bugfix-123
 			] as any);
 
 			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
-				const cwdStr = String(cwd);
+				const cwdStr = String(cwd).replace(/\\/g, '/');
 
 				if (cwdStr.endsWith('good-worktree')) {
 					if (args?.includes('--is-inside-work-tree')) {
@@ -3965,6 +4797,255 @@ branch refs/heads/bugfix-123
 			expect(result.gitSubdirs).toHaveLength(1);
 			expect(result.gitSubdirs[0].name).toBe('good-worktree');
 		});
+
+		it('should accept worktrees on symlinked basePaths via realpath canonicalization', async () => {
+			// Regression: on Linux/Windows, if the configured basePath traverses a symlink
+			// (e.g. /home/user/work → /data/work), git rev-parse --show-toplevel returns
+			// the realpath while the constructed subdirPath does not. Without realpath
+			// canonicalization the comparison rejected every subdir and the renderer
+			// then bulk-flagged every existing worktree as removed.
+			vi.mocked(mockFs.readdir).mockResolvedValue([
+				{ name: 'feature-branch', isDirectory: () => true },
+			] as any);
+
+			vi.mocked(mockFs.realpath).mockImplementation(async (p: any) => {
+				// Normalize separators so the Windows product path (path.join → backslashes)
+				// matches these POSIX keys; on POSIX this is a no-op.
+				const s = String(p).replace(/\\/g, '/');
+				if (s === '/home/user/worktrees/feature-branch') {
+					return '/data/worktrees/feature-branch';
+				}
+				if (s === '/data/worktrees/feature-branch') {
+					return '/data/worktrees/feature-branch';
+				}
+				return s;
+			});
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args) => {
+				if (args?.includes('--is-inside-work-tree')) {
+					return { stdout: 'true\n', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--show-toplevel')) {
+					// git always returns realpath, not the symlink path
+					return { stdout: '/data/worktrees/feature-branch', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--git-dir')) {
+					return { stdout: '.git', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--git-common-dir')) {
+					return { stdout: '.git', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--abbrev-ref')) {
+					return { stdout: 'feature-branch\n', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			const handler = handlers.get('git:scanWorktreeDirectory');
+			const result = await handler!({} as any, '/home/user/worktrees');
+
+			expect(result.gitSubdirs).toHaveLength(1);
+			expect(result.gitSubdirs[0].branch).toBe('feature-branch');
+			expect(result.scanFailed).toBeFalsy();
+		});
+
+		it('should discover nested worktrees from slash-named branches', async () => {
+			// Regression: branches like "fix/worktree-removal" produce a nested
+			// path <basePath>/fix/worktree-removal. Without one-level recursion,
+			// the scan misses these and the renderer wrongly removes the session.
+			vi.mocked(mockFs.readdir).mockImplementation(async (dir: any) => {
+				if (String(dir) === '/parent') {
+					return [
+						// Flat worktree (existing happy path)
+						{ name: 'flat-branch', isDirectory: () => true },
+						// Group directory containing nested worktrees
+						{ name: 'fix', isDirectory: () => true },
+					] as any;
+				}
+				if (String(dir) === path.join('/parent', 'fix')) {
+					return [
+						{ name: 'worktree-removal', isDirectory: () => true },
+						{ name: 'files-restart', isDirectory: () => true },
+					] as any;
+				}
+				return [] as any;
+			});
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
+				const cwdStr = String(cwd);
+
+				// Group directory itself is NOT a git repo
+				if (cwdStr === path.join('/parent', 'fix')) {
+					if (args?.includes('--is-inside-work-tree')) {
+						return { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 };
+					}
+				}
+
+				// Helper: act like a real worktree at the given path
+				const respondAsWorktreeAt = (workPath: string, branch: string) => {
+					if (cwdStr === workPath) {
+						if (args?.includes('--is-inside-work-tree')) {
+							return { stdout: 'true\n', stderr: '', exitCode: 0 };
+						}
+						if (args?.includes('--show-toplevel')) {
+							return { stdout: workPath, stderr: '', exitCode: 0 };
+						}
+						if (args?.includes('--git-dir')) {
+							return {
+								stdout: `/parent/main-repo/.git/worktrees/${branch}`,
+								stderr: '',
+								exitCode: 0,
+							};
+						}
+						if (args?.includes('--git-common-dir')) {
+							return { stdout: '/parent/main-repo/.git', stderr: '', exitCode: 0 };
+						}
+						if (args?.includes('--abbrev-ref')) {
+							return { stdout: `${branch}\n`, stderr: '', exitCode: 0 };
+						}
+					}
+					return null;
+				};
+
+				return (
+					respondAsWorktreeAt(path.join('/parent', 'flat-branch'), 'flat-branch') ??
+					respondAsWorktreeAt(
+						path.join('/parent', 'fix', 'worktree-removal'),
+						'fix/worktree-removal'
+					) ??
+					respondAsWorktreeAt(
+						path.join('/parent', 'fix', 'files-restart'),
+						'fix/files-restart'
+					) ?? { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 }
+				);
+			});
+
+			const handler = handlers.get('git:scanWorktreeDirectory');
+			const result = await handler!({} as any, '/parent');
+
+			const paths = (result.gitSubdirs as Array<{ path: string; branch: string }>)
+				.map((e) => e.path)
+				.sort();
+			expect(paths).toEqual(
+				[
+					path.join('/parent', 'flat-branch'),
+					path.join('/parent', 'fix', 'files-restart'),
+					path.join('/parent', 'fix', 'worktree-removal'),
+				].sort()
+			);
+			const nested = (result.gitSubdirs as Array<{ path: string; branch: string }>).find(
+				(e) => e.path === path.join('/parent', 'fix', 'worktree-removal')
+			);
+			expect(nested?.branch).toBe('fix/worktree-removal');
+			expect(result.scanFailed).toBeFalsy();
+		});
+
+		it('should not recurse beyond one level', async () => {
+			// MAX_DEPTH=1 means we cover <basePath>/<group>/<branch> but not deeper.
+			// Worktrees at <basePath>/a/b/c must NOT appear.
+			vi.mocked(mockFs.readdir).mockImplementation(async (dir: any) => {
+				const s = String(dir);
+				if (s === '/parent') return [{ name: 'a', isDirectory: () => true }] as any;
+				if (s === path.join('/parent', 'a')) return [{ name: 'b', isDirectory: () => true }] as any;
+				if (s === path.join('/parent', 'a', 'b'))
+					return [{ name: 'c', isDirectory: () => true }] as any;
+				return [] as any;
+			});
+
+			// Make every level look like "not a git repo" except the deepest one.
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
+				const cwdStr = String(cwd);
+				if (cwdStr === path.join('/parent', 'a', 'b', 'c')) {
+					if (args?.includes('--is-inside-work-tree')) {
+						return { stdout: 'true\n', stderr: '', exitCode: 0 };
+					}
+					if (args?.includes('--show-toplevel')) {
+						return { stdout: cwdStr, stderr: '', exitCode: 0 };
+					}
+					if (args?.includes('--abbrev-ref')) {
+						return { stdout: 'too-deep\n', stderr: '', exitCode: 0 };
+					}
+					return { stdout: '.git', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 };
+			});
+
+			const handler = handlers.get('git:scanWorktreeDirectory');
+			const result = await handler!({} as any, '/parent');
+
+			expect(result.gitSubdirs).toHaveLength(0);
+			expect(result.scanFailed).toBeFalsy();
+		});
+
+		it('should set scanFailed when SSH readDirRemote fails at the top level', async () => {
+			// Regression: previously the SSH branch in readSubdirs returned null on
+			// failure, scanLevel returned [], the outer try/catch never fired, and
+			// the renderer received { gitSubdirs: [] } with no scanFailed flag.
+			// That triggered bulk-removal of every SSH worktree session whenever
+			// the remote read failed (network blip, expired auth, missing path).
+			mockSettingsStore.get.mockReturnValue([
+				{ id: 'ssh-1', host: 'remote.example.com', user: 'me' },
+			]);
+
+			const remoteFs = await import('../../../../main/utils/remote-fs');
+			vi.mocked(remoteFs.readDirRemote).mockResolvedValue({
+				success: false,
+				error: 'connection timed out',
+			} as any);
+
+			const handler = handlers.get('git:scanWorktreeDirectory');
+			const result = await handler!({} as any, '/remote/worktrees', 'ssh-1');
+
+			expect(result.gitSubdirs).toEqual([]);
+			expect(result.scanFailed).toBe(true);
+		});
+
+		it('should swallow read errors on nested group directories', async () => {
+			// If recursing into a group dir fails (perms, race with deletion), the
+			// rest of the scan must still succeed. Without this, a transient
+			// failure on one nested branch wipes every sibling worktree session.
+			vi.mocked(mockFs.readdir).mockImplementation(async (dir: any) => {
+				const s = String(dir);
+				if (s === '/parent') {
+					return [
+						{ name: 'good-flat', isDirectory: () => true },
+						{ name: 'broken-group', isDirectory: () => true },
+					] as any;
+				}
+				if (s === path.join('/parent', 'broken-group')) {
+					const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+					err.code = 'EACCES';
+					throw err;
+				}
+				return [] as any;
+			});
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
+				const cwdStr = String(cwd);
+				if (cwdStr === path.join('/parent', 'good-flat')) {
+					if (args?.includes('--is-inside-work-tree')) {
+						return { stdout: 'true\n', stderr: '', exitCode: 0 };
+					}
+					if (args?.includes('--show-toplevel')) {
+						return { stdout: cwdStr, stderr: '', exitCode: 0 };
+					}
+					if (args?.includes('--abbrev-ref')) {
+						return { stdout: 'good-flat\n', stderr: '', exitCode: 0 };
+					}
+					return { stdout: '.git', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 };
+			});
+
+			const handler = handlers.get('git:scanWorktreeDirectory');
+			const result = await handler!({} as any, '/parent');
+
+			expect(result.gitSubdirs).toHaveLength(1);
+			expect((result.gitSubdirs as Array<{ name: string }>)[0].name).toBe('good-flat');
+			// Whole-scan failure must NOT be flagged - that would trigger the renderer's
+			// removal-skip fallback; we only flag scanFailed for the top-level read.
+			expect(result.scanFailed).toBeFalsy();
+		});
 	});
 
 	describe('git:watchWorktreeDirectory', () => {
@@ -3992,10 +5073,10 @@ branch refs/heads/bugfix-123
 
 			expect(mockFs.access).toHaveBeenCalledWith('/parent/worktrees');
 			expect(mockChokidar.watch).toHaveBeenCalledWith('/parent/worktrees', {
-				ignored: /(^|[/\\])\../,
+				ignored: [/(^|[/\\])\../, expect.any(RegExp)],
 				persistent: true,
 				ignoreInitial: true,
-				depth: 0,
+				depth: 1,
 			});
 			expect(mockWatcher.on).toHaveBeenCalledWith('addDir', expect.any(Function));
 			expect(mockWatcher.on).toHaveBeenCalledWith('error', expect.any(Function));
@@ -4087,8 +5168,7 @@ branch refs/heads/bugfix-123
 					isDestroyed: vi.fn().mockReturnValue(false),
 				},
 			};
-			const { BrowserWindow } = await import('electron');
-			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([mockWindow] as any);
+			currentMockWindow = mockWindow;
 
 			// Mock git commands for the discovered directory
 			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
@@ -4129,6 +5209,253 @@ branch refs/heads/bugfix-123
 			vi.useRealTimers();
 		});
 
+		// Issue #1506: a worktree Maestro created itself must not be announced. The
+		// renderer that asked for it is already building the child agent, and the
+		// event reaches every OTHER renderer too - each Electron window and each
+		// connected web-desktop client - so letting it through has each of them mint
+		// a rival child at the same path under the same parent.
+		it('does not emit worktree:discovered for a worktree Maestro just created', async () => {
+			vi.useFakeTimers();
+
+			vi.mocked(mockFs.access).mockResolvedValue(undefined);
+
+			let addDirCallback: Function | undefined;
+			const mockWatcher = {
+				on: vi.fn((event: string, cb: Function) => {
+					if (event === 'addDir') {
+						addDirCallback = cb;
+					}
+					return mockWatcher;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			};
+			vi.mocked(mockChokidar.watch).mockReturnValue(mockWatcher as any);
+
+			const mockWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: {
+					send: vi.fn(),
+					isDestroyed: vi.fn().mockReturnValue(false),
+				},
+			};
+			currentMockWindow = mockWindow;
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args) => {
+				if (args?.includes('--is-inside-work-tree')) {
+					return { stdout: 'true\n', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--show-toplevel')) {
+					return { stdout: '/parent/worktrees/new-worktree', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--abbrev-ref')) {
+					return { stdout: 'feature-branch\n', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			markWorktreeCreatedByMaestro('/parent/worktrees/new-worktree');
+
+			const handler = handlers.get('git:watchWorktreeDirectory');
+			await handler!({} as any, 'session-marked', '/parent/worktrees');
+
+			await addDirCallback!('/parent/worktrees/new-worktree');
+			await vi.advanceTimersByTimeAsync(600);
+
+			expect(mockWindow.webContents.send).not.toHaveBeenCalledWith(
+				'worktree:discovered',
+				expect.anything()
+			);
+			expect(mockBroadcastBridgeEvent).not.toHaveBeenCalledWith(
+				'worktree:discovered',
+				expect.anything()
+			);
+
+			vi.useRealTimers();
+		});
+
+		it('suppresses a physical watcher path when setup used a symlinked base path', async () => {
+			vi.useFakeTimers();
+
+			const mainRepo = path.resolve('/main/repo');
+			const linkedBase = path.resolve('/linked/worktrees');
+			const physicalBase = path.resolve('/physical/worktrees');
+			const requestedPath = path.join(linkedBase, 'new-worktree');
+			const physicalPath = path.join(physicalBase, 'new-worktree');
+
+			vi.mocked(mockFs.access).mockRejectedValue(new Error('ENOENT'));
+			vi.mocked(mockFs.realpath).mockResolvedValueOnce(physicalBase);
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (_cmd, args) => {
+				if (args?.includes('--verify')) {
+					return { stdout: '', stderr: 'missing branch', exitCode: 128 };
+				}
+				if (args?.[0] === 'worktree' && args?.[1] === 'add') {
+					// The physical spelling must be claimed before Git creates the
+					// directory and gives chokidar a chance to report it.
+					expect(isWorktreeCreatedByMaestro(physicalPath)).toBe(true);
+					return { stdout: 'Preparing worktree', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			const setupHandler = handlers.get('git:worktreeSetup');
+			const setupResult = await setupHandler!({} as any, mainRepo, requestedPath, 'feature-branch');
+			expect(setupResult.success).toBe(true);
+			expect(isWorktreeCreatedByMaestro(physicalPath)).toBe(true);
+
+			let addDirCallback: Function | undefined;
+			const mockWatcher = {
+				on: vi.fn((event: string, cb: Function) => {
+					if (event === 'addDir') addDirCallback = cb;
+					return mockWatcher;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			};
+			vi.mocked(mockChokidar.watch).mockReturnValue(mockWatcher as any);
+			vi.mocked(mockFs.access).mockResolvedValue(undefined);
+			vi.mocked(execFile.execFileNoThrow).mockClear();
+
+			const mockWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: {
+					send: vi.fn(),
+					isDestroyed: vi.fn().mockReturnValue(false),
+				},
+			};
+			currentMockWindow = mockWindow;
+
+			const watchHandler = handlers.get('git:watchWorktreeDirectory');
+			await watchHandler!({} as any, 'session-symlink', physicalBase);
+			await addDirCallback!(physicalPath);
+			await vi.advanceTimersByTimeAsync(600);
+
+			expect(execFile.execFileNoThrow).not.toHaveBeenCalled();
+			expect(mockWindow.webContents.send).not.toHaveBeenCalledWith(
+				'worktree:discovered',
+				expect.anything()
+			);
+			expect(mockBroadcastBridgeEvent).not.toHaveBeenCalledWith(
+				'worktree:discovered',
+				expect.anything()
+			);
+
+			vi.useRealTimers();
+		});
+
+		it('emits worktree:discovered again once the creation mark has expired', async () => {
+			vi.useFakeTimers();
+
+			vi.mocked(mockFs.access).mockResolvedValue(undefined);
+
+			let addDirCallback: Function | undefined;
+			const mockWatcher = {
+				on: vi.fn((event: string, cb: Function) => {
+					if (event === 'addDir') {
+						addDirCallback = cb;
+					}
+					return mockWatcher;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			};
+			vi.mocked(mockChokidar.watch).mockReturnValue(mockWatcher as any);
+
+			const mockWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: {
+					send: vi.fn(),
+					isDestroyed: vi.fn().mockReturnValue(false),
+				},
+			};
+			currentMockWindow = mockWindow;
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args) => {
+				if (args?.includes('--is-inside-work-tree')) {
+					return { stdout: 'true\n', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--show-toplevel')) {
+					return { stdout: '/parent/worktrees/new-worktree', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--abbrev-ref')) {
+					return { stdout: 'feature-branch\n', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			markWorktreeCreatedByMaestro('/parent/worktrees/new-worktree', 100);
+
+			const handler = handlers.get('git:watchWorktreeDirectory');
+			await handler!({} as any, 'session-expired', '/parent/worktrees');
+
+			await vi.advanceTimersByTimeAsync(200);
+
+			await addDirCallback!('/parent/worktrees/new-worktree');
+			await vi.advanceTimersByTimeAsync(600);
+
+			expect(mockWindow.webContents.send).toHaveBeenCalledWith('worktree:discovered', {
+				sessionId: 'session-expired',
+				worktree: {
+					path: '/parent/worktrees/new-worktree',
+					name: 'new-worktree',
+					branch: 'feature-branch',
+				},
+			});
+
+			vi.useRealTimers();
+		});
+
+		it('fans worktree:discovered out to the web-desktop bridge even when no desktop window exists', async () => {
+			vi.useFakeTimers();
+
+			vi.mocked(mockFs.access).mockResolvedValue(undefined);
+
+			let addDirCallback: Function | undefined;
+			const mockWatcher = {
+				on: vi.fn((event: string, cb: Function) => {
+					if (event === 'addDir') {
+						addDirCallback = cb;
+					}
+					return mockWatcher;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			};
+			vi.mocked(mockChokidar.watch).mockReturnValue(mockWatcher as any);
+
+			// Desktop window is down; safeSend must still fan the event out to
+			// connected web-desktop bridge clients.
+			currentMockWindow = null;
+
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (_cmd, args) => {
+				if (args?.includes('--is-inside-work-tree')) {
+					return { stdout: 'true\n', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--show-toplevel')) {
+					return { stdout: '/parent/worktrees/new-worktree', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--abbrev-ref')) {
+					return { stdout: 'feature-branch\n', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			const handler = handlers.get('git:watchWorktreeDirectory');
+			await handler!({} as any, 'session-bridge', '/parent/worktrees');
+
+			await addDirCallback!('/parent/worktrees/new-worktree');
+			await vi.advanceTimersByTimeAsync(600);
+
+			expect(mockBroadcastBridgeEvent).toHaveBeenCalledWith('worktree:discovered', [
+				{
+					sessionId: 'session-bridge',
+					worktree: {
+						path: '/parent/worktrees/new-worktree',
+						name: 'new-worktree',
+						branch: 'feature-branch',
+					},
+				},
+			]);
+
+			vi.useRealTimers();
+		});
+
 		it('should skip emitting event when directory is the watched path itself', async () => {
 			vi.useFakeTimers();
 
@@ -4153,8 +5480,7 @@ branch refs/heads/bugfix-123
 					isDestroyed: vi.fn().mockReturnValue(false),
 				},
 			};
-			const { BrowserWindow } = await import('electron');
-			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([mockWindow] as any);
+			currentMockWindow = mockWindow;
 
 			const handler = handlers.get('git:watchWorktreeDirectory');
 			await handler!({} as any, 'session-skip', '/parent/worktrees');
@@ -4194,8 +5520,7 @@ branch refs/heads/bugfix-123
 					isDestroyed: vi.fn().mockReturnValue(false),
 				},
 			};
-			const { BrowserWindow } = await import('electron');
-			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([mockWindow] as any);
+			currentMockWindow = mockWindow;
 
 			// Mock git commands - return main branch
 			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
@@ -4249,8 +5574,7 @@ branch refs/heads/bugfix-123
 					isDestroyed: vi.fn().mockReturnValue(false),
 				},
 			};
-			const { BrowserWindow } = await import('electron');
-			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([mockWindow] as any);
+			currentMockWindow = mockWindow;
 
 			// Mock git commands - not a git repo
 			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args) => {
@@ -4274,7 +5598,7 @@ branch refs/heads/bugfix-123
 			vi.useRealTimers();
 		});
 
-		it('should debounce rapid directory additions', async () => {
+		it('should use per-directory debounce so multiple worktrees are each detected', async () => {
 			vi.useFakeTimers();
 
 			vi.mocked(mockFs.access).mockResolvedValue(undefined);
@@ -4298,8 +5622,7 @@ branch refs/heads/bugfix-123
 					isDestroyed: vi.fn().mockReturnValue(false),
 				},
 			};
-			const { BrowserWindow } = await import('electron');
-			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([mockWindow] as any);
+			currentMockWindow = mockWindow;
 
 			// Track which paths were checked
 			const checkedPaths: string[] = [];
@@ -4320,7 +5643,7 @@ branch refs/heads/bugfix-123
 			const handler = handlers.get('git:watchWorktreeDirectory');
 			await handler!({} as any, 'session-debounce', '/parent/worktrees');
 
-			// Simulate rapid directory additions
+			// Simulate rapid directory additions for different paths
 			await addDirCallback!('/parent/worktrees/dir1');
 			await vi.advanceTimersByTimeAsync(100);
 			await addDirCallback!('/parent/worktrees/dir2');
@@ -4330,8 +5653,70 @@ branch refs/heads/bugfix-123
 			// Fast-forward past debounce
 			await vi.advanceTimersByTimeAsync(600);
 
-			// Only the last directory should be processed due to debouncing
-			expect(checkedPaths).toEqual(['/parent/worktrees/dir3']);
+			// All three directories should be processed (per-directory debounce)
+			expect(checkedPaths).toHaveLength(3);
+			expect(checkedPaths).toContain('/parent/worktrees/dir1');
+			expect(checkedPaths).toContain('/parent/worktrees/dir2');
+			expect(checkedPaths).toContain('/parent/worktrees/dir3');
+
+			vi.useRealTimers();
+		});
+
+		it('should debounce repeated addDir events for the same directory', async () => {
+			vi.useFakeTimers();
+
+			vi.mocked(mockFs.access).mockResolvedValue(undefined);
+
+			let addDirCallback: Function | undefined;
+			const mockWatcher = {
+				on: vi.fn((event: string, cb: Function) => {
+					if (event === 'addDir') {
+						addDirCallback = cb;
+					}
+					return mockWatcher;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			};
+			vi.mocked(mockChokidar.watch).mockReturnValue(mockWatcher as any);
+
+			const mockWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: {
+					send: vi.fn(),
+					isDestroyed: vi.fn().mockReturnValue(false),
+				},
+			};
+			currentMockWindow = mockWindow;
+
+			const checkedPaths: string[] = [];
+			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
+				if (args?.includes('--is-inside-work-tree')) {
+					checkedPaths.push(cwd as string);
+					return { stdout: 'true\n', stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--show-toplevel')) {
+					return { stdout: String(cwd), stderr: '', exitCode: 0 };
+				}
+				if (args?.includes('--abbrev-ref')) {
+					return { stdout: 'feature\n', stderr: '', exitCode: 0 };
+				}
+				return { stdout: '', stderr: '', exitCode: 0 };
+			});
+
+			const handler = handlers.get('git:watchWorktreeDirectory');
+			await handler!({} as any, 'session-debounce-same', '/parent/worktrees');
+
+			// Simulate repeated addDir for the SAME path (e.g., rapid filesystem events)
+			await addDirCallback!('/parent/worktrees/dir1');
+			await vi.advanceTimersByTimeAsync(100);
+			await addDirCallback!('/parent/worktrees/dir1');
+			await vi.advanceTimersByTimeAsync(100);
+			await addDirCallback!('/parent/worktrees/dir1');
+
+			await vi.advanceTimersByTimeAsync(600);
+
+			// Should only process once despite three events for the same path
+			expect(checkedPaths).toEqual(['/parent/worktrees/dir1']);
 
 			vi.useRealTimers();
 		});
@@ -4398,8 +5783,7 @@ branch refs/heads/bugfix-123
 					isDestroyed: vi.fn().mockReturnValue(false),
 				},
 			};
-			const { BrowserWindow } = await import('electron');
-			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([mockWindow] as any);
+			currentMockWindow = mockWindow;
 
 			vi.mocked(execFile.execFileNoThrow).mockImplementation(async (cmd, args, cwd) => {
 				if (args?.includes('--is-inside-work-tree')) {
@@ -4465,7 +5849,7 @@ branch refs/heads/bugfix-123
 			// Start unwatch (will await watcher.close() which we control)
 			const unwatchPromise = unwatchHandler!({} as any, 'race-session');
 
-			// Before unwatch resolves, start watch — this creates watcher B
+			// Before unwatch resolves, start watch - this creates watcher B
 			const watchPromise = watchHandler!({} as any, 'race-session', '/some/path');
 
 			// Now let watcher A's close resolve (unwatch resumes)
@@ -4473,7 +5857,7 @@ branch refs/heads/bugfix-123
 			await unwatchPromise;
 			await watchPromise;
 
-			// Watcher B should still be functional — the late-resolving unwatch
+			// Watcher B should still be functional - the late-resolving unwatch
 			// must NOT have removed it from the map
 			expect(mockWatcherB.close).not.toHaveBeenCalled();
 

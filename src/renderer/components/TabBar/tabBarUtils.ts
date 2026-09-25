@@ -1,4 +1,76 @@
-import type { UnifiedTab } from '../../types';
+import type { LucideIcon } from 'lucide-react';
+import { MessageSquare, FileText, Globe, TerminalSquare, LayoutGrid } from 'lucide-react';
+import type { Theme, UnifiedTab } from '../../types';
+
+/** The kind of content a tab holds - matches the UnifiedTab discriminant. */
+export type TabKind = UnifiedTab['type'];
+
+/**
+ * Signature icon for each tab kind, the counterpart to
+ * {@link getTabKindColor}.
+ *
+ * Any surface that lists tabs of MIXED kind - the snoozed-tab list, the closed
+ * tab history, a group's member list - reads from this one map. Picking icons
+ * per surface is how two lists end up showing a different glyph for the same
+ * thing, and the tab strip itself is not a usable source: each tab component
+ * imports its own icons directly and layers state on top (a busy AI tab shows a
+ * spinner, a failed one an alert), which is right for the strip and wrong for a
+ * list of parked tabs.
+ */
+export function getTabKindIcon(kind: TabKind): LucideIcon {
+	switch (kind) {
+		case 'ai':
+			return MessageSquare;
+		case 'file':
+			return FileText;
+		case 'browser':
+			return Globe;
+		case 'terminal':
+			return TerminalSquare;
+		case 'group':
+			// rc-only kind: a tiled group of panes. Same glyph the group chip in the
+			// tab strip falls back to when no emoji is set (GroupTabChip), so a
+			// parked group is recognisable as the thing that was on the strip.
+			return LayoutGrid;
+		default:
+			// Unreachable for TabKind as declared here, but deliberate: a branch that
+			// adds a kind should merge rather than fail this switch to compile. A
+			// generic glyph is the right answer for a kind this map has not been
+			// taught yet.
+			return LayoutGrid;
+	}
+}
+
+/**
+ * Signature color for each tab kind. AI/file/terminal track the active theme
+ * via semantic tokens so the palette adapts to light/dark/vibe themes. Browser
+ * uses a fixed sky blue - there's no "info/blue" semantic token in the theme,
+ * and the obvious fallback (`ansiBlue`) lands on desaturated purples/grays in
+ * several vibe themes (pedurple, winamp), making the icon read as
+ * gray next to the other kinds. A stable browser-blue keeps the kind visually
+ * distinct from accent/warning/success on every theme.
+ * - ai      → accent  (brand hue)
+ * - browser → sky blue (fixed; universal "browser" color)
+ * - file    → warning (yellow/orange)
+ * - terminal→ success (green) - terminal tabs additionally override with
+ *             their run-state, so this is the idle base.
+ */
+const BROWSER_TAB_COLOR = '#3b82f6';
+
+export function getTabKindColor(kind: TabKind, theme: Theme): string {
+	switch (kind) {
+		case 'ai':
+			return theme.colors.accent;
+		case 'browser':
+			return BROWSER_TAB_COLOR;
+		case 'file':
+			return theme.colors.warning;
+		case 'terminal':
+			return theme.colors.success;
+		default:
+			return theme.colors.textDim;
+	}
+}
 
 /**
  * Determine if a unified tab is currently active, based on tab type and input mode.
@@ -12,8 +84,16 @@ export function isUnifiedTabActive(
 	activeFileTabId: string | null | undefined,
 	activeBrowserTabId: string | null | undefined,
 	activeTerminalTabId: string | null | undefined,
-	inputMode: 'ai' | 'terminal' | undefined
+	inputMode: 'ai' | 'terminal' | undefined,
+	activeGroupId?: string | null
 ): boolean {
+	// A tiled group is the active tab when it takes over the panel; it outranks the
+	// standalone selections (which navigation clears when a group activates).
+	if (tab.type === 'group') {
+		return tab.id === activeGroupId;
+	}
+	// While a group is active, no standalone chip should read as active.
+	if (activeGroupId) return false;
 	if (tab.type === 'ai') {
 		return (
 			tab.id === activeTabId && !activeFileTabId && !activeBrowserTabId && inputMode !== 'terminal'
@@ -30,16 +110,28 @@ export function isUnifiedTabActive(
 
 /**
  * Compute shortcut hint for a tab at a given position.
- * Returns 1-9 for first 9 tabs, 0 for last tab (Cmd+0), null for others.
- * Returns null when unread filter is active (positions aren't stable).
+ *
+ * When useCmd0AsLastTab is true (Maestro default): returns 1-9 for the first 9 tabs,
+ * 0 for the last tab (Cmd+0), null for others.
+ *
+ * When useCmd0AsLastTab is false (browser-style): returns 1-8 for the first 8 tabs,
+ * 9 for the last tab (Cmd+9), null for others.
+ *
+ * Callers pass the tab's index within the currently displayed list (filtered or not) so
+ * hints stay aligned with Cmd+N behaviour - the jump shortcuts index into the same
+ * filtered list when the unread filter is active.
  */
 export function getShortcutHint(
-	originalIndex: number,
+	displayedIndex: number,
 	isLastTab: boolean,
-	showUnreadOnly: boolean
+	useCmd0AsLastTab = true
 ): number | null {
-	if (showUnreadOnly) return null;
-	if (isLastTab) return 0;
-	if (originalIndex < 9) return originalIndex + 1;
+	if (useCmd0AsLastTab) {
+		if (isLastTab) return 0;
+		if (displayedIndex < 9) return displayedIndex + 1;
+		return null;
+	}
+	if (isLastTab) return 9;
+	if (displayedIndex < 8) return displayedIndex + 1;
 	return null;
 }

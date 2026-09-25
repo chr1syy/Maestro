@@ -29,11 +29,14 @@ import {
 	ChevronDown,
 	ChevronRight,
 	Code2,
+	ArrowRight,
 } from 'lucide-react';
 import type { Theme, AgentError, AgentErrorType } from '../types';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { Modal } from './ui/Modal';
 import { CollapsibleJsonViewer } from './CollapsibleJsonViewer';
+import { QuotaLimitEvidence } from './ui/QuotaLimitEvidence';
+import { parseQuotaLimitDetail } from '../../shared/quotaLimitDetail';
 
 /**
  * Props for recovery action buttons
@@ -56,6 +59,13 @@ interface AgentErrorModalProps {
 	onDismiss: () => void;
 	/** Whether the error can be dismissed (vs. requiring action) */
 	dismissible?: boolean;
+	/**
+	 * When provided, renders a "Jump to failing tab" button that switches the
+	 * Left Bar selection to the failing agent and activates the failing tab.
+	 * Should be undefined when the user is already viewing that tab, or when
+	 * the error is historical (the user already navigated to view it).
+	 */
+	onJumpToAgent?: () => void;
 }
 
 /**
@@ -121,6 +131,7 @@ export function AgentErrorModal({
 	recoveryActions,
 	onDismiss,
 	dismissible = true,
+	onJumpToAgent,
 }: AgentErrorModalProps) {
 	const primaryButtonRef = useRef<HTMLButtonElement>(null);
 	const [showJsonDetails, setShowJsonDetails] = useState(false);
@@ -133,6 +144,9 @@ export function AgentErrorModal({
 
 	// Check if we have JSON details to show
 	const hasJsonDetails = error.parsedJson !== undefined;
+
+	// Readable form of the provider's quota payload, when it sent one.
+	const quotaDetail = useMemo(() => parseQuotaLimitDetail(error.parsedJson), [error.parsedJson]);
 
 	const errorColor = getErrorColor(error, theme);
 	const errorIcon = getErrorIcon(error.type);
@@ -153,11 +167,30 @@ export function AgentErrorModal({
 			{/* Error Details */}
 			<div className="space-y-4">
 				{/* Agent and session context */}
-				{(agentName || sessionName) && (
-					<div className="text-xs" style={{ color: theme.colors.textDim }}>
-						{agentName && <span>{agentName}</span>}
-						{agentName && sessionName && <span> • </span>}
-						{sessionName && <span>{sessionName}</span>}
+				{(agentName || sessionName || onJumpToAgent) && (
+					<div className="flex items-center gap-2 text-xs" style={{ color: theme.colors.textDim }}>
+						{(agentName || sessionName) && (
+							<div className="min-w-0 truncate">
+								{agentName && <span>{agentName}</span>}
+								{agentName && sessionName && <span> • </span>}
+								{sessionName && <span>{sessionName}</span>}
+							</div>
+						)}
+						{onJumpToAgent && (
+							<button
+								type="button"
+								onClick={onJumpToAgent}
+								className="ml-auto shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded border hover:bg-white/5 transition-colors"
+								style={{
+									borderColor: theme.colors.border,
+									color: theme.colors.textMain,
+								}}
+								title="Switch to the failing agent and tab"
+							>
+								<span>Jump to failing tab</span>
+								<ArrowRight className="w-3 h-3" />
+							</button>
+						)}
 					</div>
 				)}
 
@@ -165,6 +198,13 @@ export function AgentErrorModal({
 				<p className="text-sm leading-relaxed" style={{ color: theme.colors.textMain }}>
 					{error.message}
 				</p>
+
+				{/* Plan-limit evidence: a provider's limit notice collapses to one
+				    sentence that can't say which window was exhausted or whether
+				    anything can be done. The structured payload riding on the same
+				    message can, so read it out rather than leaving the answer buried
+				    in the raw JSON below. */}
+				<QuotaLimitEvidence detail={quotaDetail} theme={theme} />
 
 				{/* Timestamp */}
 				<div className="text-xs" style={{ color: theme.colors.textDim }}>

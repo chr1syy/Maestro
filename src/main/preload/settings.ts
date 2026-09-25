@@ -42,8 +42,43 @@ export function createSessionsApi() {
 	return {
 		getAll: () => ipcRenderer.invoke('sessions:getAll'),
 		setAll: (sessions: StoredSession[]) => ipcRenderer.invoke('sessions:setAll', sessions),
+		/**
+		 * Incremental persistence: merge `updates` into the stored sessions and
+		 * remove any whose id is in `removeIds`. Preferred over `setAll` for
+		 * debounced flushes - avoids cloning + serializing the entire sessions
+		 * tree on every change.
+		 */
+		setMany: (updates: StoredSession[], removeIds: string[] = []) =>
+			ipcRenderer.invoke('sessions:setMany', updates, removeIds),
 		getActiveSessionId: () => ipcRenderer.invoke('sessions:getActiveSessionId') as Promise<string>,
 		setActiveSessionId: (id: string) => ipcRenderer.invoke('sessions:setActiveSessionId', id),
+		/**
+		 * Listen for main-side focus requests (plugin `sessions.focus` verb). The
+		 * main store write alone is invisible to the live renderer store, so the
+		 * renderer must apply the jump itself through the canonical helpers.
+		 */
+		onFocusRequest: (handler: (payload: { sessionId: string; tabId?: string }) => void) => {
+			const wrappedHandler = (_: unknown, payload: { sessionId: string; tabId?: string }) =>
+				handler(payload);
+			ipcRenderer.on('sessions:focus-request', wrappedHandler);
+			return () => ipcRenderer.removeListener('sessions:focus-request', wrappedHandler);
+		},
+		/**
+		 * Listen for agents another client added or closed. Desktop windows and
+		 * web-desktop clients each hold their own session tree and flush it to the
+		 * same store, so without this push a client only learns what the others did
+		 * by reloading - and its stale copy resurrects agents they closed.
+		 */
+		onLifecycleSync: (
+			handler: (payload: { added: StoredSession[]; removedIds: string[] }) => void
+		) => {
+			const wrappedHandler = (
+				_: unknown,
+				payload: { added: StoredSession[]; removedIds: string[] }
+			) => handler(payload);
+			ipcRenderer.on('sessions:lifecycleSync', wrappedHandler);
+			return () => ipcRenderer.removeListener('sessions:lifecycleSync', wrappedHandler);
+		},
 	};
 }
 

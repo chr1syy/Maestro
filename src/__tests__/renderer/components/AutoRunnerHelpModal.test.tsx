@@ -12,6 +12,7 @@ import { AutoRunnerHelpModal } from '../../../renderer/components/AutoRun/AutoRu
 import type { Theme } from '../../../renderer/types';
 import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
 
+import { mockTheme } from '../../helpers/mockTheme';
 // Mock the layer stack context
 const mockRegisterLayer = vi.fn(() => 'layer-123');
 const mockUnregisterLayer = vi.fn();
@@ -42,26 +43,6 @@ vi.mock('../../../renderer/utils/shortcutFormatter', () => ({
 }));
 
 // Sample theme for testing
-const mockTheme: Theme = {
-	id: 'test-dark',
-	name: 'Test Dark',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgSidebar: '#252525',
-		bgActivity: '#2d2d2d',
-		border: '#444444',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#007acc',
-		error: '#ff4444',
-		success: '#44ff44',
-		warning: '#ffaa00',
-		cursor: '#ffffff',
-		selection: '#264f78',
-		terminalBackground: '#000000',
-	},
-};
 
 describe('AutoRunnerHelpModal', () => {
 	const mockOnClose = vi.fn();
@@ -109,9 +90,17 @@ describe('AutoRunnerHelpModal', () => {
 			render(<AutoRunnerHelpModal theme={mockTheme} onClose={mockOnClose} />);
 		});
 
-		it('should render Introduction section', () => {
+		it('should render Introduction section explaining both run modes up front', () => {
 			expect(
-				screen.getByText(/Auto Run is a file-system-based document runner/)
+				screen.getByText(/Auto Run automates AI-driven work in one of two modes/)
+			).toBeInTheDocument();
+			// Both modes are introduced side by side at the top of the guide. The
+			// labels themselves appear several times, so assert the unique blurbs.
+			expect(
+				screen.getByText(/Run markdown checklist documents to completion/)
+			).toBeInTheDocument();
+			expect(
+				screen.getByText(/Pursue a single free-text objective with no checklist/)
 			).toBeInTheDocument();
 		});
 
@@ -223,6 +212,12 @@ describe('AutoRunnerHelpModal', () => {
 			expect(screen.getByText(/to gracefully stop/)).toBeInTheDocument();
 		});
 
+		it('should render Halt Marker section', () => {
+			expect(screen.getByText('Halt Marker (Agent Early Exit)')).toBeInTheDocument();
+			expect(screen.getByText('<!-- maestro:halt: brief reason here -->')).toBeInTheDocument();
+			expect(screen.getByText(/A stale halt marker left in a document/)).toBeInTheDocument();
+		});
+
 		it('should render Keyboard Shortcuts section', () => {
 			expect(screen.getByText('Keyboard Shortcuts')).toBeInTheDocument();
 		});
@@ -252,8 +247,8 @@ describe('AutoRunnerHelpModal', () => {
 		it('should apply theme background color to modal', () => {
 			render(<AutoRunnerHelpModal theme={mockTheme} onClose={mockOnClose} />);
 
-			// Modal component uses inline width style
-			const modal = document.querySelector('[style*="width: 672px"]');
+			// Modal renders a resizable frame keyed by resizeKey
+			const modal = document.querySelector('[data-modal-resize-key="auto-run-guide"]');
 			expect(modal).toHaveStyle({ backgroundColor: mockTheme.colors.bgSidebar });
 		});
 
@@ -454,20 +449,20 @@ describe('AutoRunnerHelpModal', () => {
 	});
 
 	describe('Responsive Design', () => {
-		it('should have max-width constraint on modal', () => {
+		it('should render a resizable frame with a persisted size key', () => {
 			render(<AutoRunnerHelpModal theme={mockTheme} onClose={mockOnClose} />);
 
-			// Modal component uses inline width style
-			const modal = document.querySelector('[style*="width: 672px"]');
+			const modal = document.querySelector('[data-modal-resize-key="auto-run-guide"]');
 			expect(modal).toBeInTheDocument();
+			// Height is clamped to the viewport, so only the width is deterministic here.
+			expect(modal).toHaveStyle({ width: '880px' });
 		});
 
-		it('should have max-height constraint for scrolling', () => {
+		it('should cap the frame to the viewport so it can never grow off screen', () => {
 			render(<AutoRunnerHelpModal theme={mockTheme} onClose={mockOnClose} />);
 
-			// Modal component uses inline max-height style
-			const modal = document.querySelector('[style*="max-height: 85vh"]');
-			expect(modal).toBeInTheDocument();
+			const modal = document.querySelector('[data-modal-resize-key="auto-run-guide"]');
+			expect(modal).toHaveStyle({ maxWidth: '90vw', maxHeight: '90vh' });
 		});
 
 		it('should use flex layout for modal structure', () => {
@@ -504,8 +499,8 @@ describe('AutoRunnerHelpModal', () => {
 		it('should render checkbox syntax examples', () => {
 			render(<AutoRunnerHelpModal theme={mockTheme} onClose={mockOnClose} />);
 
-			// Checkbox format is mentioned
-			expect(screen.getByText(/- \[ \]/)).toBeInTheDocument();
+			// Checkbox format is mentioned (task format section and the human-step section)
+			expect(screen.getAllByText(/- \[ \]/).length).toBeGreaterThan(0);
 		});
 
 		it('should render file extension examples', () => {

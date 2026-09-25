@@ -7,20 +7,30 @@ import {
 	Edit,
 	Play,
 	Square,
-	Loader2,
 	Save,
 	RotateCcw,
 	LayoutGrid,
 	AlertTriangle,
 } from 'lucide-react';
+import { GhostIconButton } from '../ui/GhostIconButton';
+import { Spinner } from '../ui/Spinner';
 import type { Theme, BatchRunState, SessionState, Shortcut } from '../../types';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useIsTopLayer } from '../../hooks/ui/useIsTopLayer';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
+import { useAutoRunErrorPaused } from '../../hooks/batch/useAutoRunPause';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { AutoRun } from './AutoRun';
 import type { AutoRunHandle } from './types';
 import type { DocumentTaskCount } from './AutoRunDocumentSelector';
+import type { FileNode } from '../../types/fileTree';
 import { ConfirmModal } from '../ConfirmModal';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
+import { ResizeHandles } from '../ui/ResizeHandles';
+import {
+	MIRRORED_RUN_CONTROL_TITLE,
+	useIsMirroredBatchRun,
+} from '../../hooks/batch/useAutoRunStateMirror';
 
 interface AutoRunExpandedModalProps {
 	theme: Theme;
@@ -37,6 +47,10 @@ interface AutoRunExpandedModalProps {
 		path: string;
 		children?: unknown[];
 	}>;
+	// Project context for markdown file links (see AutoRunProps).
+	projectFileTree?: FileNode[];
+	projectRoot?: string;
+	onOpenProjectFile?: (path: string, options?: { openInNewTab?: boolean }) => void;
 	content: string;
 	onContentChange: (content: string) => void;
 	contentVersion?: number;
@@ -93,8 +107,6 @@ export function AutoRunExpandedModal({
 	onOpenMarketplace,
 	...autoRunProps
 }: AutoRunExpandedModalProps) {
-	const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-	const layerIdRef = useRef<string>();
 	const onCloseRef = useRef(onClose);
 	const handleCloseRef = useRef<() => void>(() => {});
 	const autoRunRef = useRef<AutoRunHandle>(null);
@@ -103,6 +115,15 @@ export function AutoRunExpandedModal({
 
 	// Local mode state - independent from the right panel behind the modal
 	const [localMode, setLocalMode] = useState<'edit' | 'preview'>(initialMode);
+
+	// The cmd+e capture listener reads the mode and the setter through refs so it
+	// registers once instead of re-subscribing on every mode flip - a listener
+	// that tears down and re-adds mid-keystroke can miss the very event it exists
+	// to catch. Assigned during render, so they are current by the time any event
+	// fires.
+	const localModeRef = useRef(localMode);
+	localModeRef.current = localMode;
+	const setModeRef = useRef<(mode: 'edit' | 'preview') => void>(() => {});
 
 	// Wrap onStateChange to prevent mode from propagating to parent
 	// This keeps the expanded modal's mode independent from the right panel
@@ -124,9 +145,18 @@ export function AutoRunExpandedModal({
 		[onStateChange, initialMode]
 	);
 
-	const isLocked = batchRunState?.isRunning || false;
+	const isRunActive = batchRunState?.isRunning || false;
+	const isErrorPaused = useAutoRunErrorPaused(sessionId);
+	// A run that is parked on an agent error or a MAESTRO:HITL gate is waiting on
+	// the user, not driving the document, so editing opens back up. The Run/Stop
+	// button still reads `isRunActive` - a paused run is stoppable, not startable.
+	const isEditLocked = isRunActive && !isErrorPaused;
 	const isAgentBusy = sessionState === 'busy' || sessionState === 'connecting';
 	const isStopping = batchRunState?.isStopping || false;
+	// Mirrored from another Maestro window: the document is still locked (that
+	// window really is writing to it) but Stop cannot reach the loop from here.
+	const isMirroredRun = useIsMirroredBatchRun(sessionId);
+	const stopDisabled = isStopping || isMirroredRun;
 
 	// Track dirty state from AutoRun component
 	const [isDirty, setIsDirty] = useState(false);
@@ -177,35 +207,9 @@ export function AutoRunExpandedModal({
 		onClose();
 	}, [handleRevert, onClose]);
 
-	// Register layer on mount
-	useEffect(() => {
-		const id = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.AUTORUN_EXPANDED,
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			onEscape: () => {
-				handleCloseRef.current();
-			},
-		});
-		layerIdRef.current = id;
-
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [registerLayer, unregisterLayer]);
-
-	// Keep escape handler up to date
-	useEffect(() => {
-		if (layerIdRef.current) {
-			updateLayerHandler(layerIdRef.current, () => {
-				handleCloseRef.current();
-			});
-		}
-	}, [handleClose, updateLayerHandler]);
+	useModalLayer(MODAL_PRIORITIES.AUTORUN_EXPANDED, undefined, () => {
+		handleCloseRef.current();
+	});
 
 	// Focus the AutoRun component on mount
 	useEffect(() => {
@@ -214,6 +218,74 @@ export function AutoRunExpandedModal({
 		}, 50);
 		return () => clearTimeout(timer);
 	}, []);
+
+	// Re-claim focus whenever this modal becomes the topmost layer again - e.g.
+	// after the user opens PlayBook Exchange (or the doc selector) and dismisses
+	// it. Without this, focus falls back to the body and Cmd+E starts targeting
+	// the right-panel AutoRun behind us instead of the expanded view.
+	const isTopLayer = useIsTopLayer(MODAL_PRIORITIES.AUTORUN_EXPANDED);
+	useEffect(() => {
+		if (!isTopLayer) return;
+		// Wait a tick so the closing modal has finished tearing down its focus trap.
+		const timer = setTimeout(() => {
+			const active = document.activeElement as HTMLElement | null;
+			// Only steal focus when it's idling on the body (or detached) - don't
+			// yank it out of an input the user has deliberately focused.
+			if (!active || active === document.body) {
+				autoRunRef.current?.focus();
+			}
+		}, 0);
+		return () => clearTimeout(timer);
+	}, [isTopLayer]);
+
+	// Modal-scoped shortcuts: cmd+s saves (when dirty); cmd+o opens the
+	// document selector dropdown; cmd+e toggles edit/preview. Registered in the
+	// capture phase so we run before the global keyboard handler in
+	// useMainKeyboardHandler (which would otherwise treat cmd+o as
+	// `agentSwitcher`, and cmd+e as the chat's raw-markdown toggle).
+	//
+	// cmd+e in particular MUST be claimed here rather than left to the AutoRun
+	// component's own React onKeyDown. That handler only fires when focus is
+	// inside its subtree, and this modal shares the app with a second, fully
+	// mounted AutoRun in the right panel behind it. Whenever focus was anywhere
+	// else - the body after dismissing a nested dialog, a toolbar button - the
+	// keystroke sailed past both and landed on the global handler, which toggled
+	// the main panel's markdown mode. The user saw a modal that ignored its own
+	// shortcut while something changed behind it.
+	//
+	// A window-capture listener runs before any React handler, and only while
+	// this modal is mounted, so the topmost surface wins by construction rather
+	// than by whoever happens to hold focus.
+	useEffect(() => {
+		const handleKeyDown = (e: KeyboardEvent) => {
+			const metaPressed = e.metaKey || e.ctrlKey;
+			if (!metaPressed || e.altKey) return;
+			const key = e.key.toLowerCase();
+			if (key === 's' && !e.shiftKey) {
+				if (!isEditLocked && autoRunRef.current?.isDirty()) {
+					e.preventDefault();
+					e.stopPropagation();
+					void handleSave();
+				}
+			} else if (key === 'o' && !e.shiftKey) {
+				e.preventDefault();
+				e.stopPropagation();
+				autoRunRef.current?.openDocumentSelector();
+			} else if (key === 'e' && !e.shiftKey) {
+				// Swallowed even while locked: editing is disabled during a run,
+				// but letting it through would toggle the main panel behind us,
+				// which is the exact leak this closes. Cmd+Shift+E is a different
+				// shortcut ("Edit Last Queued Message") and is left alone.
+				e.preventDefault();
+				e.stopPropagation();
+				if (!isEditLocked) {
+					setModeRef.current(localModeRef.current === 'edit' ? 'preview' : 'edit');
+				}
+			}
+		};
+		window.addEventListener('keydown', handleKeyDown, { capture: true });
+		return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
+	}, [handleSave, isEditLocked]);
 
 	// Use the AutoRun's switchMode for scroll sync, falling back to local mode change
 	const setMode = useCallback(
@@ -227,6 +299,13 @@ export function AutoRunExpandedModal({
 		},
 		[onModeChange]
 	);
+	setModeRef.current = setMode;
+
+	const resizableModal = useResizableModal({
+		resizeKey: 'auto-run-expanded',
+		defaultSize: { width: 960, height: 720 },
+		minSize: { width: 680, height: 460 },
+	});
 
 	return createPortal(
 		<div
@@ -240,12 +319,25 @@ export function AutoRunExpandedModal({
 		>
 			{/* Modal - same size as PromptComposer for consistency */}
 			<div
-				className="relative w-[90vw] h-[80vh] max-w-5xl overflow-hidden rounded-xl border shadow-2xl flex flex-col"
+				ref={resizableModal.modalRef}
+				role="dialog"
+				aria-modal="true"
+				aria-label="Auto Run"
+				className="relative overflow-hidden rounded-xl border shadow-2xl flex flex-col"
 				style={{
+					...resizableModal.style,
 					backgroundColor: theme.colors.bgSidebar,
 					borderColor: theme.colors.border,
 				}}
+				data-modal-resize-key="auto-run-expanded"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header with controls */}
 				<div
 					className="flex items-center justify-between px-4 py-3 border-b shrink-0"
@@ -259,15 +351,15 @@ export function AutoRunExpandedModal({
 					{/* Center - Mode controls */}
 					<div className="flex items-center gap-2">
 						<button
-							onClick={() => !isLocked && setMode('edit')}
-							disabled={isLocked}
-							className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium transition-colors ${isLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+							onClick={() => !isEditLocked && setMode('edit')}
+							disabled={isEditLocked}
+							className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium transition-colors ${isEditLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
 							style={{
 								color: theme.colors.accent,
-								border: `1px solid ${theme.colors.accent}${localMode === 'edit' && !isLocked ? '' : '40'}`,
-								backgroundColor: `${theme.colors.accent}${localMode === 'edit' && !isLocked ? '30' : '15'}`,
+								border: `1px solid ${theme.colors.accent}${localMode === 'edit' && !isEditLocked ? '' : '40'}`,
+								backgroundColor: `${theme.colors.accent}${localMode === 'edit' && !isEditLocked ? '30' : '15'}`,
 							}}
-							title={isLocked ? 'Editing disabled while Auto Run active' : 'Edit document'}
+							title={isEditLocked ? 'Editing disabled while Auto Run active' : 'Edit document'}
 						>
 							<Edit className="w-3.5 h-3.5" />
 							Edit
@@ -277,8 +369,8 @@ export function AutoRunExpandedModal({
 							className="flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium transition-colors"
 							style={{
 								color: theme.colors.accent,
-								border: `1px solid ${theme.colors.accent}${localMode === 'preview' || isLocked ? '' : '40'}`,
-								backgroundColor: `${theme.colors.accent}${localMode === 'preview' || isLocked ? '30' : '15'}`,
+								border: `1px solid ${theme.colors.accent}${localMode === 'preview' || isEditLocked ? '' : '40'}`,
+								backgroundColor: `${theme.colors.accent}${localMode === 'preview' || isEditLocked ? '30' : '15'}`,
 							}}
 							title="Preview document"
 						>
@@ -287,24 +379,24 @@ export function AutoRunExpandedModal({
 						</button>
 						{/* Image upload button - hidden for now, can be re-enabled when needed
             <button
-              onClick={() => localMode === 'edit' && !isLocked && fileInputRef.current?.click()}
-              disabled={localMode !== 'edit' || isLocked}
+              onClick={() => localMode === 'edit' && !isEditLocked && fileInputRef.current?.click()}
+              disabled={localMode !== 'edit' || isEditLocked}
               className={`flex items-center justify-center w-8 h-8 rounded text-xs transition-colors ${
-                localMode === 'edit' && !isLocked ? 'hover:opacity-80' : 'opacity-30 cursor-not-allowed'
+                localMode === 'edit' && !isEditLocked ? 'hover:opacity-80' : 'opacity-30 cursor-not-allowed'
               }`}
               style={{
                 backgroundColor: 'transparent',
                 color: theme.colors.textDim,
                 border: `1px solid ${theme.colors.border}`
               }}
-              title={localMode === 'edit' && !isLocked ? 'Add image (or paste from clipboard)' : 'Switch to Edit mode to add images'}
+              title={localMode === 'edit' && !isEditLocked ? 'Add image (or paste from clipboard)' : 'Switch to Edit mode to add images'}
             >
               <Image className="w-3.5 h-3.5" />
             </button>
             */}
 						<input ref={fileInputRef} type="file" accept="image/*" className="hidden" />
-						{/* Save/Revert buttons - shown when dirty */}
-						{isDirty && localMode === 'edit' && !isLocked && (
+						{/* Save/Revert buttons - shown whenever the doc is dirty, in either mode */}
+						{isDirty && !isEditLocked && (
 							<>
 								<div className="w-px h-4 mx-1" style={{ backgroundColor: theme.colors.border }} />
 								<button
@@ -334,7 +426,7 @@ export function AutoRunExpandedModal({
 									Save
 									{/* Keyboard shortcut overlay on hover */}
 									<span
-										className="absolute -bottom-6 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+										className="absolute -bottom-6 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-2xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
 										style={{
 											backgroundColor: theme.colors.bgMain,
 											color: theme.colors.textDim,
@@ -347,24 +439,26 @@ export function AutoRunExpandedModal({
 							</>
 						)}
 						{/* Run / Stop button */}
-						{isLocked ? (
+						{isRunActive ? (
 							<button
-								onClick={() => !isStopping && onStopBatchRun?.(sessionId)}
-								disabled={isStopping}
-								className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs transition-colors font-semibold ${isStopping ? 'cursor-not-allowed' : ''}`}
+								onClick={() => !stopDisabled && onStopBatchRun?.(sessionId)}
+								disabled={stopDisabled}
+								className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs transition-colors font-semibold ${stopDisabled ? 'cursor-not-allowed' : ''}`}
 								style={{
 									backgroundColor: isStopping ? theme.colors.warning : theme.colors.error,
 									color: isStopping ? theme.colors.bgMain : 'white',
 									border: `1px solid ${isStopping ? theme.colors.warning : theme.colors.error}`,
-									pointerEvents: isStopping ? 'none' : 'auto',
+									opacity: isMirroredRun ? 0.6 : 1,
 								}}
-								title={isStopping ? 'Stopping after current task...' : 'Stop auto-run'}
+								title={
+									isMirroredRun
+										? MIRRORED_RUN_CONTROL_TITLE
+										: isStopping
+											? 'Stopping after current task...'
+											: 'Stop auto-run'
+								}
 							>
-								{isStopping ? (
-									<Loader2 className="w-3.5 h-3.5 animate-spin" />
-								) : (
-									<Square className="w-3.5 h-3.5" />
-								)}
+								{isStopping ? <Spinner size={14} /> : <Square className="w-3.5 h-3.5" />}
 								{isStopping ? 'Stopping' : 'Stop'}
 							</button>
 						) : (
@@ -389,7 +483,8 @@ export function AutoRunExpandedModal({
 								Run
 							</button>
 						)}
-						{/* PlayBooks button */}
+						{/* Playbook Exchange button - full name fits in the expanded header
+						    (the right-panel AutoRun shortens it to "PlayBooks"). */}
 						{onOpenMarketplace && (
 							<button
 								onClick={onOpenMarketplace}
@@ -399,10 +494,10 @@ export function AutoRunExpandedModal({
 									border: `1px solid ${theme.colors.accent}40`,
 									backgroundColor: `${theme.colors.accent}15`,
 								}}
-								title="Browse PlayBooks - discover and share community playbooks"
+								title="Browse Playbook Exchange - discover and share community playbooks"
 							>
 								<LayoutGrid className="w-3.5 h-3.5" />
-								PlayBooks
+								Playbook Exchange
 							</button>
 						)}
 					</div>
@@ -422,13 +517,9 @@ export function AutoRunExpandedModal({
 							<Minimize2 className="w-4 h-4" />
 							Collapse
 						</button>
-						<button
-							onClick={handleClose}
-							className="p-1 rounded hover:bg-white/10 transition-colors"
-							title="Close (Esc)"
-						>
+						<GhostIconButton onClick={handleClose} title="Close (Esc)">
 							<X className="w-5 h-5" style={{ color: theme.colors.textDim }} />
-						</button>
+						</GhostIconButton>
 					</div>
 				</div>
 
@@ -449,6 +540,7 @@ export function AutoRunExpandedModal({
 						sessionState={sessionState}
 						sessionId={sessionId}
 						hideTopControls
+						showLineNumbers
 						{...autoRunProps}
 					/>
 				</div>

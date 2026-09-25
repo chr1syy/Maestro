@@ -1,15 +1,17 @@
 /**
- * Cue Template Context Builder — builds the `templateContext.cue` object
+ * Cue Template Context Builder - builds the `templateContext.cue` object
  * from a CueEvent's payload using an enricher registry pattern.
  *
  * Each event type registers an enricher function that maps payload fields
  * to template context keys. Adding a new event type requires only adding
- * one enricher entry — no changes to the executor or engine.
+ * one enricher entry - no changes to the executor or engine.
  */
 
 import type { CueEvent, CueSubscription } from './cue-types';
 import type { CueEventType } from '../../shared/cue/contracts';
 import type { TemplateContext } from '../../shared/templateVariables';
+import { sanitizeVarName } from '../../shared/cue-pipeline-types';
+import { formatNewCommentsForTemplate, type GitHubComment } from './cue-github-poller';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -31,26 +33,52 @@ export type CueTemplateContext = NonNullable<TemplateContext['cue']>;
  */
 const enricherRegistry = new Map<CueEventType | '*', CueContextEnricher>();
 
-/** Base enricher — runs for all event types. Populates common fields. */
-enricherRegistry.set('*', (event, subscription, runId) => ({
-	eventType: event.type,
-	eventTimestamp: event.timestamp,
-	triggerName: subscription.name,
-	runId,
-	filePath: String(event.payload.path ?? ''),
-	fileName: String(event.payload.filename ?? ''),
-	fileDir: String(event.payload.directory ?? ''),
-	fileExt: String(event.payload.extension ?? ''),
-	fileChangeType: String(event.payload.changeType ?? ''),
-	sourceSession: String(event.payload.sourceSession ?? ''),
-	sourceOutput: String(event.payload.sourceOutput ?? ''),
-	sourceStatus: String(event.payload.status ?? ''),
-	sourceExitCode: String(event.payload.exitCode ?? ''),
-	sourceDuration: String(event.payload.durationMs ?? ''),
-	sourceTriggeredBy: String(event.payload.triggeredBy ?? ''),
-}));
+/** Base enricher - runs for all event types. Populates common fields. */
+enricherRegistry.set('*', (event, subscription, runId) => {
+	const base: Record<string, string> = {
+		eventType: event.type,
+		eventTimestamp: event.timestamp,
+		triggerName: subscription.name,
+		runId,
+		filePath: String(event.payload.path ?? ''),
+		fileName: String(event.payload.filename ?? ''),
+		fileDir: String(event.payload.directory ?? ''),
+		fileExt: String(event.payload.extension ?? ''),
+		fileChangeType: String(event.payload.changeType ?? ''),
+		sourceSession: String(event.payload.sourceSession ?? ''),
+		sourceOutput: String(event.payload.sourceOutput ?? ''),
+		sourceStatus: String(event.payload.status ?? ''),
+		sourceExitCode: String(event.payload.exitCode ?? ''),
+		sourceDuration: String(event.payload.durationMs ?? ''),
+		sourceTriggeredBy: String(event.payload.triggeredBy ?? ''),
+		// Unified "triggering agent's session ID" - populated by the completion
+		// service (sourceSessionId) for agent.completed and by the CLI handler
+		// (sourceAgentId) for cli.trigger. Surfaced to users as {{CUE_FROM_AGENT}}
+		// so a single variable references whichever upstream agent fired this run.
+		fromAgent: String(event.payload.sourceSessionId ?? event.payload.sourceAgentId ?? ''),
+	};
 
-/** task.pending enricher — adds task-specific fields. */
+	// Per-source output variables (e.g. CUE_OUTPUT_AGENT_A) so users can
+	// place individual upstream outputs at specific positions in their prompt.
+	const perSource = event.payload.perSourceOutputs as Record<string, string> | undefined;
+	if (perSource) {
+		for (const [name, output] of Object.entries(perSource)) {
+			base[`output_${sanitizeVarName(name)}`] = output;
+		}
+	}
+
+	// Forwarded outputs from earlier in the chain (e.g. CUE_FORWARDED_AGENT_B).
+	const forwarded = event.payload.forwardedOutputs as Record<string, string> | undefined;
+	if (forwarded) {
+		for (const [name, output] of Object.entries(forwarded)) {
+			base[`forwarded_${sanitizeVarName(name)}`] = output;
+		}
+	}
+
+	return base;
+});
+
+/** task.pending enricher - adds task-specific fields. */
 enricherRegistry.set('task.pending', (event) => ({
 	taskFile: String(event.payload.path ?? ''),
 	taskFileName: String(event.payload.filename ?? ''),
@@ -62,6 +90,9 @@ enricherRegistry.set('task.pending', (event) => ({
 
 /** Shared GitHub enricher for both pull_request and issue events. */
 function buildGitHubContext(event: CueEvent): Record<string, string> {
+	const newComments = Array.isArray(event.payload.new_comments)
+		? (event.payload.new_comments as GitHubComment[])
+		: [];
 	return {
 		ghType: String(event.payload.type ?? ''),
 		ghNumber: String(event.payload.number ?? ''),
@@ -76,11 +107,69 @@ function buildGitHubContext(event: CueEvent): Record<string, string> {
 		ghBaseBranch: String(event.payload.base_branch ?? ''),
 		ghAssignees: String(event.payload.assignees ?? ''),
 		ghMergedAt: String(event.payload.merged_at ?? ''),
+		// Only github.label events carry these; other GitHub events leave the
+		// variables empty rather than absent so prompts stay substitutable.
+		ghLabel: String(event.payload.label ?? ''),
+		ghLabelActor: String(event.payload.label_actor ?? ''),
+		ghLabeledAt: String(event.payload.labeled_at ?? ''),
+		ghNewComments: formatNewCommentsForTemplate(newComments),
+		ghIsRetrigger: event.payload.is_retrigger === true ? 'true' : 'false',
+		ghRetriggerCount: String(event.payload.retrigger_count ?? '0'),
 	};
 }
 
 enricherRegistry.set('github.pull_request', (event) => buildGitHubContext(event));
 enricherRegistry.set('github.issue', (event) => buildGitHubContext(event));
+enricherRegistry.set('github.label', (event) => buildGitHubContext(event));
+
+/** cli.trigger enricher - adds CLI-specific fields. */
+enricherRegistry.set('cli.trigger', (event) => ({
+	cliPrompt: String(event.payload.cliPrompt ?? ''),
+	sourceAgentId: String(event.payload.sourceAgentId ?? ''),
+}));
+
+/** time.once enricher - surfaces the originally-scheduled fire timestamp. */
+enricherRegistry.set('time.once', (event) => ({
+	fireAt: String(event.payload.fire_at ?? ''),
+}));
+
+/** Cap on webhook body text injected into a prompt. Matches the
+ *  {{CUE_TASK_CONTENT}} budget - enough for a full PR/issue payload, small
+ *  enough that a chatty CI system can't blow out the agent's context. */
+const MAX_WEBHOOK_BODY_CHARS = 10_000;
+
+/**
+ * webhook.received enricher.
+ *
+ * `{{CUE_WEBHOOK_BODY}}` is the parsed JSON re-serialized with indentation
+ * rather than the raw body: webhook senders minify, and a single-line 8 KB
+ * JSON blob is materially harder for an agent to reason about than the same
+ * data pretty-printed. Non-JSON bodies fall back to the raw text.
+ */
+enricherRegistry.set('webhook.received', (event) => {
+	const body = event.payload.body;
+	const rendered =
+		body === null || body === undefined
+			? String(event.payload.raw_body ?? '')
+			: JSON.stringify(body, null, 2);
+	const headers =
+		event.payload.headers && typeof event.payload.headers === 'object'
+			? Object.entries(event.payload.headers as Record<string, string>)
+					.map(([key, value]) => `${key}: ${value}`)
+					.join('\n')
+			: '';
+
+	return {
+		webhookPath: String(event.payload.path ?? ''),
+		webhookEvent: String(event.payload.webhook_event ?? ''),
+		webhookDeliveryId: String(event.payload.delivery_id ?? ''),
+		webhookBody:
+			rendered.length > MAX_WEBHOOK_BODY_CHARS
+				? `${rendered.slice(0, MAX_WEBHOOK_BODY_CHARS)}\n... (truncated)`
+				: rendered,
+		webhookHeaders: headers,
+	};
+});
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 

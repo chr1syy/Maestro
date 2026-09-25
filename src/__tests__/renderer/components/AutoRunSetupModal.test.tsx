@@ -19,7 +19,8 @@ import type { Theme } from '../../../renderer/types';
 import { formatShortcutKeys } from '../../../renderer/utils/shortcutFormatter';
 
 // Mock lucide-react
-vi.mock('lucide-react', () => ({
+vi.mock('lucide-react', async (importOriginal) => ({
+	...(await importOriginal()),
 	X: () => <svg data-testid="x-icon" />,
 	Folder: () => <svg data-testid="folder-icon" />,
 	FileText: () => <svg data-testid="file-text-icon" />,
@@ -227,7 +228,7 @@ describe('AutoRunSetupModal', () => {
 			});
 
 			// Modal uses inline width style instead of Tailwind class
-			const modalContent = container.querySelector('[style*="width: 520px"]');
+			const modalContent = container.querySelector('[style*="width: min(calc(520px"]');
 			expect(modalContent).toHaveStyle({ backgroundColor: theme.colors.bgSidebar });
 		});
 	});
@@ -1205,7 +1206,7 @@ describe('AutoRunSetupModal', () => {
 			});
 
 			// Modal uses inline width style instead of Tailwind class
-			const modalContent = container.querySelector('[style*="width: 520px"]');
+			const modalContent = container.querySelector('[style*="width: min(calc(520px"]');
 			expect(modalContent).toHaveStyle({ backgroundColor: lightTheme.colors.bgSidebar });
 		});
 

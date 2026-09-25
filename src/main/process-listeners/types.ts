@@ -8,10 +8,11 @@ import type { WebServer } from '../web-server';
 import type { AgentDetector } from '../agents';
 import type { CueEngine } from '../cue/cue-engine';
 import type { SafeSendFn } from '../utils/safe-send';
-import type { StatsDB } from '../stats';
 import type { GroupChat, GroupChatParticipant } from '../group-chat/group-chat-storage';
 import type { GroupChatMessage, GroupChatState } from '../../shared/group-chat-types';
 import type { ParticipantState } from '../ipc/handlers/groupChat';
+import type { SshRemoteConfig } from '../../shared/types';
+import type { PluginEvent } from '../../shared/plugins/events';
 
 // ==========================================================================
 // Constants
@@ -94,6 +95,8 @@ export interface ProcessListenerDependencies {
 			processManager: ProcessManager | undefined
 		) => Promise<void>;
 		markParticipantResponded: (groupChatId: string, participantName: string) => boolean;
+		/** Clears the room's running state and releases its power block. */
+		settleGroupChatToIdle: (groupChatId: string) => void;
 		spawnModeratorSynthesis: (
 			groupChatId: string,
 			processManager: ProcessManager,
@@ -144,8 +147,6 @@ export interface ProcessListenerDependencies {
 			cacheCreationInputTokens: number;
 		}) => number;
 	};
-	/** Stats database getter */
-	getStatsDB: () => StatsDB;
 	/** Debug log function */
 	debugLog: (prefix: string, message: string, ...args: unknown[]) => void;
 	/** Regex patterns */
@@ -170,4 +171,23 @@ export interface ProcessListenerDependencies {
 	getCueEngine?: () => CueEngine | null;
 	/** Function to check if the Maestro Cue Encore Feature is enabled */
 	isCueEnabled?: () => boolean;
+	/**
+	 * Resolve an SSH remote configuration by display name.
+	 *
+	 * Used by the group chat exit listener to read on-disk usage data from
+	 * the remote host where a copilot-cli participant ran. Returns null
+	 * when no SSH remote with that name exists or the lookup is unavailable.
+	 */
+	getSshRemoteByName?: (name: string) => SshRemoteConfig | null;
+	/**
+	 * Resolve an agent's configured context window in tokens. Used to convert
+	 * the raw token count from copilot-cli's session.shutdown into a
+	 * percentage gauge.
+	 */
+	getAgentContextWindow?: (agentId: string) => number;
+	/**
+	 * Emit a metadata-only plugin event to subscribed plugins. No-op when the
+	 * plugin event bus is unavailable (feature off / not yet constructed).
+	 */
+	emitPluginEvent?: (event: PluginEvent) => void;
 }

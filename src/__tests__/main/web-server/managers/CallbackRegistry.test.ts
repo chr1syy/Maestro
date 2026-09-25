@@ -367,7 +367,15 @@ describe('CallbackRegistry', () => {
 
 			await registry.executeCommand('session-5', 'npm test');
 
-			expect(callback).toHaveBeenCalledWith('session-5', 'npm test', undefined);
+			expect(callback).toHaveBeenCalledWith(
+				'session-5',
+				'npm test',
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined
+			);
 		});
 
 		it('passes inputMode argument to the callback', async () => {
@@ -376,7 +384,15 @@ describe('CallbackRegistry', () => {
 
 			await registry.executeCommand('session-5', 'npm test', 'terminal');
 
-			expect(callback).toHaveBeenCalledWith('session-5', 'npm test', 'terminal');
+			expect(callback).toHaveBeenCalledWith(
+				'session-5',
+				'npm test',
+				'terminal',
+				undefined,
+				undefined,
+				undefined,
+				undefined
+			);
 		});
 
 		it('passes ai inputMode argument to the callback', async () => {
@@ -385,7 +401,74 @@ describe('CallbackRegistry', () => {
 
 			await registry.executeCommand('session-5', 'explain this code', 'ai');
 
-			expect(callback).toHaveBeenCalledWith('session-5', 'explain this code', 'ai');
+			expect(callback).toHaveBeenCalledWith(
+				'session-5',
+				'explain this code',
+				'ai',
+				undefined,
+				undefined,
+				undefined,
+				undefined
+			);
+		});
+
+		it('passes tabId argument to the callback so callers (`dispatch --session`) can target a specific tab', async () => {
+			const callback = vi.fn().mockResolvedValue(true);
+			registry.setExecuteCommandCallback(callback);
+
+			await registry.executeCommand('session-5', 'follow up', 'ai', 'tab-xyz');
+
+			expect(callback).toHaveBeenCalledWith(
+				'session-5',
+				'follow up',
+				'ai',
+				'tab-xyz',
+				undefined,
+				undefined,
+				undefined
+			);
+		});
+
+		it('passes force argument to the callback so `dispatch --force` survives the WebSocket boundary', async () => {
+			const callback = vi.fn().mockResolvedValue(true);
+			registry.setExecuteCommandCallback(callback);
+
+			await registry.executeCommand('session-5', 'concurrent write', 'ai', undefined, true);
+
+			expect(callback).toHaveBeenCalledWith(
+				'session-5',
+				'concurrent write',
+				'ai',
+				undefined,
+				true,
+				undefined,
+				undefined
+			);
+		});
+
+		it('passes images argument so pasted attachments survive the boundary', async () => {
+			const callback = vi.fn().mockResolvedValue(true);
+			registry.setExecuteCommandCallback(callback);
+
+			const images = ['data:image/png;base64,abc'];
+			await registry.executeCommand(
+				'session-5',
+				'look at this',
+				'ai',
+				undefined,
+				undefined,
+				images
+			);
+
+			expect(callback).toHaveBeenCalledWith(
+				'session-5',
+				'look at this',
+				'ai',
+				undefined,
+				undefined,
+				images,
+				undefined
+			);
 		});
 	});
 
@@ -427,7 +510,7 @@ describe('CallbackRegistry', () => {
 
 			await registry.switchMode('session-3', 'terminal');
 
-			expect(callback).toHaveBeenCalledWith('session-3', 'terminal');
+			expect(callback).toHaveBeenCalledWith('session-3', 'terminal', undefined);
 		});
 
 		it('passes ai mode correctly', async () => {
@@ -436,7 +519,7 @@ describe('CallbackRegistry', () => {
 
 			await registry.switchMode('session-3', 'ai');
 
-			expect(callback).toHaveBeenCalledWith('session-3', 'ai');
+			expect(callback).toHaveBeenCalledWith('session-3', 'ai', undefined);
 		});
 	});
 
@@ -508,7 +591,7 @@ describe('CallbackRegistry', () => {
 
 			await registry.newTab('session-15');
 
-			expect(callback).toHaveBeenCalledWith('session-15');
+			expect(callback).toHaveBeenCalledWith('session-15', undefined);
 		});
 	});
 
@@ -654,6 +737,25 @@ describe('CallbackRegistry', () => {
 			// The set callback should work
 			expect(registry.getSessions()).toEqual([]);
 			expect(sessionsCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it('triggerCueSubscription() returns false when no callback set', async () => {
+			expect(await registry.triggerCueSubscription('my-sub')).toBe(false);
+		});
+
+		it('triggerCueSubscription() passes sourceAgentId through to callback', async () => {
+			const callback = vi.fn().mockResolvedValue(true);
+			registry.setTriggerCueSubscriptionCallback(callback);
+			const result = await registry.triggerCueSubscription('my-sub', 'prompt', 'agent-xyz-123');
+			expect(result).toBe(true);
+			expect(callback).toHaveBeenCalledWith('my-sub', 'prompt', 'agent-xyz-123');
+		});
+
+		it('triggerCueSubscription() passes undefined sourceAgentId when not provided', async () => {
+			const callback = vi.fn().mockResolvedValue(true);
+			registry.setTriggerCueSubscriptionCallback(callback);
+			await registry.triggerCueSubscription('my-sub');
+			expect(callback).toHaveBeenCalledWith('my-sub', undefined, undefined);
 		});
 
 		it('multiple callbacks can be set and work independently', async () => {

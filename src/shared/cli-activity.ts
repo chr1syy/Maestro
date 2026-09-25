@@ -22,7 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-export interface CliActivityStatus {
+interface CliActivityStatus {
 	sessionId: string;
 	playbookId: string;
 	playbookName: string;
@@ -32,7 +32,7 @@ export interface CliActivityStatus {
 	currentDocument?: string;
 }
 
-export interface CliActivityFile {
+interface CliActivityFile {
 	activities: CliActivityStatus[];
 }
 
@@ -60,7 +60,7 @@ function getActivityFilePath(): string {
 /**
  * Read all CLI activities
  */
-export function readCliActivities(): CliActivityStatus[] {
+function readCliActivities(): CliActivityStatus[] {
 	try {
 		const filePath = getActivityFilePath();
 		const content = fs.readFileSync(filePath, 'utf-8');
@@ -99,18 +99,6 @@ export function registerCliActivity(status: CliActivityStatus): void {
 }
 
 /**
- * Update CLI activity (e.g., current task)
- */
-export function updateCliActivity(sessionId: string, updates: Partial<CliActivityStatus>): void {
-	const activities = readCliActivities();
-	const index = activities.findIndex((a) => a.sessionId === sessionId);
-	if (index >= 0) {
-		activities[index] = { ...activities[index], ...updates };
-		writeCliActivities(activities);
-	}
-}
-
-/**
  * Unregister CLI activity for a session (called when playbook ends)
  */
 export function unregisterCliActivity(sessionId: string): void {
@@ -128,38 +116,53 @@ export function getCliActivityForSession(sessionId: string): CliActivityStatus |
 }
 
 /**
- * Check if a session has active CLI activity
+ * Is the process behind a recorded activity still alive?
+ *
+ * `process.kill(pid, 0)` sends no signal; it only reports whether the caller
+ * could. The distinction between its failure modes is the whole point:
+ *
+ * - EPERM means the pid EXISTS but belongs to another user or sits outside this
+ *   caller's signal permission. That is evidence of life, not death, and it is
+ *   the normal answer for a sandboxed read-only monitor.
+ * - ESRCH is the only code that proves the process is gone, and therefore the
+ *   only one that may erase the shared activity entry.
+ * - Anything else is an unexplained probe failure. Report not-busy for this
+ *   call, but do not mutate the file on a guess.
  */
-export function isSessionBusyWithCli(sessionId: string): boolean {
-	const activity = getCliActivityForSession(sessionId);
-	if (!activity) return false;
-
-	// Check if the process is still running
+function isActivityProcessAlive(activity: CliActivityStatus): boolean {
 	try {
-		process.kill(activity.pid, 0); // Doesn't kill, just checks if process exists
+		process.kill(activity.pid, 0);
 		return true;
-	} catch {
-		// Process not running, clean up stale entry
-		unregisterCliActivity(sessionId);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === 'EPERM') return true;
+		if (code === 'ESRCH') unregisterCliActivity(activity.sessionId);
 		return false;
 	}
 }
 
 /**
- * Clean up stale activities (processes that are no longer running)
+ * Check if a session has active CLI activity
  */
-export function cleanupStaleActivities(): void {
-	const activities = readCliActivities();
-	const stillRunning = activities.filter((activity) => {
-		try {
-			process.kill(activity.pid, 0);
-			return true;
-		} catch {
-			return false;
-		}
-	});
+export function isSessionBusyWithCli(sessionId: string): boolean {
+	const activity = getCliActivityForSession(sessionId);
+	if (!activity) return false;
+	return isActivityProcessAlive(activity);
+}
 
-	if (stillRunning.length !== activities.length) {
-		writeCliActivities(stillRunning);
+/**
+ * Session ids with a live CLI process, resolved in ONE read of the activity
+ * file.
+ *
+ * `isSessionBusyWithCli` re-reads and re-parses that file on every call, which
+ * is fine for a one-off check but not for a caller looping over every agent -
+ * the desktop session listing did exactly that, turning one WebSocket request
+ * into N synchronous reads of the same file.
+ */
+export function getSessionIdsBusyWithCli(): Set<string> {
+	const busy = new Set<string>();
+	for (const activity of readCliActivities()) {
+		if (isActivityProcessAlive(activity)) busy.add(activity.sessionId);
 	}
+	return busy;
 }

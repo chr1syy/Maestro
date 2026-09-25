@@ -54,6 +54,9 @@ vi.mock('lucide-react', () => ({
 	ChevronDown: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="chevron-down-icon" className={className} style={style} />
 	),
+	ChevronLeft: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="chevron-left-icon" className={className} style={style} />
+	),
 	ChevronRight: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="chevron-right-icon" className={className} style={style} />
 	),
@@ -103,6 +106,12 @@ vi.mock('lucide-react', () => ({
 	Search: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="search-icon" className={className} style={style} />
 	),
+	Sparkles: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="sparkles-icon" className={className} style={style} />
+	),
+	Gauge: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="gauge-icon" className={className} style={style} />
+	),
 	Info: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="info-icon" className={className} style={style} />
 	),
@@ -143,6 +152,7 @@ const mockMaestro = {
 	agents: {
 		detect: vi.fn(),
 		get: vi.fn(),
+		getMaestroPDetectedPath: vi.fn().mockResolvedValue(null),
 	},
 	git: {
 		isRepo: vi.fn(),
@@ -396,7 +406,7 @@ describe('Wizard Theme Styles', () => {
 	});
 
 	describe('WizardExitConfirmModal Theme Rendering', () => {
-		const sampleThemes: ThemeId[] = ['tokyo-night', 'one-light', 'inquest'];
+		const sampleThemes: ThemeId[] = ['tokyo-night', 'one-light', 'winamp'];
 
 		it.each(sampleThemes)('should render with %s theme without errors', (themeId) => {
 			const theme = THEMES[themeId];

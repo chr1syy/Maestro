@@ -3,15 +3,21 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { useSettings } from '../../../renderer/hooks';
 import type { AutoRunStats, OnboardingStats, CustomAICommand } from '../../../renderer/types';
 import { DEFAULT_SHORTCUTS } from '../../../renderer/constants/shortcuts';
-import {
-	useSettingsStore,
-	DEFAULT_CONTEXT_MANAGEMENT_SETTINGS,
-	DEFAULT_AUTO_RUN_STATS,
-	DEFAULT_USAGE_STATS,
-	DEFAULT_KEYBOARD_MASTERY_STATS,
-	DEFAULT_ONBOARDING_STATS,
-	DEFAULT_AI_COMMANDS,
-} from '../../../renderer/stores/settingsStore';
+import { useSettingsStore } from '../../../renderer/stores/settingsStore';
+
+// Deep-cloned defaults captured from a fresh store so mutations in tests can't
+// leak back into the reference. The store no longer exports these defaults.
+const _INITIAL_STATE = useSettingsStore.getState();
+const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS = JSON.parse(
+	JSON.stringify(_INITIAL_STATE.contextManagementSettings)
+);
+const DEFAULT_AUTO_RUN_STATS = JSON.parse(JSON.stringify(_INITIAL_STATE.autoRunStats));
+const DEFAULT_USAGE_STATS = JSON.parse(JSON.stringify(_INITIAL_STATE.usageStats));
+const DEFAULT_KEYBOARD_MASTERY_STATS = JSON.parse(
+	JSON.stringify(_INITIAL_STATE.keyboardMasteryStats)
+);
+const DEFAULT_ONBOARDING_STATS = JSON.parse(JSON.stringify(_INITIAL_STATE.onboardingStats));
+const DEFAULT_AI_COMMANDS = JSON.parse(JSON.stringify(_INITIAL_STATE.customAICommands));
 import { TAB_SHORTCUTS } from '../../../renderer/constants/shortcuts';
 import { DEFAULT_CUSTOM_THEME_COLORS } from '../../../renderer/constants/themes';
 
@@ -31,9 +37,7 @@ describe('useSettings', () => {
 		useSettingsStore.setState({
 			settingsLoaded: false,
 			conductorProfile: '',
-			llmProvider: 'openrouter',
-			modelSlug: 'anthropic/claude-3.5-sonnet',
-			apiKey: '',
+			globalShowHotkey: [],
 			defaultShell: 'zsh',
 			customShellPath: '',
 			shellArgs: '',
@@ -52,11 +56,11 @@ describe('useSettings', () => {
 			markdownEditMode: false,
 			chatRawTextMode: false,
 			showHiddenFiles: true,
-			fileExplorerIconTheme: 'default',
+			fileExplorerIconTheme: 'rich',
 			terminalWidth: 100,
 			logLevel: 'info',
 			maxLogBuffer: 5000,
-			maxOutputLines: 25,
+			maxOutputLines: Infinity,
 			osNotificationsEnabled: true,
 			audioFeedbackEnabled: false,
 			audioFeedbackCommand: 'say',
@@ -72,6 +76,7 @@ describe('useSettings', () => {
 			autoRunStats: DEFAULT_AUTO_RUN_STATS,
 			usageStats: DEFAULT_USAGE_STATS,
 			ungroupedCollapsed: false,
+			groupChatsExpanded: true,
 			tourCompleted: false,
 			firstAutoRunCompleted: false,
 			onboardingStats: DEFAULT_ONBOARDING_STATS,
@@ -84,10 +89,11 @@ describe('useSettings', () => {
 			documentGraphShowExternalLinks: false,
 			documentGraphMaxNodes: 50,
 			documentGraphPreviewCharLimit: 100,
-			documentGraphLayoutType: 'mindmap',
+			documentGraphLayoutType: 'hierarchical',
 			statsCollectionEnabled: true,
 			defaultStatsTimeRange: 'week',
 			preventSleepEnabled: false,
+			preventDisplaySleepEnabled: false,
 			disableGpuAcceleration: false,
 			disableConfetti: false,
 			sshRemoteIgnorePatterns: ['.git', '*cache*'],
@@ -123,15 +129,6 @@ describe('useSettings', () => {
 			expect(result.current.settingsLoaded).toBe(true);
 		});
 
-		it('should have correct default values for LLM settings', async () => {
-			const { result } = renderHook(() => useSettings());
-			await waitForSettingsLoaded(result);
-
-			expect(result.current.llmProvider).toBe('openrouter');
-			expect(result.current.modelSlug).toBe('anthropic/claude-3.5-sonnet');
-			expect(result.current.apiKey).toBe('');
-		});
-
 		it('should have correct default values for shell settings', async () => {
 			const { result } = renderHook(() => useSettings());
 			await waitForSettingsLoaded(result);
@@ -158,7 +155,7 @@ describe('useSettings', () => {
 			expect(result.current.leftSidebarWidth).toBe(256);
 			expect(result.current.rightPanelWidth).toBe(384);
 			expect(result.current.markdownEditMode).toBe(false);
-			expect(result.current.fileExplorerIconTheme).toBe('default');
+			expect(result.current.fileExplorerIconTheme).toBe('rich');
 		});
 
 		it('should have correct default values for logging settings', async () => {
@@ -173,7 +170,7 @@ describe('useSettings', () => {
 			const { result } = renderHook(() => useSettings());
 			await waitForSettingsLoaded(result);
 
-			expect(result.current.maxOutputLines).toBe(25);
+			expect(result.current.maxOutputLines).toBe(Infinity);
 		});
 
 		it('should have correct default values for notification settings', async () => {
@@ -244,6 +241,7 @@ describe('useSettings', () => {
 
 			expect(result.current.autoRunStats).toEqual({
 				cumulativeTimeMs: 0,
+				cueTimeMs: 0,
 				longestRunMs: 0,
 				longestRunTimestamp: 0,
 				totalRuns: 0,
@@ -256,24 +254,9 @@ describe('useSettings', () => {
 	});
 
 	describe('loading saved settings', () => {
-		it('should load saved LLM settings', async () => {
-			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
-				llmProvider: 'anthropic',
-				modelSlug: 'claude-3-opus',
-				apiKey: 'test-api-key',
-			});
-
-			const { result } = renderHook(() => useSettings());
-			await waitForSettingsLoaded(result);
-
-			expect(result.current.llmProvider).toBe('anthropic');
-			expect(result.current.modelSlug).toBe('claude-3-opus');
-			expect(result.current.apiKey).toBe('test-api-key');
-		});
-
 		it('should load saved UI settings', async () => {
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
-				activeThemeId: 'gruvbox',
+				activeThemeId: 'gruvbox-dark',
 				enterToSendAI: true,
 				defaultSaveToHistory: true,
 				leftSidebarWidth: 300,
@@ -284,7 +267,7 @@ describe('useSettings', () => {
 			const { result } = renderHook(() => useSettings());
 			await waitForSettingsLoaded(result);
 
-			expect(result.current.activeThemeId).toBe('gruvbox');
+			expect(result.current.activeThemeId).toBe('gruvbox-dark');
 			expect(result.current.enterToSendAI).toBe(true);
 			expect(result.current.defaultSaveToHistory).toBe(true);
 			expect(result.current.leftSidebarWidth).toBe(300);
@@ -413,7 +396,7 @@ describe('useSettings', () => {
 
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
 				autoRunStats: savedStats,
-				concurrentAutoRunTimeMigrationApplied: true, // Skip migration in tests
+				concurrentAutoRunTimeMigrationApplied: true, // Legacy flag, now ignored on load
 			});
 
 			const { result } = renderHook(() => useSettings());
@@ -459,44 +442,6 @@ describe('useSettings', () => {
 			await waitForSettingsLoaded(result);
 
 			expect(result.current.automaticTabNamingEnabled).toBe(false);
-		});
-	});
-
-	describe('setter functions - LLM settings', () => {
-		it('should update llmProvider and persist to settings', async () => {
-			const { result } = renderHook(() => useSettings());
-			await waitForSettingsLoaded(result);
-
-			act(() => {
-				result.current.setLlmProvider('anthropic');
-			});
-
-			expect(result.current.llmProvider).toBe('anthropic');
-			expect(window.maestro.settings.set).toHaveBeenCalledWith('llmProvider', 'anthropic');
-		});
-
-		it('should update modelSlug and persist to settings', async () => {
-			const { result } = renderHook(() => useSettings());
-			await waitForSettingsLoaded(result);
-
-			act(() => {
-				result.current.setModelSlug('claude-3-opus');
-			});
-
-			expect(result.current.modelSlug).toBe('claude-3-opus');
-			expect(window.maestro.settings.set).toHaveBeenCalledWith('modelSlug', 'claude-3-opus');
-		});
-
-		it('should update apiKey and persist to settings', async () => {
-			const { result } = renderHook(() => useSettings());
-			await waitForSettingsLoaded(result);
-
-			act(() => {
-				result.current.setApiKey('new-api-key');
-			});
-
-			expect(result.current.apiKey).toBe('new-api-key');
-			expect(window.maestro.settings.set).toHaveBeenCalledWith('apiKey', 'new-api-key');
 		});
 	});
 
@@ -690,13 +635,13 @@ describe('useSettings', () => {
 			expect(result.current.maxOutputLines).toBe(Infinity);
 		});
 
-		it('should keep default (25) when maxOutputLines is undefined', async () => {
+		it('should keep default (Infinity) when maxOutputLines is undefined', async () => {
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({});
 
 			const { result } = renderHook(() => useSettings());
 			await waitForSettingsLoaded(result);
 
-			expect(result.current.maxOutputLines).toBe(25);
+			expect(result.current.maxOutputLines).toBe(Infinity);
 		});
 	});
 
@@ -994,7 +939,7 @@ describe('useSettings', () => {
 						lastAcknowledgedBadgeLevel: 0,
 						badgeHistory: [],
 					},
-					concurrentAutoRunTimeMigrationApplied: true, // Skip migration in tests
+					concurrentAutoRunTimeMigrationApplied: true, // Legacy flag, now ignored on load
 				});
 
 				const { result } = renderHook(() => useSettings());
@@ -1053,7 +998,7 @@ describe('useSettings', () => {
 						lastAcknowledgedBadgeLevel: 0,
 						badgeHistory: [],
 					},
-					concurrentAutoRunTimeMigrationApplied: true, // Skip migration in tests
+					concurrentAutoRunTimeMigrationApplied: true, // Legacy flag, now ignored on load
 				});
 
 				const { result } = renderHook(() => useSettings());
@@ -1441,7 +1386,7 @@ describe('useSettings', () => {
 			await waitForSettingsLoaded(result);
 
 			// Should use defaults
-			expect(result.current.llmProvider).toBe('openrouter');
+			expect(result.current.defaultShell).toBe('zsh');
 			expect(result.current.activeThemeId).toBe('dracula');
 		});
 

@@ -48,29 +48,49 @@ vi.mock('../../../renderer/contexts/InputContext', () => ({
 	useInputContext: () => mockInputContext,
 }));
 
-import { useInputKeyDown } from '../../../renderer/hooks/input/useInputKeyDown';
+import {
+	useInputKeyDown,
+	FORCED_PARALLEL_SEND_EVENT,
+} from '../../../renderer/hooks/input/useInputKeyDown';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { useUIStore } from '../../../renderer/stores/uiStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import type { InputKeyDownDeps } from '../../../renderer/hooks/input/useInputKeyDown';
+import { useAiCommandStore } from '../../../renderer/stores/aiCommandStore';
+import { acceptAiCommand, dismissAiCommand } from '../../../renderer/services/aiCommand';
+
+// The proposal card's two outcomes are services; assert the routing, not the run.
+vi.mock('../../../renderer/services/aiCommand', () => ({
+	acceptAiCommand: vi.fn(),
+	dismissAiCommand: vi.fn((entry: { request: string }) => entry.request),
+	requestAiCommand: vi.fn().mockResolvedValue(undefined),
+}));
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
 
-function createMockDeps(overrides: Partial<InputKeyDownDeps> = {}): InputKeyDownDeps {
+// `inputValue` is a test convenience: the hook reads the live value via
+// getInputValue() (the draft moved to useComposerInputStore for perf), so we
+// translate the override into a getter and keep call sites unchanged.
+function createMockDeps(
+	overrides: Partial<InputKeyDownDeps> & { inputValue?: string } = {}
+): InputKeyDownDeps {
+	const { inputValue = '', ...rest } = overrides;
 	return {
-		inputValue: '',
+		getInputValue: () => inputValue,
 		setInputValue: vi.fn(),
 		tabCompletionSuggestions: [],
-		atMentionSuggestions: [],
+		atMentionItems: [],
 		allSlashCommands: [],
 		syncFileTreeToTabCompletion: vi.fn(),
 		processInput: vi.fn(),
 		getTabCompletionSuggestions: vi.fn().mockReturnValue([]),
+		getCommandMode: () => 'off',
+		setCommandMode: vi.fn(),
 		inputRef: { current: { focus: vi.fn(), blur: vi.fn() } } as any,
 		terminalOutputRef: { current: { focus: vi.fn() } } as any,
-		...overrides,
+		...rest,
 	};
 }
 
@@ -81,6 +101,7 @@ function createKeyEvent(
 	return {
 		key,
 		preventDefault: vi.fn(),
+		stopPropagation: vi.fn(),
 		shiftKey: false,
 		metaKey: false,
 		ctrlKey: false,
@@ -126,11 +147,11 @@ beforeEach(() => {
 	});
 
 	useSessionStore.setState({
-		sessions: [],
-		activeSessionId: '',
+		sessions: [{ id: 'sess-1', activeTabId: 'tab-1' }],
+		activeSessionId: 'sess-1',
 	} as any);
 
-	useUIStore.setState({ outputSearchOpen: false });
+	useUIStore.setState({ outputSearchByKey: {} });
 
 	useSettingsStore.setState({
 		enterToSendAI: true,
@@ -156,7 +177,7 @@ describe('Cmd+F output search', () => {
 		});
 
 		expect(e.preventDefault).toHaveBeenCalled();
-		expect(useUIStore.getState().outputSearchOpen).toBe(true);
+		expect(useUIStore.getState().outputSearchByKey['sess-1::tab-1']?.open).toBe(true);
 	});
 
 	it('opens output search on Ctrl+F', () => {
@@ -169,7 +190,7 @@ describe('Cmd+F output search', () => {
 		});
 
 		expect(e.preventDefault).toHaveBeenCalled();
-		expect(useUIStore.getState().outputSearchOpen).toBe(true);
+		expect(useUIStore.getState().outputSearchByKey['sess-1::tab-1']?.open).toBe(true);
 	});
 });
 
@@ -346,7 +367,7 @@ describe('Tab completion navigation', () => {
 			result.current.handleInputKeyDown(e);
 		});
 
-		// Should not call tab completion setters — falls through
+		// Should not call tab completion setters - falls through
 		expect(mockInputContext.setSelectedTabCompletionIndex).not.toHaveBeenCalled();
 	});
 });
@@ -358,15 +379,15 @@ describe('Tab completion navigation', () => {
 describe('@ mention completion', () => {
 	const mentions = [
 		{
-			value: 'src/app.ts',
-			type: 'file' as const,
+			kind: 'file' as const,
+			value: '@src/app.ts ',
 			displayText: 'app.ts',
 			fullPath: 'src/app.ts',
 			score: 1,
 		},
 		{
-			value: 'src/index.ts',
-			type: 'file' as const,
+			kind: 'file' as const,
+			value: '@src/index.ts ',
 			displayText: 'index.ts',
 			fullPath: 'src/index.ts',
 			score: 0.9,
@@ -382,7 +403,7 @@ describe('@ mention completion', () => {
 	});
 
 	it('navigates down with ArrowDown', () => {
-		const deps = createMockDeps({ atMentionSuggestions: mentions });
+		const deps = createMockDeps({ atMentionItems: mentions });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('ArrowDown');
 
@@ -395,7 +416,7 @@ describe('@ mention completion', () => {
 	});
 
 	it('navigates up with ArrowUp', () => {
-		const deps = createMockDeps({ atMentionSuggestions: mentions });
+		const deps = createMockDeps({ atMentionItems: mentions });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('ArrowUp');
 
@@ -409,7 +430,7 @@ describe('@ mention completion', () => {
 	it('accepts selection on Enter and replaces @filter', () => {
 		const deps = createMockDeps({
 			inputValue: 'hello @app world',
-			atMentionSuggestions: mentions,
+			atMentionItems: mentions,
 		});
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Enter');
@@ -427,7 +448,7 @@ describe('@ mention completion', () => {
 	it('accepts selection on Tab', () => {
 		const deps = createMockDeps({
 			inputValue: 'hello @app world',
-			atMentionSuggestions: mentions,
+			atMentionItems: mentions,
 		});
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Tab');
@@ -441,7 +462,7 @@ describe('@ mention completion', () => {
 	});
 
 	it('closes on Escape and clears state', () => {
-		const deps = createMockDeps({ atMentionSuggestions: mentions });
+		const deps = createMockDeps({ atMentionItems: mentions });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Escape');
 
@@ -457,7 +478,7 @@ describe('@ mention completion', () => {
 
 	it('does not activate in terminal mode', () => {
 		setActiveSession({ inputMode: 'terminal' });
-		const deps = createMockDeps({ atMentionSuggestions: mentions });
+		const deps = createMockDeps({ atMentionItems: mentions });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('ArrowDown');
 
@@ -509,7 +530,7 @@ describe('Slash command autocomplete', () => {
 		expect(mockInputContext.setSelectedSlashCommandIndex).toHaveBeenCalled();
 	});
 
-	it('fills command text on Enter', () => {
+	it('fills command text with trailing space on Enter', () => {
 		setActiveSession({ inputMode: 'ai' });
 		const deps = createMockDeps({ inputValue: '/h', allSlashCommands: commands });
 		const { result } = renderHook(() => useInputKeyDown(deps));
@@ -519,11 +540,11 @@ describe('Slash command autocomplete', () => {
 			result.current.handleInputKeyDown(e);
 		});
 
-		expect(deps.setInputValue).toHaveBeenCalledWith('/help');
+		expect(deps.setInputValue).toHaveBeenCalledWith('/help ');
 		expect(mockInputContext.setSlashCommandOpen).toHaveBeenCalledWith(false);
 	});
 
-	it('fills command text on Tab', () => {
+	it('fills command text with trailing space on Tab', () => {
 		setActiveSession({ inputMode: 'ai' });
 		const deps = createMockDeps({ inputValue: '/h', allSlashCommands: commands });
 		const { result } = renderHook(() => useInputKeyDown(deps));
@@ -533,7 +554,7 @@ describe('Slash command autocomplete', () => {
 			result.current.handleInputKeyDown(e);
 		});
 
-		expect(deps.setInputValue).toHaveBeenCalledWith('/help');
+		expect(deps.setInputValue).toHaveBeenCalledWith('/help ');
 		expect(deps.inputRef.current!.focus).toHaveBeenCalled();
 	});
 
@@ -668,6 +689,47 @@ describe('Enter-to-send', () => {
 
 		expect(deps.processInput).not.toHaveBeenCalled();
 	});
+
+	it('tab-level enterToSend=false overrides global enterToSendAI=true', () => {
+		useSettingsStore.setState({ enterToSendAI: true } as any);
+		setActiveSession({
+			activeTabId: 'tab-1',
+			aiTabs: [{ id: 'tab-1', enterToSend: false }],
+		});
+		const deps = createMockDeps();
+		const { result } = renderHook(() => useInputKeyDown(deps));
+
+		// Plain Enter on a tab that overrides to Cmd+Enter mode - should NOT send
+		const plain = createKeyEvent('Enter');
+		act(() => {
+			result.current.handleInputKeyDown(plain);
+		});
+		expect(deps.processInput).not.toHaveBeenCalled();
+
+		// Cmd+Enter on the same tab - SHOULD send
+		const withMeta = createKeyEvent('Enter', { metaKey: true });
+		act(() => {
+			result.current.handleInputKeyDown(withMeta);
+		});
+		expect(deps.processInput).toHaveBeenCalled();
+	});
+
+	it('tab-level enterToSend=true overrides global enterToSendAI=false', () => {
+		useSettingsStore.setState({ enterToSendAI: false } as any);
+		setActiveSession({
+			activeTabId: 'tab-1',
+			aiTabs: [{ id: 'tab-1', enterToSend: true }],
+		});
+		const deps = createMockDeps();
+		const { result } = renderHook(() => useInputKeyDown(deps));
+		const e = createKeyEvent('Enter');
+
+		act(() => {
+			result.current.handleInputKeyDown(e);
+		});
+
+		expect(deps.processInput).toHaveBeenCalled();
+	});
 });
 
 // ============================================================================
@@ -758,7 +820,9 @@ describe('Tab completion trigger', () => {
 			result.current.handleInputKeyDown(e);
 		});
 
-		expect(deps.getTabCompletionSuggestions).toHaveBeenCalledWith('sr');
+		// Terminal mode passes commandMode=false, so completion resolves against
+		// shellCwd and the shell history rather than the agent's cwd.
+		expect(deps.getTabCompletionSuggestions).toHaveBeenCalledWith('sr', 'all', false);
 		expect(deps.setInputValue).toHaveBeenCalledWith('src/');
 	});
 
@@ -880,7 +944,8 @@ describe('Forced parallel send shortcut', () => {
 				},
 			},
 		} as any);
-		const deps = createMockDeps();
+		// Non-empty input - empty input takes the `triggerForceSendQueued` event branch instead.
+		const deps = createMockDeps({ inputValue: 'hello' });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Enter', { metaKey: true, shiftKey: true });
 
@@ -890,6 +955,71 @@ describe('Forced parallel send shortcut', () => {
 
 		expect(e.preventDefault).toHaveBeenCalled();
 		expect(deps.processInput).toHaveBeenCalledWith(undefined, { forceParallel: true });
+	});
+
+	it('records forcedParallelSend shortcut usage when the shortcut fires', () => {
+		setActiveSession({ inputMode: 'ai' });
+		useSettingsStore.setState({
+			forcedParallelExecution: true,
+			shortcuts: {
+				...useSettingsStore.getState().shortcuts,
+				forcedParallelSend: {
+					id: 'forcedParallelSend',
+					label: 'Forced Parallel Send',
+					keys: ['Meta', 'Shift', 'Enter'],
+				},
+			},
+			keyboardMasteryStats: {
+				usedShortcuts: [],
+				currentLevel: 0,
+				lastLevelUpTimestamp: 0,
+				lastAcknowledgedLevel: 0,
+			},
+		} as any);
+		const deps = createMockDeps({ inputValue: 'hello' });
+		const { result } = renderHook(() => useInputKeyDown(deps));
+		const e = createKeyEvent('Enter', { metaKey: true, shiftKey: true });
+
+		act(() => {
+			result.current.handleInputKeyDown(e);
+		});
+
+		const used = useSettingsStore.getState().keyboardMasteryStats.usedShortcuts;
+		expect(used).toContain('forcedParallelSend');
+		expect(vi.mocked(window.maestro.stats.recordShortcutUsage)).toHaveBeenCalledWith(
+			expect.any(Number)
+		);
+	});
+
+	it('records forcedParallelSend usage on empty-input force-send-queued path', () => {
+		setActiveSession({ inputMode: 'ai' });
+		useSettingsStore.setState({
+			forcedParallelExecution: true,
+			shortcuts: {
+				...useSettingsStore.getState().shortcuts,
+				forcedParallelSend: {
+					id: 'forcedParallelSend',
+					label: 'Forced Parallel Send',
+					keys: ['Meta', 'Shift', 'Enter'],
+				},
+			},
+			keyboardMasteryStats: {
+				usedShortcuts: [],
+				currentLevel: 0,
+				lastLevelUpTimestamp: 0,
+				lastAcknowledgedLevel: 0,
+			},
+		} as any);
+		const deps = createMockDeps({ inputValue: '' });
+		const { result } = renderHook(() => useInputKeyDown(deps));
+		const e = createKeyEvent('Enter', { metaKey: true, shiftKey: true });
+
+		act(() => {
+			result.current.handleInputKeyDown(e);
+		});
+
+		const used = useSettingsStore.getState().keyboardMasteryStats.usedShortcuts;
+		expect(used).toContain('forcedParallelSend');
 	});
 
 	it('Ctrl+Shift+Enter calls processInput with forceParallel in AI mode', () => {
@@ -905,7 +1035,8 @@ describe('Forced parallel send shortcut', () => {
 				},
 			},
 		} as any);
-		const deps = createMockDeps();
+		// Non-empty input - empty input takes the `triggerForceSendQueued` event branch instead.
+		const deps = createMockDeps({ inputValue: 'hello' });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Enter', { ctrlKey: true, shiftKey: true });
 
@@ -967,6 +1098,60 @@ describe('Forced parallel send shortcut', () => {
 		expect(deps.processInput).not.toHaveBeenCalledWith(undefined, { forceParallel: true });
 	});
 
+	it('runs from the window event when focus is outside the composer', () => {
+		// The chord acts on the tab's queue, which is drawn in the transcript -
+		// requiring focus in the textarea made it look broken from the one place
+		// the user was looking at the thing it force-sends.
+		setActiveSession({ inputMode: 'ai' });
+		useSettingsStore.setState({ forcedParallelExecution: true } as any);
+		const deps = createMockDeps({ inputValue: 'hello' });
+		renderHook(() => useInputKeyDown(deps));
+
+		act(() => {
+			window.dispatchEvent(new CustomEvent(FORCED_PARALLEL_SEND_EVENT));
+		});
+
+		expect(deps.processInput).toHaveBeenCalledWith(undefined, { forceParallel: true });
+	});
+
+	it('force-sends the newest queued item from the window event on an empty draft', () => {
+		setActiveSession({ inputMode: 'ai' });
+		useSettingsStore.setState({ forcedParallelExecution: true } as any);
+		const deps = createMockDeps({ inputValue: '' });
+		renderHook(() => useInputKeyDown(deps));
+
+		const queued = vi.fn();
+		window.addEventListener('maestro:triggerForceSendQueued', queued);
+		act(() => {
+			window.dispatchEvent(new CustomEvent(FORCED_PARALLEL_SEND_EVENT));
+		});
+		window.removeEventListener('maestro:triggerForceSendQueued', queued);
+
+		expect(queued).toHaveBeenCalledTimes(1);
+		expect(deps.processInput).not.toHaveBeenCalled();
+	});
+
+	it('ignores the window event when the feature is disabled or not in AI mode', () => {
+		// Same gates as the keydown path - one runner, so they cannot drift.
+		setActiveSession({ inputMode: 'ai' });
+		useSettingsStore.setState({ forcedParallelExecution: false } as any);
+		const deps = createMockDeps({ inputValue: 'hello' });
+		renderHook(() => useInputKeyDown(deps));
+		act(() => {
+			window.dispatchEvent(new CustomEvent(FORCED_PARALLEL_SEND_EVENT));
+		});
+		expect(deps.processInput).not.toHaveBeenCalled();
+
+		setActiveSession({ inputMode: 'terminal' });
+		useSettingsStore.setState({ forcedParallelExecution: true } as any);
+		const termDeps = createMockDeps({ inputValue: 'hello' });
+		renderHook(() => useInputKeyDown(termDeps));
+		act(() => {
+			window.dispatchEvent(new CustomEvent(FORCED_PARALLEL_SEND_EVENT));
+		});
+		expect(termDeps.processInput).not.toHaveBeenCalled();
+	});
+
 	it('respects custom shortcut configuration', () => {
 		setActiveSession({ inputMode: 'ai' });
 		useSettingsStore.setState({
@@ -980,7 +1165,8 @@ describe('Forced parallel send shortcut', () => {
 				},
 			},
 		} as any);
-		const deps = createMockDeps();
+		// Non-empty input - empty input takes the `triggerForceSendQueued` event branch instead.
+		const deps = createMockDeps({ inputValue: 'hello' });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 
 		// Default shortcut (Meta+Shift+Enter) should NOT trigger
@@ -1037,10 +1223,10 @@ describe('Edge cases', () => {
 });
 
 // ============================================================================
-// Additional coverage — Tab completion navigation
+// Additional coverage - Tab completion navigation
 // ============================================================================
 
-describe('Tab completion navigation — additional', () => {
+describe('Tab completion navigation - additional', () => {
 	const suggestions = [
 		{ value: 'src/', type: 'folder' as const, label: 'src/' },
 		{ value: 'package.json', type: 'file' as const, label: 'package.json' },
@@ -1098,21 +1284,21 @@ describe('Tab completion navigation — additional', () => {
 });
 
 // ============================================================================
-// Additional coverage — @ mention completion
+// Additional coverage - @ mention completion
 // ============================================================================
 
-describe('@ mention completion — additional', () => {
+describe('@ mention completion - additional', () => {
 	const mentions = [
 		{
-			value: 'src/app.ts',
-			type: 'file' as const,
+			kind: 'file' as const,
+			value: '@src/app.ts ',
 			displayText: 'app.ts',
 			fullPath: 'src/app.ts',
 			score: 1,
 		},
 		{
-			value: 'src/index.ts',
-			type: 'file' as const,
+			kind: 'file' as const,
+			value: '@src/index.ts ',
 			displayText: 'index.ts',
 			fullPath: 'src/index.ts',
 			score: 0.9,
@@ -1129,7 +1315,7 @@ describe('@ mention completion — additional', () => {
 		mockInputContext.selectedAtMentionIndex = 10; // out of bounds
 		mockInputContext.atMentionStartIndex = 5;
 		mockInputContext.atMentionFilter = 'xyz';
-		const deps = createMockDeps({ atMentionSuggestions: mentions, inputValue: 'test @xyz' });
+		const deps = createMockDeps({ atMentionItems: mentions, inputValue: 'test @xyz' });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Enter');
 
@@ -1148,7 +1334,7 @@ describe('@ mention completion — additional', () => {
 	it('accept with empty atMentionFilter (just "@" typed)', () => {
 		mockInputContext.atMentionFilter = '';
 		mockInputContext.atMentionStartIndex = 6;
-		const deps = createMockDeps({ atMentionSuggestions: mentions, inputValue: 'hello @ world' });
+		const deps = createMockDeps({ atMentionItems: mentions, inputValue: 'hello @ world' });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Enter');
 
@@ -1163,7 +1349,7 @@ describe('@ mention completion — additional', () => {
 	it('accept when atMentionStartIndex is at start of input (0)', () => {
 		mockInputContext.atMentionFilter = 'app';
 		mockInputContext.atMentionStartIndex = 0;
-		const deps = createMockDeps({ atMentionSuggestions: mentions, inputValue: '@app rest' });
+		const deps = createMockDeps({ atMentionItems: mentions, inputValue: '@app rest' });
 		const { result } = renderHook(() => useInputKeyDown(deps));
 		const e = createKeyEvent('Tab');
 
@@ -1177,10 +1363,10 @@ describe('@ mention completion — additional', () => {
 });
 
 // ============================================================================
-// Additional coverage — Slash command autocomplete
+// Additional coverage - Slash command autocomplete
 // ============================================================================
 
-describe('Slash command autocomplete — additional', () => {
+describe('Slash command autocomplete - additional', () => {
 	const commands = [
 		{ command: '/help', description: 'Show help' },
 		{ command: '/clear', description: 'Clear output' },
@@ -1245,7 +1431,7 @@ describe('Slash command autocomplete — additional', () => {
 		});
 
 		// '/HEL'.toLowerCase() starts with '/hel' which matches '/help'
-		expect(deps.setInputValue).toHaveBeenCalledWith('/help');
+		expect(deps.setInputValue).toHaveBeenCalledWith('/help ');
 	});
 
 	it('regular key during slashCommandOpen returns early without reaching enter-to-send', () => {
@@ -1258,18 +1444,18 @@ describe('Slash command autocomplete — additional', () => {
 			result.current.handleInputKeyDown(e);
 		});
 
-		// Should return early — no processInput, no setInputValue, no other handlers
+		// Should return early - no processInput, no setInputValue, no other handlers
 		expect(deps.processInput).not.toHaveBeenCalled();
 		expect(deps.setInputValue).not.toHaveBeenCalled();
 	});
 });
 
 // ============================================================================
-// Additional coverage — Enter-to-send
+// Additional coverage - Enter-to-send
 // ============================================================================
 
-describe('Enter-to-send — additional', () => {
-	it('Enter+Meta when enterToSendAI=true does NOT send', () => {
+describe('Enter-to-send - additional', () => {
+	it('Enter+Meta when enterToSendAI=true also sends', () => {
 		setActiveSession({ inputMode: 'ai' });
 		useSettingsStore.setState({ enterToSendAI: true } as any);
 		const deps = createMockDeps();
@@ -1280,7 +1466,7 @@ describe('Enter-to-send — additional', () => {
 			result.current.handleInputKeyDown(e);
 		});
 
-		expect(deps.processInput).not.toHaveBeenCalled();
+		expect(deps.processInput).toHaveBeenCalled();
 	});
 
 	it('no active session uses undefined inputMode, falls to AI enterToSend setting', () => {
@@ -1289,14 +1475,14 @@ describe('Enter-to-send — additional', () => {
 		const deps = createMockDeps();
 		const { result } = renderHook(() => useInputKeyDown(deps));
 
-		// Plain Enter with enterToSendAI=false — does NOT send
+		// Plain Enter with enterToSendAI=false - does NOT send
 		const e1 = createKeyEvent('Enter');
 		act(() => {
 			result.current.handleInputKeyDown(e1);
 		});
 		expect(deps.processInput).not.toHaveBeenCalled();
 
-		// Cmd+Enter with enterToSendAI=false — SENDS
+		// Cmd+Enter with enterToSendAI=false - SENDS
 		const e2 = createKeyEvent('Enter', { metaKey: true });
 		act(() => {
 			result.current.handleInputKeyDown(e2);
@@ -1306,10 +1492,10 @@ describe('Enter-to-send — additional', () => {
 });
 
 // ============================================================================
-// Additional coverage — Escape key
+// Additional coverage - Escape key
 // ============================================================================
 
-describe('Escape key — additional', () => {
+describe('Escape key - additional', () => {
 	it('does not crash when terminalOutputRef is null', () => {
 		setActiveSession({ inputMode: 'ai' });
 		const deps = createMockDeps({ terminalOutputRef: { current: null } as any });
@@ -1342,10 +1528,10 @@ describe('Escape key — additional', () => {
 });
 
 // ============================================================================
-// Additional coverage — Command history
+// Additional coverage - Command history
 // ============================================================================
 
-describe('Command history — additional', () => {
+describe('Command history - additional', () => {
 	it('opens with empty filter when inputValue is empty in terminal mode', () => {
 		setActiveSession({ inputMode: 'terminal' });
 		const deps = createMockDeps({ inputValue: '' });
@@ -1363,10 +1549,10 @@ describe('Command history — additional', () => {
 });
 
 // ============================================================================
-// Additional coverage — General edge cases
+// Additional coverage - General edge cases
 // ============================================================================
 
-describe('General edge cases — additional', () => {
+describe('General edge cases - additional', () => {
 	it('ArrowDown with no active session and no dropdowns open is a no-op', () => {
 		useSessionStore.setState({ sessions: [], activeSessionId: '' } as any);
 		const deps = createMockDeps();
@@ -1411,11 +1597,314 @@ describe('General edge cases — additional', () => {
 		expect(deps.processInput).not.toHaveBeenCalled();
 	});
 
+	describe('command mode exit', () => {
+		// The `!` gesture consumes the bang, so there is no character left to
+		// delete. Escape and Backspace on an empty command line are the way out.
+		function commandModeDeps(overrides: Parameters<typeof createMockDeps>[0] = {}) {
+			return createMockDeps({ getCommandMode: () => 'shell', ...overrides });
+		}
+
+		it.each(['Escape', 'Backspace'])('exits on %s when the line is empty', (key) => {
+			setActiveSession({ inputMode: 'ai' });
+			const deps = commandModeDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+			const e = createKeyEvent(key);
+
+			act(() => {
+				result.current.handleInputKeyDown(e);
+			});
+
+			expect(deps.setCommandMode).toHaveBeenCalledWith('off');
+			expect(e.preventDefault).toHaveBeenCalled();
+		});
+
+		it.each(['Escape', 'Backspace'])('does NOT exit on %s with a half-typed command', (key) => {
+			setActiveSession({ inputMode: 'ai' });
+			const deps = commandModeDeps({ inputValue: 'git pu' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => {
+				result.current.handleInputKeyDown(createKeyEvent(key));
+			});
+
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+		});
+
+		it('leaves Escape alone outside command mode', () => {
+			setActiveSession({ inputMode: 'ai' });
+			const deps = createMockDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => {
+				result.current.handleInputKeyDown(createKeyEvent('Escape'));
+			});
+
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+			// Falls through to the existing blur-the-composer behaviour.
+			expect(deps.inputRef.current!.blur).toHaveBeenCalled();
+		});
+
+		it('does not hijack Backspace in a terminal tab', () => {
+			setActiveSession({ inputMode: 'terminal' });
+			const deps = commandModeDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => {
+				result.current.handleInputKeyDown(createKeyEvent('Backspace'));
+			});
+
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+		});
+
+		it('stops the event so the window Escape handler cannot steal focus', () => {
+			// The real defect, and the reason the earlier `focus()` fix was not
+			// enough: `useKeyboardNavigation.handleEscapeInMain` is a WINDOW-level
+			// keydown listener that blurs the composer on any Escape pressed while
+			// it has focus. This handler runs first (it is on the element), so
+			// without stopping propagation that listener fires straight afterwards
+			// and undoes the focus. A mock inputRef cannot observe that - see
+			// useInputKeyDown.focus.test.tsx for the real-DOM proof.
+			setActiveSession({ inputMode: 'ai' });
+			const deps = commandModeDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+			const e = createKeyEvent('Escape');
+
+			act(() => {
+				result.current.handleInputKeyDown(e);
+			});
+
+			expect(deps.setCommandMode).toHaveBeenCalledWith('off');
+			expect(e.stopPropagation).toHaveBeenCalled();
+			expect(deps.inputRef.current!.focus).toHaveBeenCalled();
+			expect(deps.inputRef.current!.blur).not.toHaveBeenCalled();
+			expect(deps.terminalOutputRef.current!.focus).not.toHaveBeenCalled();
+		});
+
+		it('exits on Escape when the line is only whitespace', () => {
+			// A line of spaces looks empty. Before this, Escape fell through to the
+			// generic branch and blurred the composer instead of exiting.
+			setActiveSession({ inputMode: 'ai' });
+			const deps = commandModeDeps({ inputValue: '   ' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => {
+				result.current.handleInputKeyDown(createKeyEvent('Escape'));
+			});
+
+			expect(deps.setCommandMode).toHaveBeenCalledWith('off');
+			expect(deps.inputRef.current!.focus).toHaveBeenCalled();
+			expect(deps.inputRef.current!.blur).not.toHaveBeenCalled();
+		});
+
+		it('does NOT exit on Backspace over whitespace - that is an edit', () => {
+			// Backspace is an editing key: on "   " the user is deleting a space.
+			setActiveSession({ inputMode: 'ai' });
+			const deps = commandModeDeps({ inputValue: '   ' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => {
+				result.current.handleInputKeyDown(createKeyEvent('Backspace'));
+			});
+
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+		});
+
+		it('opens completion on Tab for an EMPTY command line', () => {
+			// "what have I run before" - the terminal has no equivalent.
+			setActiveSession({ inputMode: 'ai' });
+			const getTabCompletionSuggestions = vi.fn().mockReturnValue([
+				{ value: 'git status', displayText: 'git status', type: 'history' },
+				{ value: 'npm test', displayText: 'npm test', type: 'history' },
+			]);
+			const deps = commandModeDeps({ inputValue: '', getTabCompletionSuggestions });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => {
+				result.current.handleInputKeyDown(createKeyEvent('Tab'));
+			});
+
+			expect(getTabCompletionSuggestions).toHaveBeenCalledWith('', 'all', true);
+		});
+	});
+
 	it('handleInputKeyDown return value is stable across re-renders', () => {
 		const deps = createMockDeps();
 		const { result, rerender } = renderHook(() => useInputKeyDown(deps));
 		const first = result.current.handleInputKeyDown;
 		rerender();
 		expect(result.current.handleInputKeyDown).toBe(first);
+	});
+});
+
+// ============================================================================
+// AI command mode
+// ============================================================================
+
+describe('useInputKeyDown - AI command mode', () => {
+	const SESSION_ID = 'session-1';
+	const TAB_ID = 'tab-1';
+
+	function seedEntry(overrides: Record<string, unknown> = {}) {
+		useAiCommandStore.setState({ entries: {} });
+		useAiCommandStore.getState().beginAiCommand({
+			requestId: 'req-1',
+			sessionId: SESSION_ID,
+			tabId: TAB_ID,
+			request: 'what is eating disk space',
+		});
+		if (overrides.command) {
+			useAiCommandStore.getState().resolveAiCommand('req-1', overrides.command as string);
+		}
+		if (overrides.choice === 'cancel') {
+			useAiCommandStore.getState().setAiCommandChoice(`${SESSION_ID}:${TAB_ID}`, 'cancel');
+		}
+	}
+
+	function aiModeDeps(overrides: Parameters<typeof createMockDeps>[0] = {}) {
+		return createMockDeps({ getCommandMode: () => 'ai', ...overrides });
+	}
+
+	beforeEach(() => {
+		useAiCommandStore.setState({ entries: {} });
+		setActiveSession({ activeTabId: TAB_ID });
+	});
+
+	describe('the ladder', () => {
+		it('Escape on an empty AI command line steps back to command mode', () => {
+			// One rung down, not all the way out - the user asked for a shell, and
+			// the shell is still what they get.
+			const deps = aiModeDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+			const e = createKeyEvent('Escape');
+
+			act(() => result.current.handleInputKeyDown(e));
+
+			expect(deps.setCommandMode).toHaveBeenCalledWith('shell');
+			expect(e.stopPropagation).toHaveBeenCalled();
+		});
+	});
+
+	describe('answering a proposal', () => {
+		it('arrow keys move between Run and Cancel', () => {
+			seedEntry({ command: 'du -sh *' });
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('ArrowRight')));
+			expect(useAiCommandStore.getState().entries[`${SESSION_ID}:${TAB_ID}`].choice).toBe('cancel');
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('ArrowLeft')));
+			expect(useAiCommandStore.getState().entries[`${SESSION_ID}:${TAB_ID}`].choice).toBe('run');
+		});
+
+		it('defaults to Run, so Enter runs the proposed command', () => {
+			seedEntry({ command: 'du -sh *' });
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Enter')));
+
+			expect(acceptAiCommand).toHaveBeenCalledTimes(1);
+			expect(vi.mocked(acceptAiCommand).mock.calls[0][1]).toMatchObject({ command: 'du -sh *' });
+		});
+
+		it('Enter on Cancel declines and hands the request back for editing', () => {
+			seedEntry({ command: 'du -sh *', choice: 'cancel' });
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Enter')));
+
+			expect(acceptAiCommand).not.toHaveBeenCalled();
+			expect(deps.setInputValue).toHaveBeenCalledWith('what is eating disk space');
+		});
+
+		it('y and n answer without touching the arrows', () => {
+			seedEntry({ command: 'du -sh *' });
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('n')));
+			expect(acceptAiCommand).not.toHaveBeenCalled();
+			expect(deps.setInputValue).toHaveBeenCalledWith('what is eating disk space');
+
+			seedEntry({ command: 'du -sh *' });
+			act(() => result.current.handleInputKeyDown(createKeyEvent('y')));
+			expect(acceptAiCommand).toHaveBeenCalledTimes(1);
+		});
+
+		it('Escape declines rather than stepping down a rung', () => {
+			// The card owns the keyboard while it is up: Escape answers it, and the
+			// composer keeps its caret so the next Escape can walk the ladder.
+			seedEntry({ command: 'du -sh *' });
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+			const e = createKeyEvent('Escape');
+
+			act(() => result.current.handleInputKeyDown(e));
+
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+			expect(deps.setInputValue).toHaveBeenCalledWith('what is eating disk space');
+			expect(e.stopPropagation).toHaveBeenCalled();
+		});
+
+		it('Enter while still thinking runs nothing', () => {
+			seedEntry();
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Enter')));
+
+			expect(acceptAiCommand).not.toHaveBeenCalled();
+			expect(deps.processInput).not.toHaveBeenCalled();
+		});
+
+		it('Escape while still thinking abandons the request', () => {
+			seedEntry();
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Escape')));
+
+			expect(dismissAiCommand).toHaveBeenCalledTimes(1);
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+		});
+
+		it('Enter after a failure hands the request back so it can be retried', () => {
+			seedEntry();
+			useAiCommandStore.getState().failAiCommand('req-1', 'the model returned nothing');
+			const deps = aiModeDeps();
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Enter')));
+
+			expect(deps.setInputValue).toHaveBeenCalledWith('what is eating disk space');
+			expect(acceptAiCommand).not.toHaveBeenCalled();
+		});
+
+		it('Backspace cannot sneak past the card by stepping down a rung', () => {
+			// Otherwise the card would be parked on a tab that no longer renders it
+			// and would reappear the next time the user climbed back.
+			seedEntry({ command: 'du -sh *' });
+			const deps = aiModeDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Backspace')));
+
+			expect(deps.setCommandMode).not.toHaveBeenCalled();
+		});
+
+		it('leaves a proposal parked on another tab alone', () => {
+			// Entries are per tab; a card belonging to a tab the user is not looking
+			// at must not swallow this tab's keystrokes.
+			seedEntry({ command: 'du -sh *' });
+			setActiveSession({ activeTabId: 'tab-2' });
+			const deps = aiModeDeps({ inputValue: '' });
+			const { result } = renderHook(() => useInputKeyDown(deps));
+
+			act(() => result.current.handleInputKeyDown(createKeyEvent('Escape')));
+
+			expect(deps.setCommandMode).toHaveBeenCalledWith('shell');
+		});
 	});
 });

@@ -11,6 +11,7 @@ export interface AutoRunAttachmentsPanelProps {
 	onToggleExpanded: () => void;
 	onRemoveAttachment: (filename: string) => void;
 	onImageClick: (filename: string) => void;
+	onAnnotateAttachment?: (filename: string) => void;
 }
 
 export const AutoRunAttachmentsPanel = memo(function AutoRunAttachmentsPanel({
@@ -21,6 +22,7 @@ export const AutoRunAttachmentsPanel = memo(function AutoRunAttachmentsPanel({
 	onToggleExpanded,
 	onRemoveAttachment,
 	onImageClick,
+	onAnnotateAttachment,
 }: AutoRunAttachmentsPanelProps) {
 	if (attachmentsList.length === 0) return null;
 
@@ -33,7 +35,7 @@ export const AutoRunAttachmentsPanel = memo(function AutoRunAttachmentsPanel({
 				onClick={onToggleExpanded}
 				aria-expanded={attachmentsExpanded}
 				aria-controls={attachmentsExpanded ? 'autorun-attachments-panel' : undefined}
-				className="w-full flex items-center gap-1 text-[10px] uppercase font-semibold hover:opacity-80 transition-opacity"
+				className="w-full flex items-center gap-1 text-2xs uppercase font-semibold hover:opacity-80 transition-opacity"
 				style={{ color: theme.colors.textDim }}
 			>
 				{attachmentsExpanded ? (
@@ -53,6 +55,7 @@ export const AutoRunAttachmentsPanel = memo(function AutoRunAttachmentsPanel({
 							theme={theme}
 							onRemove={() => onRemoveAttachment(filename)}
 							onImageClick={onImageClick}
+							onAnnotate={onAnnotateAttachment ? () => onAnnotateAttachment(filename) : undefined}
 						/>
 					))}
 				</div>

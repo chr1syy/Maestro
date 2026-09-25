@@ -12,7 +12,7 @@ import type { SpawnSpec } from '../../../main/cue/cue-spawn-builder';
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
-// Mock parsers — default returns null (no parser)
+// Mock parsers - default returns null (no parser)
 const mockGetOutputParser = vi.fn(() => null as any);
 vi.mock('../../../main/parsers', () => ({
 	getOutputParser: (...args: unknown[]) => mockGetOutputParser(...args),
@@ -23,6 +23,25 @@ const mockCaptureException = vi.fn();
 vi.mock('../../../main/utils/sentry', () => ({
 	captureException: (...args: unknown[]) => mockCaptureException(...args),
 }));
+
+// Platform is mockable per-test. Default is the POSIX kill path
+// (child.kill('SIGTERM')) so the SIGTERM → SIGKILL assertions hold regardless
+// of host OS - mirroring what CI exercises on Unix. The Windows process-tree
+// kill tests flip this to true to exercise the taskkill branch.
+const { mockIsWindows, mockExecFile, mockExecFileSync } = vi.hoisted(() => ({
+	mockIsWindows: vi.fn(() => false),
+	mockExecFile: vi.fn((_cmd: unknown, _args: unknown, cb?: unknown) => {
+		if (typeof cb === 'function') (cb as (e: Error | null) => void)(null);
+	}),
+	mockExecFileSync: vi.fn(),
+}));
+vi.mock('../../../shared/platformDetection', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../../../shared/platformDetection')>();
+	return {
+		...actual,
+		isWindows: () => mockIsWindows(),
+	};
+});
 
 // Mock child_process.spawn
 class MockChildProcess extends EventEmitter {
@@ -60,9 +79,13 @@ vi.mock('child_process', async (importOriginal) => {
 	return {
 		...actual,
 		spawn: (...args: unknown[]) => mockSpawn(...args),
+		execFile: (...args: unknown[]) => mockExecFile(...(args as [unknown, unknown, unknown?])),
+		execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 		default: {
 			...actual,
 			spawn: (...args: unknown[]) => mockSpawn(...args),
+			execFile: (...args: unknown[]) => mockExecFile(...(args as [unknown, unknown, unknown?])),
+			execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 		},
 	};
 });
@@ -101,6 +124,8 @@ function createOptions(overrides = {}) {
 describe('cue-process-lifecycle', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// Default to the POSIX branch; Windows tests opt in via mockReturnValue(true).
+		mockIsWindows.mockReturnValue(false);
 		vi.useFakeTimers();
 		getActiveProcessMap().clear();
 	});
@@ -109,18 +134,66 @@ describe('cue-process-lifecycle', () => {
 		vi.useRealTimers();
 	});
 
+	// Cue spawns agents directly rather than through the ProcessManager, so the
+	// desktop's WakaTime listener never sees these runs. `onActivity` is the
+	// hook that lets a run beat for its whole duration instead of going
+	// unrecorded - a long Cue run would otherwise blow past WakaTime's idle
+	// timeout with nothing reported.
+	describe('onActivity (WakaTime heartbeat hook)', () => {
+		it('fires on each stdout chunk so long runs keep beating', async () => {
+			const onActivity = vi.fn();
+			const resultPromise = runProcess('run-1', createSpec(), createOptions({ onActivity }));
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', 'chunk one');
+			mockChild.stdout.emit('data', 'chunk two');
+
+			expect(onActivity).toHaveBeenCalledTimes(2);
+
+			mockChild.emit('close', 0);
+			await resultPromise;
+		});
+
+		it('fires on stderr too - a run streaming only stderr is still working', async () => {
+			const onActivity = vi.fn();
+			const resultPromise = runProcess('run-1', createSpec(), createOptions({ onActivity }));
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stderr.emit('data', 'progress on stderr');
+
+			expect(onActivity).toHaveBeenCalledTimes(1);
+
+			mockChild.emit('close', 0);
+			await resultPromise;
+		});
+
+		it('is optional - runs still complete and capture output without it', async () => {
+			const resultPromise = runProcess('run-1', createSpec(), createOptions());
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', 'hello');
+			mockChild.emit('close', 0);
+
+			const result = await resultPromise;
+			expect(result.stdout).toContain('hello');
+			expect(result.status).toBe('completed');
+		});
+	});
+
 	describe('runProcess', () => {
 		it('spawns process with correct command, args, and cwd', async () => {
 			const spec = createSpec();
 			const resultPromise = runProcess('run-1', spec, createOptions());
 			await vi.advanceTimersByTimeAsync(0);
 
+			// Local mode: stdin is `'ignore'` so agents like Codex don't print
+			// "Reading additional input from stdin..." into the run output.
 			expect(mockSpawn).toHaveBeenCalledWith(
 				'claude',
 				['--print', '--', 'test prompt'],
 				expect.objectContaining({
 					cwd: '/projects/test',
-					stdio: ['pipe', 'pipe', 'pipe'],
+					stdio: ['ignore', 'pipe', 'pipe'],
 				})
 			);
 
@@ -357,6 +430,132 @@ describe('cue-process-lifecycle', () => {
 
 				expect(result.stdout).toBe('Parsed output');
 			});
+
+			it('falls back to assistant text when result text is empty', async () => {
+				mockGetOutputParser.mockReturnValue({
+					parseJsonLine: (line: string) => {
+						try {
+							const msg = JSON.parse(line);
+							if (msg.type === 'result') {
+								return { type: 'result', text: msg.result || '' };
+							}
+							if (msg.type === 'assistant') {
+								return { type: 'text', text: msg.text, isPartial: true };
+							}
+							return { type: 'system', raw: msg };
+						} catch {
+							return { type: 'text', text: line };
+						}
+					},
+				} as any);
+
+				const lines = [
+					JSON.stringify({ type: 'assistant', text: 'Hello from the agent' }),
+					JSON.stringify({ type: 'result', result: '' }),
+				].join('\n');
+
+				const resultPromise = runProcess(
+					'run-1',
+					createSpec(),
+					createOptions({ toolType: 'claude-code' })
+				);
+				await vi.advanceTimersByTimeAsync(0);
+
+				mockChild.stdout.emit('data', lines);
+				mockChild.emit('close', 0);
+				const result = await resultPromise;
+
+				expect(result.stdout).toBe('Hello from the agent');
+			});
+		});
+
+		describe('stderr cleaning (benign noise filter)', () => {
+			it('strips "Reading additional input from stdin..." from Codex stderr', async () => {
+				const resultPromise = runProcess(
+					'run-1',
+					createSpec({ command: 'codex' }),
+					createOptions({ toolType: 'codex' })
+				);
+				await vi.advanceTimersByTimeAsync(0);
+
+				// Codex emits this diagnostic on stderr on every run - it's
+				// informational, not an error, and should never surface in the
+				// activity log's "Errors" panel.
+				mockChild.stderr.emit('data', 'Reading additional input from stdin...\n');
+				mockChild.emit('close', 0);
+
+				const result = await resultPromise;
+				expect(result.stderr).toBe('');
+			});
+
+			it('preserves real Codex errors while dropping benign noise', async () => {
+				const resultPromise = runProcess(
+					'run-1',
+					createSpec({ command: 'codex' }),
+					createOptions({ toolType: 'codex' })
+				);
+				await vi.advanceTimersByTimeAsync(0);
+
+				mockChild.stderr.emit(
+					'data',
+					'Reading additional input from stdin...\nError: model rate limited\n'
+				);
+				mockChild.emit('close', 1);
+
+				const result = await resultPromise;
+				expect(result.stderr).toContain('Error: model rate limited');
+				expect(result.stderr).not.toContain('Reading additional input from stdin');
+			});
+
+			it('strips Codex noise with ANSI dim codes', async () => {
+				const resultPromise = runProcess(
+					'run-1',
+					createSpec({ command: 'codex' }),
+					createOptions({ toolType: 'codex' })
+				);
+				await vi.advanceTimersByTimeAsync(0);
+
+				// Simulate a Codex build that wraps the diagnostic in ANSI dimming.
+				mockChild.stderr.emit('data', '\u001b[2mReading additional input from stdin...\u001b[0m\n');
+				mockChild.emit('close', 0);
+
+				const result = await resultPromise;
+				expect(result.stderr).toBe('');
+			});
+
+			it('strips Codex noise regardless of trailing text on the same prefix line', async () => {
+				const resultPromise = runProcess(
+					'run-1',
+					createSpec({ command: 'codex' }),
+					createOptions({ toolType: 'codex' })
+				);
+				await vi.advanceTimersByTimeAsync(0);
+
+				// A prefix match catches variants with or without trailing dots,
+				// extra whitespace, or future additions to the diagnostic line.
+				mockChild.stderr.emit('data', 'Reading additional input from stdin\n');
+				mockChild.emit('close', 0);
+
+				const result = await resultPromise;
+				expect(result.stderr).toBe('');
+			});
+
+			it('does not filter stderr for agents without a noise filter', async () => {
+				const resultPromise = runProcess(
+					'run-1',
+					createSpec(),
+					createOptions({ toolType: 'claude-code' })
+				);
+				await vi.advanceTimersByTimeAsync(0);
+
+				// Even a message that happens to look like Codex noise stays put
+				// for non-Codex agents - filtering is opt-in per agent.
+				mockChild.stderr.emit('data', 'Reading additional input from stdin...\n');
+				mockChild.emit('close', 0);
+
+				const result = await resultPromise;
+				expect(result.stderr).toContain('Reading additional input from stdin');
+			});
 		});
 	});
 
@@ -388,9 +587,52 @@ describe('cue-process-lifecycle', () => {
 			stopProcess('stop-test');
 			expect(childKill).toHaveBeenCalledWith('SIGTERM');
 
-			// Process hasn't exited — SIGKILL should fire after delay
+			// Process hasn't exited - SIGKILL should fire after delay
 			await vi.advanceTimersByTimeAsync(5000);
 			expect(childKill).toHaveBeenCalledWith('SIGKILL');
+
+			mockChild.emit('close', null);
+			await resultPromise;
+		});
+	});
+
+	describe('Windows process-tree kill (taskkill)', () => {
+		it('kills via taskkill /pid <pid> /t /f instead of POSIX signals', async () => {
+			mockIsWindows.mockReturnValue(true);
+
+			const resultPromise = runProcess('win-stop', createSpec(), createOptions());
+			await vi.advanceTimersByTimeAsync(0);
+
+			const childKill = vi.spyOn(mockChild, 'kill');
+
+			const stopped = stopProcess('win-stop');
+			expect(stopped).toBe(true);
+			expect(mockExecFile).toHaveBeenCalledWith(
+				'taskkill',
+				['/pid', String(mockChild.pid), '/t', '/f'],
+				expect.any(Function)
+			);
+			// POSIX signals must not be used on Windows (no-op for shell-spawned trees).
+			expect(childKill).not.toHaveBeenCalled();
+
+			mockChild.emit('close', null);
+			await resultPromise;
+		});
+
+		it('tolerates taskkill failing because the process is already dead', async () => {
+			mockIsWindows.mockReturnValue(true);
+			mockExecFile.mockImplementationOnce((_cmd: unknown, _args: unknown, cb?: unknown) => {
+				if (typeof cb === 'function') {
+					(cb as (e: Error | null) => void)(new Error('ERROR: The process "12345" not found.'));
+				}
+			});
+
+			const resultPromise = runProcess('win-dead', createSpec(), createOptions());
+			await vi.advanceTimersByTimeAsync(0);
+
+			stopProcess('win-dead');
+			// Already-dead is expected on Windows and must not be reported to Sentry.
+			expect(mockCaptureException).not.toHaveBeenCalled();
 
 			mockChild.emit('close', null);
 			await resultPromise;
@@ -470,7 +712,7 @@ describe('cue-process-lifecycle', () => {
 			await vi.advanceTimersByTimeAsync(0);
 
 			mockChild.emit('close', 0);
-			mockChild.emit('close', 1); // duplicate — should be ignored
+			mockChild.emit('close', 1); // duplicate - should be ignored
 			const result = await resultPromise;
 
 			expect(result.status).toBe('completed');

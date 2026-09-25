@@ -4,6 +4,7 @@ import type { Theme, Session, WorktreeRunTarget } from '../types';
 import { gitService } from '../services/git';
 import { getStatusColor } from '../utils/theme';
 import { captureException } from '../utils/sentry';
+import { sanitizeGitBranchName } from '../../shared/gitUtils';
 
 interface WorktreeRunSectionProps {
 	theme: Theme;
@@ -198,7 +199,7 @@ export function WorktreeRunSection({
 			setSelectedValue('');
 			onWorktreeTargetChange(null);
 		} else {
-			// Turning on — always default to "Create New Worktree"
+			// Turning on - always default to "Create New Worktree"
 			setSelectedValue('__create_new__');
 			onWorktreeTargetChange({
 				mode: 'create-new',
@@ -246,7 +247,7 @@ export function WorktreeRunSection({
 
 	return (
 		<div className="mb-6">
-			{/* Section header — matches "DOCUMENTS TO RUN" / "AGENT PROMPT" style */}
+			{/* Section header - matches "DOCUMENTS TO RUN" / "AGENT PROMPT" style */}
 			<div className="flex items-center justify-between mb-3">
 				<label className="text-xs font-bold uppercase" style={{ color: theme.colors.textDim }}>
 					Run in Worktree
@@ -293,13 +294,13 @@ export function WorktreeRunSection({
 						Dispatch to a separate worktree
 					</span>
 					{isConfigured && !isEnabled && (
-						<span className="text-[11px] ml-auto" style={{ color: theme.colors.textDim }}>
+						<span className="text-xs-plus ml-auto" style={{ color: theme.colors.textDim }}>
 							Off
 						</span>
 					)}
 					{isConfigured && isEnabled && (
 						<span
-							className="text-[11px] ml-auto font-medium"
+							className="text-xs-plus ml-auto font-medium"
 							style={{ color: theme.colors.accent }}
 						>
 							Enabled
@@ -330,7 +331,7 @@ export function WorktreeRunSection({
 										const isBusy = s.state === 'busy' || s.state === 'connecting';
 										return (
 											<option key={s.id} value={s.id} disabled={isBusy}>
-												{s.name} ({s.worktreeBranch || 'unknown branch'}){isBusy ? ' — busy' : ''}
+												{s.name} ({s.worktreeBranch || 'unknown branch'}){isBusy ? ' - busy' : ''}
 											</option>
 										);
 									})}
@@ -348,7 +349,7 @@ export function WorktreeRunSection({
 							)}
 							{hasNoWorktrees && (
 								<option disabled value="">
-									No worktrees found — create one below
+									No worktrees found - create one below
 								</option>
 							)}
 							<option value="__create_new__">Create New Worktree</option>
@@ -367,8 +368,8 @@ export function WorktreeRunSection({
 										backgroundColor: getStatusColor(selectedOpenAgent.state, theme),
 									}}
 								/>
-								<span className="text-[11px]" style={{ color: theme.colors.textDim }}>
-									{selectedOpenAgent.name} —{' '}
+								<span className="text-xs-plus" style={{ color: theme.colors.textDim }}>
+									{selectedOpenAgent.name} -{' '}
 									{selectedOpenAgent.state === 'idle'
 										? 'ready'
 										: selectedOpenAgent.state === 'busy'
@@ -419,7 +420,11 @@ export function WorktreeRunSection({
 									<input
 										type="text"
 										value={newBranchName}
-										onChange={(e) => setNewBranchName(e.target.value)}
+										onChange={(e) =>
+											setNewBranchName(
+												sanitizeGitBranchName(e.target.value, { allowIncomplete: true })
+											)
+										}
 										className="w-full rounded-lg border px-3 py-1.5 text-sm outline-none"
 										style={{
 											backgroundColor: theme.colors.bgMain,
@@ -436,7 +441,7 @@ export function WorktreeRunSection({
 									)}
 									{worktreePathPreview && (
 										<span
-											className="text-[10px] font-mono truncate"
+											className="text-2xs font-mono truncate"
 											style={{ color: theme.colors.textDim, opacity: 0.7 }}
 											title={worktreePathPreview}
 										>

@@ -2,20 +2,10 @@ import React, { useState, useCallback, useRef } from 'react';
 import { Palette, Download, Upload, RotateCcw, Check, ChevronDown } from 'lucide-react';
 import type { Theme, ThemeColors, ThemeId } from '../types';
 import { THEMES, DEFAULT_CUSTOM_THEME_COLORS } from '../constants/themes';
-
-/**
- * Validates that a string is a valid CSS color value
- */
-function isValidColor(color: string): boolean {
-	// Handle empty strings
-	if (!color || typeof color !== 'string') return false;
-
-	// Use the DOM to validate - create an option element and try to set its color
-	const testElement = new Option().style;
-	testElement.color = color;
-	// If the browser accepts the color, it will be non-empty
-	return testElement.color !== '';
-}
+import { ConfirmModal } from './ConfirmModal';
+import { useModalLayer } from '../hooks/ui/useModalLayer';
+import { MODAL_PRIORITIES } from '../constants/modalPriorities';
+import { isValidCssColor } from '../../shared/cssColor';
 
 interface CustomThemeBuilderProps {
 	theme: Theme; // Current active theme for styling the builder
@@ -34,6 +24,7 @@ const COLOR_CONFIG: { key: keyof ThemeColors; label: string; description: string
 	{ key: 'bgMain', label: 'Main Background', description: 'Primary content area' },
 	{ key: 'bgSidebar', label: 'Sidebar Background', description: 'Left & right panels' },
 	{ key: 'bgActivity', label: 'Activity Background', description: 'Hover, active states' },
+	{ key: 'bgTitleBar', label: 'Title Bar Background', description: 'Top draggable window strip' },
 	{ key: 'border', label: 'Border', description: 'Dividers & outlines' },
 	{ key: 'textMain', label: 'Main Text', description: 'Primary text color' },
 	{ key: 'textDim', label: 'Dimmed Text', description: 'Secondary text' },
@@ -46,30 +37,40 @@ const COLOR_CONFIG: { key: keyof ThemeColors; label: string; description: string
 	{ key: 'error', label: 'Error', description: 'Red states' },
 ];
 
+const OPTIONAL_IMPORT_COLOR_KEYS = new Set<string>(['bgTitleBar']);
+
 // Mini UI Preview component
 function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 	return (
 		<div
-			className="rounded-lg overflow-hidden border"
+			className="rounded-lg overflow-hidden border flex flex-col"
 			style={{
 				borderColor: colors.border,
 				width: '100%',
 				height: 140,
 			}}
 		>
+			{/* Draggable title bar strip */}
+			<div
+				className="h-3 shrink-0 border-b"
+				style={{
+					backgroundColor: colors.bgTitleBar ?? colors.bgMain,
+					borderColor: colors.border,
+				}}
+			/>
 			{/* Mini UI layout */}
-			<div className="flex h-full">
+			<div className="flex flex-1 min-h-0">
 				{/* Left sidebar */}
 				<div className="w-12 flex flex-col gap-1 p-1" style={{ backgroundColor: colors.bgSidebar }}>
 					{/* Session items */}
 					<div
-						className="h-4 rounded text-[6px] flex items-center justify-center"
+						className="h-4 rounded text-3xs flex items-center justify-center"
 						style={{ backgroundColor: colors.bgActivity, color: colors.textDim }}
 					>
 						S1
 					</div>
 					<div
-						className="h-4 rounded text-[6px] flex items-center justify-center ring-1"
+						className="h-4 rounded text-3xs flex items-center justify-center ring-1"
 						style={
 							{
 								backgroundColor: colors.accentDim,
@@ -81,7 +82,7 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 						S2
 					</div>
 					<div
-						className="h-4 rounded text-[6px] flex items-center justify-center"
+						className="h-4 rounded text-3xs flex items-center justify-center"
 						style={{ backgroundColor: colors.bgActivity, color: colors.textDim }}
 					>
 						S3
@@ -95,7 +96,7 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 						className="h-5 flex items-center px-2 border-b"
 						style={{ borderColor: colors.border }}
 					>
-						<span className="text-[7px] font-bold" style={{ color: colors.textMain }}>
+						<span className="text-3xs font-bold" style={{ color: colors.textMain }}>
 							AI Terminal
 						</span>
 					</div>
@@ -105,7 +106,7 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 						{/* User message */}
 						<div className="flex justify-end">
 							<div
-								className="rounded px-1.5 py-0.5 text-[6px] max-w-[80%]"
+								className="rounded px-1.5 py-0.5 text-3xs max-w-[80%]"
 								style={{ backgroundColor: colors.accentDim, color: colors.textMain }}
 							>
 								User message
@@ -114,7 +115,7 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 						{/* AI response */}
 						<div className="flex justify-start">
 							<div
-								className="rounded px-1.5 py-0.5 text-[6px] max-w-[80%]"
+								className="rounded px-1.5 py-0.5 text-3xs max-w-[80%]"
 								style={{ backgroundColor: colors.bgActivity, color: colors.textMain }}
 							>
 								AI response here
@@ -123,19 +124,19 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 						{/* Status indicators */}
 						<div className="flex gap-1 mt-1">
 							<span
-								className="text-[5px] px-1 rounded"
+								className="text-3xs px-1 rounded"
 								style={{ backgroundColor: colors.success + '30', color: colors.success }}
 							>
 								ready
 							</span>
 							<span
-								className="text-[5px] px-1 rounded"
+								className="text-3xs px-1 rounded"
 								style={{ backgroundColor: colors.warning + '30', color: colors.warning }}
 							>
 								busy
 							</span>
 							<span
-								className="text-[5px] px-1 rounded"
+								className="text-3xs px-1 rounded"
 								style={{ backgroundColor: colors.error + '30', color: colors.error }}
 							>
 								error
@@ -149,7 +150,7 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 						style={{ borderColor: colors.border }}
 					>
 						<div
-							className="flex-1 h-4 rounded border text-[6px] flex items-center px-1"
+							className="flex-1 h-4 rounded border text-3xs flex items-center px-1"
 							style={{
 								borderColor: colors.border,
 								backgroundColor: colors.bgActivity,
@@ -159,7 +160,7 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 							Type a message...
 						</div>
 						<div
-							className="ml-1 w-4 h-4 rounded flex items-center justify-center text-[6px]"
+							className="ml-1 w-4 h-4 rounded flex items-center justify-center text-3xs"
 							style={{ backgroundColor: colors.accent, color: colors.accentForeground }}
 						>
 							↵
@@ -173,19 +174,19 @@ function MiniUIPreview({ colors }: { colors: ThemeColors }) {
 					style={{ backgroundColor: colors.bgSidebar, borderColor: colors.border }}
 				>
 					<div
-						className="text-[5px] px-1 py-0.5 border-b text-center font-bold"
+						className="text-3xs px-1 py-0.5 border-b text-center font-bold"
 						style={{ borderColor: colors.border, color: colors.accent }}
 					>
 						Files
 					</div>
 					<div className="p-0.5 space-y-0.5">
-						<div className="text-[5px] truncate" style={{ color: colors.textMain }}>
+						<div className="text-3xs truncate" style={{ color: colors.textMain }}>
 							src/
 						</div>
-						<div className="text-[5px] truncate pl-1" style={{ color: colors.textDim }}>
+						<div className="text-3xs truncate pl-1" style={{ color: colors.textDim }}>
 							app.tsx
 						</div>
-						<div className="text-[5px] truncate pl-1" style={{ color: colors.textDim }}>
+						<div className="text-3xs truncate pl-1" style={{ color: colors.textDim }}>
 							index.ts
 						</div>
 					</div>
@@ -231,7 +232,7 @@ function ColorInput({
 				/>
 				{isComplexColor && (
 					<div
-						className="absolute inset-0 rounded pointer-events-none flex items-center justify-center text-[8px] font-bold"
+						className="absolute inset-0 rounded pointer-events-none flex items-center justify-center text-3xs font-bold"
 						style={{ color: theme.colors.textMain }}
 					>
 						α
@@ -242,7 +243,7 @@ function ColorInput({
 				<div className="text-xs font-medium" style={{ color: theme.colors.textMain }}>
 					{label}
 				</div>
-				<div className="text-[10px]" style={{ color: theme.colors.textDim }}>
+				<div className="text-2xs" style={{ color: theme.colors.textDim }}>
 					{description}
 				</div>
 			</div>
@@ -291,6 +292,7 @@ export function CustomThemeBuilder({
 	onImportSuccess,
 }: CustomThemeBuilderProps) {
 	const [showBaseSelector, setShowBaseSelector] = useState(false);
+	const [showResetConfirm, setShowResetConfirm] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
 	// Get all themes except 'custom' for base selection
@@ -304,6 +306,21 @@ export function CustomThemeBuilder({
 			});
 		},
 		[customThemeColors, setCustomThemeColors]
+	);
+
+	// Register the base-theme dropdown as its own layer while open so Escape
+	// closes the dropdown first instead of dismissing the whole Settings modal.
+	const closeBaseSelector = useCallback(() => setShowBaseSelector(false), []);
+	useModalLayer(
+		MODAL_PRIORITIES.CUSTOM_THEME_BASE_SELECTOR,
+		'Base Theme Selector',
+		closeBaseSelector,
+		{
+			enabled: showBaseSelector,
+			blocksLowerLayers: false,
+			capturesFocus: false,
+			focusTrap: 'none',
+		}
 	);
 
 	const handleInitializeFromBase = useCallback(
@@ -350,8 +367,13 @@ export function CustomThemeBuilder({
 				try {
 					const data = JSON.parse(e.target?.result as string);
 					if (data.colors && typeof data.colors === 'object') {
-						// Validate all required color keys exist
-						const requiredKeys = COLOR_CONFIG.map((c) => c.key);
+						// Validate all required color keys exist. Optional keys (e.g.
+						// bgTitleBar, which older/partial exports may omit; the UI falls
+						// back to bgMain) are excluded so their absence isn't an error.
+						const colorKeys = COLOR_CONFIG.map((c) => c.key);
+						const requiredKeys = colorKeys.filter(
+							(key) => !OPTIONAL_IMPORT_COLOR_KEYS.has(String(key))
+						);
 						const hasAllKeys = requiredKeys.every((key) => key in data.colors);
 
 						if (!hasAllKeys) {
@@ -361,8 +383,10 @@ export function CustomThemeBuilder({
 							return;
 						}
 
-						// Validate all color values are valid CSS colors
-						const invalidColors = requiredKeys.filter((key) => !isValidColor(data.colors[key]));
+						// Validate color values for every key that is present (including
+						// optional keys like bgTitleBar when supplied).
+						const presentKeys = colorKeys.filter((key) => key in data.colors);
+						const invalidColors = presentKeys.filter((key) => !isValidCssColor(data.colors[key]));
 						if (invalidColors.length > 0) {
 							const errorMsg = `Invalid theme file: invalid color values for ${invalidColors.slice(0, 3).join(', ')}${invalidColors.length > 3 ? '...' : ''}`;
 							onImportError?.(errorMsg);
@@ -442,7 +466,7 @@ export function CustomThemeBuilder({
 					{/* Mini Preview */}
 					<div className="py-3">
 						<div
-							className="text-[10px] uppercase font-bold mb-2"
+							className="text-2xs uppercase font-bold mb-2"
 							style={{ color: theme.colors.textDim }}
 						>
 							Preview
@@ -493,10 +517,7 @@ export function CustomThemeBuilder({
 											</div>
 											{t.name}
 											{customThemeBaseId === t.id && (
-												<span
-													className="ml-auto text-[9px]"
-													style={{ color: theme.colors.textDim }}
-												>
+												<span className="ml-auto text-3xs" style={{ color: theme.colors.textDim }}>
 													current base
 												</span>
 											)}
@@ -543,7 +564,7 @@ export function CustomThemeBuilder({
 
 						{/* Reset */}
 						<button
-							onClick={handleReset}
+							onClick={() => setShowResetConfirm(true)}
 							className="flex items-center justify-center gap-1 px-2 py-1.5 rounded text-xs font-medium border hover:opacity-80"
 							style={{
 								backgroundColor: theme.colors.error + '20',
@@ -558,7 +579,7 @@ export function CustomThemeBuilder({
 
 					{/* Color Editors */}
 					<div
-						className="text-[10px] uppercase font-bold mb-2"
+						className="text-2xs uppercase font-bold mb-2"
 						style={{ color: theme.colors.textDim }}
 					>
 						Colors
@@ -576,7 +597,9 @@ export function CustomThemeBuilder({
 								colorKey={key}
 								label={label}
 								description={description}
-								value={customThemeColors[key] ?? ''}
+								value={
+									customThemeColors[key] ?? (key === 'bgTitleBar' ? customThemeColors.bgMain : '')
+								}
 								onChange={handleColorChange}
 								theme={theme}
 							/>
@@ -584,6 +607,17 @@ export function CustomThemeBuilder({
 					</div>
 				</div>
 			</div>
+
+			{showResetConfirm && (
+				<ConfirmModal
+					theme={theme}
+					title="Reset Custom Theme"
+					message="Reset all custom theme colors to their defaults? This will discard your current customizations."
+					confirmLabel="Reset"
+					onConfirm={handleReset}
+					onClose={() => setShowResetConfirm(false)}
+				/>
+			)}
 		</div>
 	);
 }

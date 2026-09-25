@@ -15,10 +15,21 @@ import { app } from 'electron';
 import { bmadCatalog } from '../prompts/bmad/catalog';
 import { captureException } from './utils/sentry';
 import { logger } from './utils/logger';
+import { fetchWithTimeout } from './utils/fetchWithTimeout';
 
 const LOG_CONTEXT = '[BMAD]';
 const BMAD_REPO_URL = 'https://github.com/bmad-code-org/BMAD-METHOD';
-const BMAD_RAW_BASE = 'https://raw.githubusercontent.com/bmad-code-org/BMAD-METHOD/main';
+// Pinned to v6.2.0: the last BMAD release whose workflows are self-contained
+// `workflow.md` files usable as paste-in slash-command prompts. v6.2.1+ moved to
+// a multi-file "skills" model (SKILL.md + steps + customize.toml) that depends on
+// a local `_bmad/` install and a python resolver, so those prompts cannot run
+// standalone inside Maestro. The bundled catalog.ts source paths only resolve at
+// this ref. Keep this in sync with scripts/refresh-bmad.mjs.
+const BMAD_REF = 'v6.2.0';
+const BMAD_RAW_BASE = `https://raw.githubusercontent.com/bmad-code-org/BMAD-METHOD/${BMAD_REF}`;
+
+/** Request budget for BMAD asset downloads from GitHub raw and the API. */
+const BMAD_FETCH_TIMEOUT_MS = 15_000;
 const REFERENCE_TOKEN_REGEX =
 	/`((?:\.\.?\/)?[A-Za-z0-9_./-]+\.md|\{project-root\}\/_bmad\/[^`]+\.md|\{installed_path\}\/[^`]+\.md)`/g;
 
@@ -53,7 +64,7 @@ function applyMaestroPromptFixes(id: string, prompt: string): string {
 
 	if (id === 'retrospective') {
 		fixed = fixed.replace(
-			`- No time estimates — NEVER mention hours, days, weeks, months, or ANY time-based predictions. AI has fundamentally changed development speed.`,
+			`- No time estimates \u2014 NEVER mention hours, days, weeks, months, or ANY time-based predictions. AI has fundamentally changed development speed.`,
 			`- Do not invent time estimates or predictions. Only mention hours, days, sprints, or timelines when they are already present in project artifacts or completed work.`
 		);
 	}
@@ -141,8 +152,14 @@ async function loadUserCustomizations(): Promise<StoredData | null> {
 	}
 }
 
-function fetchWithTimeout(url: string, timeoutMs = 15000): Promise<Response> {
-	return fetch(url, { signal: AbortSignal.timeout(timeoutMs) }).catch((error) => {
+/**
+ * BMAD asset fetch. Thin wrapper over the shared `fetchWithTimeout` that adds
+ * the Sentry reporting this module wants on every transport failure. The
+ * reporting is deliberately kept here rather than in the shared helper: most
+ * callers of that helper treat an offline machine as routine, not as a bug.
+ */
+function fetchBmadResource(url: string, timeoutMs = BMAD_FETCH_TIMEOUT_MS): Promise<Response> {
+	return fetchWithTimeout(url, {}, timeoutMs).catch((error) => {
 		captureException(error, {
 			operation: 'bmad:fetch',
 			url,
@@ -201,7 +218,7 @@ async function collectReferencedAssets(
 
 		seen.add(repoPath);
 		try {
-			const response = await fetchWithTimeout(`${BMAD_RAW_BASE}/${repoPath}`);
+			const response = await fetchBmadResource(`${BMAD_RAW_BASE}/${repoPath}`);
 			if (!response.ok) {
 				throw new Error(`Failed to fetch referenced asset ${repoPath}: ${response.statusText}`);
 			}
@@ -210,6 +227,7 @@ async function collectReferencedAssets(
 			const nestedAssets = await collectReferencedAssets(repoPath, assetContent, seen, depth + 1);
 			assets.push(...nestedAssets);
 		} catch (error) {
+			void captureException(error);
 			logger.warn(`Could not fetch referenced BMAD asset ${repoPath}: ${error}`, LOG_CONTEXT);
 		}
 	}
@@ -369,6 +387,7 @@ async function getBundledPrompts(): Promise<
 				isCustom: cmd.isCustom,
 			};
 		} catch (error) {
+			void captureException(error);
 			logger.warn(`Failed to load bundled prompt for ${cmd.id}: ${error}`, LOG_CONTEXT);
 			result[cmd.id] = {
 				prompt: `# ${cmd.id}\n\nPrompt not available.`,
@@ -492,16 +511,17 @@ export async function resetBmadPrompt(id: string): Promise<string> {
 
 async function getLatestCommitSha(): Promise<string> {
 	try {
-		const response = await fetchWithTimeout(
-			`${BMAD_REPO_URL.replace('https://github.com', 'https://api.github.com/repos')}/commits/main`,
-			15000
+		const response = await fetchBmadResource(
+			`${BMAD_REPO_URL.replace('https://github.com', 'https://api.github.com/repos')}/commits/${BMAD_REF}`,
+			BMAD_FETCH_TIMEOUT_MS
 		);
 		if (!response.ok) {
 			throw new Error(`Failed to fetch latest commit: ${response.statusText}`);
 		}
 		const commit = (await response.json()) as { sha?: string };
-		return commit.sha?.slice(0, 7) ?? 'main';
+		return commit.sha?.slice(0, 7) ?? BMAD_REF;
 	} catch (error) {
+		void captureException(error);
 		logger.warn(`Could not fetch BMAD commit SHA: ${error}`, LOG_CONTEXT);
 		return 'main';
 	}
@@ -509,15 +529,14 @@ async function getLatestCommitSha(): Promise<string> {
 
 async function getLatestVersion(): Promise<string> {
 	try {
-		const response = await fetchWithTimeout(
-			'https://raw.githubusercontent.com/bmad-code-org/BMAD-METHOD/main/package.json'
-		);
+		const response = await fetchBmadResource(`${BMAD_RAW_BASE}/package.json`);
 		if (!response.ok) {
 			throw new Error(`Failed to fetch package.json: ${response.statusText}`);
 		}
 		const packageJson = (await response.json()) as { version?: string };
-		return packageJson.version ?? 'main';
+		return packageJson.version ?? BMAD_REF;
 	} catch (error) {
+		void captureException(error);
 		logger.warn(`Could not fetch BMAD version: ${error}`, LOG_CONTEXT);
 		return 'main';
 	}
@@ -533,7 +552,7 @@ export async function refreshBmadPrompts(): Promise<BmadMetadata> {
 		const downloadedPrompts: Array<{ id: string; prompt: string }> = [];
 
 		for (const cmd of BMAD_COMMANDS) {
-			const response = await fetchWithTimeout(`${BMAD_RAW_BASE}/${cmd.sourcePath}`);
+			const response = await fetchBmadResource(`${BMAD_RAW_BASE}/${cmd.sourcePath}`);
 			if (!response.ok) {
 				throw new Error(`Failed to fetch ${cmd.sourcePath}: ${response.statusText}`);
 			}

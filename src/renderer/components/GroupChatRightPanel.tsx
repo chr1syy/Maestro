@@ -3,7 +3,6 @@
  *
  * Right panel component for group chats with tabbed interface.
  * Contains "Participants" and "History" tabs.
- * Replaces direct use of GroupChatParticipants when group chat is active.
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
@@ -13,6 +12,7 @@ import type { GroupChatHistoryEntry } from '../../shared/group-chat-types';
 import { ParticipantCard } from './ParticipantCard';
 import { GroupChatHistoryPanel } from './GroupChatHistoryPanel';
 import { formatShortcutKeys } from '../utils/shortcutFormatter';
+import { filterGroupChatHistory } from '../../shared/groupChatModeratorView';
 import {
 	buildParticipantColorMapWithPreferences,
 	loadColorPreferences,
@@ -21,6 +21,8 @@ import {
 } from '../utils/participantColors';
 import { useResizablePanel } from '../hooks';
 import { useGroupChatStore } from '../stores/groupChatStore';
+import { usePhoneLayout } from '../hooks/ui/useViewportBreakpoint';
+import { logger } from '../utils/logger';
 
 export type GroupChatRightTab = 'participants' | 'history';
 
@@ -57,6 +59,12 @@ interface GroupChatRightPanelProps {
 	onJumpToMessage?: (timestamp: number) => void;
 	/** Callback when participant colors are computed (for sharing with other components) */
 	onColorsComputed?: (colors: Record<string, string>) => void;
+	/**
+	 * True to show only the moderator's own history entries, matching the
+	 * message list's moderator-only view. The Participants tab is unaffected -
+	 * the roster is who is in the room, not who is talking.
+	 */
+	moderatorOnly?: boolean;
 }
 
 export function GroupChatRightPanel({
@@ -80,6 +88,7 @@ export function GroupChatRightPanel({
 	onTabChange,
 	onJumpToMessage,
 	onColorsComputed,
+	moderatorOnly = false,
 }: GroupChatRightPanelProps): JSX.Element | null {
 	const participantLiveOutput = useGroupChatStore((s) => s.participantLiveOutput);
 
@@ -186,7 +195,7 @@ export function GroupChatRightPanel({
 			try {
 				await window.maestro.groupChat.resetParticipantContext(groupChatId, participantName);
 			} catch (error) {
-				console.error(`Failed to reset context for ${participantName}:`, error);
+				logger.error(`Failed to reset context for ${participantName}:`, undefined, error);
 			}
 		},
 		[groupChatId]
@@ -194,8 +203,62 @@ export function GroupChatRightPanel({
 
 	// Handle removing a participant from the group chat
 	const handleRemoveParticipant = useCallback(
-		async (participantName: string) => {
-			await window.maestro.groupChat.removeParticipant(groupChatId, participantName);
+		async (participantName: string): Promise<boolean> => {
+			const updatedChat = await window.maestro.groupChat.removeParticipant(
+				groupChatId,
+				participantName
+			);
+			if (!updatedChat) {
+				throw new Error(`Group chat not found: ${groupChatId}`);
+			}
+
+			const store = useGroupChatStore.getState();
+			store.setGroupChats((prev) =>
+				prev.map((chat) => {
+					if (chat.id !== groupChatId) return chat;
+					// Merge only the removed participant out of the current store
+					// state. A concurrent participantsChanged event (for example a
+					// participant added while this removal IPC was in flight) may
+					// have already written a newer participant list; replacing the
+					// whole chat with the older removal snapshot would drop that
+					// addition until the chat is reloaded.
+					return {
+						...chat,
+						participants: chat.participants.filter(
+							(participant) => participant.name !== participantName
+						),
+					};
+				})
+			);
+
+			const removed = !updatedChat.participants.some(
+				(participant) => participant.name === participantName
+			);
+			if (removed) {
+				// Proactively clear the removed participant's transient state. The
+				// participantsChanged event also clears it, but if this optimistic
+				// local update lands first the event sees the participant already
+				// gone, computes no removedNames, and skips cleanup, leaving a
+				// removed working participant stuck marked busy in the sidebar.
+				store.setAllGroupChatParticipantStates((prev) => {
+					const chatStates = prev.get(groupChatId);
+					if (!chatStates) return prev;
+					const nextChatStates = new Map(chatStates);
+					nextChatStates.delete(participantName);
+					const next = new Map(prev);
+					next.set(groupChatId, nextChatStates);
+					return next;
+				});
+				if (groupChatId === store.activeGroupChatId) {
+					store.setParticipantStates((prev) => {
+						const next = new Map(prev);
+						next.delete(participantName);
+						return next;
+					});
+				}
+				store.clearParticipantLiveOutput(`${groupChatId}:${participantName}`);
+			}
+			return removed;
 		},
 		[groupChatId]
 	);
@@ -210,7 +273,7 @@ export function GroupChatRightPanel({
 
 		// Safety check in case preload hasn't been updated yet
 		if (typeof window.maestro.groupChat.getHistory !== 'function') {
-			console.warn('groupChat.getHistory not available - restart dev server to update preload');
+			logger.warn('groupChat.getHistory not available - restart dev server to update preload');
 			setHistoryEntries([]);
 			setIsLoadingHistory(false);
 			return;
@@ -222,7 +285,7 @@ export function GroupChatRightPanel({
 				const entries = await window.maestro.groupChat.getHistory(groupChatId);
 				setHistoryEntries(entries);
 			} catch (error) {
-				console.error('Failed to load group chat history:', error);
+				logger.error('Failed to load group chat history:', undefined, error);
 				setHistoryEntries([]);
 			} finally {
 				setIsLoadingHistory(false);
@@ -238,7 +301,7 @@ export function GroupChatRightPanel({
 
 		// Safety check in case preload hasn't been updated yet
 		if (typeof window.maestro.groupChat.onHistoryEntry !== 'function') {
-			console.warn('groupChat.onHistoryEntry not available - restart dev server to update preload');
+			logger.warn('groupChat.onHistoryEntry not available - restart dev server to update preload');
 			return;
 		}
 
@@ -251,26 +314,49 @@ export function GroupChatRightPanel({
 		return unsubscribe;
 	}, [groupChatId]);
 
+	// Filtered for display only: `historyEntries` keeps the full activity log, so
+	// flipping back to the team view restores it without re-reading the file.
+	const visibleHistoryEntries = useMemo(
+		() => filterGroupChatHistory(historyEntries, moderatorOnly),
+		[historyEntries, moderatorOnly]
+	);
+
+	// A phone has no room for a fixed-px side panel: at 390px the panel and the
+	// chat are flex siblings, so the row overflows the viewport, the tab header
+	// is pushed off-screen (History becomes unreachable) and the chat behind it
+	// is crushed to about one character per line. On a phone the panel takes the
+	// whole screen instead. Taking it out of flow (`fixed`) is the half that
+	// stops the bleed-through: as a flex sibling it squeezed the chat to a
+	// sliver that still painted one glyph per line down the edge.
+	const isPhone = usePhoneLayout();
+
 	if (!isOpen) return null;
 
 	return (
 		<div
 			ref={panelRef}
-			className={`relative border-l flex flex-col ${transitionClass}`}
+			className={
+				isPhone
+					? 'fixed inset-0 z-30 w-full max-w-full flex flex-col'
+					: `relative border-l flex flex-col ${transitionClass}`
+			}
 			style={{
-				width: `${width}px`,
+				...(isPhone ? {} : { width: `${width}px` }),
 				backgroundColor: theme.colors.bgSidebar,
 				borderColor: theme.colors.border,
 			}}
 		>
-			{/* Resize Handle */}
-			<div
-				className="absolute top-0 left-0 w-3 h-full cursor-col-resize border-l-4 border-transparent hover:border-blue-500 transition-colors z-20"
-				onMouseDown={onResizeStart}
-			/>
+			{/* Resize Handle. Pointless on a phone, where the panel is full-screen,
+			    and it would sit under the user's thumb on the chat's left edge. */}
+			{!isPhone && (
+				<div
+					className="resize-handle absolute top-0 left-0 w-3 h-full cursor-col-resize border-l-4 border-transparent hover:border-blue-500 transition-colors z-20"
+					onPointerDown={onResizeStart}
+				/>
+			)}
 
 			{/* Tab Header - matches RightPanel styling */}
-			<div className="flex border-b h-16" style={{ borderColor: theme.colors.border }}>
+			<div className="flex border-b h-16 shrink-0" style={{ borderColor: theme.colors.border }}>
 				{(['participants', 'history'] as const).map((tab) => (
 					<button
 						key={tab}
@@ -344,7 +430,7 @@ export function GroupChatRightPanel({
 				<GroupChatHistoryPanel
 					theme={theme}
 					groupChatId={groupChatId}
-					entries={historyEntries}
+					entries={visibleHistoryEntries}
 					isLoading={isLoadingHistory}
 					participantColors={participantColors}
 					onJumpToMessage={onJumpToMessage}

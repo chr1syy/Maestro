@@ -14,13 +14,49 @@ import { render, screen } from '@testing-library/react';
 import { AppConfirmModals } from '../../../renderer/components/AppModals';
 import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
 import type { Theme, Session } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
 // Mock lucide-react
-vi.mock('lucide-react', () => ({
+vi.mock('lucide-react', async (importOriginal) => ({
+	...(await importOriginal()),
 	AlertTriangle: () => <svg data-testid="alert-triangle-icon" />,
 	X: () => <svg data-testid="x-icon" />,
 	Trash2: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="trash2-icon" className={className} style={style} />
+	),
+	MessageSquare: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="message-square-icon" className={className} style={style} />
+	),
+	Hourglass: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="hourglass-icon" className={className} style={style} />
+	),
+	// Pulled in transitively via SnoozedTabsModal -> SnoozeHistoryModal.
+	BellRing: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="bell-ring-icon" className={className} style={style} />
+	),
+	History: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="history-icon" className={className} style={style} />
+	),
+	RotateCcw: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="rotate-ccw-icon" className={className} style={style} />
+	),
+	StickyNote: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="sticky-note-icon" className={className} style={style} />
+	),
+	Clock: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="clock-icon" className={className} style={style} />
+	),
+	CalendarClock: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="calendar-clock-icon" className={className} style={style} />
+	),
+	CalendarDays: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="calendar-days-icon" className={className} style={style} />
+	),
+	ChevronLeft: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="chevron-left-icon" className={className} style={style} />
+	),
+	ChevronRight: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="chevron-right-icon" className={className} style={style} />
 	),
 }));
 
@@ -44,16 +80,7 @@ const testTheme: Theme = {
 };
 
 function createMockSession(overrides: Partial<Session>): Session {
-	return {
-		id: 'session-1',
-		name: 'Agent 1',
-		state: 'idle',
-		toolType: 'claude-code',
-		cwd: '/tmp',
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	} as Session;
+	return baseCreateMockSession({ name: 'Agent 1', cwd: '/tmp', ...overrides });
 }
 
 const defaultProps = {

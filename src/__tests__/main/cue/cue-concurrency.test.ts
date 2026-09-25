@@ -42,6 +42,14 @@ vi.mock('../../../main/cue/cue-db', () => ({
 	isCueDbReady: () => true,
 	recordCueEvent: vi.fn(),
 	updateCueEventStatus: vi.fn(),
+	safeRecordCueEvent: vi.fn(),
+	safeUpdateCueEventStatus: vi.fn(),
+	persistQueuedEvent: vi.fn(),
+	removeQueuedEvent: vi.fn(),
+	getQueuedEvents: vi.fn(() => []),
+	clearPersistedQueue: vi.fn(),
+	safePersistQueuedEvent: vi.fn(),
+	safeRemoveQueuedEvent: vi.fn(),
 }));
 
 // Mock crypto
@@ -132,9 +140,9 @@ describe('CueEngine Concurrency Control', () => {
 			// First call dispatched
 			expect(deps.onCueRun).toHaveBeenCalledTimes(1);
 
-			// Trigger another interval — should be queued
+			// Trigger another interval - should be queued
 			vi.advanceTimersByTime(1 * 60 * 1000);
-			// Still only 1 call — the second was queued
+			// Still only 1 call - the second was queued
 			expect(deps.onCueRun).toHaveBeenCalledTimes(1);
 
 			// Verify queue has an entry
@@ -172,7 +180,7 @@ describe('CueEngine Concurrency Control', () => {
 
 			await vi.advanceTimersByTimeAsync(10);
 
-			// Trigger another interval — should be queued
+			// Trigger another interval - should be queued
 			vi.advanceTimersByTime(1 * 60 * 1000);
 
 			expect(deps.onLog).toHaveBeenCalledWith(
@@ -221,12 +229,12 @@ describe('CueEngine Concurrency Control', () => {
 			await vi.advanceTimersByTimeAsync(10);
 			expect(deps.onCueRun).toHaveBeenCalledTimes(1);
 
-			// Trigger another — should be queued
+			// Trigger another - should be queued
 			vi.advanceTimersByTime(1 * 60 * 1000);
 			expect(deps.onCueRun).toHaveBeenCalledTimes(1);
 			expect(engine.getQueueStatus().get('session-1')).toBe(1);
 
-			// Complete the first run — should drain the queue
+			// Complete the first run - should drain the queue
 			resolveRun!({
 				runId: 'r1',
 				sessionId: 'session-1',
@@ -287,7 +295,7 @@ describe('CueEngine Concurrency Control', () => {
 
 			expect(engine.getQueueStatus().get('session-1')).toBe(2);
 
-			// Overflow — should drop oldest
+			// Overflow - should drop oldest
 			vi.advanceTimersByTime(1 * 60 * 1000); // queued: still 2, but oldest dropped
 
 			expect(engine.getQueueStatus().get('session-1')).toBe(2);
@@ -343,7 +351,7 @@ describe('CueEngine Concurrency Control', () => {
 			// Wait long enough for the queued event to become stale (> 1 minute)
 			vi.advanceTimersByTime(2 * 60 * 1000);
 
-			// Complete the first run — drain should evict the stale event
+			// Complete the first run - drain should evict the stale event
 			resolveRun!({
 				runId: 'r1',
 				sessionId: 'session-1',
@@ -362,7 +370,8 @@ describe('CueEngine Concurrency Control', () => {
 
 			expect(deps.onLog).toHaveBeenCalledWith(
 				'cue',
-				expect.stringContaining('Dropping stale queued event')
+				expect.stringContaining('Dropping stale queued event'),
+				expect.objectContaining({ type: 'queueDropped', reason: 'stale' })
 			);
 
 			engine.stopAll();
@@ -507,7 +516,7 @@ describe('CueEngine Concurrency Control', () => {
 			vi.advanceTimersByTime(1 * 60 * 1000);
 			expect(engine.getQueueStatus().get('session-1')).toBe(1);
 
-			// Stop the active run — should free the slot and drain the queue
+			// Stop the active run - should free the slot and drain the queue
 			const activeRun = engine.getActiveRuns()[0];
 			engine.stopRun(activeRun.runId);
 
@@ -665,10 +674,65 @@ describe('CueEngine Concurrency Control', () => {
 	});
 
 	describe('multi-concurrent slots', () => {
-		it('allows multiple concurrent runs up to max_concurrent', async () => {
+		it('allows DIFFERENT subscriptions to run concurrently up to max_concurrent', async () => {
 			const deps = createMockDeps({
 				onCueRun: vi.fn(() => new Promise<CueRunResult>(() => {})),
 			});
+			// Three distinct subscriptions, each firing on start - they are
+			// different roots, so the self-overlap guard does not apply and all
+			// three may run in parallel.
+			const config = createMockConfig({
+				settings: {
+					timeout_minutes: 30,
+					timeout_on_fail: 'break',
+					max_concurrent: 3,
+					queue_size: 10,
+				},
+				subscriptions: [
+					{
+						name: 'timer-a',
+						event: 'time.heartbeat',
+						enabled: true,
+						prompt: 'test',
+						interval_minutes: 60,
+					},
+					{
+						name: 'timer-b',
+						event: 'time.heartbeat',
+						enabled: true,
+						prompt: 'test',
+						interval_minutes: 60,
+					},
+					{
+						name: 'timer-c',
+						event: 'time.heartbeat',
+						enabled: true,
+						prompt: 'test',
+						interval_minutes: 60,
+					},
+				],
+			});
+			mockLoadCueConfig.mockReturnValue(config);
+			const engine = new CueEngine(deps);
+			engine.start();
+
+			await vi.advanceTimersByTimeAsync(10);
+			// All three distinct subscriptions dispatch concurrently (3 slots).
+			expect(deps.onCueRun).toHaveBeenCalledTimes(3);
+			expect(engine.getQueueStatus().size).toBe(0); // Nothing queued
+
+			engine.stopAll();
+			engine.stop();
+		});
+
+		it('serializes the SAME subscription even when slots are free (no self-overlap)', async () => {
+			const deps = createMockDeps({
+				onCueRun: vi.fn(() => new Promise<CueRunResult>(() => {})),
+			});
+			// A single subscription at max_concurrent: 3. Even though slots are
+			// free, repeated firings of the SAME root must NOT overlap - the
+			// re-trigger is queued and runs only after the in-flight one finishes.
+			// This is the regression guard for the "double-fire" bug.
 			const config = createMockConfig({
 				settings: {
 					timeout_minutes: 30,
@@ -693,16 +757,12 @@ describe('CueEngine Concurrency Control', () => {
 			await vi.advanceTimersByTimeAsync(10);
 			expect(deps.onCueRun).toHaveBeenCalledTimes(1); // Initial fire
 
-			// Trigger 2 more intervals — all should dispatch (3 slots)
+			// Two more ticks of the SAME subscription - both queue rather than
+			// dispatching into the 2 free slots.
 			vi.advanceTimersByTime(1 * 60 * 1000);
 			vi.advanceTimersByTime(1 * 60 * 1000);
-			expect(deps.onCueRun).toHaveBeenCalledTimes(3);
-			expect(engine.getQueueStatus().size).toBe(0); // Nothing queued
-
-			// 4th trigger should be queued
-			vi.advanceTimersByTime(1 * 60 * 1000);
-			expect(deps.onCueRun).toHaveBeenCalledTimes(3);
-			expect(engine.getQueueStatus().get('session-1')).toBe(1);
+			expect(deps.onCueRun).toHaveBeenCalledTimes(1); // still only the first run
+			expect(engine.getQueueStatus().get('session-1')).toBe(2);
 
 			engine.stopAll();
 			engine.stop();
@@ -858,7 +918,8 @@ describe('CueEngine Concurrency Control', () => {
 			// All stale events should have been dropped
 			expect(deps.onLog).toHaveBeenCalledWith(
 				'cue',
-				expect.stringContaining('Dropping stale queued event')
+				expect.stringContaining('Dropping stale queued event'),
+				expect.objectContaining({ type: 'queueDropped', reason: 'stale' })
 			);
 
 			engine.stopAll();
@@ -898,7 +959,7 @@ describe('CueEngine Concurrency Control', () => {
 			vi.advanceTimersByTime(1 * 60 * 1000);
 			expect(engine.getQueueStatus().get('session-1')).toBe(2);
 
-			// Stop engine mid-drain — should not crash
+			// Stop engine mid-drain - should not crash
 			expect(() => {
 				engine.stop();
 			}).not.toThrow();

@@ -1,5 +1,7 @@
 import React, { memo } from 'react';
-import { Layers, Hash, Bot, User, BarChart3, Loader2, ListOrdered } from 'lucide-react';
+import { Layers, Hash, Bot, User, Zap, BarChart3, ListOrdered, MessagesSquare } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
+import { CUE_COLOR, AGENT_COLOR } from './historyConstants';
 import type { Theme } from '../../types';
 
 export interface HistoryStats {
@@ -7,6 +9,10 @@ export interface HistoryStats {
 	sessionCount: number;
 	autoCount: number;
 	userCount: number;
+	/** Total CUE entries; only rendered when provided and > 0 (gated by the Maestro Cue encore feature) */
+	cueCount?: number;
+	/** Total AGENT entries (messages proxied in from another agent); only rendered when provided and > 0 */
+	agentEntryCount?: number;
 	totalCount: number;
 	/** Number of agents currently in 'busy' state (live indicator) */
 	activeAgentCount?: number;
@@ -36,10 +42,7 @@ function StatItem({ icon, label, value, color, theme }: StatItemProps) {
 			>
 				{icon}
 			</span>
-			<span
-				className="text-[10px] uppercase tracking-wider"
-				style={{ color: theme.colors.textDim }}
-			>
+			<span className="text-2xs uppercase tracking-wider" style={{ color: theme.colors.textDim }}>
 				{label}
 			</span>
 			<span className="text-xs font-bold tabular-nums" style={{ color: theme.colors.textMain }}>
@@ -88,6 +91,24 @@ export const HistoryStatsBar = memo(function HistoryStatsBar({
 				color={theme.colors.warning}
 				theme={theme}
 			/>
+			{stats.agentEntryCount !== undefined && stats.agentEntryCount > 0 && (
+				<StatItem
+					icon={<MessagesSquare className="w-3 h-3" />}
+					label="Agent"
+					value={stats.agentEntryCount}
+					color={AGENT_COLOR}
+					theme={theme}
+				/>
+			)}
+			{stats.cueCount !== undefined && stats.cueCount > 0 && (
+				<StatItem
+					icon={<Zap className="w-3 h-3" />}
+					label="Cue"
+					value={stats.cueCount}
+					color={CUE_COLOR}
+					theme={theme}
+				/>
+			)}
 			<div className="w-px h-4 flex-shrink-0" style={{ backgroundColor: theme.colors.border }} />
 			<StatItem
 				icon={<BarChart3 className="w-3 h-3" />}
@@ -97,7 +118,7 @@ export const HistoryStatsBar = memo(function HistoryStatsBar({
 				theme={theme}
 			/>
 
-			{/* Live activity indicators — only shown when provided and > 0 */}
+			{/* Live activity indicators - only shown when provided and > 0 */}
 			{showLiveIndicators(stats) && (
 				<>
 					<div
@@ -113,10 +134,10 @@ export const HistoryStatsBar = memo(function HistoryStatsBar({
 									color: theme.colors.warning,
 								}}
 							>
-								<Loader2 className="w-3 h-3 animate-spin" />
+								<Spinner size={12} />
 							</span>
 							<span
-								className="text-[10px] uppercase tracking-wider"
+								className="text-2xs uppercase tracking-wider"
 								style={{ color: theme.colors.textDim }}
 							>
 								Active

@@ -7,3 +7,7 @@
 
 export { useStats, useComputedStats } from './useStats';
 export type { StatsTimeRange, StatsAggregation, UseStatsReturn, ComputedStats } from './useStats';
+export { useGlobalAgentStats } from './useGlobalAgentStats';
+export type { UseGlobalAgentStatsResult } from './useGlobalAgentStats';
+export { useProviderProfiles } from './useProviderProfiles';
+export type { ProviderProfile, ProviderProfileIndex } from './useProviderProfiles';

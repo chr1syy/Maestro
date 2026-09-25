@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { groomContext, type GroomingProcessManager } from '../../../main/utils/context-groomer';
 import type { AgentDetector } from '../../../main/agents';
 import type { AgentConfig } from '../../../main/agents';
+import type { SshRemoteSettingsStore } from '../../../main/utils/ssh-remote-resolver';
+import type { SshRemoteConfig } from '../../../shared/types';
 
 // Mock agent-args module to verify override resolution
 vi.mock('../../../main/utils/agent-args', () => ({
@@ -25,9 +27,22 @@ vi.mock('../../../main/utils/agent-args', () => ({
 	),
 }));
 
+// Mock platform detection so we can toggle isWindows() per test
+vi.mock('../../../shared/platformDetection', () => ({
+	isWindows: vi.fn(() => false),
+	isMacOS: vi.fn(() => true),
+	isLinux: vi.fn(() => false),
+}));
+
 // Mock uuid to return predictable values
 vi.mock('uuid', () => ({
 	v4: vi.fn(() => 'test-uuid'),
+}));
+
+// Keep the real SSH wrapping logic, but pin the resolved ssh binary so the
+// built command is deterministic (and no PATH probing happens in tests).
+vi.mock('../../../main/utils/cliDetection', () => ({
+	resolveSshPath: vi.fn().mockResolvedValue('ssh'),
 }));
 
 // Mock logger
@@ -41,18 +56,37 @@ vi.mock('../../../main/utils/logger', () => ({
 }));
 
 import { buildAgentArgs, applyAgentConfigOverrides } from '../../../main/utils/agent-args';
+import { isWindows } from '../../../shared/platformDetection';
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
 		id: 'claude-code',
 		name: 'Claude Code',
 		binaryName: 'claude',
-		command: '/usr/local/bin/claude',
+		// `command` is the static, bare name from definitions.ts; `path` is what
+		// the detector resolves. Keep them distinct so command-resolution tests
+		// can tell which field actually reaches spawn().
+		command: 'claude',
+		path: '/usr/local/bin/claude',
 		args: ['--default'],
 		available: true,
 		capabilities: {} as AgentConfig['capabilities'],
 		...overrides,
 	};
+}
+
+const SSH_REMOTE: SshRemoteConfig = {
+	id: 'my-remote',
+	name: 'Dev Box',
+	host: 'dev.example.com',
+	port: 22,
+	username: 'testuser',
+	privateKeyPath: '/home/testuser/.ssh/id_ed25519',
+	enabled: true,
+};
+
+function createSshStore(remotes: SshRemoteConfig[] = [SSH_REMOTE]): SshRemoteSettingsStore {
+	return { getSshRemotes: () => remotes };
 }
 
 function createMockProcessManager(): GroomingProcessManager & {
@@ -63,7 +97,6 @@ function createMockProcessManager(): GroomingProcessManager & {
 	_emitError: (sessionId: string, error: unknown) => void;
 } {
 	const handlers = new Map<string, ((...args: unknown[]) => void)[]>();
-	let lastSpawnConfig: Record<string, unknown> | null = null;
 
 	return {
 		_handlers: handlers,
@@ -81,8 +114,6 @@ function createMockProcessManager(): GroomingProcessManager & {
 			for (const fn of fns) fn(sessionId, error);
 		},
 		spawn(config: Record<string, unknown>) {
-			lastSpawnConfig = config;
-			// Store on the instance for test assertions
 			(this as any)._lastSpawnConfig = config;
 
 			// Schedule data + exit to resolve the promise
@@ -120,6 +151,7 @@ describe('groomContext', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		vi.mocked(isWindows).mockReturnValue(false);
 		mockPM = createMockProcessManager();
 		agent = makeAgent();
 	});
@@ -140,6 +172,7 @@ describe('groomContext', () => {
 			readOnlyMode: false,
 			modelId: undefined,
 			yoloMode: false,
+			permissionMode: 'standard',
 			agentSessionId: undefined,
 		});
 	});
@@ -164,6 +197,8 @@ describe('groomContext', () => {
 			agentConfigValues: { model: 'opus' },
 			sessionCustomArgs: '--extra',
 			sessionCustomEnvVars: { API_KEY: 'test' },
+			// Forwarded so a custom arg can't override a read-only flag
+			readOnlyMode: false,
 		});
 	});
 
@@ -197,7 +232,7 @@ describe('groomContext', () => {
 		expect(mockPM._lastSpawnConfig!.args).toContain('--resolved');
 	});
 
-	it('uses sessionCustomPath to override agent.command', async () => {
+	it('uses sessionCustomPath to override the detected agent path', async () => {
 		const detector = createMockAgentDetector(agent);
 
 		await groomContext(
@@ -214,7 +249,7 @@ describe('groomContext', () => {
 		expect(mockPM._lastSpawnConfig!.command).toBe('/custom/claude');
 	});
 
-	it('falls back to agent.command when sessionCustomPath is not provided', async () => {
+	it('falls back to agent.path when sessionCustomPath is not provided', async () => {
 		const detector = createMockAgentDetector(agent);
 
 		await groomContext(
@@ -224,6 +259,38 @@ describe('groomContext', () => {
 		);
 
 		expect(mockPM._lastSpawnConfig!.command).toBe('/usr/local/bin/claude');
+	});
+
+	it('spawns the detected .cmd shim rather than the bare command on Windows', async () => {
+		// Regression: grooming used to spawn `agent.command` ('claude'), which is
+		// not on PATH on Windows (npm installs a claude.cmd shim), so every
+		// "Compact and Continue" failed with `spawn claude ENOENT`.
+		const windowsAgent = makeAgent({
+			path: 'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd',
+		});
+		const detector = createMockAgentDetector(windowsAgent);
+
+		await groomContext(
+			{ projectRoot: 'C:\\project', agentType: 'claude-code', prompt: 'summarize' },
+			mockPM,
+			detector
+		);
+
+		expect(mockPM._lastSpawnConfig!.command).toBe(
+			'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd'
+		);
+	});
+
+	it('falls back to agent.command when the detector resolved no path', async () => {
+		const detector = createMockAgentDetector(makeAgent({ path: undefined }));
+
+		await groomContext(
+			{ projectRoot: '/project', agentType: 'claude-code', prompt: 'summarize' },
+			mockPM,
+			detector
+		);
+
+		expect(mockPM._lastSpawnConfig!.command).toBe('claude');
 	});
 
 	it('passes resolved customEnvVars on spawn config', async () => {
@@ -276,8 +343,34 @@ describe('groomContext', () => {
 		expect(config).not.toHaveProperty('sessionCustomEnvVars');
 	});
 
-	it('passes SSH remote config through to spawn', async () => {
-		const sshConfig = { enabled: true, remoteId: 'my-remote', workingDirOverride: '/remote/dir' };
+	it('sets sendPromptViaStdinRaw=true on Windows to avoid ENAMETOOLONG', async () => {
+		vi.mocked(isWindows).mockReturnValue(true);
+		const detector = createMockAgentDetector(agent);
+
+		await groomContext(
+			{ projectRoot: '/project', agentType: 'claude-code', prompt: 'summarize' },
+			mockPM,
+			detector
+		);
+
+		expect(mockPM._lastSpawnConfig!.sendPromptViaStdinRaw).toBe(true);
+	});
+
+	it('does NOT set sendPromptViaStdinRaw on non-Windows platforms', async () => {
+		vi.mocked(isWindows).mockReturnValue(false);
+		const detector = createMockAgentDetector(agent);
+
+		await groomContext(
+			{ projectRoot: '/project', agentType: 'claude-code', prompt: 'summarize' },
+			mockPM,
+			detector
+		);
+
+		expect(mockPM._lastSpawnConfig!.sendPromptViaStdinRaw).toBe(false);
+	});
+
+	it('does NOT set sendPromptViaStdinRaw on Windows when SSH is used', async () => {
+		vi.mocked(isWindows).mockReturnValue(true);
 		const detector = createMockAgentDetector(agent);
 
 		await groomContext(
@@ -285,13 +378,184 @@ describe('groomContext', () => {
 				projectRoot: '/project',
 				agentType: 'claude-code',
 				prompt: 'summarize',
-				sessionSshRemoteConfig: sshConfig,
+				sessionSshRemoteConfig: { enabled: true, remoteId: 'my-remote' },
+				sshStore: createSshStore(),
 			},
 			mockPM,
 			detector
 		);
 
-		expect(mockPM._lastSpawnConfig!.sessionSshRemoteConfig).toEqual(sshConfig);
+		expect(mockPM._lastSpawnConfig!.sendPromptViaStdinRaw).toBe(false);
+	});
+
+	it('spawns ssh (not the agent) when the session has an SSH remote', async () => {
+		const detector = createMockAgentDetector(agent);
+
+		await groomContext(
+			{
+				projectRoot: '/project',
+				agentType: 'claude-code',
+				prompt: 'summarize',
+				sessionSshRemoteConfig: { enabled: true, remoteId: 'my-remote' },
+				sshStore: createSshStore(),
+			},
+			mockPM,
+			detector
+		);
+
+		const config = mockPM._lastSpawnConfig!;
+		expect(config.command).toBe('ssh');
+		expect(config.sshRemoteId).toBe('my-remote');
+		expect(config.sshRemoteHost).toBe('dev.example.com');
+		// The prompt now travels inside the SSH invocation, not as a spawn field
+		expect(config.prompt).toBeUndefined();
+		expect(String(config.sshRemoteCommand)).toContain('summarize');
+	});
+
+	it('invokes the agent by binary name on the remote, never the local path', async () => {
+		// agent.command is an absolute LOCAL path - sending it to the remote host
+		// is how grooming would ENOENT there.
+		const detector = createMockAgentDetector(makeAgent({ command: '/usr/local/bin/claude' }));
+
+		await groomContext(
+			{
+				projectRoot: '/project',
+				agentType: 'claude-code',
+				prompt: 'summarize',
+				sessionSshRemoteConfig: { enabled: true, remoteId: 'my-remote' },
+				sshStore: createSshStore(),
+			},
+			mockPM,
+			detector
+		);
+
+		const remoteCommand = String(mockPM._lastSpawnConfig!.sshRemoteCommand);
+		expect(remoteCommand).not.toContain('/usr/local/bin/claude');
+		expect(remoteCommand).toContain('claude');
+	});
+
+	it('honors sessionCustomPath as the remote binary when SSH is enabled', async () => {
+		const detector = createMockAgentDetector(agent);
+
+		await groomContext(
+			{
+				projectRoot: '/project',
+				agentType: 'claude-code',
+				prompt: 'summarize',
+				sessionCustomPath: '/opt/remote/bin/claude',
+				sessionSshRemoteConfig: { enabled: true, remoteId: 'my-remote' },
+				sshStore: createSshStore(),
+			},
+			mockPM,
+			detector
+		);
+
+		expect(String(mockPM._lastSpawnConfig!.sshRemoteCommand)).toContain('/opt/remote/bin/claude');
+	});
+
+	it('cds to the remote working dir override, not the local project root', async () => {
+		const detector = createMockAgentDetector(agent);
+
+		await groomContext(
+			{
+				projectRoot: '/local/project',
+				agentType: 'claude-code',
+				prompt: 'summarize',
+				sessionSshRemoteConfig: {
+					enabled: true,
+					remoteId: 'my-remote',
+					workingDirOverride: '/home/testuser/project',
+				},
+				sshStore: createSshStore(),
+			},
+			mockPM,
+			detector
+		);
+
+		// The `cd` lives in the ssh invocation itself, not in the summarized
+		// remote command line.
+		const sshArgs = (mockPM._lastSpawnConfig!.args as string[]).join(' ');
+		expect(sshArgs).toContain('/home/testuser/project');
+		expect(sshArgs).not.toContain('/local/project');
+	});
+
+	it('sends large prompts to the remote via the stdin script', async () => {
+		const detector = createMockAgentDetector(agent);
+		const bigPrompt = 'x'.repeat(5000);
+
+		await groomContext(
+			{
+				projectRoot: '/project',
+				agentType: 'claude-code',
+				prompt: bigPrompt,
+				sessionSshRemoteConfig: { enabled: true, remoteId: 'my-remote' },
+				sshStore: createSshStore(),
+			},
+			mockPM,
+			detector
+		);
+
+		expect(String(mockPM._lastSpawnConfig!.sshStdinScript)).toContain(bigPrompt);
+	});
+
+	it('throws instead of running locally when the SSH remote cannot be resolved', async () => {
+		const detector = createMockAgentDetector(agent);
+
+		await expect(
+			groomContext(
+				{
+					projectRoot: '/project',
+					agentType: 'claude-code',
+					prompt: 'summarize',
+					sessionSshRemoteConfig: { enabled: true, remoteId: 'deleted-remote' },
+					sshStore: createSshStore(),
+				},
+				mockPM,
+				detector
+			)
+		).rejects.toThrow(/could not be resolved/);
+
+		expect(mockPM._lastSpawnConfig).toBeNull();
+	});
+
+	it('throws instead of running locally when no SSH store is provided', async () => {
+		const detector = createMockAgentDetector(agent);
+
+		await expect(
+			groomContext(
+				{
+					projectRoot: '/project',
+					agentType: 'claude-code',
+					prompt: 'summarize',
+					sessionSshRemoteConfig: { enabled: true, remoteId: 'my-remote' },
+				},
+				mockPM,
+				detector
+			)
+		).rejects.toThrow(/no SSH settings store/);
+
+		expect(mockPM._lastSpawnConfig).toBeNull();
+	});
+
+	it('spawns locally when the session SSH config is disabled', async () => {
+		const detector = createMockAgentDetector(agent);
+
+		await groomContext(
+			{
+				projectRoot: '/project',
+				agentType: 'claude-code',
+				prompt: 'summarize',
+				sessionSshRemoteConfig: { enabled: false, remoteId: 'my-remote' },
+				sshStore: createSshStore(),
+			},
+			mockPM,
+			detector
+		);
+
+		const config = mockPM._lastSpawnConfig!;
+		expect(config.command).toBe('/usr/local/bin/claude');
+		expect(config.prompt).toBe('summarize');
+		expect(config.sshStdinScript).toBeUndefined();
 	});
 
 	it('passes promptArgs and noPromptSeparator from agent config', async () => {
@@ -442,10 +706,10 @@ describe('groomContext', () => {
 	it('uses custom timeout when provided', async () => {
 		const detector = createMockAgentDetector(agent);
 
-		// Override spawn to never complete — the timeout will fire
+		// Override spawn to never complete - the timeout will fire
 		mockPM.spawn = vi.fn((config: Record<string, unknown>) => {
 			(mockPM as any)._lastSpawnConfig = config;
-			// Don't emit any events — will timeout
+			// Don't emit any events - will timeout
 			return { pid: 12345, success: true };
 		});
 

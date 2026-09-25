@@ -1,5 +1,5 @@
 /**
- * EdgePromptRow — Per-edge prompt editor for multi-trigger agent nodes.
+ * EdgePromptRow - Per-edge prompt editor for multi-trigger agent nodes.
  *
  * Shows trigger label, config summary, textarea with char count.
  * Debounces updates to avoid excessive pipeline state writes.
@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Theme } from '../../../types';
 import type { IncomingTriggerEdgeInfo } from './NodeConfigPanel';
 import { useDebouncedCallback } from '../../../hooks/utils';
+import { registerPendingEdit } from '../../../hooks/cue/pendingEditsRegistry';
 import { getInputStyle, getLabelStyle } from './triggers/triggerConfigStyles';
 
 interface EdgePromptRowProps {
@@ -33,9 +34,27 @@ export function EdgePromptRow({
 		setLocalPrompt(edgeInfo.prompt);
 	}, [edgeInfo.prompt]);
 
-	const { debouncedCallback: debouncedUpdate } = useDebouncedCallback((...args: unknown[]) => {
-		onUpdateEdgePrompt(edgeInfo.edgeId, args[0] as string);
-	}, 300);
+	const { debouncedCallback: debouncedUpdate, flush } = useDebouncedCallback(
+		(...args: unknown[]) => {
+			onUpdateEdgePrompt(edgeInfo.edgeId, args[0] as string);
+		},
+		300
+	);
+
+	// Flush pending writes on unmount so the last keystroke commits to THIS edge
+	// before the row tears down (row remount when agent selection changes).
+	// Also register with the pending-edits registry so `handleSave` flushes
+	// any in-flight edit before reading pipelineState - clicking Save within
+	// 300ms of a keystroke would otherwise persist the prior (stale) value.
+	useEffect(() => {
+		const unregister = registerPendingEdit(() => {
+			flush();
+		});
+		return () => {
+			flush();
+			unregister();
+		};
+	}, [flush]);
 
 	const handleChange = useCallback(
 		(e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -53,7 +72,7 @@ export function EdgePromptRow({
 	// - Collapsed mode: row uses INTRINSIC content height (flexShrink: 0, no
 	//   flex grow). The parent column in AgentConfigPanel sets overflowY: auto
 	//   so additional rows scroll instead of squeezing each other below their
-	//   min content size — that squeezing was what caused the bottom row's
+	//   min content size - that squeezing was what caused the bottom row's
 	//   title to visually overlap the textarea above it when 3+ triggers were
 	//   attached. Each row reserves a stable ~140px (label + textarea + count)
 	//   so the layout is predictable.

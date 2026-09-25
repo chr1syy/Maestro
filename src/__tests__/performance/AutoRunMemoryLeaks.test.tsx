@@ -16,7 +16,9 @@ import { AutoRun } from '../../renderer/components/AutoRun';
 import { LayerStackProvider } from '../../renderer/contexts/LayerStackContext';
 import { imageCache, useAutoRunImageHandling } from '../../renderer/hooks/useAutoRunImageHandling';
 import { useAutoRunUndo } from '../../renderer/hooks/useAutoRunUndo';
-import type { Theme, BatchRunState, SessionState } from '../../renderer/types';
+import type { BatchRunState, SessionState } from '../../renderer/types';
+
+import { createMockTheme } from '../helpers/mockTheme';
 
 // Helper to render with LayerStackProvider (required by AutoRunSearchBar)
 const renderWithProvider = (ui: React.ReactElement) => {
@@ -29,6 +31,13 @@ const renderWithProvider = (ui: React.ReactElement) => {
 };
 
 // Mock dependencies
+// CodeMirror cannot lay itself out in jsdom, so the Auto Run source editor is
+// swapped for the shared textarea double (it still implements the editor handle).
+vi.mock('../../renderer/components/FilePreview/markdownEditor', async () => {
+	const { markdownEditorModuleMock } = await import('../helpers/mockMarkdownEditor');
+	return markdownEditorModuleMock();
+});
+
 vi.mock('react-markdown', () => ({
 	default: ({ children }: { children: string }) => (
 		<div data-testid="react-markdown">{children}</div>
@@ -127,25 +136,6 @@ vi.mock('../../renderer/components/TemplateAutocompleteDropdown', () => ({
 }));
 
 // Helper to create mock theme
-const createMockTheme = (): Theme => ({
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgActivity: '#2d2d2d',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		highlight: '#0066ff33',
-		success: '#00aa00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-	},
-});
 
 // Setup window.maestro mock
 const setupMaestroMock = () => {
@@ -500,7 +490,6 @@ describe('AutoRun Memory Leak Detection', () => {
 					selectedFile: 'test-doc',
 					localContent: `![test-img.png](${relativePath})`,
 					setLocalContent: vi.fn(),
-					handleContentChange: vi.fn(),
 					isLocked: false,
 					textareaRef,
 					pushUndoState: vi.fn(),
@@ -539,7 +528,6 @@ describe('AutoRun Memory Leak Detection', () => {
 				selectedFile: 'doc1',
 				localContent: '',
 				setLocalContent: vi.fn(),
-				handleContentChange: vi.fn(),
 				isLocked: false,
 				textareaRef: textareaRef1,
 				pushUndoState: vi.fn(),
@@ -551,7 +539,6 @@ describe('AutoRun Memory Leak Detection', () => {
 				selectedFile: 'doc2',
 				localContent: '',
 				setLocalContent: vi.fn(),
-				handleContentChange: vi.fn(),
 				isLocked: false,
 				textareaRef: textareaRef2,
 				pushUndoState: vi.fn(),

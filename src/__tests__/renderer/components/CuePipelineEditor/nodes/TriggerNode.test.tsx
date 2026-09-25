@@ -84,14 +84,14 @@ describe('TriggerNode', () => {
 		expect(summarySpan).toHaveAttribute('title', longSummary);
 	});
 
-	it('should use minWidth and maxWidth instead of fixed width', () => {
+	it('should use minWidth and grow to fit content instead of fixed width', () => {
 		const { container } = renderTriggerNode();
 
 		const rootDiv = container.querySelector('div[style*="min-width: 220px"]') as HTMLElement;
 		expect(rootDiv).not.toBeNull();
-		expect(rootDiv.style.maxWidth).toBe('320px');
-		// Ensure no fixed width is set
-		expect(rootDiv.style.width).toBe('');
+		// Node grows to fit content rather than capping at a fixed maxWidth.
+		expect(rootDiv.style.width).toBe('max-content');
+		expect(rootDiv.style.maxWidth).toBe('');
 	});
 
 	it('should not render config summary when empty', () => {
@@ -236,6 +236,87 @@ describe('TriggerNode', () => {
 			const gearButton = container.querySelector('[title="Configure"]') as HTMLElement;
 			gearButton.click();
 			expect(onConfigure).toHaveBeenCalledWith('pipeline-1:trigger-0');
+		});
+
+		it("fires the trigger node's OWN subscription (chain sub), not the pipeline name, when clicked", () => {
+			// Regression: multi-trigger pipelines (e.g. startup + scheduled +
+			// GitHub PR all under "Pipeline 1") produce subscriptions named
+			// "Pipeline 1", "Pipeline 1-chain-1", "Pipeline 1-chain-2".
+			// Before this fix, every Play button sent "Pipeline 1" regardless
+			// of which trigger was clicked - chain triggers (including
+			// GitHub PR/Issue polls) were unreachable from the UI.
+			const onTriggerPipeline = vi.fn();
+			const { container } = renderTriggerNode({
+				onTriggerPipeline,
+				pipelineName: 'Pipeline 1',
+				subscriptionName: 'Pipeline 1-chain-2',
+				isSaved: true,
+			});
+
+			const playButton = container.querySelector('[title="Run now"]') as HTMLElement;
+			playButton.click();
+
+			expect(onTriggerPipeline).toHaveBeenCalledTimes(1);
+			expect(onTriggerPipeline).toHaveBeenCalledWith('Pipeline 1-chain-2');
+			expect(onTriggerPipeline).not.toHaveBeenCalledWith('Pipeline 1');
+		});
+
+		it('falls back to pipelineName when subscriptionName is missing (never-saved or legacy state)', () => {
+			// Defensive: single-trigger pipelines that predate the fix still
+			// work because subscriptionName defaults to the pipeline name.
+			const onTriggerPipeline = vi.fn();
+			const { container } = renderTriggerNode({
+				onTriggerPipeline,
+				pipelineName: 'legacy-pipeline',
+				isSaved: true,
+			});
+
+			const playButton = container.querySelector('[title="Run now"]') as HTMLElement;
+			playButton.click();
+
+			expect(onTriggerPipeline).toHaveBeenCalledWith('legacy-pipeline');
+		});
+
+		it('reserves the button footprint while hidden so Save cannot widen the node', () => {
+			// Regression: the node is `width: max-content`, so a Play button that
+			// only appears once the pipeline is saved grew the node by its own
+			// width, ate the gap to the first target node, and forced the edge
+			// router into hooks - clean lines before Save, tangled after.
+			const { container: unsaved } = renderTriggerNode({
+				onTriggerPipeline: vi.fn(),
+				pipelineName: 'my-pipeline',
+				isSaved: false,
+			});
+			const { container: saved } = renderTriggerNode({
+				onTriggerPipeline: vi.fn(),
+				pipelineName: 'my-pipeline',
+				isSaved: true,
+			});
+
+			const placeholder = unsaved.querySelector(
+				'[data-testid="trigger-play-placeholder"]'
+			) as HTMLElement;
+			const playButton = saved.querySelector('[title="Run now"]') as HTMLElement;
+			expect(placeholder).not.toBeNull();
+			expect(playButton).not.toBeNull();
+			expect(placeholder.style.width).toBe('22px');
+			expect(playButton.style.width).toBe(placeholder.style.width);
+			// The action row must contain the same number of children in both
+			// states, so the flex gap contributes identically too.
+			expect(placeholder.parentElement?.children.length).toBe(
+				playButton.parentElement?.children.length
+			);
+		});
+
+		it('aria-label uses the subscription name so screen readers announce the correct trigger', () => {
+			const { container } = renderTriggerNode({
+				onTriggerPipeline: vi.fn(),
+				pipelineName: 'Pipeline 1',
+				subscriptionName: 'Pipeline 1-chain-2',
+				isSaved: true,
+			});
+			const playButton = container.querySelector('[aria-label="Run Pipeline 1-chain-2"]');
+			expect(playButton).not.toBeNull();
 		});
 	});
 

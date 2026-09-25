@@ -8,69 +8,39 @@
  */
 
 import { ipcRenderer } from 'electron';
+import type {
+	QueryEvent,
+	AutoRunSession,
+	AutoRunTask,
+	SessionLifecycleEvent,
+	ShortcutUsageDay,
+	StatsAggregation,
+	StatsTimeRange,
+	ResilienceEvent,
+	WizardRun,
+	UsageExportFormat,
+	UsageExportResult,
+} from '../../shared/stats-types';
+export type {
+	QueryEvent,
+	AutoRunSession,
+	AutoRunTask,
+	ShortcutUsageDay,
+	StatsAggregation,
+} from '../../shared/stats-types';
+import type { TokenUsageQuery, TokenUsageAggregate } from '../../shared/tokenUsage';
+export type { TokenUsageQuery, TokenUsageAggregate } from '../../shared/tokenUsage';
+import type { DelegationDay, DelegationTotals } from '../../shared/delegation';
+export type { DelegationDay, DelegationTotals } from '../../shared/delegation';
 
 /**
- * Query event for recording
+ * Session lifecycle event for recording session creation.
+ * Subset of SessionLifecycleEvent from shared/stats-types.
  */
-export interface QueryEvent {
-	sessionId: string;
-	agentType: string;
-	source: 'user' | 'auto';
-	startTime: number;
-	duration: number;
-	projectPath?: string;
-	tabId?: string;
-	isRemote?: boolean;
-}
-
-/**
- * Auto Run session for recording
- */
-export interface AutoRunSession {
-	sessionId: string;
-	agentType: string;
-	documentPath?: string;
-	startTime: number;
-	tasksTotal?: number;
-	projectPath?: string;
-}
-
-/**
- * Auto Run task for recording
- */
-export interface AutoRunTask {
-	autoRunSessionId: string;
-	sessionId: string;
-	agentType: string;
-	taskIndex: number;
-	taskContent?: string;
-	startTime: number;
-	duration: number;
-	success: boolean;
-}
-
-/**
- * Session lifecycle event
- */
-export interface SessionCreatedEvent {
-	sessionId: string;
-	agentType: string;
-	projectPath?: string;
-	createdAt: number;
-	isRemote?: boolean;
-}
-
-/**
- * Aggregation result
- */
-export interface StatsAggregation {
-	totalQueries: number;
-	totalDuration: number;
-	avgDuration: number;
-	byAgent: Record<string, { count: number; duration: number }>;
-	bySource: { user: number; auto: number };
-	byDay: Array<{ date: string; count: number; duration: number }>;
-}
+export type SessionCreatedEvent = Pick<
+	SessionLifecycleEvent,
+	'sessionId' | 'agentType' | 'projectPath' | 'createdAt' | 'isRemote' | 'isWorktree'
+>;
 
 /**
  * Creates the Stats API object for preload exposure
@@ -154,9 +124,29 @@ export function createStatsApi() {
 			range: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'all'
 		): Promise<StatsAggregation> => ipcRenderer.invoke('stats:get-aggregation', range),
 
-		// Export query events to CSV
-		exportCsv: (range: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'all'): Promise<string> =>
-			ipcRenderer.invoke('stats:export-csv', range),
+		// Interactive vs autonomous (Auto Run + Cue) totals. Merges the stats DB
+		// and the Cue DB in the main process; defaults to all retained history,
+		// which is what the lifetime delegation score reads.
+		getDelegationTotals: (range: StatsTimeRange = 'all'): Promise<DelegationTotals> =>
+			ipcRenderer.invoke('stats:get-delegation-totals', range),
+
+		// The same split bucketed by local-time day. Days with no activity are
+		// omitted; the caller zero-fills.
+		getDelegationByDay: (range: StatsTimeRange = 'all'): Promise<DelegationDay[]> =>
+			ipcRenderer.invoke('stats:get-delegation-by-day', range),
+
+		// Token & cost usage aggregate (Cost & Tokens tab). Reads agent session
+		// storage; `force` bypasses the accessor's in-memory memo for a refresh.
+		getTokenUsage: (query: TokenUsageQuery = {}, force = false): Promise<TokenUsageAggregate> =>
+			ipcRenderer.invoke('stats:get-token-usage', query, force),
+
+		// Export every stats table for a range to `filePath`: one JSON file, or a
+		// zip with one CSV per table. Main writes the file.
+		exportUsage: (
+			range: StatsTimeRange,
+			format: UsageExportFormat,
+			filePath: string
+		): Promise<UsageExportResult> => ipcRenderer.invoke('stats:export', range, format, filePath),
 
 		// Subscribe to stats updates (for real-time dashboard refresh)
 		onStatsUpdate: (callback: () => void) => {
@@ -183,7 +173,40 @@ export function createStatsApi() {
 		getEarliestTimestamp: (): Promise<number | null> =>
 			ipcRenderer.invoke('stats:get-earliest-timestamp'),
 
+		// Record a keyboard shortcut firing. The main process buckets `firedAt`
+		// into a local-time day and increments that day's counter. Resolves to
+		// the YYYY-MM-DD bucket, or null when stats collection is disabled.
+		recordShortcutUsage: (firedAt: number): Promise<string | null> =>
+			ipcRenderer.invoke('stats:record-shortcut-usage', firedAt),
+
+		// Get per-day shortcut usage counts within a time range. Days with no
+		// activity are omitted; the renderer is responsible for zero-filling.
+		getShortcutUsageByDay: (range: StatsTimeRange): Promise<ShortcutUsageDay[]> =>
+			ipcRenderer.invoke('stats:get-shortcut-usage-by-day', range),
+
+		// Get the total number of shortcut firings in a time range
+		getShortcutUsageTotal: (range: StatsTimeRange): Promise<number> =>
+			ipcRenderer.invoke('stats:get-shortcut-usage-total', range),
+
+		// Record an image annotation save event
+		recordImageAnnotation: (createdAt: number): Promise<string | null> =>
+			ipcRenderer.invoke('stats:record-image-annotation', createdAt),
+
 		// Record session creation (for lifecycle tracking)
+		recordResilience: (event: ResilienceEvent): Promise<string | null> =>
+			ipcRenderer.invoke('stats:record-resilience', event),
+
+		getResilience: (range: StatsTimeRange): Promise<ResilienceEvent[]> =>
+			ipcRenderer.invoke('stats:get-resilience', range),
+
+		// Upsert one Auto Run wizard run (idempotent on run.id) - called at each
+		// milestone of a wizard conversation, not just at the end.
+		recordWizardRun: (run: WizardRun): Promise<string | null> =>
+			ipcRenderer.invoke('stats:record-wizard-run', run),
+
+		getWizardRuns: (range: StatsTimeRange): Promise<WizardRun[]> =>
+			ipcRenderer.invoke('stats:get-wizard-runs', range),
+
 		recordSessionCreated: (event: SessionCreatedEvent): Promise<string | null> =>
 			ipcRenderer.invoke('stats:record-session-created', event),
 

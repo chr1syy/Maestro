@@ -1,5 +1,5 @@
 /**
- * Tests for shared/agentIds.ts — Single Source of Truth for Agent IDs
+ * Tests for shared/agentIds.ts - Single Source of Truth for Agent IDs
  */
 
 import { describe, it, expect } from 'vitest';
@@ -18,13 +18,19 @@ describe('agentIds', () => {
 			expect(AGENT_IDS).toContain('codex');
 			expect(AGENT_IDS).toContain('opencode');
 			expect(AGENT_IDS).toContain('factory-droid');
+			expect(AGENT_IDS).toContain('hermes');
+			expect(AGENT_IDS).toContain('pi');
 			expect(AGENT_IDS).toContain('terminal');
 		});
 
 		it('should contain placeholder agents', () => {
 			expect(AGENT_IDS).toContain('gemini-cli');
 			expect(AGENT_IDS).toContain('qwen3-coder');
-			expect(AGENT_IDS).toContain('aider');
+		});
+
+		it('should contain beta agents', () => {
+			expect(AGENT_IDS).toContain('copilot-cli');
+			expect(AGENT_IDS).toContain('omp');
 		});
 
 		it('should have no duplicates', () => {

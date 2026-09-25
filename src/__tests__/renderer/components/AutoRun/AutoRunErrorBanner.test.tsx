@@ -1,29 +1,10 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
+import { createMockTheme } from '../../../helpers/mockTheme';
 import {
 	AutoRunErrorBanner,
 	AutoRunErrorBannerProps,
 } from '../../../../renderer/components/AutoRun/AutoRunErrorBanner';
-
-const createMockTheme = () => ({
-	id: 'test',
-	name: 'Test',
-	mode: 'dark' as const,
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgActivity: '#2d2d2d',
-		textMain: '#fff',
-		textDim: '#888',
-		accent: '#0066ff',
-		accentForeground: '#fff',
-		border: '#333',
-		highlight: '#0066ff33',
-		success: '#0a0',
-		warning: '#fa0',
-		error: '#f00',
-	},
-});
 
 const defaultProps: AutoRunErrorBannerProps = {
 	theme: createMockTheme() as any,
@@ -94,5 +75,13 @@ describe('AutoRunErrorBanner', () => {
 		renderBanner({ onAbortBatchOnError: onAbort });
 		fireEvent.click(screen.getByText('Abort Run'));
 		expect(onAbort).toHaveBeenCalledTimes(1);
+	});
+
+	it('labels Resume as "Done, Resume" on a human-in-the-loop gate', () => {
+		const onResume = vi.fn();
+		renderBanner({ isRecoverable: true, isHumanGate: true, onResumeAfterError: onResume });
+		fireEvent.click(screen.getByText('Done, Resume'));
+		expect(onResume).toHaveBeenCalledTimes(1);
+		expect(screen.queryByText('Resume')).not.toBeInTheDocument();
 	});
 });

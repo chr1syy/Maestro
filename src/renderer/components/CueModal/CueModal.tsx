@@ -1,40 +1,55 @@
 /**
- * CueModal — Main modal for Maestro Cue dashboard and pipeline editor.
+ * CueModal - Main modal for Maestro Cue dashboard and pipeline editor.
  *
- * Thin shell: tab switching, master toggle, help overlay, layer stack,
- * unsaved changes confirmation. Sub-components handle dashboard sections.
+ * Thin shell: layer stack, tab switching, help overlay, unsaved changes
+ * confirmation. Delegates:
+ *   - Graph data fetch + refresh → useCueGraphData
+ *   - Master toggle state + handler → useCueToggle
+ *   - Header chrome → CueModalHeader
+ *   - Dashboard sections → CueDashboard
+ *   - Pipeline tab → CuePipelineEditor (with Fix #3 save-refresh wiring)
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import {
-	X,
-	Zap,
-	HelpCircle,
-	LayoutDashboard,
-	GitFork,
-	ArrowLeft,
-	AlertTriangle,
-} from 'lucide-react';
 import type { Theme } from '../../types';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { useCue } from '../../hooks/useCue';
 import type { CueSessionStatus } from '../../hooks/useCue';
-import { CueHelpContent } from '../CueHelpModal';
+import { CueHelpModal } from '../CueHelpModal';
 import { CuePipelineEditor } from '../CuePipelineEditor';
+import type { CueGraphTarget } from '../CuePipelineEditor/CuePipelineEditor';
+import { pipelinesForSession } from '../CuePipelineEditor/utils/pipelineMembership';
+import { generateId } from '../../utils/ids';
 import { useSessionStore } from '../../stores/sessionStore';
 import { getModalActions, useModalStore, selectModalData } from '../../stores/modalStore';
-import { CUE_COLOR, type CueGraphSession } from '../../../shared/cue-pipeline-types';
-import { graphSessionsToPipelines } from '../CuePipelineEditor/utils/yamlToPipeline';
-import { SessionsTable } from './SessionsTable';
-import { ActiveRunsList } from './ActiveRunsList';
-import { ActivityLog } from './ActivityLog';
-import { buildSubscriptionPipelineMap } from './cueModalUtils';
 import { notifyToast } from '../../stores/notificationStore';
 import { captureException } from '../../utils/sentry';
+import { cueService } from '../../services/cue';
+import { useCueDirtyStore } from '../../stores/cueDirtyStore';
+import { useCueGraphData } from '../../hooks/cue/useCueGraphData';
+import { useCueToggle } from '../../hooks/cue/useCueToggle';
+import { CueModalHeader, type CueModalTab } from './CueModalHeader';
+import { CueDashboard } from './CueDashboard';
+import { ActivityLog } from './ActivityLog';
+import { PipelineListTab } from './PipelineListTab';
+import { ScheduledTasksTab } from './ScheduledTasksTab';
+import { BackupTab } from './BackupTab';
+import { ResizeHandles } from '../ui/ResizeHandles';
 
-type CueModalTab = 'dashboard' | 'pipeline';
+// In-memory only - last tab the user was on. Reopening the modal lands here
+// instead of snapping back to Dashboard, matching how the Settings modal
+// behaves. Resets on app restart by design, and an explicit `initialTab`
+// (a deep link, `maestro-cli open cue --tab ...`) always wins over it.
+let lastOpenCueTab: CueModalTab | null = null;
+
+/** Test-only: clear the remembered tab so suites that assume a fresh open
+ *  aren't polluted by a prior test in the same file. */
+export function __resetLastOpenCueTabForTests(): void {
+	lastOpenCueTab = null;
+}
 
 export interface CueModalProps {
 	theme: Theme;
@@ -43,8 +58,6 @@ export interface CueModalProps {
 }
 
 export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
-	const { registerLayer, unregisterLayer } = useLayerStack();
-	const layerIdRef = useRef<string>();
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
 
@@ -53,6 +66,7 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 		activeRuns,
 		activityLog,
 		queueStatus,
+		eventCount,
 		loading,
 		error,
 		enable,
@@ -79,7 +93,14 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 		[allSessions]
 	);
 
-	const [graphSessions, setGraphSessions] = useState<CueGraphSession[]>([]);
+	// Agents that can own a scheduled task. Terminal agents are excluded: they
+	// have no AI turn to send a prompt into.
+	const activeSessionId = useSessionStore((state) => state.activeSessionId);
+	const scheduledTaskAgents = useMemo(
+		() =>
+			allSessions.filter((s) => s.toolType !== 'terminal').map((s) => ({ id: s.id, name: s.name })),
+		[allSessions]
+	);
 
 	const handleSwitchToSession = useCallback(
 		(id: string) => {
@@ -90,120 +111,122 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 	);
 
 	const isEnabled = sessions.some((s) => s.enabled);
-	const [toggling, setToggling] = useState(false);
-
-	const handleToggle = useCallback(async () => {
-		if (toggling) return;
-		setToggling(true);
-		try {
-			if (isEnabled) {
-				await disable();
-			} else {
-				await enable();
-			}
-		} catch (err) {
-			notifyToast({
-				type: 'error',
-				title: 'Cue',
-				message:
-					err instanceof Error
-						? err.message
-						: isEnabled
-							? 'Failed to disable Cue engine'
-							: 'Failed to enable Cue engine',
-			});
-		} finally {
-			setToggling(false);
-		}
-	}, [isEnabled, enable, disable, toggling]);
-
-	// Register layer on mount
-	useEffect(() => {
-		const id = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.CUE_MODAL,
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			onEscape: () => {
-				if (showHelpRef.current) {
-					setShowHelp(false);
-					return;
-				}
-				if (pipelineDirtyRef.current) {
-					getModalActions().showConfirmation(
-						'You have unsaved changes in the pipeline editor. Discard and close?',
-						() => onCloseRef.current()
-					);
-					return;
-				}
-				onCloseRef.current();
-			},
-		});
-		layerIdRef.current = id;
-
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [registerLayer, unregisterLayer]);
-
-	// Read initial tab from modal data (e.g., when navigating from YAML editor)
-	const cueModalData = useModalStore(selectModalData('cueModal'));
-	const [activeTab, setActiveTab] = useState<CueModalTab>(cueModalData?.initialTab ?? 'pipeline');
-
-	// Graph data fetch error state
-	const [graphError, setGraphError] = useState<string | null>(null);
-
-	// Fetch graph data on mount and when tab changes (needed for both dashboard and pipeline tabs)
-	useEffect(() => {
-		let cancelled = false;
-		setGraphError(null);
-		window.maestro.cue
-			.getGraphData()
-			.then((data: CueGraphSession[]) => {
-				if (!cancelled) setGraphSessions(data);
-			})
-			.catch((err: unknown) => {
-				if (!cancelled) {
-					setGraphError(err instanceof Error ? err.message : 'Failed to load graph data');
-				}
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, [activeTab]);
-
-	// Compute pipelines from graph sessions for dashboard pipeline info
-	const dashboardPipelines = useMemo(() => {
-		if (graphSessions.length === 0) return [];
-		return graphSessionsToPipelines(graphSessions, sessionInfoList);
-	}, [graphSessions, sessionInfoList]);
-
-	// Build subscription-to-pipeline lookup map
-	const subscriptionPipelineMap = useMemo(
-		() => buildSubscriptionPipelineMap(dashboardPipelines),
-		[dashboardPipelines]
-	);
+	const { toggling, handleToggle } = useCueToggle({ isEnabled, enable, disable });
 
 	// Help modal state
 	const [showHelp, setShowHelp] = useState(false);
 	const showHelpRef = useRef(false);
 	showHelpRef.current = showHelp;
 
-	// Pipeline dirty state (unsaved changes)
-	const [pipelineDirty, setPipelineDirty] = useState(false);
-	const pipelineDirtyRef = useRef(false);
-	pipelineDirtyRef.current = pipelineDirty;
+	// Activity Log search state - lifted here so the modal layer escape handler
+	// can clear it before the layer stack closes the modal.
+	const [activitySearchQuery, setActivitySearchQuery] = useState('');
+	const activitySearchInputRef = useRef<HTMLInputElement>(null);
+	const activitySearchQueryRef = useRef(activitySearchQuery);
+	activitySearchQueryRef.current = activitySearchQuery;
+
+	useModalLayer(MODAL_PRIORITIES.CUE_MODAL, undefined, () => {
+		// The help guide registers its own layer above this one (CUE_HELP), so
+		// Escape while the guide is open is handled there - it never reaches here.
+		// If Activity Log search is focused with text, clear it instead of closing.
+		// First Escape clears, second Escape (now with empty input) closes the modal.
+		if (
+			document.activeElement === activitySearchInputRef.current &&
+			activitySearchQueryRef.current.length > 0
+		) {
+			setActivitySearchQuery('');
+			return;
+		}
+		// Skip the dirty-changes confirmation when a save is already in flight -
+		// the save promise lives in the persistence hook and continues running
+		// after CueModal unmounts (it toasts success/failure when it lands).
+		// Forcing the user to wait or discard would defeat the whole point of
+		// being able to close mid-save.
+		const cueDirtyState = useCueDirtyStore.getState();
+		if (cueDirtyState.pipelineDirty && !cueDirtyState.pipelineSaving) {
+			getModalActions().showConfirmation(
+				'You have unsaved changes in the pipeline editor. Discard and close?',
+				() => onCloseRef.current()
+			);
+			return;
+		}
+		onCloseRef.current();
+	});
+
+	// Read initial tab from modal data (e.g., when navigating from YAML editor)
+	// Resolved once in the lazy initializer rather than via a restore effect:
+	// under StrictMode a restore-via-effect double-fires and clobbers the
+	// remembered value with the default before it lands.
+	const cueModalData = useModalStore(selectModalData('cueModal'));
+	const [activeTab, setActiveTab] = useState<CueModalTab>(
+		() => cueModalData?.initialTab ?? lastOpenCueTab ?? 'dashboard'
+	);
+
+	// Remember the tab for the next open.
+	useEffect(() => {
+		lastOpenCueTab = activeTab;
+	}, [activeTab]);
+
+	// Graph data (owned by hook: fetch on mount + tab change, cancellation race guard, refreshGraphData)
+	const {
+		graphSessions,
+		graphError,
+		initialLoading: graphInitialLoading,
+		dashboardPipelines,
+		subscriptionPipelineMap,
+		refreshGraphData,
+	} = useCueGraphData({ activeTab, sessionInfoList });
+
+	// Reset pipeline dirty state when the modal unmounts
+	useEffect(() => {
+		return () => {
+			useCueDirtyStore.getState().resetAll();
+		};
+	}, []);
 
 	const handleEditYaml = useCallback((session: CueSessionStatus) => {
 		getModalActions().openCueYamlEditor(session.sessionId, session.projectRoot);
 	}, []);
 
-	const handleViewInPipeline = useCallback((_session: CueSessionStatus) => {
+	const [pendingGraphTarget, setPendingGraphTarget] = useState<CueGraphTarget | null>(null);
+
+	// Jump to the graph tab with a specific pipeline pre-selected. The nonce is
+	// what lets the editor re-apply the same target on a repeat click.
+	const handleViewInGraph = useCallback((pipelineId: string | null) => {
+		setPendingGraphTarget({ id: pipelineId, nonce: generateId() });
 		setActiveTab('pipeline');
 	}, []);
+
+	const handleViewInGraphFromSession = useCallback(
+		(session: CueSessionStatus) => {
+			// Resolve by session membership, not by color: several pipelines can
+			// share a color, and a command-only pipeline has no agent node to
+			// match at all. `pipelinesForSession` covers both, plus pipelines the
+			// agent declares in its cue.yaml without appearing in.
+			const owned = pipelinesForSession(session.sessionId, dashboardPipelines, graphSessions);
+			if (owned.length === 1) {
+				handleViewInGraph(owned[0].id);
+				return;
+			}
+			// More than one: stay in the All Pipelines view but scope it to this
+			// agent's pipelines, so the user sees their fleet instead of everyone's.
+			// Zero: no scope to apply - fall through to the unfiltered view.
+			setPendingGraphTarget({
+				id: null,
+				nonce: generateId(),
+				scope:
+					owned.length > 1
+						? {
+								sessionId: session.sessionId,
+								sessionName: session.sessionName,
+								pipelineIds: owned.map((p) => p.id),
+							}
+						: undefined,
+			});
+			setActiveTab('pipeline');
+		},
+		[dashboardPipelines, graphSessions, handleViewInGraph]
+	);
 
 	const handleRemoveCue = useCallback(
 		(session: CueSessionStatus) => {
@@ -211,7 +234,7 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 				`Remove Cue configuration for "${session.sessionName}"?\n\nThis will delete the cue.yaml file from this project. This cannot be undone.`,
 				async () => {
 					try {
-						await window.maestro.cue.deleteYaml(session.projectRoot);
+						await cueService.deleteYaml(session.projectRoot);
 					} catch (err) {
 						captureException(err, {
 							extra: { context: 'handleRemoveCue', projectRoot: session.projectRoot },
@@ -241,9 +264,11 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 		[refresh]
 	);
 
-	// Close with unsaved changes confirmation
+	// Close with unsaved changes confirmation. A save in flight bypasses the
+	// confirmation (see escape handler above for the rationale).
 	const handleCloseWithConfirm = useCallback(() => {
-		if (pipelineDirtyRef.current) {
+		const cueDirtyState = useCueDirtyStore.getState();
+		if (cueDirtyState.pipelineDirty && !cueDirtyState.pipelineSaving) {
 			getModalActions().showConfirmation(
 				'You have unsaved changes in the pipeline editor. Discard and close?',
 				() => onClose()
@@ -255,6 +280,55 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 
 	// Active runs section is collapsible when empty
 	const [activeRunsExpanded, setActiveRunsExpanded] = useState(true);
+
+	// Wrap tab switching so navigating away from the pipeline tab clears the
+	// pending selection token - prevents a stale nonce from re-snapping the editor
+	// to the "View in Graph" target on the next remount.
+	const handleSetActiveTab = useCallback((tab: CueModalTab) => {
+		if (tab !== 'pipeline') setPendingGraphTarget(null);
+		setActiveTab(tab);
+	}, []);
+
+	// Cmd/Ctrl+Shift+[/] cycles between tabs. Disabled while help is open
+	// so the help view's keyboard handlers stay in charge.
+	const tabsRef = useRef<readonly CueModalTab[]>([
+		'dashboard',
+		'scheduled',
+		'pipeline',
+		'pipeline-list',
+		'activity',
+		'backup',
+	]);
+	useEffect(() => {
+		const handleTabCycle = (e: KeyboardEvent) => {
+			if (showHelpRef.current) return;
+			if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
+			if (e.key !== '[' && e.key !== ']') return;
+			e.preventDefault();
+			const tabs = tabsRef.current;
+			const currentIndex = tabs.indexOf(activeTab);
+			const delta = e.key === '[' ? -1 : 1;
+			const newIndex = (currentIndex + delta + tabs.length) % tabs.length;
+			handleSetActiveTab(tabs[newIndex]);
+		};
+		window.addEventListener('keydown', handleTabCycle);
+		return () => window.removeEventListener('keydown', handleTabCycle);
+	}, [activeTab, handleSetActiveTab]);
+
+	const handleOpenHelp = useCallback(() => setShowHelp(true), []);
+	const handleCloseHelp = useCallback(() => setShowHelp(false), []);
+
+	// Retry re-fetches both streams so a transient graph-fetch failure and a
+	// main Cue status failure both clear on one click.
+	const handleRetry = useCallback(() => {
+		refresh();
+		refreshGraphData();
+	}, [refresh, refreshGraphData]);
+	const resizableModal = useResizableModal({
+		resizeKey: 'cue',
+		defaultSize: { width: 1200, height: 760 },
+		minSize: { width: 760, height: 520 },
+	});
 
 	return (
 		<>
@@ -271,259 +345,99 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 
 					{/* Modal */}
 					<div
-						className="relative rounded-xl shadow-2xl flex flex-col"
+						ref={resizableModal.modalRef}
+						role="dialog"
+						aria-modal="true"
+						aria-label="Maestro Cue"
+						className="relative rounded-xl shadow-2xl flex flex-col select-none"
 						style={{
-							width: '80vw',
-							maxWidth: 1400,
-							height: '85vh',
-							maxHeight: 900,
+							...resizableModal.style,
 							backgroundColor: theme.colors.bgMain,
 							border: `1px solid ${theme.colors.border}`,
 						}}
+						data-modal-resize-key="cue"
 					>
-						{/* Header */}
-						<div
-							className="flex items-center justify-between px-5 py-4 border-b shrink-0"
-							style={{ borderColor: theme.colors.border }}
-						>
-							<div className="flex items-center gap-3">
-								{showHelp ? (
-									<>
-										<button
-											onClick={() => setShowHelp(false)}
-											className="p-1 rounded-md hover:bg-white/10 transition-colors"
-											style={{ color: theme.colors.textDim }}
-											title="Back to dashboard"
-										>
-											<ArrowLeft className="w-4 h-4" />
-										</button>
-										<Zap className="w-5 h-5" style={{ color: CUE_COLOR }} />
-										<h2 className="text-base font-bold" style={{ color: theme.colors.textMain }}>
-											Maestro Cue Guide
-										</h2>
-									</>
-								) : (
-									<>
-										<Zap className="w-5 h-5" style={{ color: CUE_COLOR }} />
-										<h2 className="text-base font-bold" style={{ color: theme.colors.textMain }}>
-											Maestro Cue
-										</h2>
+						<ResizeHandles
+							onResizeStart={resizableModal.onResizeStart}
+							accentColor={theme.colors.accent}
+							onResetSize={resizableModal.onResetSize}
+							canReset={resizableModal.canReset}
+						/>
 
-										{/* Tab bar */}
-										<div
-											className="flex items-center gap-1 ml-3 rounded-md p-0.5"
-											style={{ backgroundColor: theme.colors.bgActivity }}
-										>
-											<button
-												onClick={() => setActiveTab('dashboard')}
-												className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors"
-												style={{
-													backgroundColor:
-														activeTab === 'dashboard' ? theme.colors.bgMain : 'transparent',
-													color:
-														activeTab === 'dashboard'
-															? theme.colors.textMain
-															: theme.colors.textDim,
-												}}
-											>
-												<LayoutDashboard className="w-3.5 h-3.5" />
-												Dashboard
-											</button>
-											<button
-												onClick={() => setActiveTab('pipeline')}
-												className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors"
-												style={{
-													backgroundColor:
-														activeTab === 'pipeline' ? theme.colors.bgMain : 'transparent',
-													color:
-														activeTab === 'pipeline' ? theme.colors.textMain : theme.colors.textDim,
-												}}
-											>
-												<GitFork className="w-3.5 h-3.5" />
-												Pipeline Editor
-											</button>
-										</div>
-									</>
-								)}
-							</div>
-							<div className="flex items-center gap-3">
-								{!showHelp && (
-									<>
-										{/* Master toggle */}
-										<button
-											onClick={handleToggle}
-											disabled={toggling}
-											className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50"
-											style={{
-												backgroundColor: isEnabled
-													? `${theme.colors.accent}20`
-													: theme.colors.bgActivity,
-												color: isEnabled ? theme.colors.accent : theme.colors.textDim,
-											}}
-										>
-											<div
-												className="relative w-8 h-4 rounded-full transition-colors"
-												style={{
-													backgroundColor: isEnabled ? theme.colors.accent : theme.colors.border,
-												}}
-											>
-												<div
-													className="absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform"
-													style={{
-														transform: isEnabled ? 'translateX(17px)' : 'translateX(2px)',
-													}}
-												/>
-											</div>
-											{isEnabled ? 'Enabled' : 'Disabled'}
-										</button>
-
-										{/* Help button */}
-										<button
-											onClick={() => setShowHelp(true)}
-											className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
-											title="Help"
-											style={{ color: theme.colors.textDim }}
-										>
-											<HelpCircle className="w-4 h-4" />
-										</button>
-									</>
-								)}
-
-								{/* Close button */}
-								<button
-									onClick={handleCloseWithConfirm}
-									className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
-									style={{ color: theme.colors.textDim }}
-								>
-									<X className="w-4 h-4" />
-								</button>
-							</div>
-						</div>
+						<CueModalHeader
+							theme={theme}
+							activeTab={activeTab}
+							setActiveTab={handleSetActiveTab}
+							isEnabled={isEnabled}
+							toggling={toggling}
+							handleToggle={handleToggle}
+							onOpenHelp={handleOpenHelp}
+							onClose={handleCloseWithConfirm}
+						/>
 
 						{/* Body */}
-						{showHelp ? (
-							<div className="flex-1 overflow-y-auto px-5 py-4">
-								<CueHelpContent theme={theme} cueShortcutKeys={cueShortcutKeys} />
-							</div>
-						) : activeTab === 'dashboard' ? (
+						{activeTab === 'dashboard' ? (
 							<div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-								{loading ? (
-									<div
-										className="text-center py-12 text-sm"
-										style={{ color: theme.colors.textDim }}
-									>
-										Loading Cue status...
-									</div>
-								) : (
-									<>
-										{(error || graphError) && (
-											<div
-												className="flex items-center gap-2 px-3 py-2 rounded-md text-xs"
-												style={{
-													backgroundColor: `${theme.colors.error}15`,
-													border: `1px solid ${theme.colors.error}40`,
-													color: theme.colors.error,
-												}}
-											>
-												<AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
-												<span className="flex-1">{error || graphError}</span>
-												<button
-													onClick={refresh}
-													className="px-2 py-0.5 rounded text-xs hover:opacity-80"
-													style={{ color: theme.colors.textMain }}
-												>
-													Retry
-												</button>
-											</div>
-										)}
-
-										{/* Section 1: Sessions with Cue */}
-										<div>
-											<h3
-												className="text-xs font-bold uppercase tracking-wider mb-3"
-												style={{ color: theme.colors.textDim }}
-											>
-												Sessions with Cue
-											</h3>
-											<SessionsTable
-												sessions={sessions}
-												theme={theme}
-												onViewInPipeline={handleViewInPipeline}
-												onEditYaml={handleEditYaml}
-												onRemoveCue={handleRemoveCue}
-												onTriggerSubscription={triggerSubscription}
-												queueStatus={queueStatus}
-												pipelines={dashboardPipelines}
-												graphSessions={graphSessions}
-											/>
-										</div>
-
-										{/* Section 2: Active Runs */}
-										<div>
-											<button
-												onClick={() => setActiveRunsExpanded(!activeRunsExpanded)}
-												className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider mb-3 hover:opacity-80 transition-opacity"
-												style={{ color: theme.colors.textDim }}
-											>
-												Active Runs
-												{activeRuns.length > 0 && (
-													<span
-														className="px-1.5 py-0.5 rounded-full text-[10px] font-bold"
-														style={{
-															backgroundColor: CUE_COLOR,
-															color: '#fff',
-														}}
-													>
-														{activeRuns.length}
-													</span>
-												)}
-												{activeRuns.length > 0 && sessions.some((s) => s.activeRuns > 0) && (
-													<span
-														className="text-[10px] font-normal normal-case tracking-normal"
-														style={{ color: theme.colors.textDim }}
-													>
-														{sessions
-															.filter((s) => s.activeRuns > 0)
-															.map(
-																(s) =>
-																	`${s.sessionName}: ${s.activeRuns} slot${s.activeRuns !== 1 ? 's' : ''} used`
-															)
-															.join(' · ')}
-													</span>
-												)}
-											</button>
-											{activeRunsExpanded && (
-												<ActiveRunsList
-													runs={activeRuns}
-													theme={theme}
-													onStopRun={stopRun}
-													onStopAll={stopAll}
-													subscriptionPipelineMap={subscriptionPipelineMap}
-												/>
-											)}
-										</div>
-
-										{/* Section 3: Activity Log */}
-										<div>
-											<h3
-												className="text-xs font-bold uppercase tracking-wider mb-3"
-												style={{ color: theme.colors.textDim }}
-											>
-												Activity Log
-											</h3>
-											<div
-												className="max-h-96 overflow-y-auto rounded-md px-3 py-2"
-												style={{ backgroundColor: theme.colors.bgActivity }}
-											>
-												<ActivityLog
-													log={activityLog}
-													theme={theme}
-													subscriptionPipelineMap={subscriptionPipelineMap}
-												/>
-											</div>
-										</div>
-									</>
-								)}
+								<CueDashboard
+									theme={theme}
+									loading={loading}
+									error={error}
+									graphError={graphError}
+									onRetry={handleRetry}
+									sessions={sessions}
+									activeRuns={activeRuns}
+									activityLog={activityLog}
+									queueStatus={queueStatus}
+									graphSessions={graphSessions}
+									dashboardPipelines={dashboardPipelines}
+									subscriptionPipelineMap={subscriptionPipelineMap}
+									executionCount={eventCount}
+									activeRunsExpanded={activeRunsExpanded}
+									setActiveRunsExpanded={setActiveRunsExpanded}
+									onViewInGraph={handleViewInGraphFromSession}
+									onEditYaml={handleEditYaml}
+									onRemoveCue={handleRemoveCue}
+									onTriggerSubscription={triggerSubscription}
+									onStopRun={stopRun}
+									onStopAll={stopAll}
+									focusSessionId={cueModalData?.focusSessionId}
+								/>
+							</div>
+						) : activeTab === 'scheduled' ? (
+							<ScheduledTasksTab
+								theme={theme}
+								active
+								agents={scheduledTaskAgents}
+								defaultAgentId={activeSessionId ?? undefined}
+							/>
+						) : activeTab === 'pipeline-list' ? (
+							<PipelineListTab
+								theme={theme}
+								pipelines={dashboardPipelines}
+								graphSessions={graphSessions}
+								activeRuns={activeRuns}
+								activityLog={activityLog}
+								loading={loading || graphInitialLoading}
+								error={error || graphError}
+								onRetry={handleRetry}
+								onViewInGraph={handleViewInGraph}
+								onTriggerSubscription={triggerSubscription}
+								onRenamed={handleRetry}
+							/>
+						) : activeTab === 'activity' ? (
+							<div className="flex-1 min-h-0 px-5 py-4 select-text">
+								<ActivityLog
+									log={activityLog}
+									theme={theme}
+									subscriptionPipelineMap={subscriptionPipelineMap}
+									searchQuery={activitySearchQuery}
+									setSearchQuery={setActivitySearchQuery}
+									searchInputRef={activitySearchInputRef}
+								/>
+							</div>
+						) : activeTab === 'backup' ? (
+							<div className="flex-1 min-h-0 flex flex-col">
+								<BackupTab theme={theme} />
 							</div>
 						) : (
 							<CuePipelineEditor
@@ -532,15 +446,21 @@ export function CueModal({ theme, onClose, cueShortcutKeys }: CueModalProps) {
 								graphSessions={graphSessions}
 								onSwitchToSession={handleSwitchToSession}
 								onClose={onClose}
-								onDirtyChange={setPipelineDirty}
 								theme={theme}
 								activeRuns={activeRuns}
 								onTriggerPipeline={triggerSubscription}
+								onSaveSuccess={refreshGraphData}
+								initialGraphTarget={pendingGraphTarget ?? undefined}
+								graphLoading={graphInitialLoading}
 							/>
 						)}
 					</div>
 				</div>,
 				document.body
+			)}
+
+			{showHelp && (
+				<CueHelpModal theme={theme} onClose={handleCloseHelp} cueShortcutKeys={cueShortcutKeys} />
 			)}
 		</>
 	);

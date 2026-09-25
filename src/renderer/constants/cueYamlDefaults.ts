@@ -29,13 +29,25 @@ export const CUE_YAML_TEMPLATE = `# .maestro/cue.yaml
 #   - name: "review new PRs"
 #     event: github.pull_request
 #     poll_minutes: 5
-#     prompt: prompts/pr-review.md
+#     # retrigger_on_comments: true   # re-fire when a PR receives new activity
+#     # max_notifications: 10         # per-PR cap on re-fires (0 = unlimited)
+#     prompt: prompts/pr-review.md    # reference {{CUE_NEW_COMMENTS}} for comment context
 #     enabled: true
 #
 #   - name: "triage issues"
 #     event: github.issue
 #     poll_minutes: 10
-#     prompt: prompts/issue-triage.md
+#     # retrigger_on_comments: true   # re-fire when an issue receives new activity
+#     # max_notifications: 10         # per-issue cap on re-fires (0 = unlimited)
+#     prompt: prompts/issue-triage.md # reference {{CUE_NEW_COMMENTS}} for comment context
+#     enabled: true
+#
+#   - name: "work labeled PRs"
+#     event: github.label
+#     gh_label_target: pr          # pr | issue | both (default both)
+#     gh_labels: ["ready-to-merge"] # omit to fire on any label
+#     poll_minutes: 2
+#     prompt: prompts/labeled-pr.md  # {{CUE_GH_LABEL}} is the label that landed
 #     enabled: true
 #
 #   - name: "process task queue"
@@ -45,9 +57,14 @@ export const CUE_YAML_TEMPLATE = `# .maestro/cue.yaml
 #     prompt: prompts/process-task.md
 #     enabled: true
 #
+#   - name: "deploy"
+#     event: cli.trigger
+#     prompt: "Run the deployment pipeline for the current branch"
+#     enabled: true
+#
 # settings:
 #   timeout_minutes: 30
 #   timeout_on_fail: break
 #   max_concurrent: 1
-#   queue_size: 10
+#   queue_size: 512
 `;

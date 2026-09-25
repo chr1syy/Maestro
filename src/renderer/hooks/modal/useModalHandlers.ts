@@ -1,5 +1,5 @@
 /**
- * useModalHandlers — Extracted from App.tsx (Phase 2C)
+ * useModalHandlers - Extracted from App.tsx (Phase 2C)
  *
  * Handles all modal open/close lifecycle callbacks, agent error recovery,
  * lightbox navigation, celebration modals, leaderboard, quit confirmation,
@@ -18,13 +18,26 @@ import type { Session, LeaderboardRegistration, AgentError } from '../../types';
 import type { RecoveryAction } from '../../components/AgentErrorModal';
 import { getModalActions, useModalStore } from '../../stores/modalStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { useSessionStore, selectActiveSession } from '../../stores/sessionStore';
+import {
+	useSessionStore,
+	selectActiveSession,
+	selectSessionById,
+	updateSessionWith,
+} from '../../stores/sessionStore';
+import { useTabStore } from '../../stores/tabStore';
 import { useGroupChatStore } from '../../stores/groupChatStore';
 import { useAgentStore } from '../../stores/agentStore';
+import { reportAuthFailure } from '../../stores/authOutageStore';
+import { useFeedbackDraftStore } from '../../stores/feedbackDraftStore';
+import { useQuitWhenIdleStore } from '../../stores/quitWhenIdleStore';
 import { useAgentErrorRecovery } from '../agent/useAgentErrorRecovery';
-import { getInitialRenameValue } from '../../utils/tabHelpers';
+import { aiTabFocusFields } from '../../utils/tabHelpers';
+import { resolveActiveTabRef, resolveTabRefRenameValue } from '../../utils/panelLayout';
 import { CONDUCTOR_BADGES } from '../../constants/conductorBadges';
 import { gitService } from '../../services/git';
+import { cueService } from '../../services/cue';
+import { notifyCenterFlash } from '../../stores/centerFlashStore';
+import { useGitDetail } from '../../contexts/GitStatusContext';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,9 +46,15 @@ import { gitService } from '../../services/git';
 export interface ModalHandlersReturn {
 	// Derived state
 	errorSession: Session | null;
-	/** The error to display — live session error or historical from chat log */
+	/** The error to display - live session error or historical from chat log */
 	effectiveAgentError: AgentError | null;
 	recoveryActions: RecoveryAction[];
+	/**
+	 * When defined, jumps the Left Bar to the failing agent and activates the
+	 * failing AI tab. Undefined when not applicable (historical error, or the
+	 * user is already viewing the failing tab).
+	 */
+	handleJumpToFailingAgent?: () => void;
 
 	// Simple close handlers
 	handleCloseGitDiff: () => void;
@@ -60,6 +79,7 @@ export interface ModalHandlersReturn {
 	// Quit handlers
 	handleConfirmQuit: () => void;
 	handleCancelQuit: () => void;
+	handleQuitWhenIdle: () => void;
 
 	// Celebration handlers
 	onKeyboardMasteryLevelUp: (level: number) => void;
@@ -86,6 +106,7 @@ export interface ModalHandlersReturn {
 	// Open handlers
 	handleOpenQueueBrowser: () => void;
 	handleOpenTabSearch: () => void;
+	handleOpenCrossTabSearch: () => void;
 	handleOpenPromptComposer: () => void;
 	handleOpenFuzzySearch: () => void;
 	handleOpenCreatePR: () => void;
@@ -111,11 +132,13 @@ export interface ModalHandlersReturn {
 	handleCloseLightbox: () => void;
 	handleNavigateLightbox: (img: string) => void;
 	handleDeleteLightboxImage: (img: string) => void;
+	handleUpdateLightboxImage: (oldImg: string, newDataUrl: string) => void;
 
 	// Utility close handlers
 	handleCloseAutoRunSetup: () => void;
 	handleCloseBatchRunner: () => void;
 	handleCloseTabSwitcher: () => void;
+	handleCloseCrossTabSearch: () => void;
 	handleCloseFileSearch: () => void;
 	handleClosePromptComposer: () => void;
 	handleCloseCreatePRModal: () => void;
@@ -139,7 +162,11 @@ export interface ModalHandlersReturn {
 	handleViewGitDiff: () => Promise<void>;
 
 	// Director's Notes session navigation (Tier 3C)
-	handleDirectorNotesResumeSession: (sourceSessionId: string, agentSessionId: string) => void;
+	handleDirectorNotesResumeSession: (
+		sourceSessionId: string,
+		agentSessionId: string,
+		sessionName?: string
+	) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,12 +188,16 @@ const selectShortcutsHelpOpen = (s: ReturnType<typeof useModalStore.getState>) =
 export function useModalHandlers(
 	inputRef: React.RefObject<HTMLTextAreaElement | null>,
 	terminalOutputRef: React.RefObject<HTMLDivElement | null>,
-	handleResumeSessionRef?: React.MutableRefObject<((agentSessionId: string) => void) | null>
+	// Third slot is `sessionName`; the second is `providedMessages` and is
+	// deliberately left to the resume itself to read from disk.
+	handleResumeSessionRef?: React.MutableRefObject<
+		((agentSessionId: string, providedMessages?: undefined, sessionName?: string) => void) | null
+	>,
+	groupChatInputRef?: React.RefObject<HTMLTextAreaElement | null>
 ): ModalHandlersReturn {
 	// --- Reactive subscriptions (for derived state & effects) ---
 	const agentErrorModalSessionId = useModalStore(selectAgentErrorSessionId);
 	const historicalAgentError = useModalStore(selectAgentErrorHistorical);
-	const sessions = useSessionStore((s) => s.sessions);
 	const logViewerOpen = useModalStore(selectLogViewerOpen);
 	const shortcutsHelpOpen = useModalStore(selectShortcutsHelpOpen);
 	const settingsLoaded = useSettingsStore((s) => s.settingsLoaded);
@@ -176,13 +207,12 @@ export function useModalHandlers(
 	// Derived State
 	// ====================================================================
 
-	const errorSession = useMemo(
+	const errorSessionSelector = useMemo(
 		() =>
-			agentErrorModalSessionId
-				? (sessions.find((s) => s.id === agentErrorModalSessionId) ?? null)
-				: null,
-		[agentErrorModalSessionId, sessions]
+			agentErrorModalSessionId ? selectSessionById(agentErrorModalSessionId) : () => undefined,
+		[agentErrorModalSessionId]
 	);
+	const errorSession = useSessionStore(errorSessionSelector) ?? null;
 
 	// ====================================================================
 	// Group A: Simple Close Handlers
@@ -238,7 +268,7 @@ export function useModalHandlers(
 
 	const handleCloseDeleteAgentModal = useCallback(() => {
 		// setDeleteAgentSession(null) calls closeModal('deleteAgent') which clears both
-		// the open state and the session data — no separate setDeleteAgentModalOpen needed.
+		// the open state and the session data - no separate setDeleteAgentModalOpen needed.
 		getModalActions().setDeleteAgentSession(null);
 	}, []);
 
@@ -249,7 +279,7 @@ export function useModalHandlers(
 
 	const handleCloseEditAgentModal = useCallback(() => {
 		// setEditAgentSession(null) calls closeModal('editAgent') which clears both
-		// the open state and the session data — no separate setEditAgentModalOpen needed.
+		// the open state and the session data - no separate setEditAgentModalOpen needed.
 		getModalActions().setEditAgentSession(null);
 	}, []);
 
@@ -274,6 +304,15 @@ export function useModalHandlers(
 
 	const handleCancelQuit = useCallback(() => {
 		getModalActions().setQuitConfirmModalOpen(false);
+		window.maestro.app.cancelQuit();
+	}, []);
+
+	// Defer the quit: close the modal, release this quit attempt so the app keeps
+	// running, and arm the idle watcher (useQuitWhenIdle) to quit once everything
+	// finishes.
+	const handleQuitWhenIdle = useCallback(() => {
+		getModalActions().setQuitConfirmModalOpen(false);
+		useQuitWhenIdleStore.getState().arm();
 		window.maestro.app.cancelQuit();
 	}, []);
 
@@ -311,6 +350,9 @@ export function useModalHandlers(
 			if (result.newLevel !== null) {
 				onKeyboardMasteryLevelUp(result.newLevel);
 			}
+			// Also bump the daily-firings counter so the Usage Dashboard bar
+			// chart includes shortcuts handled inside the System Log Viewer.
+			void window.maestro?.stats?.recordShortcutUsage?.(Date.now());
 		},
 		[onKeyboardMasteryLevelUp]
 	);
@@ -400,14 +442,23 @@ export function useModalHandlers(
 		[inputRef]
 	);
 
-	const handleAuthenticateAfterError = useCallback(
-		(sessionId: string) => {
-			useAgentStore.getState().authenticateAfterError(sessionId);
-			getModalActions().setAgentErrorModalSessionId(null);
-			setTimeout(() => inputRef.current?.focus(), 0);
-		},
-		[inputRef]
-	);
+	// Hand off to the re-authentication terminal rather than the bare terminal
+	// tab: the login flow finishes inside the modal, so the user never has to
+	// remember the provider's login command. Registering the failure first is
+	// what scopes the dialog to the provider and puts this agent on the list to
+	// resume - reached when the user opens a historical error by hand, so the
+	// outage may not exist yet.
+	const handleAuthenticateAfterError = useCallback((sessionId: string) => {
+		const session = selectSessionById(sessionId)(useSessionStore.getState());
+		const { providerKey } = reportAuthFailure({
+			sessionId,
+			message: session?.agentError?.message ?? 'The provider rejected the stored credentials.',
+			tabId: session?.agentErrorTabId,
+		});
+		useAgentStore.getState().authenticateAfterError(sessionId);
+		getModalActions().setAgentErrorModalSessionId(null);
+		if (providerKey) getModalActions().openReauthModal({ providerKey });
+	}, []);
 
 	// Determine the effective error: historical wins when explicitly requested (user clicked Details),
 	// otherwise fall back to live session error
@@ -452,6 +503,10 @@ export function useModalHandlers(
 		getModalActions().setTabSwitcherOpen(true);
 	}, []);
 
+	const handleOpenCrossTabSearch = useCallback(() => {
+		getModalActions().setCrossTabSearchOpen(true);
+	}, []);
+
 	const handleOpenPromptComposer = useCallback(() => {
 		getModalActions().setPromptComposerOpen(true);
 	}, []);
@@ -469,6 +524,15 @@ export function useModalHandlers(
 	}, []);
 
 	const handleOpenFeedbackModal = useCallback(() => {
+		// If the modal is minimized to the sidebar Feedback button, restore it
+		// instead of opening a fresh one (preserves the in-flight draft).
+		const draft = useFeedbackDraftStore.getState();
+		// Refresh the persisted drafts list so it is current when the modal opens.
+		void draft.loadDrafts();
+		if (draft.isMinimized) {
+			draft.setMinimized(false);
+			return;
+		}
 		getModalActions().setFeedbackModalOpen(true);
 	}, []);
 
@@ -492,8 +556,24 @@ export function useModalHandlers(
 		getModalActions().setCreatePRSession(session);
 	}, []);
 
-	const handleConfigureCue = useCallback((session: Session) => {
-		getModalActions().openCueYamlEditor(session.id, session.projectRoot);
+	const handleConfigureCue = useCallback(async (session: Session) => {
+		// Pick the initial tab from whether THIS agent already has Cue config:
+		// an agent that is already wired up lands on the Dashboard, one that is
+		// not lands in the Pipeline Graph where its first pipeline gets built.
+		// Asking "does *any* agent have config" instead dumps someone who just
+		// right-clicked a fresh agent onto a dashboard that says nothing about
+		// it. Falls back to 'pipeline' if the status query fails - first-run is
+		// the safer landing for a user who has nothing configured yet.
+		let initialTab: 'dashboard' | 'pipeline' = 'pipeline';
+		try {
+			const sessions = await cueService.getStatus();
+			if (sessions.some((s) => s.sessionId === session.id)) initialTab = 'dashboard';
+		} catch {
+			initialTab = 'pipeline';
+		}
+		// The dashboard lists every Cue-enabled agent. Carrying the id through is
+		// what lets it mark the row the user actually right-clicked.
+		getModalActions().openCueModalWithTab(initialTab, session.id);
 	}, []);
 
 	// ====================================================================
@@ -513,7 +593,7 @@ export function useModalHandlers(
 		(image: string | null, contextImages?: string[], source: 'staged' | 'history' = 'history') => {
 			const { activeGroupChatId } = useGroupChatStore.getState();
 			const actions = getModalActions();
-			// setLightboxImage opens the modal — must be called first so that
+			// setLightboxImage opens the modal - must be called first so that
 			// subsequent updateModalData calls (isGroupChat, allowDelete) find an active modal.
 			actions.setLightboxImage(image);
 			actions.setLightboxIsGroupChat(activeGroupChatId !== null);
@@ -574,6 +654,42 @@ export function useModalHandlers(
 		getModalActions().setLightboxImages(currentImages.filter((i) => i !== img));
 	}, []);
 
+	const handleUpdateLightboxImage = useCallback((oldImg: string, newDataUrl: string) => {
+		const lightboxData = useModalStore.getState().getData('lightbox');
+		const isGroupChat = lightboxData?.isGroupChat ?? false;
+
+		if (isGroupChat) {
+			useGroupChatStore
+				.getState()
+				.setGroupChatStagedImages((prev) => prev.map((i) => (i === oldImg ? newDataUrl : i)));
+		} else {
+			const { sessions: currentSessions, activeSessionId } = useSessionStore.getState();
+			const session = currentSessions.find((s) => s.id === activeSessionId);
+			if (session) {
+				useSessionStore.getState().setSessions((prev) =>
+					prev.map((s) => {
+						if (s.id !== session.id) return s;
+						return {
+							...s,
+							aiTabs: s.aiTabs.map((tab) => {
+								if (tab.id !== s.activeTabId) return tab;
+								return {
+									...tab,
+									stagedImages: (tab.stagedImages || []).map((i) =>
+										i === oldImg ? newDataUrl : i
+									),
+								};
+							}),
+						};
+					})
+				);
+			}
+		}
+
+		const currentImages = lightboxData?.images ?? [];
+		getModalActions().setLightboxImages(currentImages.map((i) => (i === oldImg ? newDataUrl : i)));
+	}, []);
+
 	// ====================================================================
 	// Group K: Utility Close Handlers
 	// ====================================================================
@@ -590,14 +706,24 @@ export function useModalHandlers(
 		getModalActions().setTabSwitcherOpen(false);
 	}, []);
 
+	const handleCloseCrossTabSearch = useCallback(() => {
+		getModalActions().setCrossTabSearchOpen(false);
+	}, []);
+
 	const handleCloseFileSearch = useCallback(() => {
 		getModalActions().setFuzzyFileSearchOpen(false);
 	}, []);
 
 	const handleClosePromptComposer = useCallback(() => {
 		getModalActions().setPromptComposerOpen(false);
-		setTimeout(() => inputRef.current?.focus(), 0);
-	}, [inputRef]);
+		// The composer serves both the agent composer and a group chat room, so
+		// hand the caret back to whichever one is actually on screen. The AI
+		// input isn't rendered while a room is open, so focusing it there lands
+		// the caret nowhere and the next keystroke goes to the document.
+		const inGroupChat = useGroupChatStore.getState().activeGroupChatId !== null;
+		const targetRef = inGroupChat && groupChatInputRef ? groupChatInputRef : inputRef;
+		setTimeout(() => targetRef.current?.focus(), 0);
+	}, [inputRef, groupChatInputRef]);
 
 	const handleCloseCreatePRModal = useCallback(() => {
 		getModalActions().setCreatePRModalOpen(false);
@@ -606,6 +732,8 @@ export function useModalHandlers(
 
 	const handleCloseSendToAgent = useCallback(() => {
 		getModalActions().setSendToAgentModalOpen(false);
+		// Drop any queued terminal-buffer send so it doesn't bleed into the next open
+		useTabStore.getState().setPendingTerminalBufferSend(null);
 	}, []);
 
 	const handleCloseQueueBrowser = useCallback(() => {
@@ -625,31 +753,23 @@ export function useModalHandlers(
 		const currentSession = currentSessions.find((s) => s.id === activeSessionId);
 		if (!currentSession) return;
 
-		const actions = getModalActions();
+		// Same target resolution as the Cmd+Shift+R shortcut: the focused pane when a
+		// tiled group is active, else the visible single-view tab.
+		const renameRef = resolveActiveTabRef(currentSession);
+		if (!renameRef) return;
+		const renameValue = resolveTabRefRenameValue(currentSession, renameRef);
+		if (renameValue === null) return;
 
-		if (currentSession.inputMode === 'terminal' && currentSession.activeTerminalTabId) {
-			const termTab = currentSession.terminalTabs?.find(
-				(t) => t.id === currentSession.activeTerminalTabId
-			);
-			if (termTab) {
-				actions.setRenameTabId(termTab.id);
-				actions.setRenameTabInitialName(termTab.name || '');
-				actions.setRenameTabModalOpen(true);
-			}
-		} else if (currentSession.inputMode === 'ai' && currentSession.activeTabId) {
-			const activeTab = currentSession.aiTabs?.find((t) => t.id === currentSession.activeTabId);
-			if (activeTab) {
-				actions.setRenameTabId(activeTab.id);
-				actions.setRenameTabInitialName(getInitialRenameValue(activeTab));
-				actions.setRenameTabModalOpen(true);
-			}
-		}
+		const actions = getModalActions();
+		actions.setRenameTabId(renameRef.id);
+		actions.setRenameTabInitialName(renameValue);
+		actions.setRenameTabModalOpen(true);
 	}, []);
 
 	const handleQuickActionsOpenTabSwitcher = useCallback(() => {
 		const { sessions: currentSessions, activeSessionId } = useSessionStore.getState();
 		const currentSession = currentSessions.find((s) => s.id === activeSessionId);
-		if (currentSession?.inputMode === 'ai' && currentSession.aiTabs) {
+		if (currentSession?.aiTabs) {
 			getModalActions().setTabSwitcherOpen(true);
 		}
 	}, []);
@@ -815,12 +935,53 @@ export function useModalHandlers(
 	}, [settingsLoaded, sessionsLoaded]);
 
 	// ====================================================================
+	// Active session (narrow) - Git Diff / Director's Notes / jump-to-failing
+	// ====================================================================
+	// PERF: Never useSessionStore(selectActiveSession). Streamed logs/tokens
+	// would wake App via this hook. Handlers resolve via getState(); jump-to-
+	// failing only needs primitive focus fields. Use the resolved agent id
+	// (same fallback as selectActiveSession) with those fields.
+	const activeSessionId = useSessionStore((s) => selectActiveSession(s)?.id);
+	const activeTabId = useSessionStore((s) => selectActiveSession(s)?.activeTabId);
+	const activeInputMode = useSessionStore((s) => selectActiveSession(s)?.inputMode);
+
+	// ====================================================================
+	// Agent Error: Jump to Failing Tab
+	// ====================================================================
+
+	// Only offer "Jump to failing tab" for live errors (not historical, since
+	// the user already navigated to view the historical entry) and only when
+	// the user isn't already focused on the failing tab. The failing tab id
+	// is recorded on the session as `agentErrorTabId`.
+	const failingTabId = !isHistorical ? errorSession?.agentErrorTabId : undefined;
+	const isAlreadyOnFailingTab =
+		errorSession != null &&
+		failingTabId != null &&
+		activeSessionId === errorSession.id &&
+		activeTabId === failingTabId &&
+		activeInputMode === 'ai';
+
+	const handleJumpToFailingAgent = useMemo(() => {
+		if (!errorSession || !failingTabId || isAlreadyOnFailingTab) return undefined;
+		return () => {
+			useSessionStore.getState().setActiveSessionId(errorSession.id);
+			updateSessionWith(errorSession.id, (s) => ({
+				...s,
+				...aiTabFocusFields(
+					s.aiTabs?.some((t) => t.id === failingTabId) ? failingTabId : undefined
+				),
+			}));
+		};
+	}, [errorSession, failingTabId, isAlreadyOnFailingTab]);
+
+	// ====================================================================
 	// Git Diff Opener (Tier 3C)
 	// ====================================================================
 
-	const activeSession = useSessionStore(selectActiveSession);
+	const { refreshGitStatus } = useGitDetail();
 
 	const handleViewGitDiff = useCallback(async () => {
+		const activeSession = selectActiveSession(useSessionStore.getState());
 		if (!activeSession || !activeSession.isGitRepo) return;
 
 		const cwd =
@@ -837,44 +998,59 @@ export function useModalHandlers(
 
 		if (diff.diff) {
 			getModalActions().setGitDiffPreview(diff.diff);
+		} else {
+			notifyCenterFlash({ message: 'No diff to examine', color: 'theme' });
+			// Polling cache said there were changes but `git diff` is empty -
+			// repo state changed since the last poll. Re-sync so the widget
+			// stops advertising stale stats.
+			void refreshGitStatus();
 		}
-	}, [activeSession]);
+	}, [refreshGitStatus]);
 
 	// ====================================================================
 	// Director's Notes Session Navigation (Tier 3C)
 	// ====================================================================
 
-	const pendingResumeRef = useRef<{ agentSessionId: string; targetSessionId: string } | null>(null);
+	// `sessionName` rides along because the deferred branch resumes on a LATER
+	// tick, by which point the entry that carried the name is gone.
+	const pendingResumeRef = useRef<{
+		agentSessionId: string;
+		targetSessionId: string;
+		sessionName?: string;
+	} | null>(null);
 
 	const handleDirectorNotesResumeSession = useCallback(
-		(sourceSessionId: string, agentSessionId: string) => {
+		(sourceSessionId: string, agentSessionId: string, sessionName?: string) => {
 			// Close the Director's Notes modal
 			getModalActions().setDirectorNotesOpen(false);
 
+			// A group chat outranks the agent view in the main window, so landing
+			// on the right agent is not enough - without this the jump appears to
+			// do nothing because the room is still what's rendered. Also covers the
+			// early-return below, where activeSessionId already points at the target.
+			useGroupChatStore.getState().setActiveGroupChatId(null);
+
 			// If already on the right agent, resume directly
-			if (activeSession?.id === sourceSessionId) {
-				handleResumeSessionRef?.current?.(agentSessionId);
+			if (useSessionStore.getState().activeSessionId === sourceSessionId) {
+				handleResumeSessionRef?.current?.(agentSessionId, undefined, sessionName);
 				return;
 			}
 
-			// Switch to the target agent and defer resume until activeSession updates
-			pendingResumeRef.current = { agentSessionId, targetSessionId: sourceSessionId };
+			// Switch to the target agent and defer resume until activeSessionId updates
+			pendingResumeRef.current = { agentSessionId, targetSessionId: sourceSessionId, sessionName };
 			useSessionStore.getState().setActiveSessionId(sourceSessionId);
 		},
-		[activeSession?.id, handleResumeSessionRef]
+		[handleResumeSessionRef]
 	);
 
 	// Effect: process pending resume after agent switch completes
 	useEffect(() => {
-		if (
-			pendingResumeRef.current &&
-			activeSession?.id === pendingResumeRef.current.targetSessionId
-		) {
-			const { agentSessionId } = pendingResumeRef.current;
+		if (pendingResumeRef.current && activeSessionId === pendingResumeRef.current.targetSessionId) {
+			const { agentSessionId, sessionName } = pendingResumeRef.current;
 			pendingResumeRef.current = null;
-			handleResumeSessionRef?.current?.(agentSessionId);
+			handleResumeSessionRef?.current?.(agentSessionId, undefined, sessionName);
 		}
-	}, [activeSession?.id, handleResumeSessionRef]);
+	}, [activeSessionId, handleResumeSessionRef]);
 
 	// ====================================================================
 	// Return
@@ -885,6 +1061,7 @@ export function useModalHandlers(
 		errorSession,
 		effectiveAgentError: effectiveError ?? null,
 		recoveryActions,
+		handleJumpToFailingAgent,
 
 		// Simple close handlers
 		handleCloseGitDiff,
@@ -909,6 +1086,7 @@ export function useModalHandlers(
 		// Quit handlers
 		handleConfirmQuit,
 		handleCancelQuit,
+		handleQuitWhenIdle,
 
 		// Celebration handlers
 		onKeyboardMasteryLevelUp,
@@ -935,6 +1113,7 @@ export function useModalHandlers(
 		// Open handlers
 		handleOpenQueueBrowser,
 		handleOpenTabSearch,
+		handleOpenCrossTabSearch,
 		handleOpenPromptComposer,
 		handleOpenFuzzySearch,
 		handleOpenCreatePR,
@@ -956,11 +1135,13 @@ export function useModalHandlers(
 		handleCloseLightbox,
 		handleNavigateLightbox,
 		handleDeleteLightboxImage,
+		handleUpdateLightboxImage,
 
 		// Utility close handlers
 		handleCloseAutoRunSetup,
 		handleCloseBatchRunner,
 		handleCloseTabSwitcher,
+		handleCloseCrossTabSearch,
 		handleCloseFileSearch,
 		handleClosePromptComposer,
 		handleCloseCreatePRModal,

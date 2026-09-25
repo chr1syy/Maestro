@@ -18,13 +18,14 @@ import type {
 } from '../../types';
 import type { FileTreeChanges } from '../../utils/fileExplorer';
 import type { FileNode } from '../../types/fileTree';
+import type { FileClickOptions } from '../ui/useAppHandlers';
 
 /**
  * Dependencies for computing RightPanel props.
- * Only handlers and externally-computed values remain — stores are read directly inside the component.
+ * Only handlers and externally-computed values remain - stores are read directly inside the component.
  */
 export interface UseRightPanelPropsDeps {
-	// Theme (computed from settingsStore by App.tsx — not a raw store value)
+	// Theme (computed from settingsStore by App.tsx - not a raw store value)
 	theme: Theme;
 
 	// Refs
@@ -40,7 +41,12 @@ export interface UseRightPanelPropsDeps {
 		activeSessionId: string,
 		setSessions: React.Dispatch<React.SetStateAction<Session[]>>
 	) => void;
-	handleFileClick: (node: FileNode, path: string, activeSession: Session) => Promise<void>;
+	toggleFolderRecursive: (
+		path: string,
+		activeSessionId: string,
+		setSessions: React.Dispatch<React.SetStateAction<Session[]>>
+	) => void;
+	handleFileClick: (node: FileNode, path: string, options?: FileClickOptions) => Promise<void>;
 	expandAllFolders: (
 		activeSessionId: string,
 		activeSession: Session,
@@ -55,6 +61,7 @@ export interface UseRightPanelPropsDeps {
 		setSessions: React.Dispatch<React.SetStateAction<Session[]>>
 	) => Promise<void>;
 	refreshFileTree: (sessionId: string) => Promise<FileTreeChanges | undefined>;
+	cancelFileTreeLoad: (sessionId: string) => void;
 	handleAutoRefreshChange: (interval: number) => void;
 	showSuccessFlash: (message: string) => void;
 
@@ -96,10 +103,13 @@ export interface UseRightPanelPropsDeps {
 	handleLaunchWizardTab: () => void;
 
 	// File linking
-	handleMainPanelFileClick: (path: string) => void;
+	handleMainPanelFileClick: (path: string, options?: { openInNewTab?: boolean }) => void;
 
 	// Document Graph handlers
 	handleFocusFileInGraph: (relativePath: string) => void;
+
+	// Browser tab handler - used by file-tree "Open in Maestro Browser"
+	handleOpenBrowserTabAt: (url: string, options?: { title?: string }) => void;
 }
 
 /**
@@ -121,11 +131,13 @@ export function useRightPanelProps(deps: UseRightPanelPropsDeps) {
 
 			// File explorer handlers
 			toggleFolder: deps.toggleFolder,
+			toggleFolderRecursive: deps.toggleFolderRecursive,
 			handleFileClick: deps.handleFileClick,
 			expandAllFolders: deps.expandAllFolders,
 			collapseAllFolders: deps.collapseAllFolders,
 			updateSessionWorkingDirectory: deps.updateSessionWorkingDirectory,
 			refreshFileTree: deps.refreshFileTree,
+			cancelFileTreeLoad: deps.cancelFileTreeLoad,
 			onAutoRefreshChange: deps.handleAutoRefreshChange,
 			onShowFlash: deps.showSuccessFlash,
 
@@ -148,11 +160,16 @@ export function useRightPanelProps(deps: UseRightPanelPropsDeps) {
 			onResumeAfterError: deps.handleResumeAfterError,
 			onJumpToAgentSession: deps.handleJumpToAgentSession,
 			onResumeSession: deps.handleResumeSession,
-			onOpenSessionAsTab: (agentSessionId: string, projectPath?: string) =>
+			// `sessionName` is the name the history entry already shows on its pill.
+			// It has to travel: the resume fallback reads the session-origins store,
+			// which is Claude-only and only ever written by a synopsis, so for every
+			// other provider (and for any session that never produced one) the history
+			// record is the ONLY surviving copy of that name.
+			onOpenSessionAsTab: (agentSessionId: string, projectPath?: string, sessionName?: string) =>
 				deps.handleResumeSession(
 					agentSessionId,
 					undefined,
-					undefined,
+					sessionName,
 					undefined,
 					undefined,
 					projectPath
@@ -168,6 +185,9 @@ export function useRightPanelProps(deps: UseRightPanelPropsDeps) {
 
 			// Document Graph
 			onFocusFileInGraph: deps.handleFocusFileInGraph,
+
+			// Browser tab
+			onOpenBrowserTabAt: deps.handleOpenBrowserTabAt,
 		}),
 		[
 			deps.theme,
@@ -175,11 +195,13 @@ export function useRightPanelProps(deps: UseRightPanelPropsDeps) {
 			// Stable callbacks
 			deps.handleSetActiveRightTab,
 			deps.toggleFolder,
+			deps.toggleFolderRecursive,
 			deps.handleFileClick,
 			deps.expandAllFolders,
 			deps.collapseAllFolders,
 			deps.updateSessionWorkingDirectory,
 			deps.refreshFileTree,
+			deps.cancelFileTreeLoad,
 			deps.handleAutoRefreshChange,
 			deps.showSuccessFlash,
 			deps.handleAutoRunContentChange,
@@ -202,6 +224,7 @@ export function useRightPanelProps(deps: UseRightPanelPropsDeps) {
 			deps.handleLaunchWizardTab,
 			deps.handleMainPanelFileClick,
 			deps.handleFocusFileInGraph,
+			deps.handleOpenBrowserTabAt,
 			// Refs (stable)
 			deps.fileTreeContainerRef,
 			deps.fileTreeFilterInputRef,

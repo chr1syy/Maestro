@@ -21,9 +21,11 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import type { Theme } from '../types';
-import { useLayerStack } from '../contexts/LayerStackContext';
+import { useModalLayer } from '../hooks/ui/useModalLayer';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { formatShortcutKeys } from '../utils/shortcutFormatter';
+import { formatDurationVerbose as formatDuration } from '../../shared/formatters';
+import { Z_LAYERS } from '../constants/zLayers';
 
 // 15 minutes in milliseconds - threshold for "Standing Ovation" variation
 const STANDING_OVATION_THRESHOLD_MS = 15 * 60 * 1000;
@@ -59,33 +61,6 @@ interface FirstRunCelebrationProps {
 }
 
 /**
- * Format milliseconds into a human-readable duration string
- */
-function formatDuration(ms: number): string {
-	const seconds = Math.floor(ms / 1000);
-	const minutes = Math.floor(seconds / 60);
-	const hours = Math.floor(minutes / 60);
-
-	if (hours > 0) {
-		const remainingMinutes = minutes % 60;
-		if (remainingMinutes > 0) {
-			return `${hours} hour${hours > 1 ? 's' : ''} ${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''}`;
-		}
-		return `${hours} hour${hours > 1 ? 's' : ''}`;
-	}
-
-	if (minutes > 0) {
-		const remainingSeconds = seconds % 60;
-		if (remainingSeconds > 0) {
-			return `${minutes} minute${minutes > 1 ? 's' : ''} ${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}`;
-		}
-		return `${minutes} minute${minutes > 1 ? 's' : ''}`;
-	}
-
-	return `${seconds} second${seconds > 1 ? 's' : ''}`;
-}
-
-/**
  * FirstRunCelebration - Modal celebrating the user's first Auto Run completion
  */
 export function FirstRunCelebration({
@@ -99,8 +74,6 @@ export function FirstRunCelebration({
 	disableConfetti = false,
 }: FirstRunCelebrationProps): JSX.Element {
 	const containerRef = useRef<HTMLDivElement>(null);
-	const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-	const layerIdRef = useRef<string>();
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
 
@@ -112,9 +85,6 @@ export function FirstRunCelebration({
 	// Colors
 	const goldColor = '#FFD700';
 	const purpleAccent = theme.colors.accent;
-
-	// Z-index layering: backdrop (99997) < confetti (99998) < modal (99999)
-	const CONFETTI_Z_INDEX = 99998;
 
 	// Fire confetti burst
 	const fireConfetti = useCallback(() => {
@@ -138,7 +108,7 @@ export function FirstRunCelebration({
 			flat: false,
 			shapes: ['circle', 'star', 'square'] as ('circle' | 'star' | 'square')[],
 			colors: CONFETTI_COLORS,
-			zIndex: CONFETTI_Z_INDEX,
+			zIndex: Z_LAYERS.CONFETTI,
 			disableForReducedMotion: true,
 		};
 
@@ -211,33 +181,16 @@ export function FirstRunCelebration({
 	}, [handleClose]);
 
 	// Register with layer stack
-	useEffect(() => {
-		const id = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.STANDING_OVATION, // Use same high priority as standing ovation
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			ariaLabel: 'First Auto Run Celebration',
-			onEscape: () => handleClose(),
-		});
-		layerIdRef.current = id;
+	useModalLayer(
+		MODAL_PRIORITIES.STANDING_OVATION, // Use same high priority as standing ovation
+		'First Auto Run Celebration',
+		handleClose
+	);
 
+	// Focus container on mount
+	useEffect(() => {
 		containerRef.current?.focus();
-
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [registerLayer, unregisterLayer, handleClose]);
-
-	// Update escape handler when handleClose changes
-	useEffect(() => {
-		if (layerIdRef.current) {
-			updateLayerHandler(layerIdRef.current, handleClose);
-		}
-	}, [updateLayerHandler, handleClose]);
+	}, []);
 
 	return (
 		<>
@@ -250,7 +203,7 @@ export function FirstRunCelebration({
 				}}
 			/>
 
-			{/* Confetti renders at z-index 99998 */}
+			{/* Confetti renders at Z_LAYERS.CONFETTI */}
 
 			{/* Modal container */}
 			<div

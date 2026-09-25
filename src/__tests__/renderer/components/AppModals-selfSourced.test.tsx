@@ -12,8 +12,11 @@ import { render, screen, act } from '@testing-library/react';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { useGroupChatStore } from '../../../renderer/stores/groupChatStore';
 import { useModalStore } from '../../../renderer/stores/modalStore';
-import type { Theme, Session, Shortcut, Group, GroupChat } from '../../../renderer/types';
+import { useComposerInputStore } from '../../../renderer/stores/composerInputStore';
+import type { Session, Shortcut, Group, GroupChat } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
+import { mockTheme } from '../../helpers/mockTheme';
 // Track props passed to sub-components
 let capturedInfoProps: Record<string, unknown> = {};
 let capturedConfirmProps: Record<string, unknown> = {};
@@ -23,6 +26,10 @@ let capturedWorktreeProps: Record<string, unknown> = {};
 let capturedUtilityProps: Record<string, unknown> = {};
 let capturedGroupChatProps: Record<string, unknown> = {};
 let capturedAgentProps: Record<string, unknown> = {};
+
+const promptComposerModalMock = vi.hoisted(() => ({
+	props: undefined as Record<string, unknown> | undefined,
+}));
 
 // Mock ALL sub-components to capture props
 vi.mock('../../../renderer/components/AboutModal', () => ({ AboutModal: () => null }));
@@ -66,7 +73,10 @@ vi.mock('../../../renderer/components/FileSearchModal', () => ({
 	FileSearchModal: () => null,
 }));
 vi.mock('../../../renderer/components/PromptComposerModal', () => ({
-	PromptComposerModal: () => null,
+	PromptComposerModal: (props: Record<string, unknown>) => {
+		promptComposerModalMock.props = props;
+		return null;
+	},
 }));
 vi.mock('../../../renderer/components/ExecutionQueueBrowser', () => ({
 	ExecutionQueueBrowser: () => null,
@@ -110,7 +120,6 @@ vi.mock('../../../renderer/components/WizardResumeModal', () => ({
 	WizardResumeModal: () => null,
 }));
 vi.mock('../../../renderer/components/MarketplaceModal', () => ({ MarketplaceModal: () => null }));
-vi.mock('../../../renderer/components/DebugWizardModal', () => ({ DebugWizardModal: () => null }));
 vi.mock('../../../renderer/components/DebugPackageModal', () => ({
 	DebugPackageModal: () => null,
 }));
@@ -142,38 +151,8 @@ vi.mock('../../../renderer/contexts/LayerStackContext', () => ({
 // Import after mocks are set up
 const { AppModals } = await import('../../../renderer/components/AppModals');
 
-const mockTheme: Theme = {
-	id: 'dracula',
-	name: 'Dracula',
-	mode: 'dark',
-	colors: {
-		bgMain: '#282a36',
-		bgSidebar: '#21222c',
-		bgActivity: '#343746',
-		border: '#44475a',
-		textMain: '#f8f8f2',
-		textDim: '#6272a4',
-		accent: '#bd93f9',
-		accentDim: '#bd93f920',
-		accentText: '#ff79c6',
-		accentForeground: '#ffffff',
-		success: '#50fa7b',
-		warning: '#ffb86c',
-		error: '#ff5555',
-	},
-};
-
 function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: 'session-1',
-		name: 'Test Agent',
-		state: 'idle',
-		toolType: 'claude-code',
-		cwd: '/tmp',
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	} as Session;
+	return baseCreateMockSession({ name: 'Test Agent', cwd: '/tmp', ...overrides });
 }
 
 function createMockGroup(overrides: Partial<Group> = {}): Group {
@@ -362,10 +341,6 @@ function createDefaultProps(overrides: Record<string, unknown> = {}) {
 		marketplaceModalOpen: false,
 		onCloseMarketplace: vi.fn(),
 		onImportPlaybook: vi.fn(),
-		// Debug wizard
-		debugWizardModalOpen: false,
-		onCloseDebugWizard: vi.fn(),
-		onStartDebugPlaybook: vi.fn(),
 		// Debug package
 		debugPackageModalOpen: false,
 		onCloseDebugPackage: vi.fn(),
@@ -412,6 +387,8 @@ describe('AppModals (Tier 1B self-sourcing)', () => {
 			activeGroupChatId: null,
 		});
 		useModalStore.setState({ modals: new Map() });
+		useComposerInputStore.setState({ aiValue: '', terminalValue: '' });
+		promptComposerModalMock.props = undefined;
 	});
 
 	describe('sessionStore self-sourcing', () => {
@@ -460,7 +437,7 @@ describe('AppModals (Tier 1B self-sourcing)', () => {
 		it('responds to sessionStore updates', () => {
 			const { unmount } = render(<AppModals {...createDefaultProps()} />);
 
-			// Update store after render — component should re-render
+			// Update store after render - component should re-render
 			act(() => {
 				useSessionStore.setState({
 					sessions: [createMockSession({ id: 's1' })],
@@ -498,7 +475,7 @@ describe('AppModals (Tier 1B self-sourcing)', () => {
 			const { openModal } = useModalStore.getState();
 			openModal('about');
 
-			// Render without passing aboutModalOpen as prop — component sources it from store
+			// Render without passing aboutModalOpen as prop - component sources it from store
 			const { unmount } = render(<AppModals {...createDefaultProps()} />);
 			unmount();
 		});
@@ -566,13 +543,13 @@ describe('AppModals (Tier 1B self-sourcing)', () => {
 				openModal(id);
 			}
 
-			// Should render without crash — all booleans sourced from store
+			// Should render without crash - all booleans sourced from store
 			const { unmount } = render(<AppModals {...createDefaultProps()} />);
 			unmount();
 		});
 
 		it('defaults modal booleans to false when not in modalStore', () => {
-			// Empty modal store — all booleans should be false
+			// Empty modal store - all booleans should be false
 			useModalStore.setState({ modals: new Map() });
 
 			const { unmount } = render(<AppModals {...createDefaultProps()} />);
@@ -586,6 +563,50 @@ describe('AppModals (Tier 1B self-sourcing)', () => {
 				useModalStore.getState().openModal('about');
 			});
 
+			unmount();
+		});
+
+		it('seeds Prompt Composer from the live AI draft when opened after initial render', () => {
+			const session = createMockSession({ id: 's1', inputMode: 'ai' });
+			useSessionStore.setState({
+				sessions: [session],
+				activeSessionId: 's1',
+			});
+			const { unmount } = render(<AppModals {...createDefaultProps()} />);
+
+			act(() => {
+				useComposerInputStore.setState({
+					aiValue: 'live AI draft typed after parent render',
+					terminalValue: 'terminal draft',
+				});
+				useModalStore.getState().openModal('promptComposer');
+			});
+
+			expect(promptComposerModalMock.props?.initialValue).toBe(
+				'live AI draft typed after parent render'
+			);
+			unmount();
+		});
+
+		it('seeds Prompt Composer from the live terminal draft when opened after initial render', () => {
+			const session = createMockSession({ id: 's1', inputMode: 'terminal' });
+			useSessionStore.setState({
+				sessions: [session],
+				activeSessionId: 's1',
+			});
+			const { unmount } = render(<AppModals {...createDefaultProps()} />);
+
+			act(() => {
+				useComposerInputStore.setState({
+					aiValue: 'AI draft',
+					terminalValue: 'live terminal draft typed after parent render',
+				});
+				useModalStore.getState().openModal('promptComposer');
+			});
+
+			expect(promptComposerModalMock.props?.initialValue).toBe(
+				'live terminal draft typed after parent render'
+			);
 			unmount();
 		});
 	});

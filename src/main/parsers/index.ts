@@ -37,6 +37,9 @@ export {
 	clearParserRegistry,
 } from './agent-output-parser';
 
+// Re-export factory function
+export { createOutputParser } from './parser-factory';
+
 // Re-export error pattern utilities (access patterns via getErrorPatterns(agentId))
 export type { ErrorPattern, AgentErrorPatterns } from './error-patterns';
 export {
@@ -54,6 +57,12 @@ import { ClaudeOutputParser } from './claude-output-parser';
 import { OpenCodeOutputParser } from './opencode-output-parser';
 import { CodexOutputParser } from './codex-output-parser';
 import { FactoryDroidOutputParser } from './factory-droid-output-parser';
+import { CopilotOutputParser } from './copilot-output-parser';
+import { PiOutputParser } from './pi-output-parser';
+import { QwenOutputParser } from './qwen-output-parser';
+import { OmpOutputParser } from './omp-output-parser';
+import { GrokOutputParser } from './grok-output-parser';
+import { AntigravityOutputParser } from './antigravity-output-parser';
 import {
 	registerOutputParser,
 	clearParserRegistry,
@@ -66,6 +75,12 @@ export { ClaudeOutputParser } from './claude-output-parser';
 export { OpenCodeOutputParser } from './opencode-output-parser';
 export { CodexOutputParser } from './codex-output-parser';
 export { FactoryDroidOutputParser } from './factory-droid-output-parser';
+export { CopilotOutputParser } from './copilot-output-parser';
+export { PiOutputParser } from './pi-output-parser';
+export { QwenOutputParser } from './qwen-output-parser';
+export { OmpOutputParser } from './omp-output-parser';
+export { GrokOutputParser } from './grok-output-parser';
+export { AntigravityOutputParser } from './antigravity-output-parser';
 
 const LOG_CONTEXT = '[OutputParsers]';
 
@@ -82,21 +97,14 @@ export function initializeOutputParsers(): void {
 	registerOutputParser(new OpenCodeOutputParser());
 	registerOutputParser(new CodexOutputParser());
 	registerOutputParser(new FactoryDroidOutputParser());
+	registerOutputParser(new CopilotOutputParser());
+	registerOutputParser(new PiOutputParser());
+	registerOutputParser(new QwenOutputParser());
+	registerOutputParser(new OmpOutputParser());
+	registerOutputParser(new GrokOutputParser());
+	registerOutputParser(new AntigravityOutputParser());
 
 	// Log registered parsers for debugging
 	const registeredParsers = getAllOutputParsers().map((p) => p.agentId);
 	logger.info(`Initialized output parsers: ${registeredParsers.join(', ')}`, LOG_CONTEXT);
-}
-
-/**
- * Check if parsers have been initialized
- * @returns true if at least one parser is registered
- */
-let _initialized = false;
-
-export function ensureParsersInitialized(): void {
-	if (!_initialized) {
-		initializeOutputParsers();
-		_initialized = true;
-	}
 }

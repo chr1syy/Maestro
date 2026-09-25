@@ -22,22 +22,24 @@
  * ```
  */
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import {
-	Server,
-	Plus,
-	Trash2,
-	CheckCircle,
-	XCircle,
-	Loader2,
-	FileCode,
-	ChevronDown,
-} from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Server, CheckCircle, XCircle, FileCode, ChevronDown } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
 import type { Theme } from '../../types';
 import type { SshRemoteConfig, SshRemoteTestResult } from '../../../shared/types';
+import type { SshRemoteRemediation } from '../../../shared/sshRemoteShell';
+import { SshRemediationNotice } from './SshRemediationNotice';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { Modal, ModalFooter } from '../ui/Modal';
 import { FormInput } from '../ui/FormInput';
+import {
+	KeyValueRows,
+	keyValueRowsToRecords,
+	recordToKeyValueRows,
+	type KeyValueRow,
+} from '../ui/KeyValueRows';
+import { validateSshOption } from '../../../shared/sshOptions';
+import { useSaveShortcut } from '../../hooks';
 
 /**
  * SSH config host entry from ~/.ssh/config
@@ -49,15 +51,6 @@ interface SshConfigHost {
 	user?: string;
 	identityFile?: string;
 	proxyJump?: string;
-}
-
-/**
- * Environment variable entry with stable ID for editing
- */
-interface EnvVarEntry {
-	id: number;
-	key: string;
-	value: string;
 }
 
 export interface SshRemoteModalProps {
@@ -83,31 +76,6 @@ export interface SshRemoteModalProps {
 	initialConfig?: SshRemoteConfig;
 	/** Modal title override */
 	title?: string;
-}
-
-/**
- * Convert environment variable object to array with stable IDs
- */
-function envVarsToArray(envVars?: Record<string, string>): EnvVarEntry[] {
-	if (!envVars) return [];
-	return Object.entries(envVars).map(([key, value], index) => ({
-		id: index,
-		key,
-		value,
-	}));
-}
-
-/**
- * Convert environment variable array back to object
- */
-function envVarsToObject(entries: EnvVarEntry[]): Record<string, string> {
-	const result: Record<string, string> = {};
-	entries.forEach((entry) => {
-		if (entry.key.trim()) {
-			result[entry.key] = entry.value;
-		}
-	});
-	return result;
 }
 
 /**
@@ -147,9 +115,11 @@ export function SshRemoteModal({
 	const [port, setPort] = useState('22');
 	const [username, setUsername] = useState('');
 	const [privateKeyPath, setPrivateKeyPath] = useState('');
-	const [envVars, setEnvVars] = useState<EnvVarEntry[]>([]);
+	const [envVars, setEnvVars] = useState<KeyValueRow[]>([]);
+	const [sshOptions, setSshOptions] = useState<KeyValueRow[]>([]);
 	const [enabled, setEnabled] = useState(true);
 	const [nextEnvVarId, setNextEnvVarId] = useState(0);
+	const [nextSshOptionId, setNextSshOptionId] = useState(0);
 	const [useSshConfig, setUseSshConfig] = useState(false);
 	const [sshConfigHost, setSshConfigHost] = useState<string | undefined>(undefined);
 
@@ -167,9 +137,11 @@ export function SshRemoteModal({
 		success: boolean;
 		message: string;
 		hostname?: string;
+		remediation?: SshRemoteRemediation;
 	} | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [showEnvVars, setShowEnvVars] = useState(false);
+	const [showSshOptions, setShowSshOptions] = useState(false);
 
 	// Refs
 	const nameInputRef = useRef<HTMLInputElement>(null);
@@ -266,11 +238,21 @@ export function SshRemoteModal({
 				setPort(String(initialConfig.port));
 				setUsername(initialConfig.username);
 				setPrivateKeyPath(initialConfig.privateKeyPath);
-				const entries = envVarsToArray(initialConfig.remoteEnv);
+				const entries = recordToKeyValueRows(
+					initialConfig.remoteEnv,
+					initialConfig.remoteEnvDisabled
+				);
 				setEnvVars(entries);
 				setNextEnvVarId(entries.length);
+				const optionRows = recordToKeyValueRows(
+					initialConfig.sshOptions,
+					initialConfig.sshOptionsDisabled
+				);
+				setSshOptions(optionRows);
+				setNextSshOptionId(optionRows.length);
 				setEnabled(initialConfig.enabled);
 				setShowEnvVars(entries.length > 0);
+				setShowSshOptions(optionRows.length > 0);
 				setUseSshConfig(initialConfig.useSshConfig || false);
 				setSshConfigHost(initialConfig.sshConfigHost);
 			} else {
@@ -282,8 +264,11 @@ export function SshRemoteModal({
 				setPrivateKeyPath('');
 				setEnvVars([]);
 				setNextEnvVarId(0);
+				setSshOptions([]);
+				setNextSshOptionId(0);
 				setEnabled(true);
 				setShowEnvVars(false);
+				setShowSshOptions(false);
 				setUseSshConfig(false);
 				setSshConfigHost(undefined);
 			}
@@ -301,10 +286,28 @@ export function SshRemoteModal({
 			return 'Port must be between 1 and 65535';
 		}
 		// Username and key are always optional - SSH will use defaults from config or ssh-agent
+
+		// A malformed keyword makes ssh exit before it dials, so reject it here
+		// rather than surfacing a bare "Bad configuration option" at spawn time.
+		// Only LIVE rows are checked: parking exists so a value that cannot work
+		// right now can be set aside, and a parked row that blocked Save would
+		// defeat the one thing the eye is for. Switching it back on re-checks it.
+		for (const row of sshOptions) {
+			if (!row.enabled) continue;
+			if (!row.key.trim() && !row.value.trim()) continue;
+			const invalid = validateSshOption(row.key, row.value);
+			if (invalid) return invalid;
+		}
 		return null;
-	}, [name, host, port]);
+	}, [name, host, port, sshOptions]);
 
 	const isValid = validateForm() === null;
+
+	// Both halves of each section are derived together: writing one record
+	// without the other is how a parked value gets dropped on save, which is
+	// exactly what the eye exists to prevent.
+	const envVarRecords = useMemo(() => keyValueRowsToRecords(envVars), [envVars]);
+	const sshOptionRecords = useMemo(() => keyValueRowsToRecords(sshOptions), [sshOptions]);
 
 	// Build config object from form state
 	const buildConfig = useCallback((): SshRemoteConfig => {
@@ -315,8 +318,10 @@ export function SshRemoteModal({
 			port: parseInt(port, 10),
 			username: username.trim(),
 			privateKeyPath: privateKeyPath.trim(),
-			remoteEnv:
-				Object.keys(envVarsToObject(envVars)).length > 0 ? envVarsToObject(envVars) : undefined,
+			remoteEnv: envVarRecords.active,
+			remoteEnvDisabled: envVarRecords.parked,
+			sshOptions: sshOptionRecords.active,
+			sshOptionsDisabled: sshOptionRecords.parked,
 			enabled,
 			useSshConfig,
 			sshConfigHost,
@@ -328,7 +333,8 @@ export function SshRemoteModal({
 		port,
 		username,
 		privateKeyPath,
-		envVars,
+		envVarRecords,
+		sshOptionRecords,
 		enabled,
 		useSshConfig,
 		sshConfigHost,
@@ -405,6 +411,7 @@ export function SshRemoteModal({
 				setTestResult({
 					success: false,
 					message: result.error || 'Connection failed',
+					remediation: result.result?.remediation,
 				});
 			}
 		} catch (err) {
@@ -419,7 +426,7 @@ export function SshRemoteModal({
 
 	// Environment variable handlers
 	const addEnvVar = () => {
-		setEnvVars((prev) => [...prev, { id: nextEnvVarId, key: '', value: '' }]);
+		setEnvVars((prev) => [...prev, { id: nextEnvVarId, key: '', value: '', enabled: true }]);
 		setNextEnvVarId((prev) => prev + 1);
 		setShowEnvVars(true);
 	};
@@ -433,6 +440,37 @@ export function SshRemoteModal({
 	const removeEnvVar = (id: number) => {
 		setEnvVars((prev) => prev.filter((entry) => entry.id !== id));
 	};
+
+	const toggleEnvVar = (id: number) => {
+		setEnvVars((prev) =>
+			prev.map((entry) => (entry.id === id ? { ...entry, enabled: !entry.enabled } : entry))
+		);
+	};
+
+	// Extra `ssh -o` option handlers
+	const addSshOption = () => {
+		setSshOptions((prev) => [...prev, { id: nextSshOptionId, key: '', value: '', enabled: true }]);
+		setNextSshOptionId((prev) => prev + 1);
+		setShowSshOptions(true);
+	};
+
+	const updateSshOption = (id: number, field: 'key' | 'value', value: string) => {
+		setSshOptions((prev) =>
+			prev.map((entry) => (entry.id === id ? { ...entry, [field]: value } : entry))
+		);
+	};
+
+	const removeSshOption = (id: number) => {
+		setSshOptions((prev) => prev.filter((entry) => entry.id !== id));
+	};
+
+	const toggleSshOption = (id: number) => {
+		setSshOptions((prev) =>
+			prev.map((entry) => (entry.id === id ? { ...entry, enabled: !entry.enabled } : entry))
+		);
+	};
+
+	useSaveShortcut(handleSave, isOpen && !saving);
 
 	if (!isOpen) return null;
 
@@ -465,7 +503,7 @@ export function SshRemoteModal({
 						>
 							{testing ? (
 								<>
-									<Loader2 className="w-4 h-4 animate-spin" />
+									<Spinner size={16} />
 									Testing...
 								</>
 							) : (
@@ -499,8 +537,12 @@ export function SshRemoteModal({
 					</div>
 				)}
 
-				{/* Test Result */}
-				{testResult && (
+				{/* Test Result. A recognized, fixable cause replaces the one-liner:
+				    its detail already says what went wrong, and it adds the fix. */}
+				{testResult?.remediation && (
+					<SshRemediationNotice remediation={testResult.remediation} theme={theme} />
+				)}
+				{testResult && !testResult.remediation && (
 					<div
 						className="p-3 rounded flex items-start gap-2 text-sm"
 						style={{
@@ -515,10 +557,10 @@ export function SshRemoteModal({
 						) : (
 							<XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
 						)}
-						<div>
-							<div>{testResult.message}</div>
+						<div className="min-w-0">
+							<div className="whitespace-pre-wrap break-words">{testResult.message}</div>
 							{testResult.hostname && (
-								<div className="text-xs mt-1 opacity-80">
+								<div className="text-xs mt-1 opacity-70">
 									Remote hostname: {testResult.hostname}
 								</div>
 							)}
@@ -559,7 +601,7 @@ export function SshRemoteModal({
 							>
 								{sshConfigLoading ? (
 									<span className="flex items-center gap-2">
-										<Loader2 className="w-3 h-3 animate-spin" />
+										<Spinner size={12} />
 										Loading...
 									</span>
 								) : (
@@ -720,72 +762,49 @@ export function SshRemoteModal({
 				/>
 
 				{/* Environment Variables */}
-				<div>
-					<div className="flex items-center justify-between mb-2">
-						<div
-							className="text-xs font-bold opacity-70 uppercase"
-							style={{ color: theme.colors.textMain }}
-						>
-							Environment Variables (optional)
-						</div>
-						<button
-							type="button"
-							onClick={addEnvVar}
-							className="flex items-center gap-1 px-2 py-1 rounded text-xs hover:bg-white/10 transition-colors"
-							style={{ color: theme.colors.accent }}
-						>
-							<Plus className="w-3 h-3" />
-							Add Variable
-						</button>
-					</div>
+				<KeyValueRows
+					theme={theme}
+					label="Environment Variables (optional)"
+					rows={envVars}
+					onChangeRow={updateEnvVar}
+					onRemoveRow={removeEnvVar}
+					onAddRow={addEnvVar}
+					onToggleRow={toggleEnvVar}
+					addLabel="Add Variable"
+					keyPlaceholder="VARIABLE"
+					collapsed={!showEnvVars}
+					removeLabel="Remove variable"
+					entryNoun="variable"
+					testId="ssh-remote-env-vars"
+					helperText="Environment variables passed to agents running on this remote host"
+				/>
 
-					{showEnvVars && envVars.length > 0 && (
-						<div className="space-y-2 mb-2">
-							{envVars.map((entry) => (
-								<div key={entry.id} className="flex items-center gap-2">
-									<input
-										type="text"
-										value={entry.key}
-										onChange={(e) => updateEnvVar(entry.id, 'key', e.target.value)}
-										placeholder="VARIABLE"
-										className="flex-1 p-2 rounded border bg-transparent outline-none text-xs font-mono"
-										style={{
-											borderColor: theme.colors.border,
-											color: theme.colors.textMain,
-										}}
-									/>
-									<span className="text-xs" style={{ color: theme.colors.textDim }}>
-										=
-									</span>
-									<input
-										type="text"
-										value={entry.value}
-										onChange={(e) => updateEnvVar(entry.id, 'value', e.target.value)}
-										placeholder="value"
-										className="flex-[2] p-2 rounded border bg-transparent outline-none text-xs font-mono"
-										style={{
-											borderColor: theme.colors.border,
-											color: theme.colors.textMain,
-										}}
-									/>
-									<button
-										type="button"
-										onClick={() => removeEnvVar(entry.id)}
-										className="p-2 rounded hover:bg-white/10 transition-colors"
-										title="Remove variable"
-										style={{ color: theme.colors.textDim }}
-									>
-										<Trash2 className="w-3 h-3" />
-									</button>
-								</div>
-							))}
-						</div>
-					)}
-
-					<p className="text-xs" style={{ color: theme.colors.textDim }}>
-						Environment variables passed to agents running on this remote host
-					</p>
-				</div>
+				{/* Extra ssh -o options */}
+				<KeyValueRows
+					theme={theme}
+					label="SSH Options (optional)"
+					rows={sshOptions}
+					onChangeRow={updateSshOption}
+					onRemoveRow={removeSshOption}
+					onAddRow={addSshOption}
+					onToggleRow={toggleSshOption}
+					addLabel="Add Option"
+					keyPlaceholder="ProxyCommand"
+					valuePlaceholder="/opt/homebrew/bin/tailcat tcXXXX 22"
+					collapsed={!showSshOptions}
+					removeLabel="Remove option"
+					entryNoun="option"
+					testId="ssh-remote-ssh-options"
+					helperText={
+						<>
+							Passed to ssh as <span className="font-mono">-o KEY=VALUE</span>, overriding
+							Maestro&apos;s defaults. Use for a tunnelled host (
+							<span className="font-mono">ProxyCommand</span>,{' '}
+							<span className="font-mono">ProxyJump</span>) or a slower link (
+							<span className="font-mono">ConnectTimeout</span>). These win over ~/.ssh/config.
+						</>
+					}
+				/>
 
 				{/* Enabled Toggle */}
 				<div

@@ -10,6 +10,7 @@ import {
 	FileText,
 	Bot,
 	User,
+	Terminal,
 } from 'lucide-react';
 import type { Theme, Shortcut } from '../../types';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
@@ -36,7 +37,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 	}));
 	const sectionHeaderClass = 'flex items-center gap-2 mb-3';
 	const sectionContentClass = 'text-sm space-y-2 pl-7';
-	const codeClass = 'px-1.5 py-0.5 rounded text-[11px] font-mono';
+	const codeClass = 'px-1.5 py-0.5 rounded text-xs-plus font-mono';
 
 	return (
 		<div
@@ -59,7 +60,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 							doing, you get a bird's-eye view of every completed task, decision, and interaction.
 						</p>
 						<p>
-							Think of it as your project logbook — a searchable, filterable record of everything
+							Think of it as your project logbook - a searchable, filterable record of everything
 							that's been accomplished.
 						</p>
 					</div>
@@ -89,7 +90,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 									<strong style={{ color: theme.colors.textMain }}>AI Overview</strong>
 								</div>
 								<p>
-									An AI-generated synopsis of recent work — auto-generated when you open Director's
+									An AI-generated synopsis of recent work - auto-generated when you open Director's
 									Notes.
 								</p>
 							</div>
@@ -106,7 +107,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 					<div className={sectionContentClass} style={{ color: theme.colors.textDim }}>
 						<div className="flex items-start gap-3">
 							<span
-								className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase shrink-0"
+								className="flex items-center gap-1 px-2 py-0.5 rounded-full text-2xs font-bold uppercase shrink-0"
 								style={{
 									backgroundColor: theme.colors.accent + '20',
 									color: theme.colors.accent,
@@ -117,7 +118,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 								USER
 							</span>
 							<p>
-								Interactive work sessions — created via{' '}
+								Interactive work sessions - created via{' '}
 								<code className={codeClass} style={{ backgroundColor: theme.colors.bgActivity }}>
 									/history
 								</code>{' '}
@@ -130,7 +131,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 						</div>
 						<div className="flex items-start gap-3">
 							<span
-								className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase shrink-0"
+								className="flex items-center gap-1 px-2 py-0.5 rounded-full text-2xs font-bold uppercase shrink-0"
 								style={{
 									backgroundColor: theme.colors.warning + '20',
 									color: theme.colors.warning,
@@ -219,7 +220,7 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 									}}
 								>
 									<kbd
-										className="px-2 py-0.5 rounded text-[11px] font-mono font-medium shrink-0 min-w-[140px]"
+										className="px-2 py-0.5 rounded text-xs-plus font-mono font-medium shrink-0 min-w-[140px]"
 										style={{
 											backgroundColor: theme.colors.bgActivity,
 											color: theme.colors.textMain,
@@ -232,6 +233,64 @@ export const OverviewTab = forwardRef<TabFocusHandle, OverviewTabProps>(function
 								</div>
 							))}
 						</div>
+					</div>
+				</section>
+
+				{/* From the CLI */}
+				<section>
+					<div className={sectionHeaderClass}>
+						<Terminal className="w-5 h-5" style={{ color: theme.colors.accent }} />
+						<h3 className="font-bold">From the CLI</h3>
+					</div>
+					<div className={sectionContentClass} style={{ color: theme.colors.textDim }}>
+						<p>
+							Pull the same unified history and AI synopsis from your terminal with{' '}
+							<code className={codeClass} style={{ backgroundColor: theme.colors.bgActivity }}>
+								maestro-cli director-notes
+							</code>
+							- great for scripts, cron jobs, or piping into your own tooling.
+						</p>
+						<div
+							className="rounded border p-3 font-mono text-xs-plus space-y-1.5"
+							style={{
+								borderColor: theme.colors.border,
+								backgroundColor: theme.colors.bgActivity,
+								color: theme.colors.textMain,
+							}}
+						>
+							<div>
+								<span style={{ color: theme.colors.textDim }}>
+									# Markdown recap of the last day
+								</span>
+							</div>
+							<div>maestro-cli director-notes history -f markdown -d 1</div>
+							<div className="pt-1">
+								<span style={{ color: theme.colors.textDim }}>
+									# Weekly report → dated markdown file
+								</span>
+							</div>
+							<div>maestro-cli director-notes synopsis -d 7 -f markdown \</div>
+							<div>{'  > ~/maestro-weekly-$(date +%Y-%m-%d).md'}</div>
+						</div>
+						<p>
+							Schedule it with{' '}
+							<code className={codeClass} style={{ backgroundColor: theme.colors.bgActivity }}>
+								cron
+							</code>
+							,{' '}
+							<code className={codeClass} style={{ backgroundColor: theme.colors.bgActivity }}>
+								launchd
+							</code>
+							, or Maestro Cue to wake up to a fresh weekly report every Monday.{' '}
+							<code className={codeClass} style={{ backgroundColor: theme.colors.bgActivity }}>
+								history
+							</code>{' '}
+							works offline;{' '}
+							<code className={codeClass} style={{ backgroundColor: theme.colors.bgActivity }}>
+								synopsis
+							</code>{' '}
+							needs the desktop app running.
+						</p>
 					</div>
 				</section>
 			</div>

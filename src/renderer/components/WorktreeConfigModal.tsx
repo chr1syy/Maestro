@@ -1,9 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, GitBranch, FolderOpen, Plus, Loader2, AlertTriangle, Server } from 'lucide-react';
-import type { Theme, Session, GhCliStatus } from '../types';
+import { X, GitBranch, FolderOpen, Plus, AlertTriangle, Server } from 'lucide-react';
+import { GhostIconButton } from './ui/GhostIconButton';
+import { ModalSubtitle } from './ui/Modal';
+import { Spinner } from './ui/Spinner';
+import type { Theme, Session, GhCliStatus, SessionWorktreeConfig } from '../types';
 import { useLayerStack } from '../contexts/LayerStackContext';
+import { useResizableModal } from '../hooks/ui/useResizableModal';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { getParentDir } from '../../shared/formatters';
+import { openUrl } from '../utils/openUrl';
+import { ResizeHandles } from './ui/ResizeHandles';
 
 interface WorktreeConfigModalProps {
 	isOpen: boolean;
@@ -11,7 +17,7 @@ interface WorktreeConfigModalProps {
 	theme: Theme;
 	session: Session;
 	// Callbacks
-	onSaveConfig: (config: { basePath: string; watchEnabled: boolean }) => void;
+	onSaveConfig: (config: SessionWorktreeConfig) => void;
 	onCreateWorktree: (branchName: string, basePath: string) => void;
 	onDisableConfig: () => void;
 }
@@ -50,11 +56,12 @@ export function WorktreeConfigModal({
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
 
-	// Form state — default base path to parent directory of the agent's cwd
+	// Form state - default base path to parent directory of the agent's cwd
 	const [basePath, setBasePath] = useState(
 		session.worktreeConfig?.basePath || getParentDir(session.cwd)
 	);
 	const [watchEnabled, setWatchEnabled] = useState(session.worktreeConfig?.watchEnabled ?? true);
+	const [setupScript, setSetupScript] = useState(session.worktreeConfig?.setupScript ?? '');
 	const [newBranchName, setNewBranchName] = useState('');
 	const [isCreating, setIsCreating] = useState(false);
 	const [isValidating, setIsValidating] = useState(false);
@@ -91,6 +98,7 @@ export function WorktreeConfigModal({
 			checkGhCli();
 			setBasePath(session.worktreeConfig?.basePath || getParentDir(session.cwd));
 			setWatchEnabled(session.worktreeConfig?.watchEnabled ?? true);
+			setSetupScript(session.worktreeConfig?.setupScript ?? '');
 			setNewBranchName('');
 			setError(null);
 		}
@@ -133,7 +141,7 @@ export function WorktreeConfigModal({
 				);
 				return;
 			}
-			onSaveConfig({ basePath: basePath.trim(), watchEnabled });
+			onSaveConfig({ basePath: basePath.trim(), watchEnabled, setupScript: setupScript.trim() });
 			onClose();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : 'Failed to validate directory');
@@ -157,7 +165,7 @@ export function WorktreeConfigModal({
 
 		try {
 			// Save config first to ensure it's persisted
-			onSaveConfig({ basePath: basePath.trim(), watchEnabled });
+			onSaveConfig({ basePath: basePath.trim(), watchEnabled, setupScript: setupScript.trim() });
 			// Then create the worktree, passing the basePath
 			await onCreateWorktree(newBranchName.trim(), basePath.trim());
 			setNewBranchName('');
@@ -171,11 +179,18 @@ export function WorktreeConfigModal({
 	const handleDisable = () => {
 		setBasePath('');
 		setWatchEnabled(true);
+		setSetupScript('');
 		setNewBranchName('');
 		setError(null);
 		onDisableConfig();
 		onClose();
 	};
+	const resizableModal = useResizableModal({
+		resizeKey: 'worktree-config',
+		defaultSize: { width: 560, height: 620 },
+		minSize: { width: 420, height: 360 },
+		enabled: isOpen,
+	});
 
 	if (!isOpen) return null;
 
@@ -186,26 +201,43 @@ export function WorktreeConfigModal({
 
 			{/* Modal */}
 			<div
-				className="relative w-full max-w-lg rounded-lg shadow-2xl border max-h-[80vh] flex flex-col"
+				ref={resizableModal.modalRef}
+				role="dialog"
+				aria-modal="true"
+				aria-label="Worktree Configuration"
+				className="relative rounded-lg shadow-2xl border flex flex-col overflow-hidden select-none"
 				style={{
+					...resizableModal.style,
 					backgroundColor: theme.colors.bgSidebar,
 					borderColor: theme.colors.border,
 				}}
+				data-modal-resize-key="worktree-config"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div
 					className="flex items-center justify-between px-4 py-3 border-b shrink-0"
 					style={{ borderColor: theme.colors.border }}
 				>
-					<div className="flex items-center gap-2">
-						<GitBranch className="w-5 h-5" style={{ color: theme.colors.accent }} />
-						<h2 className="font-bold" style={{ color: theme.colors.textMain }}>
+					<div className="flex items-center gap-2 min-w-0">
+						<GitBranch className="w-5 h-5 shrink-0" style={{ color: theme.colors.accent }} />
+						<h2 className="font-bold shrink-0" style={{ color: theme.colors.textMain }}>
 							Worktree Configuration
 						</h2>
+						{/* Which agent is being configured. This modal no longer force-
+						    activates the agent it was opened for, so the header is the
+						    only thing saying whose config Save will write. */}
+						<ModalSubtitle theme={theme} subtitle={session.name} />
 					</div>
-					<button onClick={onClose} className="p-1 rounded hover:bg-white/10 transition-colors">
+					<GhostIconButton onClick={onClose} ariaLabel="Close">
 						<X className="w-4 h-4" style={{ color: theme.colors.textDim }} />
-					</button>
+					</GhostIconButton>
 				</div>
 
 				{/* Content */}
@@ -231,7 +263,7 @@ export function WorktreeConfigModal({
 										type="button"
 										className="underline hover:opacity-80"
 										style={{ color: theme.colors.accent }}
-										onClick={() => window.maestro.shell.openExternal('https://cli.github.com')}
+										onClick={() => openUrl('https://cli.github.com')}
 									>
 										GitHub CLI
 									</button>{' '}
@@ -252,7 +284,7 @@ export function WorktreeConfigModal({
 						>
 							<Server className="w-4 h-4" style={{ color: theme.colors.accent }} />
 							<span className="text-sm" style={{ color: theme.colors.textMain }}>
-								Remote session — enter the path on the remote server
+								Remote session - enter the path on the remote server
 							</span>
 						</div>
 					)}
@@ -294,7 +326,7 @@ export function WorktreeConfigModal({
 								Browse
 							</button>
 						</div>
-						<p className="text-[10px] mt-1" style={{ color: theme.colors.textDim }}>
+						<p className="text-2xs mt-1" style={{ color: theme.colors.textDim }}>
 							{isRemoteSession
 								? 'Path on the remote server where worktrees will be created'
 								: 'Base directory where worktrees will be created'}
@@ -307,7 +339,7 @@ export function WorktreeConfigModal({
 							<div className="text-sm font-medium" style={{ color: theme.colors.textMain }}>
 								Watch for new worktrees
 							</div>
-							<p className="text-[10px]" style={{ color: theme.colors.textDim }}>
+							<p className="text-2xs" style={{ color: theme.colors.textDim }}>
 								Auto-detect worktrees created outside Maestro
 							</p>
 						</div>
@@ -323,6 +355,36 @@ export function WorktreeConfigModal({
 								}`}
 							/>
 						</button>
+					</div>
+
+					{/* Setup Script */}
+					<div>
+						<label
+							htmlFor="worktree-setup-script"
+							className="text-xs font-bold uppercase mb-1.5 block"
+							style={{ color: theme.colors.textDim }}
+						>
+							Setup Script
+						</label>
+						<textarea
+							id="worktree-setup-script"
+							value={setupScript}
+							onChange={(e) => setSetupScript(e.target.value)}
+							rows={3}
+							spellCheck={false}
+							placeholder={'cp "$MAESTRO_MAIN_REPO_PATH/.env.local" . && ./setup.sh'}
+							className="w-full px-3 py-2 rounded border bg-transparent outline-none text-xs font-mono resize-y"
+							style={{
+								borderColor: theme.colors.border,
+								color: theme.colors.textMain,
+							}}
+						/>
+						<p className="text-2xs mt-1" style={{ color: theme.colors.textDim }}>
+							Runs in each newly created worktree{isRemoteSession ? ' on the remote host' : ''}.
+							Available variables: <code>$MAESTRO_WORKTREE_PATH</code>,{' '}
+							<code>$MAESTRO_WORKTREE_BRANCH</code>, <code>$MAESTRO_MAIN_REPO_PATH</code>,{' '}
+							<code>$MAESTRO_BASE_BRANCH</code>. Leave blank to disable.
+						</p>
 					</div>
 
 					{/* Divider */}
@@ -367,11 +429,7 @@ export function WorktreeConfigModal({
 									color: theme.colors.accentForeground,
 								}}
 							>
-								{isCreating ? (
-									<Loader2 className="w-4 h-4 animate-spin" />
-								) : (
-									<Plus className="w-4 h-4" />
-								)}
+								{isCreating ? <Spinner size={16} /> : <Plus className="w-4 h-4" />}
 								Create
 							</button>
 						</div>
@@ -435,7 +493,7 @@ export function WorktreeConfigModal({
 							color: theme.colors.accentForeground,
 						}}
 					>
-						{isValidating && <Loader2 className="w-4 h-4 animate-spin" />}
+						{isValidating && <Spinner size={16} />}
 						{isValidating ? 'Validating...' : 'Save Configuration'}
 					</button>
 				</div>

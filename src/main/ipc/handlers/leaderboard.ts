@@ -13,6 +13,7 @@
 import { ipcMain, App } from 'electron';
 import Store from 'electron-store';
 import { logger } from '../../utils/logger';
+import { fetchWithTimeout } from '../../utils/fetchWithTimeout';
 import type { MaestroSettings } from './persistence';
 
 // ==========================================================================
@@ -21,12 +22,6 @@ import type { MaestroSettings } from './persistence';
 
 const LEADERBOARD_API_BASE = 'https://runmaestro.ai/api';
 const M4ESTR0_API_BASE = 'https://runmaestro.ai/api/m4estr0';
-
-/**
- * Default timeout for fetch requests in milliseconds.
- * 30 seconds is reasonable for API calls that may have some latency.
- */
-const FETCH_TIMEOUT_MS = 30000;
 
 // ==========================================================================
 // Types
@@ -59,6 +54,13 @@ export interface LeaderboardSubmitData {
 	// Installation tracking for multi-device differentiation
 	installationId?: string;
 	clientTotalTimeMs?: number;
+	/**
+	 * What earned this time. Absent means 'auto-run' (older clients predate
+	 * this field), so the server must treat missing as an Auto Run. Cue
+	 * submissions are far more frequent than Auto Run ones, so the server keys
+	 * off this to suppress per-submission Discord notifications.
+	 */
+	source?: 'auto-run' | 'cue';
 }
 
 /**
@@ -190,33 +192,6 @@ export interface LeaderboardHandlerDependencies {
 // ==========================================================================
 // Helper Functions
 // ==========================================================================
-
-/**
- * Creates a fetch request with timeout support.
- *
- * @param url - The URL to fetch
- * @param options - Fetch options
- * @param timeoutMs - Timeout in milliseconds (default: FETCH_TIMEOUT_MS)
- * @returns Promise that resolves to the Response or rejects on timeout
- */
-async function fetchWithTimeout(
-	url: string,
-	options: RequestInit = {},
-	timeoutMs: number = FETCH_TIMEOUT_MS
-): Promise<Response> {
-	const controller = new AbortController();
-	const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-	try {
-		const response = await fetch(url, {
-			...options,
-			signal: controller.signal,
-		});
-		return response;
-	} finally {
-		clearTimeout(timeoutId);
-	}
-}
 
 // ==========================================================================
 // Handler Registration
@@ -639,19 +614,3 @@ export function registerLeaderboardHandlers(deps: LeaderboardHandlerDependencies
 		}
 	);
 }
-
-// ==========================================================================
-// Exports for Testing
-// ==========================================================================
-
-/**
- * Get the default fetch timeout in milliseconds (for testing)
- */
-export function getFetchTimeoutMs(): number {
-	return FETCH_TIMEOUT_MS;
-}
-
-/**
- * Exposed for testing - fetch with timeout helper
- */
-export { fetchWithTimeout };

@@ -10,18 +10,17 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { SessionList } from '../../renderer/components/SessionList';
 import { AutoRun, AutoRunHandle } from '../../renderer/components/AutoRun';
 import { LayerStackProvider } from '../../renderer/contexts/LayerStackContext';
-import type {
-	Session,
-	Group,
-	Theme,
-	Shortcut,
-	BatchRunState,
-	SessionState,
-} from '../../renderer/types';
+import { createMockTheme } from '../helpers/mockTheme';
+import type { Session, Group, Shortcut, BatchRunState, SessionState } from '../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../helpers/mockSession';
+import { seedSidebarNav, resetSidebarNavStore } from '../helpers/seedSidebarNav';
+import { useSessionStore } from '../../renderer/stores/sessionStore';
+import { useUIStore } from '../../renderer/stores/uiStore';
+import { useSettingsStore } from '../../renderer/stores/settingsStore';
 
 // Helper to wrap component in LayerStackProvider with custom rerender
 const renderWithProviders = (ui: React.ReactElement) => {
@@ -34,6 +33,13 @@ const renderWithProviders = (ui: React.ReactElement) => {
 };
 
 // Mock external dependencies
+// CodeMirror cannot lay itself out in jsdom, so the Auto Run source editor is
+// swapped for the shared textarea double (it still implements the editor handle).
+vi.mock('../../renderer/components/FilePreview/markdownEditor', async () => {
+	const { markdownEditorModuleMock } = await import('../helpers/mockMarkdownEditor');
+	return markdownEditorModuleMock();
+});
+
 vi.mock('react-markdown', () => ({
 	default: ({ children }: { children: string }) => (
 		<div data-testid="react-markdown">{children}</div>
@@ -173,28 +179,6 @@ vi.mock('qrcode.react', () => ({
 	QRCodeSVG: () => <div data-testid="qrcode">QR Code</div>,
 }));
 
-// Create a mock theme for testing
-const createMockTheme = (): Theme => ({
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgActivity: '#2d2d2d',
-		bgSidebar: '#1e1e1e',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		highlight: '#0066ff33',
-		success: '#00aa00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-	},
-});
-
 // Setup window.maestro mock
 const setupMaestroMock = () => {
 	const mockMaestro = {
@@ -222,42 +206,31 @@ const setupMaestroMock = () => {
 	return mockMaestro;
 };
 
-// Create mock session
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: 'test-session-1',
-	name: 'Test Session 1',
-	cwd: '/test/path',
-	projectRoot: '/test/path',
-	fullPath: '/test/path',
-	toolType: 'claude-code',
-	state: 'idle',
-	inputMode: 'ai',
-	isGitRepo: true,
-	aiPid: 1234,
-	terminalPid: 5678,
-	port: 3000,
-	aiTabs: [{ id: 'tab-1', name: 'Tab 1', logs: [] }],
-	activeTabId: 'tab-1',
-	closedTabHistory: [],
-	shellLogs: [],
-	fileTree: [],
-	fileExplorerExpanded: [],
-	fileExplorerScrollPos: 0,
-	executionQueue: [],
-	changedFiles: [],
-	isLive: false,
-	contextUsage: 0,
-	workLog: [],
-	autoRunFolderPath: '/test/autorun',
-	autoRunSelectedFile: 'Phase 1',
-	autoRunMode: 'edit',
-	autoRunContent: '# Session 1 Content\n\n- [ ] Task 1',
-	autoRunContentVersion: 0,
-	autoRunCursorPosition: 0,
-	autoRunEditScrollPos: 0,
-	autoRunPreviewScrollPos: 0,
-	...overrides,
-});
+// Thin wrapper: seeds auto run content so SessionList shows auto run
+// progress indicators.
+const createMockSession = (overrides: Partial<Session> = {}): Session =>
+	baseCreateMockSession({
+		id: 'test-session-1',
+		name: 'Test Session 1',
+		cwd: '/test/path',
+		fullPath: '/test/path',
+		projectRoot: '/test/path',
+		isGitRepo: true,
+		aiPid: 1234,
+		terminalPid: 5678,
+		port: 3000,
+		aiTabs: [{ id: 'tab-1', name: 'Tab 1', logs: [] }] as any,
+		activeTabId: 'tab-1',
+		autoRunFolderPath: '/test/autorun',
+		autoRunSelectedFile: 'Phase 1',
+		autoRunMode: 'edit',
+		autoRunContent: '# Session 1 Content\n\n- [ ] Task 1',
+		autoRunContentVersion: 0,
+		autoRunCursorPosition: 0,
+		autoRunEditScrollPos: 0,
+		autoRunPreviewScrollPos: 0,
+		...overrides,
+	});
 
 // Create mock group
 const createMockGroup = (overrides: Partial<Group> = {}): Group => ({
@@ -413,6 +386,55 @@ const IntegrationTestWrapper = ({
 		setShowConfirmDialog({ message, onConfirm });
 	}, []);
 
+	// SessionList reads Zustand; keep local harness state mirrored into stores.
+	useEffect(() => {
+		useSessionStore.setState({ sessions, groups, activeSessionId });
+		// Pass bookmarksCollapsed explicitly: this effect can run before the UI
+		// store mirror below, and seedSidebarNav must not read a stale value.
+		seedSidebarNav({ sessions, groups, activeSessionId, bookmarksCollapsed });
+	}, [sessions, groups, activeSessionId, bookmarksCollapsed]);
+
+	useEffect(() => {
+		useUIStore.setState({
+			leftSidebarOpen,
+			activeFocus,
+			selectedSidebarIndex,
+			editingGroupId,
+			editingSessionId,
+			draggingSessionId,
+			bookmarksCollapsed,
+		});
+		useSettingsStore.setState({
+			leftSidebarWidth,
+			ungroupedCollapsed,
+		});
+	}, [
+		leftSidebarOpen,
+		activeFocus,
+		selectedSidebarIndex,
+		editingGroupId,
+		editingSessionId,
+		draggingSessionId,
+		bookmarksCollapsed,
+		leftSidebarWidth,
+		ungroupedCollapsed,
+	]);
+
+	// SessionList selection updates the store; mirror back for Auto Run panel.
+	useEffect(() => {
+		return useSessionStore.subscribe((state) => {
+			if (state.activeSessionId && state.activeSessionId !== activeSessionId) {
+				handleSessionSelect(state.activeSessionId);
+			}
+			if (state.sessions !== sessions) {
+				setSessions(state.sessions);
+			}
+			if (state.groups !== groups) {
+				setGroups(state.groups);
+			}
+		});
+	});
+
 	const theme = createMockTheme();
 	const shortcuts = createMockShortcuts();
 
@@ -422,36 +444,10 @@ const IntegrationTestWrapper = ({
 				{/* Session List */}
 				<SessionList
 					theme={theme}
-					sessions={sessions}
-					groups={groups}
-					sortedSessions={sessions}
-					activeSessionId={activeSessionId}
-					leftSidebarOpen={leftSidebarOpen}
-					leftSidebarWidthState={leftSidebarWidth}
-					activeFocus={activeFocus}
-					selectedSidebarIndex={selectedSidebarIndex}
-					editingGroupId={editingGroupId}
-					editingSessionId={editingSessionId}
-					draggingSessionId={draggingSessionId}
-					shortcuts={shortcuts}
 					isLiveMode={false}
 					webInterfaceUrl={null}
 					toggleGlobalLive={() => {}}
-					bookmarksCollapsed={bookmarksCollapsed}
-					setBookmarksCollapsed={setBookmarksCollapsed}
-					ungroupedCollapsed={ungroupedCollapsed}
-					setUngroupedCollapsed={setUngroupedCollapsed}
-					setActiveFocus={(focus) => setActiveFocus(focus as 'sidebar' | 'main' | 'right')}
-					setActiveSessionId={handleSessionSelect}
-					setLeftSidebarOpen={setLeftSidebarOpen}
-					setLeftSidebarWidthState={setLeftSidebarWidth}
-					setShortcutsHelpOpen={() => {}}
-					setSettingsModalOpen={() => {}}
-					setSettingsTab={() => {}}
-					setAboutModalOpen={() => {}}
-					setUpdateCheckModalOpen={() => {}}
-					setLogViewerOpen={() => {}}
-					setProcessMonitorOpen={() => {}}
+					restartWebServer={async () => null}
 					toggleGroup={(groupId) => {
 						setGroups((prev) =>
 							prev.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
@@ -486,8 +482,6 @@ const IntegrationTestWrapper = ({
 					startRenamingGroup={(groupId) => setEditingGroupId(groupId)}
 					startRenamingSession={(sessId) => setEditingSessionId(sessId)}
 					showConfirmation={handleConfirmation}
-					setGroups={setGroups}
-					setSessions={setSessions}
 					createNewGroup={() => {
 						const newGroup: Group = {
 							id: `group-${Date.now()}`,
@@ -497,6 +491,7 @@ const IntegrationTestWrapper = ({
 						};
 						setGroups((prev) => [...prev, newGroup]);
 					}}
+					setGroupParent={() => {}}
 					addNewSession={() => {
 						const newSession = createMockSession({
 							id: `session-${Date.now()}`,
@@ -508,9 +503,9 @@ const IntegrationTestWrapper = ({
 						setSessions((prev) => [...prev, newSession]);
 						setActiveSessionId(newSession.id);
 					}}
-					setRenameInstanceModalOpen={() => {}}
-					setRenameInstanceValue={() => {}}
-					setRenameInstanceSessionId={() => {}}
+					onDeleteSession={handleDeleteSession}
+					onEditAgent={() => {}}
+					onNewAgentSession={() => {}}
 				/>
 
 				{/* Auto Run Panel (only render if active session exists) */}
@@ -586,6 +581,7 @@ describe('Auto Run + Session List Integration', () => {
 	let mockMaestro: ReturnType<typeof setupMaestroMock>;
 
 	beforeEach(() => {
+		resetSidebarNavStore();
 		mockMaestro = setupMaestroMock();
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {

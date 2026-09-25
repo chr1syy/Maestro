@@ -3,8 +3,24 @@
  * All web server components should import types from this file to avoid duplication.
  */
 
+import type { AutoRunBroadcastState } from '../../shared/autoRunBroadcast';
+import type { DesktopTabEntry } from '../../shared/desktopTabs';
+import type { SnoozeCommandRequest, SnoozeCommandResult } from '../../shared/snoozeCommands';
+import type { UsageStats } from '../../shared/types';
+import type { ToastClickAction } from '../../shared/toastClickAction';
+import type { GroupAppearance, GroupUpdateRequest } from '../../shared/groupAppearance';
 import type { WebSocket } from 'ws';
 import type { Theme } from '../../shared/theme-types';
+import type { Shortcut } from '../../shared/shortcut-types';
+import type { CadenzaPayload } from '../../shared/cadenza-types';
+import type { MovementPayload, MovementStateSnapshot } from '../../shared/movement-types';
+import type { AgentDelegationNotice } from '../../shared/agentDelegation';
+import type { WebActingUser } from '../../shared/webLogin';
+import type {
+	ConcertoDesignerAction,
+	ConcertoDesignerActionResult,
+	MovementDesignerInspection,
+} from '../../shared/concerto-html';
 
 // Re-export Theme for convenience
 export type { Theme } from '../../shared/theme-types';
@@ -46,7 +62,7 @@ export interface AITabData {
 	name: string | null;
 	starred: boolean;
 	inputValue: string;
-	usageStats?: SessionUsageStats | null;
+	usageStats?: UsageStats | null;
 	createdAt: number;
 	state: 'idle' | 'busy';
 	thinkingStartTime?: number | null;
@@ -112,6 +128,13 @@ export interface SessionData {
 	activeTabId?: string;
 	/** Whether session is bookmarked (shows in Bookmarks group) */
 	bookmarked?: boolean;
+	/** Worktree subagent support */
+	parentSessionId?: string | null;
+	worktreeBranch?: string | null;
+	/** Whether the session's cwd is a git repo (controls Run-in-Worktree visibility on mobile). */
+	isGitRepo?: boolean;
+	/** Base path where worktrees are stored, when configured on the parent session. */
+	worktreeBasePath?: string | null;
 }
 
 /**
@@ -152,6 +175,12 @@ export interface SessionBroadcastData {
 	/** Worktree subagent support */
 	parentSessionId?: string | null;
 	worktreeBranch?: string | null;
+	/** Whether the session's cwd is a git repo (controls Run-in-Worktree visibility on mobile). */
+	isGitRepo?: boolean;
+	/** Base path where worktrees are stored, when configured on the parent session. */
+	worktreeBasePath?: string | null;
+	/** The session's configured Auto Run folder; null when not set yet. */
+	autoRunFolderPath?: string | null;
 }
 
 // =============================================================================
@@ -160,22 +189,12 @@ export interface SessionBroadcastData {
 
 /**
  * Auto Run state for broadcast messages.
+ *
+ * Alias of the shared cross-boundary shape. The renderer's IPC signature, the
+ * main-process handler, and this file all name the same type so a new field
+ * cannot be added at one end and silently dropped at another.
  */
-export interface AutoRunState {
-	isRunning: boolean;
-	totalTasks: number;
-	completedTasks: number;
-	currentTaskIndex: number;
-	isStopping?: boolean;
-	/** Total number of documents in the run (multi-document progress) */
-	totalDocuments?: number;
-	/** Current document being processed (0-based, multi-document progress) */
-	currentDocumentIndex?: number;
-	/** Total tasks across all documents (multi-document progress) */
-	totalTasksAcrossAllDocs?: number;
-	/** Completed tasks across all documents (multi-document progress) */
-	completedTasksAcrossAllDocs?: number;
-}
+export type AutoRunState = AutoRunBroadcastState;
 
 /**
  * CLI activity data for session state broadcasts.
@@ -198,6 +217,20 @@ export interface WebClient {
 	id: string;
 	connectedAt: number;
 	subscribedSessionId?: string;
+	/**
+	 * The Web Login account behind this socket, resolved once at the upgrade
+	 * from the session cookie. Undefined when the gate is off and for
+	 * `maestro-cli` (admitted by its secret, not signed in), both of which mean
+	 * "the desktop" to `getActingUser()`. Every bridge dispatch from this client
+	 * runs in this user's acting context.
+	 */
+	user?: WebActingUser;
+	/**
+	 * The session the account was resolved from. Revocation is keyed on THIS,
+	 * not on the account: a password reset or a logout removes the session
+	 * while the account stays, and the socket must still go.
+	 */
+	sessionId?: string;
 }
 
 /**
@@ -211,6 +244,22 @@ export interface WebClientMessage {
 	mode?: 'ai' | 'terminal';
 	inputMode?: 'ai' | 'terminal';
 	newName?: string;
+	/**
+	 * `dispatch --notify-on-complete <agent>`: agent to wake with a real turn
+	 * when THIS dispatch finishes. Accepted on send_command,
+	 * new_ai_tab_with_prompt and enqueue_command.
+	 */
+	notifyOnComplete?: string;
+	/** Specific caller tab to wake. Defaults to the caller's active AI tab. */
+	callbackTab?: string;
+	/** Overrides the default callback prompt body. */
+	callbackPrompt?: string;
+	/** Give-up window for the callback, in seconds. */
+	callbackTimeout?: number;
+	/** Placement for a view-moving verb. See shared/focusPlacement.ts. */
+	background?: boolean;
+	/** open_file_tab only: the older, weaker `--no-switch` ask. */
+	switchToAgent?: boolean;
 	[key: string]: unknown;
 }
 
@@ -240,11 +289,24 @@ export type WriteToSessionCallback = (sessionId: string, data: string) => boolea
  * This forwards the command to the renderer which handles spawn, state, and broadcasts.
  * Returns true if command was accepted (session not busy).
  * inputMode is optional - if provided, the renderer will use it instead of querying session state.
+ * tabId is optional - if provided, the renderer targets that specific tab instead of the active tab.
+ * force is optional - if true, bypasses the renderer's own busy-state guard so
+ *   `dispatch --force` lands on a busy tab. The server-side guard is a separate
+ *   check that is gated by the `allowConcurrentSend` setting.
  */
 export type ExecuteCommandCallback = (
 	sessionId: string,
 	command: string,
-	inputMode?: 'ai' | 'terminal'
+	inputMode?: 'ai' | 'terminal',
+	tabId?: string,
+	force?: boolean,
+	images?: string[],
+	/**
+	 * Deliver without selecting the target agent. Absent means today's behaviour
+	 * (the renderer selects it "for visual feedback"), so the web/mobile client and
+	 * every in-app caller keep focusing exactly as they do now.
+	 */
+	background?: boolean
 ) => Promise<boolean>;
 
 /**
@@ -257,7 +319,11 @@ export type InterruptSessionCallback = (sessionId: string) => Promise<boolean>;
  * Callback type for switching session input mode through the desktop's existing logic.
  * This forwards to the renderer which handles state updates and broadcasts.
  */
-export type SwitchModeCallback = (sessionId: string, mode: 'ai' | 'terminal') => Promise<boolean>;
+export type SwitchModeCallback = (
+	sessionId: string,
+	mode: 'ai' | 'terminal',
+	background?: boolean
+) => Promise<boolean>;
 
 /**
  * Callback type for selecting/switching to a session in the desktop app.
@@ -274,27 +340,464 @@ export type SelectSessionCallback = (
  * Tab operation callbacks for multi-tab support.
  */
 export type SelectTabCallback = (sessionId: string, tabId: string) => Promise<boolean>;
-export type NewTabCallback = (sessionId: string) => Promise<{ tabId: string } | null>;
+export type NewTabCallback = (
+	sessionId: string,
+	background?: boolean
+) => Promise<{ tabId: string } | null>;
 export type CloseTabCallback = (sessionId: string, tabId: string) => Promise<boolean>;
+export interface RenameTabResult {
+	success: boolean;
+	error?: string;
+	unconfirmed?: boolean;
+}
+
+export function normalizeRenameTabResult(result: unknown): RenameTabResult {
+	if (typeof result === 'boolean') return { success: result };
+	if (result && typeof result === 'object' && 'success' in result) {
+		const candidate = result as { success?: unknown; error?: unknown; unconfirmed?: unknown };
+		return {
+			success: candidate.success === true,
+			...(typeof candidate.error === 'string' ? { error: candidate.error } : {}),
+			...(candidate.unconfirmed === true ? { unconfirmed: true } : {}),
+		};
+	}
+	return { success: false, error: 'Invalid rename tab response' };
+}
+
 export type RenameTabCallback = (
 	sessionId: string,
 	tabId: string,
 	newName: string
-) => Promise<boolean>;
+) => Promise<boolean | RenameTabResult>;
 export type StarTabCallback = (
 	sessionId: string,
 	tabId: string,
 	starred: boolean
 ) => Promise<boolean>;
+/**
+ * One snooze verb, forwarded to the renderer - which owns the authoritative
+ * snooze state - and answered with whatever it did. Resolves rather than
+ * rejects on a miss: the caller is a CLI process reporting to a human, and a
+ * thrown error there reads as a broken command instead of "no such snooze".
+ */
+export type SnoozeCommandCallback = (request: SnoozeCommandRequest) => Promise<SnoozeCommandResult>;
 export type ReorderTabCallback = (
 	sessionId: string,
 	fromIndex: number,
 	toIndex: number
 ) => Promise<boolean>;
 export type ToggleBookmarkCallback = (sessionId: string) => Promise<boolean>;
-export type OpenFileTabCallback = (sessionId: string, filePath: string) => Promise<boolean>;
+export type OpenFileTabCallback = (
+	sessionId: string,
+	filePath: string,
+	/**
+	 * `switchToAgent: false` (`--no-switch`) stays on the current agent but still
+	 * activates the new tab inside the target. `background: true` changes nothing
+	 * currently rendered anywhere, and wins when both are given.
+	 */
+	options: { background: boolean; switchToAgent: boolean }
+) => Promise<boolean>;
 export type RefreshFileTreeCallback = (sessionId: string) => Promise<boolean>;
-export type RefreshAutoRunDocsCallback = (sessionId: string) => Promise<boolean>;
+/**
+ * Scope for a Document Graph opened from outside the renderer.
+ *
+ * Paths are ABSOLUTE. The renderer roots the graph at the agent's
+ * `projectRoot || cwd`, which is not always the `cwd` a CLI caller resolved
+ * against (worktrees differ), so it relativizes them itself.
+ *
+ * Exactly one of `files` / `directory` carries the scope. A directory is kept
+ * as a directory rather than expanded here so the app scans it at render time
+ * and picks up documents written since the command was issued.
+ */
+export type OpenDocumentGraphParams = {
+	sessionId: string;
+	files?: string[];
+	directory?: string;
+	focusPath?: string;
+};
+export type OpenDocumentGraphCallback = (params: OpenDocumentGraphParams) => Promise<boolean>;
+/**
+ * Open one of the app's modals/dashboards (see `shared/uiSurfaces.ts` for the
+ * registry). `surface` is a `UiSurface.id`; `tab` is an optional tab id within
+ * it, already validated against that surface.
+ */
+export type OpenModalParams = { surface: string; tab?: string };
+export type OpenModalCallback = (params: OpenModalParams) => Promise<boolean>;
+/**
+ * Callback type for atomically creating a new AI tab and dispatching a prompt into it.
+ * Returns the new tab id alongside success so callers (e.g. `maestro-cli dispatch
+ * --new-tab`) can address the same tab on later calls without owning a persistent
+ * channel.
+ */
+/**
+ * Consult another agent and return its answer (`maestro-cli ask`).
+ *
+ * Rides the same cross-agent consult path a typed `@mention` does - a hidden
+ * tab on the target, no focus, no unread - but resolves with the answer instead
+ * of streaming it into a chat bubble, because the caller here is an agent
+ * waiting on a tool result rather than a human reading a transcript.
+ */
+export type ConsultAgentParams = {
+	targetSessionId: string;
+	question: string;
+	/** The calling agent, when it named itself. Attribution + continuity. */
+	fromSessionId?: string;
+	/** The calling agent's AI tab, when its spawn stamped one. Places the consult pill. */
+	fromTabId?: string;
+	/** Forward the caller's transcript as context (off by default). */
+	withContext?: boolean;
+	/** How long the caller is willing to wait, already clamped by the CLI. */
+	timeoutMs: number;
+};
+export type ConsultAgentResult = {
+	success: boolean;
+	answer?: string;
+	error?: string;
+	canceled?: boolean;
+	targetAgentName?: string;
+	targetTabId?: string;
+};
+export type ConsultAgentCallback = (params: ConsultAgentParams) => Promise<ConsultAgentResult>;
+/**
+ * Mark a delivered CLI dispatch in the transcript of the agent that ran it
+ * (`maestro-cli dispatch` from an agent's shell). Fire-and-forget: the dispatch
+ * already succeeded, and the pill is a record of it, not part of it.
+ */
+export type NoteAgentDelegationCallback = (notice: AgentDelegationNotice) => void;
+/**
+ * Result of `dispatch --new-tab`. The tab is created either way; `queued` says
+ * whether its prompt started immediately or joined the agent's execution queue
+ * because the agent was mid-turn. `error` carries the renderer's own reason for
+ * a refusal, so the CLI can report what actually happened instead of inferring
+ * one from a missing tab id.
+ */
+export type NewAITabWithPromptResult = {
+	success: boolean;
+	tabId?: string;
+	queued?: boolean;
+	error?: string;
+};
+export type NewAITabWithPromptCallback = (
+	sessionId: string,
+	prompt: string,
+	background?: boolean
+) => Promise<NewAITabWithPromptResult>;
+/**
+ * Result of enqueuing (or immediately dispatching) a CLI prompt into the
+ * renderer's authoritative execution queue. When the target session is busy the
+ * prompt joins `session.executionQueue` (FIFO by timestamp); when idle it is
+ * dispatched immediately through the same path as a plain `dispatch`. Surfaced
+ * so `maestro-cli dispatch --queue` can report the queue position to callers.
+ */
+export type EnqueueCommandFailureReason = 'session-not-found' | 'tab-not-found' | 'no-ai-tabs';
+export type EnqueueCommandResult = {
+	success: boolean;
+	tabId?: string;
+	/** True when the prompt was queued (session busy); false when dispatched now. */
+	queued?: boolean;
+	/** 1-based position in the queue when queued (1 = next to run). */
+	queuePosition?: number;
+	/** Total number of items in the queue after enqueuing. */
+	queueLength?: number;
+	/** Id of the queued item, for later tracking or removal. */
+	itemId?: string;
+	error?: string;
+	/**
+	 * Machine-readable cause of a failure, so callers can react to a specific
+	 * one without parsing `error`. Dispatch callbacks use `tab-not-found` to
+	 * fall back to agent-level delivery when a `--callback-tab` has since been
+	 * closed (see `deliverCallback` in `dispatch-callbacks/`).
+	 */
+	reason?: EnqueueCommandFailureReason;
+};
+export type EnqueueCommandCallback = (
+	sessionId: string,
+	command: string,
+	inputMode?: 'ai' | 'terminal',
+	tabId?: string,
+	images?: string[],
+	background?: boolean
+) => Promise<EnqueueCommandResult>;
+/**
+ * A single queued item, mirrored from the renderer's executionQueue for CLI
+ * inspection (`maestro-cli queue list`). Tracks the renderer QueuedItem shape.
+ */
+export interface QueuedItemSnapshot {
+	id: string;
+	timestamp: number;
+	tabId: string;
+	type: 'message' | 'command';
+	text?: string;
+	command?: string;
+	commandArgs?: string;
+	tabName?: string;
+	paused?: boolean;
+}
+/**
+ * Per-session queue snapshot returned by the list_queue round-trip. Carries the
+ * session state alongside the queued items so `maestro-cli queue list` can show
+ * whether the agent is currently busy.
+ */
+export interface QueueSessionSnapshot {
+	sessionId: string;
+	name: string;
+	state: string;
+	items: QueuedItemSnapshot[];
+}
+export type ListQueueResult = {
+	success: boolean;
+	queues: QueueSessionSnapshot[];
+	error?: string;
+};
+export type ListQueueCallback = (sessionId?: string) => Promise<ListQueueResult>;
+export type RemoveQueueItemResult = { success: boolean; removed: boolean; error?: string };
+export type RemoveQueueItemCallback = (
+	sessionId: string,
+	itemId: string
+) => Promise<RemoveQueueItemResult>;
+/**
+ * Opens a URL as a browser tab in the desktop app.
+ *
+ * `background: true` creates the tab without stealing the user's place: the
+ * active agent is left alone and the new tab does not become the visible one.
+ * Agents doing research should always use it - a foreground tab yanks the
+ * window out from under whatever the user is doing.
+ *
+ * Returns the created tab's id so the caller can close it again when done
+ * (see `CloseBrowserTabCallback`).
+ */
+export interface OpenBrowserTabOptions {
+	background?: boolean;
+}
+export type OpenBrowserTabResult = { success: boolean; tabId?: string };
+export type OpenBrowserTabCallback = (
+	sessionId: string,
+	url: string,
+	options?: OpenBrowserTabOptions
+) => Promise<OpenBrowserTabResult>;
+
+/**
+ * Closes a browser tab by id. The owning agent is resolved in the renderer, so
+ * callers only need the tab id returned by `OpenBrowserTabCallback`.
+ */
+export type CloseBrowserTabCallback = (tabId: string) => Promise<boolean>;
+export interface OpenTerminalTabConfig {
+	cwd?: string;
+	shell?: string;
+	name?: string | null;
+	/**
+	 * Command to run in the new terminal. Stored as the tab's startup command, so
+	 * it also re-runs if the tab is restarted or the app is reopened - which is
+	 * the behavior a long-running `npm run dev` wants.
+	 */
+	command?: string;
+}
+export interface OpenTerminalTabResult {
+	success: boolean;
+	tabId?: string;
+}
+export type OpenTerminalTabCallback = (
+	sessionId: string,
+	config: OpenTerminalTabConfig,
+	options?: { background?: boolean }
+) => Promise<OpenTerminalTabResult>;
+
+/**
+ * Writes raw data into an already-open desktop terminal tab. `tabRef` is a tab
+ * id or display name; omitted means the agent's active terminal tab.
+ */
+export interface WriteTerminalTabPayload {
+	tabRef?: string;
+	data: string;
+}
+export interface WriteTerminalTabResult {
+	success: boolean;
+	error?: string;
+	/** The tab that actually received the write, echoed back for reporting. */
+	tabId?: string;
+	tabName?: string;
+}
+export type WriteTerminalTabCallback = (
+	sessionId: string,
+	payload: WriteTerminalTabPayload
+) => Promise<WriteTerminalTabResult>;
+
+/**
+ * A desktop terminal tab. Terminal tabs live only in renderer state, so this is
+ * assembled there and passed back through the remote bridge.
+ */
+export interface TerminalTabInfo {
+	tabId: string;
+	agentId: string;
+	agentName: string;
+	name: string;
+	cwd: string;
+	pid: number;
+	state: string;
+	active: boolean;
+	startupCommand: string | null;
+}
+export type ListTerminalTabsCallback = (sessionId?: string) => Promise<TerminalTabInfo[]>;
+
+/**
+ * Read a terminal tab's scrollback. The counterpart to WriteTerminalTabPayload:
+ * `send-terminal` types into a shell, this reads back what it printed.
+ */
+export interface ReadTerminalTabPayload {
+	/** Tab id or display name. Omitted means the agent's active terminal. */
+	tabRef?: string;
+	/**
+	 * Tail-truncate to the last N lines. Applied in the renderer, before the
+	 * buffer crosses IPC - a `tail -f` tab can hold megabytes of scrollback and
+	 * shipping all of it just to drop it here would be wasted copying.
+	 */
+	tail?: number;
+}
+
+export interface ReadTerminalTabResult {
+	success: boolean;
+	error?: string;
+	/** The tab that was actually read, echoed back for reporting. */
+	tabId?: string;
+	tabName?: string;
+	cwd?: string;
+	/** PTY lifecycle state: 'idle' | 'busy' | 'exited'. Tells the caller whether
+	 *  the output is final or the command is still running. */
+	state?: string;
+	content?: string;
+	/** Total lines in the buffer before tail-truncation, so a caller can tell
+	 *  "that's everything" from "that's the last 200 of 4000". */
+	totalLines?: number;
+}
+
+export type ReadTerminalTabCallback = (
+	sessionId: string,
+	payload: ReadTerminalTabPayload
+) => Promise<ReadTerminalTabResult>;
+
+/**
+ * Re-read an agent's Auto Run documents.
+ *
+ * `background` suppresses the agent switch the renderer otherwise performs to
+ * get the target refreshed; the refresh itself happens either way.
+ */
+export type RefreshAutoRunDocsCallback = (
+	sessionId: string,
+	background?: boolean
+) => Promise<boolean>;
+
+/**
+ * Updates the Auto Run folder for an existing session. Mirrors what the desktop
+ * app does when the user picks a different folder via `dialog.selectFolder` -
+ * the renderer reloads the document list from the new path and persists the
+ * choice to session storage. Used by the web UI's `FolderPickerSheet`.
+ */
+export type SetSessionAutoRunFolderCallback = (
+	sessionId: string,
+	folderPath: string
+) => Promise<{ success: boolean; error?: string }>;
+
+/**
+ * Notification kinds supported by the desktop app.
+ * Toast = persistent dismissable notification (queued).
+ * CenterFlash = momentary single-slot center-screen confirmation.
+ */
+
+/**
+ * Five canonical colors shared by Toast and Center Flash (one design language).
+ * `theme` adapts to the active theme.
+ *
+ *   green  - succeeded
+ *   yellow - heads-up / soft warning
+ *   orange - more emphatic warning
+ *   red    - failed / blocked
+ *   theme  - default; matches the active theme's accent color (no semantic)
+ */
+export type NotifyCenterFlashColor = 'green' | 'yellow' | 'orange' | 'red' | 'theme';
+export type NotifyToastColor = NotifyCenterFlashColor;
+
+/**
+ * @deprecated Legacy semantic alias. Prefer `NotifyToastColor`.
+ *   success → green, info → theme, warning → yellow, error → red
+ */
+export type NotifyToastKind = 'success' | 'info' | 'warning' | 'error';
+
+/**
+ * @deprecated Legacy semantic alias. Prefer `NotifyCenterFlashColor`.
+ *   success → green, info → theme, warning → yellow, error → red
+ */
+export type NotifyCenterFlashVariant = 'success' | 'info' | 'warning' | 'error';
+
+/**
+ * Data-driven click intent for an externally-fired toast. Alias of the
+ * canonical `ToastClickAction` (`shared/toastClickAction.ts`) - the only
+ * subset that survives serialization across the IPC bridge.
+ */
+export type NotifyToastClickAction = ToastClickAction;
+
+export interface NotifyToastParams {
+	title: string;
+	message: string;
+	/** One of the 5 canonical colors. Default: `'theme'`. */
+	color: NotifyToastColor;
+	/** Auto-dismiss seconds; ignored when `dismissible: true`. */
+	duration?: number;
+	/**
+	 * Sticky toast - no auto-dismiss, requires the user to click the close
+	 * button to dismiss. Use for critical messages the user must acknowledge.
+	 */
+	dismissible?: boolean;
+	/** Optional agent/session ID - clicking the toast jumps to it. */
+	sessionId?: string;
+	/**
+	 * Optional explicit source-agent label rendered in the toast header strip.
+	 * Unlike the name resolved from `sessionId` (which requires the agent to be
+	 * loaded in the desktop store), this is store-independent - so cron- and
+	 * watchdog-fired toasts always show who produced them. When set, it wins over
+	 * the resolved session name for display; `sessionId` still drives click-jump.
+	 */
+	sourceAgent?: string;
+	/** Optional AI tab ID within the agent - paired with `sessionId` for jump-to-tab. */
+	tabId?: string;
+	/** Optional inline action link rendered beneath the message body (opens in browser). */
+	actionUrl?: string;
+	/** Optional label for `actionUrl` (defaults to the URL itself). */
+	actionLabel?: string;
+	/**
+	 * Optional click action describing what happens when the toast body is
+	 * clicked. Takes precedence over `sessionId`/`tabId`-driven jump behavior.
+	 */
+	clickAction?: NotifyToastClickAction;
+}
+
+export interface NotifyCenterFlashParams {
+	message: string;
+	detail?: string;
+	/** One of the 5 canonical colors. Default: `'theme'`. */
+	color: NotifyCenterFlashColor;
+	/** Auto-dismiss ms; 0 = never. Omitted = renderer default (1500ms). */
+	duration?: number;
+}
+
+export type NotifyToastCallback = (params: NotifyToastParams) => Promise<boolean>;
+/** Open/update/close an agent-driven cadenza view. Resolves true on success. */
+export type CadenzaViewCallback = (params: CadenzaPayload) => Promise<boolean>;
+
+/** Add/update/move/remove/clear an item on the agent-driven movement. */
+export type MovementViewCallback = (params: MovementPayload) => Promise<boolean>;
+
+/** Read the current movement snapshot (items + size) for agent awareness. */
+export type GetMovementStateCallback = () => Promise<MovementStateSnapshot | null>;
+/** Capture the live HTML Movement viewport plus its runtime diagnostics. */
+export type GetMovementDesignerInspectionCallback = (
+	id: string
+) => Promise<MovementDesignerInspection | null>;
+/** Perform one selector-scoped action inside a sandboxed HTML Movement. */
+export type InteractMovementDesignerCallback = (
+	id: string,
+	action: ConcertoDesignerAction
+) => Promise<ConcertoDesignerActionResult>;
+export type NotifyCenterFlashCallback = (params: NotifyCenterFlashParams) => Promise<boolean>;
 export type ConfigureAutoRunCallback = (
 	sessionId: string,
 	config: {
@@ -304,8 +807,53 @@ export type ConfigureAutoRunCallback = (
 		maxLoops?: number;
 		saveAsPlaybook?: string;
 		launch?: boolean;
+		/**
+		 * Per-run model/effort override (CLI `--model` / `--effort`). Wins over the
+		 * session's configured model for this run's spawns only; never written back
+		 * to the session. Absent means "use the agent default".
+		 */
+		model?: string;
+		effort?: string;
+		worktree?: {
+			enabled: boolean;
+			path: string;
+			branchName: string;
+			createPROnCompletion: boolean;
+			prTargetBranch: string;
+		};
 	}
 ) => Promise<{ success: boolean; playbookId?: string; error?: string }>;
+
+/**
+ * Launch a Goal-Driven Auto Run that the DESKTOP owns, from the CLI
+ * (`goal-run --visible`). Distinct from `ConfigureAutoRunCallback`, which is
+ * document/playbook-driven: goal mode has no documents, so it carries a
+ * `GoalRunConfig` instead and routes to the same `startBatchRun({ goalConfig })`
+ * entry point the Auto Run modal's Go button uses.
+ *
+ * Resolves only once the renderer has confirmed the run actually reached a
+ * running state (or failed to start). Reporting "launched" before that would
+ * hand the CLI a success for a run that silently bailed on a missing prompt
+ * template or the Auto Run kill switch.
+ */
+export type LaunchGoalRunCallback = (
+	sessionId: string,
+	config: {
+		goal: string;
+		exitCriteria?: string;
+		maxIterations?: number | null;
+		/** Per-run model/effort override - wins over the session model for this run only. */
+		model?: string;
+		effort?: string;
+	}
+) => Promise<{
+	success: boolean;
+	/** Id of the AI tab the run surfaces on, for the `maestro://` deep link. */
+	tabId?: string;
+	/** Stable machine-readable failure code (AGENT_BUSY, SESSION_NOT_FOUND, ...). */
+	code?: string;
+	error?: string;
+}>;
 
 /**
  * Callback type for fetching current theme.
@@ -313,9 +861,74 @@ export type ConfigureAutoRunCallback = (
 export type GetThemeCallback = () => Theme | null;
 
 /**
+ * Callback type for fetching the current global Bionify reading-mode setting.
+ */
+export type GetBionifyReadingModeCallback = () => boolean;
+
+/**
  * Callback type for fetching custom AI commands.
  */
 export type GetCustomCommandsCallback = () => CustomAICommand[];
+
+// =============================================================================
+// External Session Inspection (maestro-cli session list / session show)
+// =============================================================================
+
+/**
+ * Single open AI tab surfaced by `maestro-cli session list`.
+ *
+ * `tabId` is the addressable identifier consumers (Maestro-Discord, Cue) pass
+ * back to `dispatch --session <id>` and `session show <id>`. `sessionId` is
+ * an alias kept for symmetry with `dispatch`'s response shape - the duplicate
+ * field lets polling consumers use whichever name they prefer.
+ *
+ * The shape itself lives in `shared/desktopTabs.ts` so the CLI reads the same
+ * declaration this end writes; this alias is the main-process name for it.
+ */
+export type DesktopSessionEntry = DesktopTabEntry;
+
+/**
+ * One message in a session-history response.
+ *
+ * `role` is a coarse derived label intended for conversational consumers
+ * (Discord bots etc.). `source` preserves the raw `LogEntry.source` so callers
+ * that need finer detail (e.g. distinguishing tool output from assistant text)
+ * can still discriminate.
+ */
+export interface SessionHistoryMessage {
+	id: string;
+	role: 'user' | 'assistant' | 'system' | 'tool' | 'thinking' | 'error' | 'unknown';
+	source: string;
+	content: string;
+	/** ISO-8601 timestamp. */
+	timestamp: string;
+}
+
+export interface SessionHistoryResult {
+	tabId: string;
+	sessionId: string;
+	agentId: string;
+	agentSessionId: string | null;
+	/** Agent working directory, when known. Used for project-scoped automation. */
+	projectPath?: string;
+	messages: SessionHistoryMessage[];
+}
+
+export interface GetSessionHistoryOptions {
+	/** Drop messages with timestamp ≤ this epoch ms. Use for poll-friendly cursoring. */
+	sinceMs?: number;
+	/** After other filters, keep only the last N messages. */
+	tail?: number;
+}
+
+/** Callback to enumerate all open AI tabs across all desktop agents. */
+export type ListDesktopSessionsCallback = () => DesktopSessionEntry[];
+
+/** Callback to fetch a tab's full conversation history by tabId. */
+export type GetSessionHistoryCallback = (
+	tabId: string,
+	options?: GetSessionHistoryOptions
+) => SessionHistoryResult | null;
 
 /**
  * Callback type for fetching history entries.
@@ -324,7 +937,9 @@ export type GetCustomCommandsCallback = () => CustomAICommand[];
 export type GetHistoryCallback = (
 	projectPath?: string,
 	sessionId?: string
-) => import('../../shared/types').HistoryEntry[];
+) =>
+	| import('../../shared/types').HistoryEntry[]
+	| Promise<import('../../shared/types').HistoryEntry[]>;
 
 /**
  * Callback to get all connected web clients.
@@ -354,6 +969,10 @@ export interface WebSettings {
 	audioFeedbackEnabled: boolean;
 	colorBlindMode: string;
 	conductorProfile: string;
+	/** Max agent output lines per message before truncation. `null` = All (Infinity serialized). */
+	maxOutputLines: number | null;
+	/** User-customized keyboard shortcuts (partial overrides of DEFAULT_SHORTCUTS). */
+	shortcuts: Record<string, Shortcut>;
 }
 
 /**
@@ -363,6 +982,7 @@ export interface GroupData {
 	id: string;
 	name: string;
 	emoji: string | null;
+	parentGroupId?: string;
 	sessionIds: string[];
 }
 
@@ -374,6 +994,33 @@ export interface AutoRunDocument {
 	path: string;
 	taskCount: number;
 	completedCount: number;
+	/** Subfolder (relative path without filename), empty string for root */
+	folder?: string;
+}
+
+/**
+ * Playbook document entry surfaced to web/CLI clients.
+ * Matches PlaybookDocumentEntry in shared/types.ts but kept local to the
+ * web-server module to avoid pulling shared types into the web bundle.
+ */
+export interface WebPlaybookDocument {
+	filename: string;
+	resetOnCompletion: boolean;
+}
+
+/**
+ * Saved Playbook configuration (subset surfaced to web/mobile clients).
+ * Worktree settings are intentionally omitted - they're desktop-only.
+ */
+export interface WebPlaybook {
+	id: string;
+	name: string;
+	createdAt: number;
+	updatedAt: number;
+	documents: WebPlaybookDocument[];
+	loopEnabled: boolean;
+	maxLoops?: number | null;
+	prompt: string;
 }
 
 /**
@@ -459,21 +1106,106 @@ export interface NotificationEvent {
 export type GetSettingsCallback = () => WebSettings;
 export type SetSettingCallback = (key: string, value: SettingValue) => Promise<boolean>;
 export type GetGroupsCallback = () => GroupData[];
-export type CreateGroupCallback = (name: string, emoji?: string) => Promise<{ id: string } | null>;
+export type CreateGroupCallback = (
+	name: string,
+	emoji?: string,
+	parentGroupId?: string,
+	appearance?: GroupAppearance
+) => Promise<{ id: string } | null>;
 export type RenameGroupCallback = (groupId: string, name: string) => Promise<boolean>;
+/**
+ * Apply a validated group update. Resolves `false` when the group is gone or
+ * the requested reparent would break the one-level nesting rule - the renderer
+ * is the only place that can answer either question.
+ */
+export type UpdateGroupCallback = (groupId: string, update: GroupUpdateRequest) => Promise<boolean>;
 export type DeleteGroupCallback = (groupId: string) => Promise<boolean>;
 export type MoveSessionToGroupCallback = (
 	sessionId: string,
 	groupId: string | null
 ) => Promise<boolean>;
+/**
+ * Optional configuration fields for session creation via CLI/web.
+ * These map 1:1 to the optional params of createNewSession in useSessionCrud.ts.
+ */
+export interface CreateSessionConfig {
+	nudgeMessage?: string;
+	newSessionMessage?: string;
+	customPath?: string;
+	customArgs?: string;
+	customEnvVars?: Record<string, string>;
+	customModel?: string;
+	customEffort?: string;
+	customContextWindow?: number;
+	/**
+	 * Provenance of {@link customContextWindow} (finding AD1). `'user-edited'`
+	 * only when a human deliberately chose the number - typing
+	 * `--context-window` on the CLI qualifies. The desktop New Agent modal does
+	 * NOT set it: its control is seeded from the agent-level config, so that
+	 * write is a materialization of the default rather than a choice.
+	 */
+	contextWindowSource?: 'user-edited';
+	customProviderPath?: string;
+	sessionSshRemoteConfig?: {
+		enabled: boolean;
+		remoteId: string | null;
+		workingDirOverride?: string;
+	};
+	autoRunFolderPath?: string;
+}
+
 export type CreateSessionCallback = (
 	name: string,
 	toolType: string,
 	cwd: string,
-	groupId?: string
+	groupId?: string,
+	config?: CreateSessionConfig,
+	background?: boolean
 ) => Promise<{ sessionId: string } | null>;
+/**
+ * Create a new agent in a git worktree branched off an existing parent agent,
+ * without an Auto Run playbook. The desktop creates the worktree on disk, builds
+ * a child session linked to the parent, and returns the new agent's session id.
+ */
+export type CreateWorktreeSessionCallback = (
+	parentSessionId: string,
+	config: {
+		branchName: string;
+		baseBranch?: string;
+	},
+	background?: boolean
+) => Promise<{ success: boolean; sessionId?: string; error?: string }>;
 export type DeleteSessionCallback = (sessionId: string) => Promise<boolean>;
 export type RenameSessionCallback = (sessionId: string, newName: string) => Promise<boolean>;
+export type UpdateSessionCwdCallback = (
+	sessionId: string,
+	newCwd: string
+) => Promise<{ success: boolean; error?: string }>;
+/**
+ * Update an agent's SSH execution config. `sshPatch` is a partial bag of
+ * `sessionSshRemoteConfig` fields (`enabled`, `remoteId`, `workingDirOverride`,
+ * `syncHistory`, `shareHistoryToProjectDir`); only the provided keys are merged
+ * onto the existing config, so a caller can flip one field without re-sending
+ * the whole block. Typed as a plain record because the payload crosses the IPC
+ * bridge to the renderer.
+ */
+export type UpdateSessionSshCallback = (
+	sessionId: string,
+	sshPatch: Record<string, unknown>
+) => Promise<{ success: boolean; error?: string }>;
+/**
+ * Update an agent's editable per-session config from the CLI/web. `configPatch`
+ * is a partial bag of the fields the Edit Agent modal exposes (nudge / new
+ * session message, custom binary path / args / env vars, model, effort, context
+ * window, and the Claude token-source tri-state `enableMaestroP` /
+ * `maestroPMode` / `maestroPPath`). Only the provided keys are applied; a key
+ * present with value `null` clears that field to undefined. Typed as a plain
+ * record because the payload crosses the IPC bridge to the renderer.
+ */
+export type UpdateSessionConfigCallback = (
+	sessionId: string,
+	configPatch: Record<string, unknown>
+) => Promise<{ success: boolean; error?: string }>;
 export type GetAutoRunDocsCallback = (sessionId: string) => Promise<AutoRunDocument[]>;
 export type GetAutoRunDocContentCallback = (sessionId: string, filename: string) => Promise<string>;
 export type SaveAutoRunDocCallback = (
@@ -482,6 +1214,36 @@ export type SaveAutoRunDocCallback = (
 	content: string
 ) => Promise<boolean>;
 export type StopAutoRunCallback = (sessionId: string) => Promise<boolean>;
+export type ResetAutoRunDocTasksCallback = (
+	sessionId: string,
+	filename: string
+) => Promise<boolean>;
+export type ResumeAutoRunErrorCallback = (sessionId: string) => Promise<boolean>;
+export type SkipAutoRunDocumentCallback = (sessionId: string) => Promise<boolean>;
+export type AbortAutoRunErrorCallback = (sessionId: string) => Promise<boolean>;
+export type ListPlaybooksCallback = (sessionId: string) => Promise<WebPlaybook[]>;
+export type CreatePlaybookCallback = (
+	sessionId: string,
+	playbook: {
+		name: string;
+		documents: WebPlaybookDocument[];
+		loopEnabled: boolean;
+		maxLoops?: number | null;
+		prompt: string;
+	}
+) => Promise<WebPlaybook | null>;
+export type UpdatePlaybookCallback = (
+	sessionId: string,
+	playbookId: string,
+	updates: Partial<{
+		name: string;
+		documents: WebPlaybookDocument[];
+		loopEnabled: boolean;
+		maxLoops?: number | null;
+		prompt: string;
+	}>
+) => Promise<WebPlaybook | null>;
+export type DeletePlaybookCallback = (sessionId: string, playbookId: string) => Promise<boolean>;
 export type GetFileTreeCallback = (sessionId: string, subPath?: string) => Promise<FileTreeNode[]>;
 export type GetFileContentCallback = (
 	sessionId: string,
@@ -489,6 +1251,33 @@ export type GetFileContentCallback = (
 ) => Promise<FileContentResult>;
 export type GetGitStatusCallback = (sessionId: string) => Promise<GitStatusResult>;
 export type GetGitDiffCallback = (sessionId: string, filePath?: string) => Promise<GitDiffResult>;
+
+/**
+ * Result for the `get_git_branches` WebSocket message - used by mobile Run-in-Worktree
+ * picker to populate the base-branch dropdown.
+ */
+export interface GitBranchesResult {
+	branches: string[];
+	/** Currently checked-out branch (used to default the selection in the picker). */
+	currentBranch?: string;
+}
+
+export type GetGitBranchesForSessionCallback = (sessionId: string) => Promise<GitBranchesResult>;
+
+/**
+ * One entry returned by the `list_worktrees` WebSocket message.
+ */
+export interface WorktreeEntry {
+	path: string;
+	branch: string | null;
+	isBare: boolean;
+}
+
+export interface ListWorktreesResult {
+	worktrees: WorktreeEntry[];
+}
+
+export type ListWorktreesForSessionCallback = (sessionId: string) => Promise<ListWorktreesResult>;
 
 // =============================================================================
 // Group Chat Types
@@ -544,6 +1333,18 @@ export type TransferContextCallback = (
 	targetSessionId: string
 ) => Promise<boolean>;
 export type SummarizeContextCallback = (sessionId: string) => Promise<boolean>;
+export type CreateGistCallback = (
+	sessionId: string,
+	description: string,
+	isPublic: boolean,
+	/**
+	 * Provider session id to publish instead of the agent's open AI tabs.
+	 * Headless callers (Relay, playbooks, Cue, CI) hold a provider session id
+	 * rather than a desktop tab, and publishing the agent's tabs for them
+	 * leaks an unrelated conversation.
+	 */
+	agentSessionId?: string
+) => Promise<{ success: boolean; gistUrl?: string; error?: string }>;
 
 // =============================================================================
 // Cue Automation Types
@@ -589,6 +1390,11 @@ export type GetCueActivityCallback = (
 	sessionId?: string,
 	limit?: number
 ) => Promise<CueActivityEntry[]>;
+export type TriggerCueSubscriptionCallback = (
+	subscriptionName: string,
+	prompt?: string,
+	sourceAgentId?: string
+) => Promise<boolean>;
 
 // =============================================================================
 // Usage Dashboard Types
@@ -633,3 +1439,77 @@ export type GetUsageDashboardCallback = (
 	timeRange: 'day' | 'week' | 'month' | 'all'
 ) => Promise<UsageDashboardData>;
 export type GetAchievementsCallback = () => Promise<AchievementData[]>;
+
+// =============================================================================
+// Director's Notes Callback Types
+// =============================================================================
+
+export interface DirectorNotesSynopsisResult {
+	success: boolean;
+	synopsis: string;
+	generatedAt?: number;
+	stats?: {
+		agentCount: number;
+		entryCount: number;
+		durationMs: number;
+	};
+	error?: string;
+}
+
+export type GenerateDirectorNotesSynopsisCallback = (
+	lookbackDays: number,
+	provider: string
+) => Promise<DirectorNotesSynopsisResult>;
+
+// =============================================================================
+// Marketplace (Playbook Exchange) Types
+// =============================================================================
+
+import type { MarketplaceManifest, MarketplacePlaybook } from '../../shared/marketplace-types';
+
+/** Re-export for convenience so handlers don't pull from two places. */
+export type { MarketplaceManifest, MarketplacePlaybook };
+
+/** Result from the marketplace get-manifest callback. */
+export interface MarketplaceManifestResult {
+	manifest: MarketplaceManifest;
+	fromCache: boolean;
+	cacheAge?: number;
+}
+
+/** Result from the marketplace import callback. */
+export interface MarketplaceImportResult {
+	success: boolean;
+	error?: string;
+	playbook?: {
+		id: string;
+		name: string;
+		createdAt: number;
+		updatedAt: number;
+		documents: Array<{ filename: string; resetOnCompletion: boolean }>;
+		loopEnabled: boolean;
+		maxLoops?: number | null;
+		prompt: string;
+	};
+	importedDocs?: string[];
+	importedAssets?: string[];
+}
+
+export type GetMarketplaceManifestCallback = (options?: {
+	refresh?: boolean;
+}) => Promise<MarketplaceManifestResult>;
+
+export type GetMarketplaceDocumentCallback = (
+	playbookPath: string,
+	filename: string
+) => Promise<{ content: string }>;
+
+export type GetMarketplaceReadmeCallback = (
+	playbookPath: string
+) => Promise<{ content: string | null }>;
+
+export type ImportMarketplacePlaybookCallback = (
+	sessionId: string,
+	playbookId: string,
+	targetFolderName: string
+) => Promise<MarketplaceImportResult>;

@@ -1,19 +1,21 @@
 /**
- * Cue Process Lifecycle — spawns child processes, manages stdio capture,
+ * Cue Process Lifecycle - spawns child processes, manages stdio capture,
  * enforces timeout with SIGTERM → SIGKILL escalation, and tracks active
  * processes for the Process Monitor.
  *
  * Single responsibility: process spawning and lifecycle management.
- * Does NOT know about template variables, agent definitions, or SSH —
+ * Does NOT know about template variables, agent definitions, or SSH -
  * it receives a fully resolved SpawnSpec and executes it.
  */
 
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execFile, execFileSync, type ChildProcess } from 'child_process';
 import type { CueRunStatus } from './cue-types';
 import type { SpawnSpec } from './cue-spawn-builder';
 import type { ToolType } from '../../shared/types';
 import { getOutputParser } from '../parsers';
 import { captureException } from '../utils/sentry';
+import { isWindows } from '../../shared/platformDetection';
+import { stripAnsiCodes } from '../../shared/stringUtils';
 
 const SIGKILL_DELAY_MS = 5000;
 
@@ -27,6 +29,15 @@ interface CueActiveProcess {
 	cwd: string;
 	toolType: string;
 	startTime: number;
+	/** For SSH spawns: the agent invocation running on the remote host. */
+	sshRemoteCommand?: string;
+	/** Live ref to the accumulating stdout buffer - filled by the runProcess
+	 *  closure as chunks arrive. Exposed via `getActiveProcessOutput` so the
+	 *  renderer can poll for in-flight logs without a separate subscription
+	 *  channel. */
+	getStdout: () => string;
+	/** Live ref to the accumulating stderr buffer. */
+	getStderr: () => string;
 }
 
 /** Serializable process info for the Process Monitor */
@@ -38,6 +49,8 @@ export interface CueProcessInfo {
 	cwd: string;
 	toolType: string;
 	startTime: number;
+	/** For SSH spawns: the agent invocation running on the remote host. */
+	sshRemoteCommand?: string;
 }
 
 /** Result of a process execution */
@@ -56,6 +69,14 @@ export interface ProcessRunOptions {
 	sshStdinScript?: string;
 	stdinPrompt?: string;
 	onLog: (level: string, message: string) => void;
+	/**
+	 * Called on every stdout/stderr chunk while the agent is producing output.
+	 * Used to drive WakaTime heartbeats for the duration of a run: a Cue run
+	 * can last well past WakaTime's idle timeout, so a single beat at start or
+	 * end would record a fraction of the real time. Must stay cheap and never
+	 * throw - it fires on every chunk, and the callee debounces.
+	 */
+	onActivity?: () => void;
 }
 
 // ─── Module State ────────────────────────────────────────────────────────────
@@ -68,8 +89,10 @@ const activeProcesses = new Map<string, CueActiveProcess>();
 /**
  * Extract clean human-readable text from agent stdout.
  * For agents that output JSON/NDJSON (like OpenCode --format json), parses each
- * line and collects text from 'result' events. Falls back to raw stdout when no
- * parser is available or no result-text events are found (e.g. plain-text agents).
+ * line and collects text from 'result' events. When 'result' events have empty
+ * text (e.g. Claude Code sometimes returns result:""), falls back to collecting
+ * text from 'assistant' (partial) events. Falls back to raw stdout when no
+ * parser is available or no text events are found (e.g. plain-text agents).
  */
 function extractCleanStdout(rawStdout: string, toolType: string): string {
 	if (!rawStdout.trim()) {
@@ -81,16 +104,126 @@ function extractCleanStdout(rawStdout: string, toolType: string): string {
 		return rawStdout;
 	}
 
-	const textParts: string[] = [];
+	const resultParts: string[] = [];
+	const assistantTextByMessage = new Map<string, string>();
+	const assistantTextWithoutId: string[] = [];
 	for (const line of rawStdout.split('\n')) {
 		if (!line.trim()) continue;
 		const event = parser.parseJsonLine(line);
 		if (event?.type === 'result' && event.text) {
-			textParts.push(event.text);
+			resultParts.push(event.text);
+		} else if (event?.type === 'text' && event.isPartial && event.text) {
+			const raw = event.raw as { message?: { id?: string } } | undefined;
+			const msgId = raw?.message?.id;
+			if (msgId) {
+				const existing = assistantTextByMessage.get(msgId) ?? '';
+				if (event.text.length > existing.length) {
+					assistantTextByMessage.set(msgId, event.text);
+				}
+			} else {
+				assistantTextWithoutId.push(event.text);
+			}
 		}
 	}
 
-	return textParts.length > 0 ? textParts.join('\n') : rawStdout;
+	if (resultParts.length > 0) return resultParts.join('\n');
+	const deduped = [...assistantTextByMessage.values(), ...assistantTextWithoutId];
+	if (deduped.length > 0) return deduped.join('\n');
+	return rawStdout;
+}
+
+/**
+ * Per-agent stderr noise prefixes. These are informational diagnostics the
+ * agent CLI emits on stderr even for successful runs - e.g. Codex printing
+ * "Reading additional input from stdin..." before it observes EOF. Including
+ * them in the activity-log "Errors" panel is misleading (nothing's wrong), so
+ * we filter them out before storing the run result.
+ *
+ * Matching is intentionally lenient: each entry is a lowercased prefix, tested
+ * after stripping ANSI escapes and trimming whitespace. A line matches if its
+ * normalised form starts with the prefix. This catches variations with
+ * trailing dots, timestamps, extra whitespace, or ANSI dimming that a strict
+ * whole-line regex would miss. Real errors from the agent don't start with
+ * these prefixes, so false-positives are very unlikely.
+ */
+const BENIGN_STDERR_PREFIXES: Partial<Record<string, string[]>> = {
+	codex: [
+		// Codex `exec` writes this to stderr on every run because it supports
+		// piping additional prompt text via stdin. When Cue passes the prompt
+		// as a CLI argument and stdin is /dev/null the read returns EOF and
+		// the message is pure noise. Observed variants include trailing dots
+		// ("..."), ANSI dim codes, and the occasional "OK" suffix.
+		'reading additional input from stdin',
+	],
+};
+
+/**
+ * Strip known-benign lines from stderr before we store it on the run result.
+ * Only applied when the agent type has a matching filter; otherwise returns
+ * stderr unchanged.
+ *
+ * We strip ANSI codes and trim each candidate line before the prefix match so
+ * dimmed / coloured diagnostics are caught alongside plain text. The ORIGINAL
+ * line (with its ANSI and whitespace preserved) is kept if it's NOT noise,
+ * so real errors render with their original formatting.
+ */
+function extractCleanStderr(rawStderr: string, toolType: string): string {
+	if (!rawStderr) return rawStderr;
+	const prefixes = BENIGN_STDERR_PREFIXES[toolType];
+	if (!prefixes || prefixes.length === 0) return rawStderr;
+
+	const lines = rawStderr.split('\n');
+	const kept: string[] = [];
+	for (const line of lines) {
+		const normalised = stripAnsiCodes(line).trim().toLowerCase();
+		if (prefixes.some((prefix) => normalised.startsWith(prefix))) continue;
+		kept.push(line);
+	}
+	const cleaned = kept.join('\n');
+	// If all that's left is whitespace, collapse to empty so the UI hides the
+	// Errors panel entirely instead of showing an empty red box.
+	return cleaned.trim() ? cleaned : '';
+}
+
+/**
+ * Kill a Cue child process, using taskkill on Windows to terminate the entire
+ * process tree (POSIX signals don't work for shell-spawned processes on Windows).
+ */
+function killCueProcess(child: ChildProcess, sync = false): void {
+	if (isWindows() && child.pid) {
+		if (sync) {
+			// During shutdown, block until taskkill completes so the process tree
+			// is actually dead before Electron exits.
+			try {
+				execFileSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+					timeout: 5000,
+				});
+			} catch {
+				// taskkill returns non-zero if the process is already dead, which is fine
+			}
+		} else {
+			execFile('taskkill', ['/pid', String(child.pid), '/t', '/f'], (error) => {
+				if (!error) return;
+				const msg = error.message.toLowerCase();
+				const alreadyStopped = msg.includes('not found') || msg.includes('no running instance');
+				if (alreadyStopped) return;
+
+				captureException(error, {
+					operation: 'cue:taskkill',
+					pid: child.pid,
+				});
+			});
+		}
+	} else {
+		child.kill('SIGTERM');
+
+		// Escalate to SIGKILL after delay - only if the process hasn't actually exited.
+		setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill('SIGKILL');
+			}
+		}, SIGKILL_DELAY_MS);
+	}
 }
 
 // ─── Public API ─────────────���─────────────────────────���──────────────────────
@@ -106,15 +239,30 @@ export function runProcess(
 	spec: SpawnSpec,
 	options: ProcessRunOptions
 ): Promise<ProcessRunResult> {
-	const { toolType, timeoutMs, sshRemoteEnabled, sshStdinScript, stdinPrompt, onLog } = options;
+	const { toolType, timeoutMs, sshRemoteEnabled, sshStdinScript, stdinPrompt, onLog, onActivity } =
+		options;
 
 	return new Promise<ProcessRunResult>((resolve) => {
 		let child: ChildProcess;
+		// Only attach a writable stdin pipe when the SSH wrapper actually
+		// needs to write a script or prompt down it. In local mode the prompt
+		// is already passed as a CLI argument, and leaving stdin as an open
+		// pipe causes some agents (notably Codex `exec`) to emit "Reading
+		// additional input from stdin..." into the run output before they
+		// observe EOF. `'ignore'` gives the child /dev/null for stdin so it
+		// never tries to read - Claude already behaves correctly with either,
+		// so this is safe across all agents.
+		const needsStdinWrite = sshRemoteEnabled && (Boolean(sshStdinScript) || Boolean(stdinPrompt));
+		const stdinMode: 'pipe' | 'ignore' = needsStdinWrite ? 'pipe' : 'ignore';
 		try {
+			// maestro-p (interactive token mode) self-allocates its own PTY via
+			// node-pty internally, so plain pipe stdio here is sufficient; no
+			// caller-side TTY is needed. The prompt rides as a CLI positional, so
+			// 'ignore' stdin is fine even in interactive mode.
 			child = spawn(spec.command, spec.args, {
 				cwd: spec.cwd,
 				env: spec.env,
-				stdio: ['pipe', 'pipe', 'pipe'],
+				stdio: [stdinMode, 'pipe', 'pipe'],
 			});
 		} catch (err) {
 			captureException(err, { operation: 'cue:spawn', runId, command: spec.command });
@@ -127,6 +275,9 @@ export function runProcess(
 			return;
 		}
 
+		let stdout = '';
+		let stderr = '';
+
 		activeProcesses.set(runId, {
 			child,
 			command: spec.command,
@@ -134,13 +285,12 @@ export function runProcess(
 			cwd: spec.cwd,
 			toolType,
 			startTime: Date.now(),
+			sshRemoteCommand: spec.sshRemoteCommand,
+			getStdout: () => stdout,
+			getStderr: () => stderr,
 		});
-
-		let stdout = '';
-		let stderr = '';
 		let settled = false;
 		let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-		let killTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const finish = (status: CueRunStatus, exitCode: number | null) => {
 			if (settled) return;
@@ -148,11 +298,10 @@ export function runProcess(
 
 			activeProcesses.delete(runId);
 			if (timeoutTimer) clearTimeout(timeoutTimer);
-			if (killTimer) clearTimeout(killTimer);
 
 			resolve({
 				stdout: extractCleanStdout(stdout, toolType),
-				stderr,
+				stderr: extractCleanStderr(stderr, toolType),
 				exitCode,
 				status,
 			});
@@ -162,12 +311,14 @@ export function runProcess(
 		child.stdout?.setEncoding('utf8');
 		child.stdout?.on('data', (data: string) => {
 			stdout += data;
+			onActivity?.();
 		});
 
 		// Capture stderr
 		child.stderr?.setEncoding('utf8');
 		child.stderr?.on('data', (data: string) => {
 			stderr += data;
+			onActivity?.();
 		});
 
 		// Handle process exit
@@ -176,7 +327,7 @@ export function runProcess(
 			finish(status, code);
 		});
 
-		// Handle spawn errors (async — e.g. ENOENT after spawn returns)
+		// Handle spawn errors (async - e.g. ENOENT after spawn returns)
 		child.on('error', (error) => {
 			captureException(error, {
 				operation: 'cue:childProcess:error',
@@ -189,33 +340,26 @@ export function runProcess(
 
 		// Write to stdin based on execution mode
 		if (sshStdinScript && sshRemoteEnabled) {
-			// SSH stdin script mode — send the full bash script via stdin
+			// SSH stdin script mode - send the full bash script via stdin
 			child.stdin?.write(sshStdinScript);
 			child.stdin?.end();
 		} else if (stdinPrompt && sshRemoteEnabled) {
-			// SSH small prompt mode — send raw prompt via stdin
+			// SSH small prompt mode - send raw prompt via stdin
 			child.stdin?.write(stdinPrompt);
 			child.stdin?.end();
 		} else {
-			// Local mode — prompt is already in the args
+			// Local mode - prompt is already in the args
 			child.stdin?.end();
 		}
 
-		// Enforce timeout with SIGTERM → SIGKILL escalation
+		// Enforce timeout - use platform-appropriate kill
 		if (timeoutMs > 0) {
 			timeoutTimer = setTimeout(() => {
 				if (settled) return;
-				onLog('cue', `[CUE] Run ${runId} timed out after ${timeoutMs}ms, sending SIGTERM`);
-				child.kill('SIGTERM');
+				onLog('cue', `[CUE] Run ${runId} timed out after ${timeoutMs}ms, killing process`);
+				killCueProcess(child);
 
-				// Escalate to SIGKILL after delay
-				killTimer = setTimeout(() => {
-					if (settled) return;
-					onLog('cue', `[CUE] Run ${runId} still alive, sending SIGKILL`);
-					child.kill('SIGKILL');
-				}, SIGKILL_DELAY_MS);
-
-				// If the process exits after SIGTERM, mark as timeout
+				// If the process exits after kill, mark as timeout
 				child.removeAllListeners('close');
 				child.on('close', (code) => {
 					finish('timeout', code);
@@ -227,7 +371,7 @@ export function runProcess(
 
 /**
  * Stop a running Cue process by runId.
- * Sends SIGTERM, then SIGKILL after 5 seconds.
+ * On Windows uses taskkill /t /f; on POSIX sends SIGTERM then SIGKILL after 5s.
  *
  * @returns true if the process was found and signaled, false if not found
  */
@@ -235,16 +379,20 @@ export function stopProcess(runId: string): boolean {
 	const entry = activeProcesses.get(runId);
 	if (!entry) return false;
 
-	entry.child.kill('SIGTERM');
-
-	// Escalate to SIGKILL after delay — only if the process hasn't actually exited.
-	setTimeout(() => {
-		if (entry.child.exitCode === null && entry.child.signalCode === null) {
-			entry.child.kill('SIGKILL');
-		}
-	}, SIGKILL_DELAY_MS);
-
+	killCueProcess(entry.child);
 	return true;
+}
+
+/**
+ * Stop all active Cue processes. Called during application shutdown to prevent
+ * orphaned processes surviving after the main Electron process exits.
+ */
+export function stopAllProcesses(): void {
+	for (const [runId, entry] of activeProcesses) {
+		// Use sync kills so process trees are dead before the app exits.
+		killCueProcess(entry.child, true);
+		activeProcesses.delete(runId);
+	}
 }
 
 /**
@@ -252,6 +400,18 @@ export function stopProcess(runId: string): boolean {
  */
 export function getActiveProcessMap(): Map<string, CueActiveProcess> {
 	return activeProcesses;
+}
+
+/**
+ * Snapshot the in-flight stdout/stderr for a still-running Cue process.
+ * Returns null when the runId has no active process (already finished, never
+ * started, or running on a different engine instance). Buffers are returned
+ * raw - callers must trim/format for display.
+ */
+export function getActiveProcessOutput(runId: string): { stdout: string; stderr: string } | null {
+	const entry = activeProcesses.get(runId);
+	if (!entry) return null;
+	return { stdout: entry.getStdout(), stderr: entry.getStderr() };
 }
 
 /**
@@ -270,6 +430,7 @@ export function getProcessList(): CueProcessInfo[] {
 				cwd: entry.cwd,
 				toolType: entry.toolType,
 				startTime: entry.startTime,
+				sshRemoteCommand: entry.sshRemoteCommand,
 			});
 		}
 	}

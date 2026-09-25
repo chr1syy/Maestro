@@ -1,21 +1,30 @@
-import { lazy, memo, Suspense } from 'react';
-import { useModalActions } from '../stores/modalStore';
+import { lazy, memo, Suspense, useMemo } from 'react';
+import { useModalActions, useModalStore } from '../stores/modalStore';
 import { useFileExplorerStore } from '../stores/fileExplorerStore';
 import { useTabStore } from '../stores/tabStore';
-import { useUIStore } from '../stores/uiStore';
+import { useMessageGistStore } from '../stores/messageGistStore';
 import { useActiveSession } from '../hooks/session/useActiveSession';
 import { useSessionStore } from '../stores/sessionStore';
 import { notifyToast } from '../stores/notificationStore';
 import { safeClipboardWrite } from '../utils/clipboard';
 import { THEMES } from '../constants/themes';
+import { usePluginContributions } from '../hooks/usePluginContributions';
+import { mergePluginThemes } from '../utils/pluginThemes';
 import { DebugPackageModal } from './DebugPackageModal';
+import { DebugApplicationStatsModal } from './DebugApplicationStatsModal';
+import { DebugAgentProbeModal } from './DebugAgentProbeModal';
+import { WidgetGallery } from './widgets/WidgetGallery';
+import { ProfilingCaptureModal } from './ProfilingCaptureModal';
+import { useProfilingAutoStop } from '../hooks/ui/useProfilingAutoStop';
 import { WindowsWarningModal } from './WindowsWarningModal';
+import { OnboardingSeriesHost } from './OnboardingSeriesHost';
 import { AppOverlays } from './AppOverlays';
+import { GitPillModals } from './GitPillModals';
 import { PlaygroundPanel } from './PlaygroundPanel';
-import { DebugWizardModal } from './DebugWizardModal';
 import { GistPublishModal } from './GistPublishModal';
 import type { GistInfo } from './GistPublishModal';
 import { DeleteAgentConfirmModal } from './DeleteAgentConfirmModal';
+import { ImageAnnotator } from './ImageAnnotator/ImageAnnotator';
 import { MaestroWizard, WizardResumeModal } from './Wizard';
 import { TourOverlay } from './Wizard/tour';
 import type { SymphonyContributionData } from './SymphonyModal';
@@ -32,6 +41,10 @@ import type {
 import type { FileTabInfo } from '../hooks/ui/useAppHandlers';
 import type { MainPanelHandle } from './MainPanel';
 import type { FileNode } from '../types/fileTree';
+import { openUrl } from '../utils/openUrl';
+import { logger } from '../utils/logger';
+import { resolveFileReference } from '../utils/fileLinks/resolve';
+import { getBasename } from '../../shared/formatters';
 
 // Lazy-loaded components (rarely-used heavy modals)
 const SettingsModal = lazy(() =>
@@ -54,6 +67,9 @@ const DirectorNotesModal = lazy(() =>
 const CueModal = lazy(() => import('./CueModal').then((m) => ({ default: m.CueModal })));
 const CueYamlEditor = lazy(() =>
 	import('./CueYamlEditor').then((m) => ({ default: m.CueYamlEditor }))
+);
+const PianolaModal = lazy(() =>
+	import('./PianolaModal').then((m) => ({ default: m.PianolaModal }))
 );
 
 /**
@@ -84,13 +100,16 @@ export interface AppStandaloneModalsProps {
 	onMarketplaceImportComplete: (folderName: string) => Promise<void>;
 
 	// --- Symphony ---
-	sessions: Session[];
 	setActiveSessionId: (id: string) => void;
 	onStartContribution: (data: SymphonyContributionData) => Promise<void>;
 	encoreFeatures: EncoreFeatureFlags;
 
 	// --- Director's Notes ---
-	onDirectorNotesResumeSession: (sourceSessionId: string, agentSessionId: string) => void;
+	onDirectorNotesResumeSession: (
+		sourceSessionId: string,
+		agentSessionId: string,
+		sessionName?: string
+	) => void;
 	onFileClick: (node: FileNode, path: string) => void;
 
 	// --- Cue ---
@@ -107,6 +126,7 @@ export interface AppStandaloneModalsProps {
 	onOpenFileTab: (info: FileTabInfo) => void;
 	mainPanelRef: React.RefObject<MainPanelHandle | null>;
 	documentGraphShowExternalLinks: boolean;
+	documentGraphConfirmClose: boolean;
 	onExternalLinksChange: (value: boolean) => void;
 	documentGraphMaxNodes: number;
 	documentGraphPreviewCharLimit: number;
@@ -164,7 +184,6 @@ function AppStandaloneModalsInner({
 	// Marketplace
 	onMarketplaceImportComplete,
 	// Symphony
-	sessions,
 	setActiveSessionId,
 	onStartContribution,
 	encoreFeatures,
@@ -183,6 +202,7 @@ function AppStandaloneModalsInner({
 	onOpenFileTab,
 	mainPanelRef,
 	documentGraphShowExternalLinks,
+	documentGraphConfirmClose,
 	onExternalLinksChange,
 	documentGraphMaxNodes,
 	documentGraphPreviewCharLimit,
@@ -213,20 +233,26 @@ function AppStandaloneModalsInner({
 	recordTourComplete,
 	recordTourSkip,
 }: AppStandaloneModalsProps) {
-	// Self-source flash notifications from UI store
-	const flashNotification = useUIStore((s) => s.flashNotification);
-	const successFlashNotification = useUIStore((s) => s.successFlashNotification);
+	// Ends a performance capture before its trace buffer overflows. Lives here
+	// because it has to be mounted for the whole life of the app - a recording
+	// runs with the command palette closed.
+	useProfilingAutoStop();
 
 	// Self-source modal open states from stores
 	const {
 		debugPackageModalOpen,
 		windowsWarningModalOpen,
 		setWindowsWarningModalOpen,
+		openSettings,
 		setDebugPackageModalOpen,
+		debugApplicationStatsOpen,
+		setDebugApplicationStatsOpen,
+		debugAgentProbeOpen,
+		setDebugAgentProbeOpen,
+		profilingCaptureOpen,
+		setProfilingCaptureOpen,
 		playgroundOpen,
 		setPlaygroundOpen,
-		debugWizardModalOpen,
-		setDebugWizardModalOpen,
 		marketplaceModalOpen,
 		setMarketplaceModalOpen,
 		symphonyModalOpen,
@@ -235,6 +261,8 @@ function AppStandaloneModalsInner({
 		setDirectorNotesOpen,
 		cueModalOpen,
 		setCueModalOpen,
+		pianolaModalOpen,
+		setPianolaModalOpen,
 		cueYamlEditorOpen,
 		cueYamlEditorSessionId,
 		cueYamlEditorProjectRoot,
@@ -243,6 +271,7 @@ function AppStandaloneModalsInner({
 		deleteAgentSession,
 		settingsModalOpen,
 		settingsTab,
+		settingsPromptId,
 		wizardResumeModalOpen,
 		wizardResumeState,
 		tourOpen,
@@ -253,12 +282,30 @@ function AppStandaloneModalsInner({
 	// Self-source file explorer state
 	const isGraphViewOpen = useFileExplorerStore((s) => s.isGraphViewOpen);
 	const graphFocusFilePath = useFileExplorerStore((s) => s.graphFocusFilePath);
+	const graphScopeFiles = useFileExplorerStore((s) => s.graphScopeFiles);
+	const graphScopeDirectory = useFileExplorerStore((s) => s.graphScopeDirectory);
+	const graphRootPath = useFileExplorerStore((s) => s.graphRootPath);
+	const graphReturnTo = useFileExplorerStore((s) => s.graphReturnTo);
 
 	// Self-source tab gist content
 	const tabGistContent = useTabStore((s) => s.tabGistContent);
 
 	// Self-source active session
 	const activeSession = useActiveSession();
+
+	// Typography chooser: "does this user already have agents" is what tells a
+	// returning user from a fresh install, and it is the only signal that needs
+	// no new persisted state. A returning user with every agent deleted gets the
+	// new-user copy, which offers the same two choices - harmless either way.
+	const hasAnySession = useSessionStore((s) => s.sessions.length > 0);
+	// Merge plugin-contributed themes into the picker list through the shared
+	// contribution registry (built-in always wins an id collision). Identical to
+	// THEMES when the plugins Encore flag is off (no contributions).
+	const pluginContributions = usePluginContributions();
+	const mergedThemes = useMemo(
+		() => mergePluginThemes(THEMES, pluginContributions.themes),
+		[pluginContributions.themes]
+	);
 
 	return (
 		<>
@@ -278,6 +325,16 @@ function AppStandaloneModalsInner({
 				onOpenDebugPackage={() => setDebugPackageModalOpen(true)}
 				useBetaChannel={enableBetaUpdates}
 				onSetUseBetaChannel={setEnableBetaUpdates}
+			/>
+
+			{/* --- FIRST-RUN SERIES: typography -> theme -> updates -> agent powers ---
+			    One step on screen at a time; see OnboardingSeriesHost. */}
+			<OnboardingSeriesHost
+				theme={theme}
+				themes={mergedThemes}
+				isReturningUser={hasAnySession}
+				onOpenSettings={(tab) => openSettings(tab)}
+				hasActiveAgent={Boolean(activeSession)}
 			/>
 
 			{/* --- CELEBRATION OVERLAYS --- */}
@@ -300,12 +357,29 @@ function AppStandaloneModalsInner({
 				/>
 			)}
 
-			{/* --- DEBUG WIZARD MODAL --- */}
-			<DebugWizardModal
-				theme={theme}
-				isOpen={debugWizardModalOpen}
-				onClose={() => setDebugWizardModalOpen(false)}
-			/>
+			{/* --- GIT PILL: STREAMING PULL/PUSH CONSOLE + BRANCH SWITCHER --- */}
+			<GitPillModals theme={theme} />
+
+			{/* --- DEBUG: VIEW APPLICATION STATS --- */}
+			{debugApplicationStatsOpen && (
+				<DebugApplicationStatsModal
+					theme={theme}
+					onClose={() => setDebugApplicationStatsOpen(false)}
+				/>
+			)}
+
+			{/* --- DEBUG: RE-PROBE AGENTS --- */}
+			{debugAgentProbeOpen && (
+				<DebugAgentProbeModal theme={theme} onClose={() => setDebugAgentProbeOpen(false)} />
+			)}
+
+			{/* --- DEBUG: WIDGET GALLERY (self-subscribes to the widgetGallery modal) --- */}
+			<WidgetGallery theme={theme} />
+
+			{/* --- PERFORMANCE PROFILING: STOP + BUNDLE PROGRESS --- */}
+			{profilingCaptureOpen && (
+				<ProfilingCaptureModal theme={theme} onClose={() => setProfilingCaptureOpen(false)} />
+			)}
 
 			{/* --- MARKETPLACE MODAL (lazy-loaded) --- */}
 			{activeSession && activeSession.autoRunFolderPath && marketplaceModalOpen && (
@@ -333,7 +407,6 @@ function AppStandaloneModalsInner({
 						theme={theme}
 						isOpen={symphonyModalOpen}
 						onClose={() => setSymphonyModalOpen(false)}
-						sessions={sessions}
 						onSelectSession={(sessionId) => {
 							setActiveSessionId(sessionId);
 							setSymphonyModalOpen(false);
@@ -343,6 +416,12 @@ function AppStandaloneModalsInner({
 				</Suspense>
 			)}
 
+			{/* --- IMAGE ANNOTATOR MODAL --- */}
+			{/* Self-sources isOpen / imageDataUrl / onSave from useImageAnnotatorStore.
+			    Returns null when closed; stays mounted so the modal-layer registration
+			    is stable across open/close cycles. */}
+			<ImageAnnotator theme={theme} />
+
 			{/* --- DIRECTOR'S NOTES MODAL (lazy-loaded, Encore Feature) --- */}
 			{encoreFeatures.directorNotes && directorNotesOpen && (
 				<Suspense fallback={null}>
@@ -351,9 +430,18 @@ function AppStandaloneModalsInner({
 						onClose={() => setDirectorNotesOpen(false)}
 						onResumeSession={onDirectorNotesResumeSession}
 						fileTree={activeSession?.fileTree}
-						onFileClick={(path: string) =>
-							onFileClick({ name: path.split('/').pop() || path, type: 'file' }, path)
-						}
+						cwd={activeSession?.cwd}
+						projectRoot={activeSession?.projectRoot || activeSession?.cwd}
+						onFileClick={(path: string) => {
+							// remarkFileLinks hands back a project-relative path for anything
+							// it matched in the tree, so join it onto the root before the
+							// reader sees it - a bare `Notes/Thing.md` opens nothing.
+							const fullPath = resolveFileReference(
+								activeSession?.projectRoot || activeSession?.cwd || '',
+								path
+							);
+							onFileClick({ name: getBasename(fullPath), type: 'file' }, fullPath);
+						}}
 					/>
 				</Suspense>
 			)}
@@ -364,8 +452,15 @@ function AppStandaloneModalsInner({
 					<CueModal
 						theme={theme}
 						onClose={() => setCueModalOpen(false)}
-						cueShortcutKeys={shortcuts.maestroCue?.keys}
+						cueShortcutKeys={shortcuts.openCue?.keys}
 					/>
+				</Suspense>
+			)}
+
+			{/* --- PIANOLA MODAL (lazy-loaded, Encore Feature) --- */}
+			{encoreFeatures.pianola && pianolaModalOpen && (
+				<Suspense fallback={null}>
+					<PianolaModal theme={theme} onClose={() => setPianolaModalOpen(false)} />
 				</Suspense>
 			)}
 
@@ -396,21 +491,42 @@ function AppStandaloneModalsInner({
 						(activeFileTab ? activeFileTab.name + activeFileTab.extension : 'conversation.md')
 					}
 					content={tabGistContent?.content ?? activeFileTab?.content ?? ''}
+					sourceLogs={tabGistContent?.sourceLogs}
 					onClose={() => {
 						setGistPublishModalOpen(false);
 						useTabStore.getState().setTabGistContent(null);
 					}}
 					onSuccess={(gistUrl, isPublic) => {
-						// Save gist URL for the file if it's from file preview tab (not tab context)
-						if (activeFileTab && !tabGistContent) {
-							saveFileGistUrl(activeFileTab.path, {
+						const publishedAt = Date.now();
+						// Save gist URL for the file the content came from. The toolbar
+						// button publishes the active file tab directly; a file tab's
+						// overlay menu names its own path, since the tab it was opened
+						// on need not be the active one.
+						const publishedFilePath =
+							tabGistContent?.filePath ?? (tabGistContent ? undefined : activeFileTab?.path);
+						if (publishedFilePath) {
+							saveFileGistUrl(publishedFilePath, {
 								gistUrl,
 								isPublic,
-								publishedAt: Date.now(),
+								publishedAt,
+							});
+						}
+						// Save gist URL for the individual message, if the publish originated from one.
+						// In-memory only - intentionally not persisted across app restarts.
+						if (tabGistContent?.messageId) {
+							useMessageGistStore.getState().setMessageGist(tabGistContent.messageId, {
+								gistUrl,
+								isPublic,
+								publishedAt,
 							});
 						}
 						// Copy the gist URL to clipboard
 						safeClipboardWrite(gistUrl);
+						// Record the published gist URL in the system logs
+						logger.info(
+							`${isPublic ? 'Public' : 'Secret'} gist published: ${gistUrl}`,
+							'GistPublish'
+						);
 						// Show a toast notification
 						notifyToast({
 							type: 'success',
@@ -424,29 +540,60 @@ function AppStandaloneModalsInner({
 						useTabStore.getState().setTabGistContent(null);
 					}}
 					existingGist={
-						activeFileTab && !tabGistContent ? fileGistUrls[activeFileTab.path] : undefined
+						tabGistContent?.messageId
+							? useMessageGistStore.getState().published[tabGistContent.messageId]
+							: tabGistContent?.filePath
+								? fileGistUrls[tabGistContent.filePath]
+								: activeFileTab && !tabGistContent
+									? fileGistUrls[activeFileTab.path]
+									: undefined
 					}
 				/>
 			)}
 
 			{/* --- DOCUMENT GRAPH VIEW (Mind Map, lazy-loaded) --- */}
-			{/* Only render when a focus file is provided - mind map requires a center document */}
-			{graphFocusFilePath && (
+			{/* Needs something to draw: either a focus document, or a scope the
+			    builder can pick a center from. `graphScopeDirectory` may legitimately
+			    be `''` (the project root), so it is compared against undefined
+			    rather than tested for truthiness - `''` is falsy and the root
+			    directory is a real scope. */}
+			{(graphFocusFilePath ||
+				(graphScopeFiles && graphScopeFiles.length > 0) ||
+				graphScopeDirectory !== undefined) && (
 				<Suspense fallback={null}>
 					<DocumentGraphView
 						isOpen={isGraphViewOpen}
 						onClose={() => {
+							// Read the target BEFORE closing - closeGraphView clears it.
+							const returnTo = useFileExplorerStore.getState().graphReturnTo;
 							useFileExplorerStore.getState().closeGraphView();
+							if (returnTo === 'memoryViewer') {
+								// The viewer closed itself to hand the window over, so
+								// closing the graph has to hand it back or the user lands
+								// on an empty workspace.
+								useModalStore.getState().openModal('memoryViewer');
+								return;
+							}
 							// Return focus to file preview if it was open
 							requestAnimationFrame(() => {
 								mainPanelRef.current?.focusFilePreview();
 							});
 						}}
+						// A graph that knows where it came from is one Escape from being
+						// back there, so the "are you sure?" prompt is pure friction.
+						confirmOnClose={documentGraphConfirmClose && !graphReturnTo}
+						// Same component, different subject: a graph opened from the
+						// Memory viewer is graphing memories, not project documents.
+						title={graphReturnTo === 'memoryViewer' ? 'Memory Graph' : undefined}
 						theme={theme}
-						rootPath={activeSession?.projectRoot || activeSession?.cwd || ''}
+						rootPath={graphRootPath || activeSession?.projectRoot || activeSession?.cwd || ''}
 						onDocumentOpen={async (filePath) => {
-							// Open the document in a file tab (migrated from legacy setPreviewFile overlay)
-							const treeRoot = activeSession?.projectRoot || activeSession?.cwd || '';
+							// Resolve against the SAME root the graph was built with. A scoped
+							// graph can be rooted outside the project (memory lives under
+							// ~/.claude), and rebuilding the project root here would open a
+							// path that does not exist.
+							const treeRoot =
+								graphRootPath || activeSession?.projectRoot || activeSession?.cwd || '';
 							const fullPath = `${treeRoot}/${filePath}`;
 							const filename = filePath.split('/').pop() || filePath;
 							// Note: sshRemoteId is only set after AI agent spawns. For terminal-only SSH sessions,
@@ -474,15 +621,17 @@ function AppStandaloneModalsInner({
 									});
 								}
 							} catch (error) {
-								console.error('[DocumentGraph] Failed to open file:', error);
+								logger.error('[DocumentGraph] Failed to open file:', undefined, error);
 							}
 							useFileExplorerStore.getState().setIsGraphViewOpen(false);
 						}}
 						onExternalLinkOpen={(url) => {
 							// Open external URL in default browser
-							window.maestro.shell.openExternal(url);
+							openUrl(url);
 						}}
-						focusFilePath={graphFocusFilePath}
+						focusFilePath={graphFocusFilePath ?? ''}
+						scopeFiles={graphScopeFiles}
+						scopeDirectory={graphScopeDirectory}
 						defaultShowExternalLinks={documentGraphShowExternalLinks}
 						onExternalLinksChange={onExternalLinksChange}
 						defaultMaxNodes={documentGraphMaxNodes}
@@ -532,8 +681,9 @@ function AppStandaloneModalsInner({
 						isOpen={settingsModalOpen}
 						onClose={onCloseSettings}
 						theme={theme}
-						themes={THEMES}
+						themes={mergedThemes}
 						initialTab={settingsTab}
+						initialSelectedPromptId={settingsPromptId}
 						hasNoAgents={hasNoAgents}
 						onThemeImportError={(msg) => setFlashNotification(msg)}
 						onThemeImportSuccess={(msg) => setFlashNotification(msg)}
@@ -583,33 +733,7 @@ function AppStandaloneModalsInner({
 				/>
 			)}
 
-			{/* --- FLASH NOTIFICATION (centered, auto-dismiss) --- */}
-			{flashNotification && (
-				<div
-					className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 px-6 py-4 rounded-lg shadow-2xl text-base font-bold animate-in fade-in zoom-in-95 duration-200 z-[9999]"
-					style={{
-						backgroundColor: theme.colors.warning,
-						color: '#000000',
-						textShadow: '0 1px 2px rgba(255, 255, 255, 0.3)',
-					}}
-				>
-					{flashNotification}
-				</div>
-			)}
-
-			{/* --- SUCCESS FLASH NOTIFICATION (centered, auto-dismiss) --- */}
-			{successFlashNotification && (
-				<div
-					className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 px-6 py-4 rounded-lg shadow-2xl text-base font-bold animate-in fade-in zoom-in-95 duration-200 z-[9999]"
-					style={{
-						backgroundColor: theme.colors.accent,
-						color: theme.colors.accentForeground,
-						textShadow: '0 1px 2px rgba(0, 0, 0, 0.3)',
-					}}
-				>
-					{successFlashNotification}
-				</div>
-			)}
+			{/* Flash notifications now rendered globally via <CenterFlash /> in App.tsx */}
 		</>
 	);
 }

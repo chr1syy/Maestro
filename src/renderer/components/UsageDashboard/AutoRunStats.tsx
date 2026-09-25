@@ -15,23 +15,21 @@
 import React, { memo, useState, useEffect, useMemo, useCallback } from 'react';
 import { Play, CheckSquare, ListChecks, Target, Clock, Timer } from 'lucide-react';
 import type { Theme } from '../../types';
-import type { StatsTimeRange } from '../../hooks/stats/useStats';
+import type { StatsTimeRange, AutoRunSession } from '../../../shared/stats-types';
 import { captureException } from '../../utils/sentry';
-
-/**
- * Auto Run session data shape from the API
- */
-interface AutoRunSession {
-	id: string;
-	sessionId: string;
-	agentType: string;
-	documentPath?: string;
-	startTime: number;
-	duration: number;
-	tasksTotal?: number;
-	tasksCompleted?: number;
-	projectPath?: string;
-}
+import { formatDurationHuman as formatDuration, formatNumber } from '../../../shared/formatters';
+import { ChartTooltip } from './ChartTooltip';
+import {
+	computeAutoRunMetrics,
+	formatDateLabel,
+	formatFullDate,
+	getAutoRunChartMax,
+	groupSessionsByDate,
+	type AutoRunDayData,
+} from './autoRunStatsUtils';
+import { MetricCard } from './MetricCard';
+import { buildAutoRunSummary } from './footerSummary';
+import { usePublishFooterSummary } from './useFooterSummary';
 
 interface AutoRunStatsProps {
 	/** Current time range for filtering */
@@ -42,121 +40,6 @@ interface AutoRunStatsProps {
 	columns?: number;
 }
 
-/**
- * Format duration in milliseconds to human-readable string
- * Examples: "12h 34m", "5m 30s", "45s"
- */
-function formatDuration(ms: number): string {
-	if (ms === 0) return '0s';
-
-	const totalSeconds = Math.floor(ms / 1000);
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-
-	if (hours > 0) {
-		return `${hours}h ${minutes}m`;
-	}
-	if (minutes > 0) {
-		return `${minutes}m ${seconds}s`;
-	}
-	return `${seconds}s`;
-}
-
-/**
- * Format large numbers with K/M suffixes for readability
- * Examples: "1.2K", "3.5M", "42"
- */
-function formatNumber(num: number): string {
-	if (num >= 1000000) {
-		return `${(num / 1000000).toFixed(1)}M`;
-	}
-	if (num >= 1000) {
-		return `${(num / 1000).toFixed(1)}K`;
-	}
-	return num.toString();
-}
-
-/**
- * Single metric card component
- */
-interface MetricCardProps {
-	icon: React.ReactNode;
-	label: string;
-	value: string;
-	subValue?: string;
-	theme: Theme;
-}
-
-function MetricCard({ icon, label, value, subValue, theme }: MetricCardProps) {
-	return (
-		<div
-			className="p-4 rounded-lg flex items-start gap-3"
-			style={{ backgroundColor: theme.colors.bgMain }}
-			data-testid="autorun-metric-card"
-			role="group"
-			aria-label={`${label}: ${value}${subValue ? `, ${subValue}` : ''}`}
-		>
-			<div
-				className="flex-shrink-0 p-2 rounded-md"
-				style={{
-					backgroundColor: `${theme.colors.accent}15`,
-					color: theme.colors.accent,
-				}}
-			>
-				{icon}
-			</div>
-			<div className="min-w-0 flex-1">
-				<div
-					className="text-xs uppercase tracking-wide mb-1"
-					style={{ color: theme.colors.textDim }}
-				>
-					{label}
-				</div>
-				<div
-					className="text-2xl font-bold truncate"
-					style={{ color: theme.colors.textMain }}
-					title={value}
-				>
-					{value}
-				</div>
-				{subValue && (
-					<div className="text-xs mt-1" style={{ color: theme.colors.textDim }}>
-						{subValue}
-					</div>
-				)}
-			</div>
-		</div>
-	);
-}
-
-/**
- * Group sessions by local date and sum tasksCompleted for the bar chart.
- * Uses session-level tasksCompleted (actual checkboxes) rather than task records
- * (agent invocations), which can batch multiple checkboxes per invocation.
- */
-function groupSessionsByDate(
-	sessions: AutoRunSession[]
-): { date: string; count: number; successCount: number }[] {
-	const grouped: Record<string, { count: number; successCount: number }> = {};
-
-	sessions.forEach((session) => {
-		// Use local date string to match what users see in labels/tooltips
-		const d = new Date(session.startTime);
-		const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-		if (!grouped[date]) {
-			grouped[date] = { count: 0, successCount: 0 };
-		}
-		grouped[date].count += session.tasksTotal ?? 0;
-		grouped[date].successCount += session.tasksCompleted ?? 0;
-	});
-
-	return Object.entries(grouped)
-		.map(([date, stats]) => ({ date, ...stats }))
-		.filter((entry) => entry.count > 0)
-		.sort((a, b) => a.date.localeCompare(b.date));
-}
-
 export const AutoRunStats = memo(function AutoRunStats({
 	timeRange,
 	theme,
@@ -165,11 +48,7 @@ export const AutoRunStats = memo(function AutoRunStats({
 	const [sessions, setSessions] = useState<AutoRunSession[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
-	const [hoveredBar, setHoveredBar] = useState<{
-		date: string;
-		count: number;
-		successCount: number;
-	} | null>(null);
+	const [hoveredBar, setHoveredBar] = useState<AutoRunDayData | null>(null);
 	const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
 
 	// Fetch Auto Run sessions (metrics and chart both derive from session-level data)
@@ -202,63 +81,45 @@ export const AutoRunStats = memo(function AutoRunStats({
 
 	// Calculate metrics from session-level data (tasksCompleted = checkboxes, not agent invocations)
 	const metrics = useMemo(() => {
-		const totalSessions = sessions.length;
-		const totalTasksCompleted = sessions.reduce((sum, s) => sum + (s.tasksCompleted ?? 0), 0);
-		const totalTasksAttempted = sessions.reduce((sum, s) => sum + (s.tasksTotal ?? 0), 0);
-
-		// Average tasks per session (completed checkboxes per session)
-		const avgTasksPerSession =
-			totalSessions > 0 ? (totalTasksCompleted / totalSessions).toFixed(1) : '0';
-
-		// Success rate (completed / attempted checkboxes)
-		const successRate =
-			totalTasksAttempted > 0 ? Math.round((totalTasksCompleted / totalTasksAttempted) * 100) : 0;
-
-		// Average session duration
-		const totalSessionDuration = sessions.reduce((sum, s) => sum + s.duration, 0);
-		const avgSessionDuration = totalSessions > 0 ? totalSessionDuration / totalSessions : 0;
-
-		// Average task duration (session time / checkboxes completed)
-		const avgTaskDuration =
-			totalTasksCompleted > 0 ? totalSessionDuration / totalTasksCompleted : 0;
-
-		return {
-			totalSessions,
-			totalTasksCompleted,
-			totalTasksAttempted,
-			avgTasksPerSession,
-			successRate,
-			avgSessionDuration,
-			avgTaskDuration,
-		};
+		return computeAutoRunMetrics(sessions);
 	}, [sessions]);
+
+	usePublishFooterSummary(
+		'autorun',
+		loading
+			? null
+			: buildAutoRunSummary({
+					runs: metrics.totalSessions,
+					tasksCompleted: metrics.totalTasksCompleted,
+					tasksAttempted: metrics.totalTasksAttempted,
+				})
+	);
 
 	// Group sessions by date for chart (uses session-level tasksCompleted)
 	const tasksByDate = useMemo(() => {
 		return groupSessionsByDate(sessions);
 	}, [sessions]);
 
-	// Max count for bar height calculation
+	// Max for bar height calculation, driven by tasks completed (the chart's
+	// titular metric), not tasks attempted, so days where `tasksTotal` is 0
+	// but real completions exist still scale correctly.
 	const maxCount = useMemo(() => {
-		if (tasksByDate.length === 0) return 0;
-		return Math.max(...tasksByDate.map((d) => d.count));
+		return getAutoRunChartMax(tasksByDate);
 	}, [tasksByDate]);
 
-	// Handle mouse events for tooltip
+	// Handle mouse events for tooltip. Anchor to the cursor (not the bar's
+	// bounding rect) so the tooltip stays close to the user's pointer. Short
+	// bars used to leave the tooltip stranded near the chart's bottom edge.
 	const handleMouseEnter = useCallback(
-		(
-			data: { date: string; count: number; successCount: number },
-			event: React.MouseEvent<HTMLDivElement>
-		) => {
+		(data: AutoRunDayData, event: React.MouseEvent<HTMLDivElement>) => {
 			setHoveredBar(data);
-			const rect = event.currentTarget.getBoundingClientRect();
-			setTooltipPos({
-				x: rect.left + rect.width / 2,
-				y: rect.top - 8,
-			});
+			setTooltipPos({ x: event.clientX, y: event.clientY });
 		},
 		[]
 	);
+	const handleMouseMove = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+		setTooltipPos({ x: event.clientX, y: event.clientY });
+	}, []);
 
 	const handleMouseLeave = useCallback(() => {
 		setHoveredBar(null);
@@ -353,12 +214,14 @@ export const AutoRunStats = memo(function AutoRunStats({
 				aria-label="Auto Run summary metrics"
 			>
 				<MetricCard
+					testId="autorun-metric-card"
 					icon={<Play className="w-4 h-4" />}
 					label="Total Sessions"
 					value={formatNumber(metrics.totalSessions)}
 					theme={theme}
 				/>
 				<MetricCard
+					testId="autorun-metric-card"
 					icon={<CheckSquare className="w-4 h-4" />}
 					label="Tasks Done"
 					value={formatNumber(metrics.totalTasksCompleted)}
@@ -366,24 +229,28 @@ export const AutoRunStats = memo(function AutoRunStats({
 					theme={theme}
 				/>
 				<MetricCard
+					testId="autorun-metric-card"
 					icon={<ListChecks className="w-4 h-4" />}
 					label="Avg Tasks/Session"
 					value={metrics.avgTasksPerSession}
 					theme={theme}
 				/>
 				<MetricCard
+					testId="autorun-metric-card"
 					icon={<Target className="w-4 h-4" />}
 					label="Success Rate"
 					value={`${metrics.successRate}%`}
 					theme={theme}
 				/>
 				<MetricCard
+					testId="autorun-metric-card"
 					icon={<Clock className="w-4 h-4" />}
 					label="Avg Session"
 					value={formatDuration(metrics.avgSessionDuration)}
 					theme={theme}
 				/>
 				<MetricCard
+					testId="autorun-metric-card"
 					icon={<Timer className="w-4 h-4" />}
 					label="Avg Task"
 					value={formatDuration(metrics.avgTaskDuration)}
@@ -399,7 +266,10 @@ export const AutoRunStats = memo(function AutoRunStats({
 				role="figure"
 				aria-label={`Tasks completed over time chart. ${tasksByDate.length} days of data.`}
 			>
-				<h3 className="text-sm font-medium mb-4" style={{ color: theme.colors.textMain }}>
+				<h3
+					className="text-sm font-medium mb-4"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
 					Tasks Completed Over Time
 				</h3>
 
@@ -411,20 +281,25 @@ export const AutoRunStats = memo(function AutoRunStats({
 							aria-label="Tasks completed by date"
 						>
 							{tasksByDate.map((day) => {
-								const height = maxCount > 0 ? (day.count / maxCount) * 100 : 0;
+								// Bar height tracks the tasks-completed value the chart claims to
+								// show. Fall back to attempted when no completion data exists so
+								// runs that errored out still surface a bar.
+								const barValue = day.successCount > 0 ? day.successCount : day.count;
+								const height = maxCount > 0 ? (barValue / maxCount) * 100 : 0;
 								const successRatio = day.count > 0 ? day.successCount / day.count : 0;
 								const isHovered = hoveredBar?.date === day.date;
 
 								return (
 									<div
 										key={day.date}
-										className="flex-1 min-w-[16px] max-w-[40px] rounded-t cursor-pointer transition-all duration-200"
+										className="flex-1 min-w-[16px] rounded-t cursor-pointer transition-all duration-200"
 										style={{
 											height: `${Math.max(height, 4)}%`,
 											backgroundColor: theme.colors.accent,
 											opacity: isHovered ? 1 : 0.7 + successRatio * 0.3,
 										}}
 										onMouseEnter={(e) => handleMouseEnter(day, e)}
+										onMouseMove={handleMouseMove}
 										onMouseLeave={handleMouseLeave}
 										onKeyDown={(e) => {
 											if (e.key === 'Enter' || e.key === ' ') {
@@ -445,49 +320,54 @@ export const AutoRunStats = memo(function AutoRunStats({
 							})}
 						</div>
 
-						{/* X-axis labels (show first, middle, last) */}
+						{/* X-axis labels must mirror the bar grid (flex-1 +
+						    gap-1) so each label slot lines up with its bar. We previously
+						    used `flex justify-between` across the full container width,
+						    which floated the middle/last labels into the empty space on
+						    the right. */}
 						<div
-							className="flex justify-between mt-2 text-xs"
+							className="flex gap-1 mt-2 text-xs"
 							style={{ color: theme.colors.textDim }}
+							aria-hidden="true"
 						>
-							{tasksByDate.length > 0 && (
-								<>
-									<span>{formatDateLabel(tasksByDate[0].date)}</span>
-									{tasksByDate.length > 2 && (
-										<span>
-											{formatDateLabel(tasksByDate[Math.floor(tasksByDate.length / 2)].date)}
-										</span>
-									)}
-									{tasksByDate.length > 1 && (
-										<span>{formatDateLabel(tasksByDate[tasksByDate.length - 1].date)}</span>
-									)}
-								</>
-							)}
+							{tasksByDate.map((day, i) => {
+								const isFirst = i === 0;
+								const isLast = i === tasksByDate.length - 1;
+								const isMiddle = tasksByDate.length > 2 && i === Math.floor(tasksByDate.length / 2);
+								const showLabel = isFirst || isLast || isMiddle;
+								// Anchor first/last labels to their bar's outer edge so the
+								// label text doesn't drift past the bar; middle stays centered.
+								const textAlign = isFirst ? 'left' : isLast ? 'right' : 'center';
+								return (
+									<div
+										key={day.date}
+										className="flex-1 min-w-[16px]"
+										style={{
+											textAlign,
+											overflow: 'visible',
+											whiteSpace: 'nowrap',
+										}}
+									>
+										{showLabel ? formatDateLabel(day.date) : ''}
+									</div>
+								);
+							})}
 						</div>
 
-						{/* Tooltip */}
-						{hoveredBar && tooltipPos && (
-							<div
-								className="fixed z-50 px-3 py-2 rounded text-xs whitespace-nowrap pointer-events-none shadow-lg"
-								style={{
-									left: tooltipPos.x,
-									top: tooltipPos.y,
-									transform: 'translate(-50%, -100%)',
-									backgroundColor: theme.colors.bgActivity,
-									color: theme.colors.textMain,
-									border: `1px solid ${theme.colors.border}`,
-								}}
-								data-testid="task-bar-tooltip"
-							>
+						{hoveredBar && (
+							<ChartTooltip anchor={tooltipPos} theme={theme} testId="task-bar-tooltip">
 								<div className="font-medium mb-1">{formatFullDate(hoveredBar.date)}</div>
 								<div style={{ color: theme.colors.textDim }}>
-									<div>{hoveredBar.count} tasks completed</div>
+									<div>{hoveredBar.count} tasks attempted</div>
 									<div>
 										{hoveredBar.successCount} successful (
-										{Math.round((hoveredBar.successCount / hoveredBar.count) * 100)}%)
+										{hoveredBar.count > 0
+											? Math.round((hoveredBar.successCount / hoveredBar.count) * 100)
+											: 0}
+										%)
 									</div>
 								</div>
-							</div>
+							</ChartTooltip>
 						)}
 					</div>
 				) : (
@@ -502,33 +382,5 @@ export const AutoRunStats = memo(function AutoRunStats({
 		</div>
 	);
 });
-
-/**
- * Parse a local YYYY-MM-DD date string without UTC shift.
- * new Date("2026-02-13") parses as UTC midnight, which shifts to the previous
- * day in negative UTC offsets. Appending T00:00 forces local-time parsing.
- */
-function parseLocalDate(dateStr: string): Date {
-	return new Date(dateStr + 'T00:00');
-}
-
-/**
- * Format date for X-axis labels (short format)
- */
-function formatDateLabel(dateStr: string): string {
-	return parseLocalDate(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-/**
- * Format date for tooltip (full format)
- */
-function formatFullDate(dateStr: string): string {
-	return parseLocalDate(dateStr).toLocaleDateString('en-US', {
-		weekday: 'short',
-		month: 'short',
-		day: 'numeric',
-		year: 'numeric',
-	});
-}
 
 export default AutoRunStats;

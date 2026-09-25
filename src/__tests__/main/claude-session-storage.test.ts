@@ -16,22 +16,44 @@ vi.mock('../../main/constants', () => ({
 	},
 }));
 
-vi.mock('../../main/utils/pricing', () => ({
-	calculateClaudeCost: vi.fn(
-		(input: number, output: number, cacheRead: number, cacheCreation: number) => {
-			return (input * 3 + output * 15 + cacheRead * 0.3 + cacheCreation * 3.75) / 1_000_000;
+vi.mock('../../main/utils/pricing', () => {
+	const flatCost = (input: number, output: number, cacheRead: number, cacheCreation: number) =>
+		(input * 3 + output * 15 + cacheRead * 0.3 + cacheCreation * 3.75) / 1_000_000;
+	const sumMatches = (content: string, key: string) => {
+		let total = 0;
+		for (const m of content.matchAll(new RegExp(`"${key}"\\s*:\\s*(\\d+)`, 'g'))) {
+			total += parseInt(m[1], 10);
 		}
-	),
-}));
+		return total;
+	};
+	return {
+		calculateClaudeCost: vi.fn(flatCost),
+		computeClaudeUsageCost: vi.fn((content: string) => {
+			const inputTokens = sumMatches(content, 'input_tokens');
+			const outputTokens = sumMatches(content, 'output_tokens');
+			const cacheReadTokens = sumMatches(content, 'cache_read_input_tokens');
+			const cacheCreationTokens = sumMatches(content, 'cache_creation_input_tokens');
+			return {
+				inputTokens,
+				outputTokens,
+				cacheReadTokens,
+				cacheCreationTokens,
+				costUsd: flatCost(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens),
+				// Per-model split the storage now maps via `claudeModelUsage`; this
+				// simplified mock doesn't track models, so an empty split is honest.
+				byModel: [],
+			};
+		}),
+	};
+});
 
 vi.mock('../../main/utils/statsCache', () => ({
 	encodeClaudeProjectPath: vi.fn((p: string) => p.replace(/[^a-zA-Z0-9]/g, '-')),
 }));
 
 vi.mock('../../main/utils/remote-fs', () => ({
-	readDirRemote: vi.fn(),
 	readFileRemote: vi.fn(),
-	statRemote: vi.fn(),
+	listDirWithStatsRemote: vi.fn(),
 }));
 
 // Mock electron-store: each instantiation gets its own isolated in-memory store
@@ -56,12 +78,22 @@ vi.mock('fs/promises', () => ({
 	},
 }));
 
+// listSessions now serves unchanged transcripts from the on-disk parse cache,
+// which resolves its location through electron's userData path.
+vi.mock('electron', () => ({
+	app: { getPath: vi.fn().mockReturnValue('/mock/userData') },
+}));
+
 // ============================================================================
 // Imports (after mocks)
 // ============================================================================
 
 import { ClaudeSessionStorage } from '../../main/storage/claude-session-storage';
-import { calculateClaudeCost } from '../../main/utils/pricing';
+import { computeClaudeUsageCost } from '../../main/utils/pricing';
+import {
+	SessionInfoCache,
+	setSessionInfoCacheForTest,
+} from '../../main/storage/session-info-cache';
 import Store from 'electron-store';
 import fs from 'fs/promises';
 
@@ -116,6 +148,10 @@ describe('ClaudeSessionStorage', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// Fresh parse cache per test: these cases reuse one project path and one
+		// set of file stats while varying the transcript CONTENT, which the real
+		// (mtime + size) fingerprint is entitled to treat as unchanged.
+		setSessionInfoCacheForTest('claude-code', new SessionInfoCache('claude-code', '/mock/cache'));
 		storage = new ClaudeSessionStorage();
 	});
 
@@ -335,7 +371,7 @@ describe('ClaudeSessionStorage', () => {
 			expect(sessions[0].cacheCreationTokens).toBe(25); // 10 + 15
 		});
 
-		it('should calculate cost via calculateClaudeCost', async () => {
+		it('should calculate cost via computeClaudeUsageCost', async () => {
 			const content = jsonl(
 				userMsg('Hello'),
 				assistantMsg('World'),
@@ -354,7 +390,7 @@ describe('ClaudeSessionStorage', () => {
 			vi.mocked(fs.readFile).mockResolvedValue(content);
 
 			const sessions = await storage.listSessions('/test/project');
-			expect(calculateClaudeCost).toHaveBeenCalledWith(1000, 500, 200, 100);
+			expect(computeClaudeUsageCost).toHaveBeenCalledWith(content);
 			expect(sessions[0].costUsd).toBeDefined();
 			// Using mock formula: (1000*3 + 500*15 + 200*0.3 + 100*3.75) / 1000000
 			const expectedCost = (1000 * 3 + 500 * 15 + 200 * 0.3 + 100 * 3.75) / 1_000_000;
@@ -523,10 +559,24 @@ describe('ClaudeSessionStorage', () => {
 		});
 
 		it('should return empty array when project directory does not exist', async () => {
-			vi.mocked(fs.access).mockRejectedValue(new Error('ENOENT'));
+			// The missing directory surfaces on readdir - listing no longer pays for a
+			// separate existence check before enumerating.
+			vi.mocked(fs.readdir).mockRejectedValue(
+				Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+			);
 
 			const sessions = await storage.listSessions('/nonexistent/path');
 			expect(sessions).toEqual([]);
+		});
+
+		it('should rethrow when the session directory is unreadable', async () => {
+			// EACCES/EIO are real faults - swallowing them would report a user's
+			// existing transcripts as "no sessions".
+			vi.mocked(fs.readdir).mockRejectedValue(
+				Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+			);
+
+			await expect(storage.listSessions('/test/project')).rejects.toThrow('EACCES');
 		});
 	});
 
@@ -575,6 +625,20 @@ describe('ClaudeSessionStorage', () => {
 
 			const origins = storage.getSessionOrigins('/test/project');
 			expect(origins['sess-1']).toEqual({ origin: 'auto' });
+		});
+
+		it('should keep name, star and context usage when re-registered', () => {
+			storage.registerSessionOrigin('/test/project', 'sess-1', 'user', 'Named');
+			storage.updateSessionStarred('/test/project', 'sess-1', true);
+			storage.updateSessionContextUsage('/test/project', 'sess-1', 42);
+			storage.registerSessionOrigin('/test/project', 'sess-1', 'user');
+
+			expect(storage.getSessionOrigins('/test/project')['sess-1']).toEqual({
+				origin: 'user',
+				sessionName: 'Named',
+				starred: true,
+				contextUsage: 42,
+			});
 		});
 	});
 
@@ -1179,6 +1243,140 @@ describe('ClaudeSessionStorage', () => {
 			// Only the user message should survive
 			expect(result.messages).toHaveLength(1);
 			expect(result.messages[0].type).toBe('user');
+		});
+	});
+
+	// ==========================================================================
+	// Remote SSH listing (regression: bulk stat, bounded read concurrency)
+	// ==========================================================================
+
+	describe('remote SSH listing', () => {
+		// Build a minimal session file whose content is enough for parseSessionContent
+		// to produce a non-null result with the given preview message.
+		function buildSessionContent(preview: string): string {
+			return jsonl(userMsg('hi'), assistantMsg(preview));
+		}
+
+		it('returns every session when the remote dir has hundreds of files', async () => {
+			// Regression for the bug where listing over SSH dropped sessions past
+			// OpenSSH MaxStartups (~29 visible out of 239). The bulk stat helper
+			// must emit one entry per file and all of them must reach the result.
+			const remoteFs = await import('../../main/utils/remote-fs');
+			const entries = Array.from({ length: 239 }, (_, i) => ({
+				name: `sess-${i}.jsonl`,
+				size: 2048,
+				mtime: 1_776_000_000_000 + i * 1000,
+			}));
+
+			vi.mocked(remoteFs.listDirWithStatsRemote).mockResolvedValue({
+				success: true,
+				data: entries,
+			});
+			vi.mocked(remoteFs.readFileRemote).mockResolvedValue({
+				success: true,
+				data: buildSessionContent('remote preview'),
+			});
+
+			const sshConfig = {
+				id: 'r1',
+				name: 'r1',
+				host: 'h',
+				port: 22,
+				username: 'u',
+				privateKeyPath: '~/.ssh/id_ed25519',
+				enabled: true,
+			} as const;
+
+			const storageForRemote = new ClaudeSessionStorage();
+			const sessions = await storageForRemote.listSessions('/remote/project', sshConfig);
+
+			expect(sessions).toHaveLength(239);
+			// Bulk stat must be a single SSH round-trip, not one-per-file.
+			expect(vi.mocked(remoteFs.listDirWithStatsRemote)).toHaveBeenCalledTimes(1);
+		});
+
+		it('paginates the remote listing while keeping the total count accurate', async () => {
+			const remoteFs = await import('../../main/utils/remote-fs');
+			const entries = Array.from({ length: 239 }, (_, i) => ({
+				name: `sess-${i}.jsonl`,
+				size: 1024,
+				mtime: 1_776_000_000_000 + i * 1000,
+			}));
+
+			vi.mocked(remoteFs.listDirWithStatsRemote).mockResolvedValue({
+				success: true,
+				data: entries,
+			});
+			vi.mocked(remoteFs.readFileRemote).mockResolvedValue({
+				success: true,
+				data: buildSessionContent('p'),
+			});
+
+			const sshConfig = {
+				id: 'r1',
+				name: 'r1',
+				host: 'h',
+				port: 22,
+				username: 'u',
+				privateKeyPath: '~/.ssh/id_ed25519',
+				enabled: true,
+			} as const;
+
+			const storageForRemote = new ClaudeSessionStorage();
+			const result = await storageForRemote.listSessionsPaginated(
+				'/remote/project',
+				{ limit: 100 },
+				sshConfig
+			);
+
+			expect(result.totalCount).toBe(239);
+			expect(result.sessions).toHaveLength(100);
+			expect(result.hasMore).toBe(true);
+			expect(result.nextCursor).toBeTruthy();
+		});
+
+		it('caps parallel remote file reads to the concurrency limit', async () => {
+			// If concurrency were unbounded, all 30 readFileRemote calls would be
+			// in flight at once. The cap is 6, so at any instant in-flight must
+			// be <= 6.
+			const remoteFs = await import('../../main/utils/remote-fs');
+			const entries = Array.from({ length: 30 }, (_, i) => ({
+				name: `sess-${i}.jsonl`,
+				size: 512,
+				mtime: 1_776_000_000_000 + i,
+			}));
+
+			vi.mocked(remoteFs.listDirWithStatsRemote).mockResolvedValue({
+				success: true,
+				data: entries,
+			});
+
+			let inFlight = 0;
+			let peakInFlight = 0;
+			vi.mocked(remoteFs.readFileRemote).mockImplementation(async () => {
+				inFlight++;
+				peakInFlight = Math.max(peakInFlight, inFlight);
+				await new Promise((r) => setTimeout(r, 5));
+				inFlight--;
+				return { success: true, data: buildSessionContent('x') };
+			});
+
+			const sshConfig = {
+				id: 'r1',
+				name: 'r1',
+				host: 'h',
+				port: 22,
+				username: 'u',
+				privateKeyPath: '~/.ssh/id_ed25519',
+				enabled: true,
+			} as const;
+
+			const storageForRemote = new ClaudeSessionStorage();
+			await storageForRemote.listSessions('/remote/project', sshConfig);
+
+			expect(peakInFlight).toBeLessThanOrEqual(6);
+			// And we actually exercised the parallelism, not just serialized.
+			expect(peakInFlight).toBeGreaterThan(1);
 		});
 	});
 });

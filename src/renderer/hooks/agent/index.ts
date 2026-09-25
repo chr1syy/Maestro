@@ -18,9 +18,14 @@ export {
 	useAgentCapabilities,
 	clearCapabilitiesCache,
 	setCapabilitiesCache,
+	getCachedCapabilities,
+	primeCapabilitiesCache,
 	DEFAULT_CAPABILITIES,
 } from './useAgentCapabilities';
 export type { AgentCapabilities, UseAgentCapabilitiesReturn } from './useAgentCapabilities';
+
+// Startup priming of the capability cache (see useCapabilitiesPriming for why)
+export { useCapabilitiesPriming } from './useCapabilitiesPriming';
 
 // Agent session history and resume
 export { useAgentSessionManagement } from './useAgentSessionManagement';
@@ -99,6 +104,9 @@ export type {
 	UseMergeTransferHandlersReturn,
 } from './useMergeTransferHandlers';
 
+// Fork conversation (create new session from conversation history)
+export { useForkConversation } from './useForkConversation';
+
 // Agent IPC listeners (process event routing)
 export { useAgentListeners, getErrorTitleForType } from './useAgentListeners';
 export type { UseAgentListenersDeps } from './useAgentListeners';
@@ -112,7 +120,7 @@ export { useQueueHandlers } from './useQueueHandlers';
 export type { UseQueueHandlersReturn } from './useQueueHandlers';
 
 // Queue processing (execution queue processing and startup recovery)
-export { useQueueProcessing } from './useQueueProcessing';
+export { useQueueProcessing, selectIdleQueuedSignature } from './useQueueProcessing';
 export type { UseQueueProcessingDeps, UseQueueProcessingReturn } from './useQueueProcessing';
 
 // Agent configuration state management (detection, config, models, SSH)

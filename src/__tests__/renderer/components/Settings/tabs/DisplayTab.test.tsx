@@ -4,6 +4,7 @@
  * Tests the display settings tab including:
  * - Font family selection and loading
  * - Custom font management (add/remove)
+ * - Saving and restoring the user's own font setup
  * - Font size toggle buttons
  * - Max log buffer toggle buttons
  * - Max output lines toggle buttons
@@ -20,26 +21,49 @@
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../../../renderer/utils/logger';
 import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { DisplayTab } from '../../../../../renderer/components/Settings/tabs/DisplayTab';
 import type { Theme } from '../../../../../renderer/types';
 
+import { mockTheme } from '../../../../helpers/mockTheme';
 // --- Mock setters (module-level for assertion access) ---
 const mockSetFontFamily = vi.fn();
 const mockSetFontSize = vi.fn();
+const mockSetSurfaceFontFamily = vi.fn();
+const mockSetSurfaceFontSize = vi.fn();
+const mockSetFontZoom = vi.fn();
+const mockResetTypography = vi.fn();
+const mockSaveTypographySnapshot = vi.fn();
+const mockRestoreTypographySnapshot = vi.fn();
 const mockSetMaxLogBuffer = vi.fn();
 const mockSetMaxOutputLines = vi.fn();
+const mockSetBionifyReadingMode = vi.fn();
+const mockSetBionifyIntensity = vi.fn();
+const mockSetBionifyAlgorithm = vi.fn();
 const mockSetUserMessageAlignment = vi.fn();
+const mockSetGroupChatAutoScroll = vi.fn();
 const mockSetFileExplorerIconTheme = vi.fn();
 const mockSetUseNativeTitleBar = vi.fn();
 const mockSetAutoHideMenuBar = vi.fn();
 const mockSetDocumentGraphShowExternalLinks = vi.fn();
+const mockSetDocumentGraphConfirmClose = vi.fn();
+const mockSetLeftPanelCollapsedPillsPerRow = vi.fn();
 const mockSetDocumentGraphMaxNodes = vi.fn();
 const mockUpdateContextManagementSettings = vi.fn();
 const mockSetLocalIgnorePatterns = vi.fn();
 const mockSetLocalHonorGitignore = vi.fn();
+const mockSetFileExplorerMaxDepth = vi.fn();
+const mockSetFileExplorerMaxEntries = vi.fn();
+const mockSetSshReduceEntryCapEnabled = vi.fn();
+const mockSetSshReduceEntryCapFraction = vi.fn();
 const mockSetShowStarredInUnreadFilter = vi.fn();
 const mockSetShowFilePreviewsInUnreadFilter = vi.fn();
+const mockSetShowTerminalTabsInUnreadFilter = vi.fn();
+const mockSetShowBrowserTabsInUnreadFilter = vi.fn();
+const mockSetFileEditWordWrap = vi.fn();
+const mockSetFileEditShowLineNumbers = vi.fn();
+const mockSetFilePreviewToolbarButtonVisibility = vi.fn();
 
 // Per-test overrides (merged into useSettings return)
 let mockUseSettingsOverrides: Record<string, any> = {};
@@ -54,16 +78,28 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 		setMaxLogBuffer: mockSetMaxLogBuffer,
 		maxOutputLines: 25,
 		setMaxOutputLines: mockSetMaxOutputLines,
+		bionifyReadingMode: false,
+		setBionifyReadingMode: mockSetBionifyReadingMode,
+		bionifyIntensity: 1,
+		setBionifyIntensity: mockSetBionifyIntensity,
+		bionifyAlgorithm: '- 0 1 1 2 0.4',
+		setBionifyAlgorithm: mockSetBionifyAlgorithm,
 		userMessageAlignment: 'right',
 		setUserMessageAlignment: mockSetUserMessageAlignment,
-		fileExplorerIconTheme: 'default',
+		groupChatAutoScroll: true,
+		setGroupChatAutoScroll: mockSetGroupChatAutoScroll,
+		fileExplorerIconTheme: 'flat',
 		setFileExplorerIconTheme: mockSetFileExplorerIconTheme,
 		useNativeTitleBar: false,
 		setUseNativeTitleBar: mockSetUseNativeTitleBar,
 		autoHideMenuBar: false,
 		setAutoHideMenuBar: mockSetAutoHideMenuBar,
+		leftPanelCollapsedPillsPerRow: 15,
+		setLeftPanelCollapsedPillsPerRow: mockSetLeftPanelCollapsedPillsPerRow,
 		documentGraphShowExternalLinks: true,
 		setDocumentGraphShowExternalLinks: mockSetDocumentGraphShowExternalLinks,
+		documentGraphConfirmClose: true,
+		setDocumentGraphConfirmClose: mockSetDocumentGraphConfirmClose,
 		documentGraphMaxNodes: 200,
 		setDocumentGraphMaxNodes: mockSetDocumentGraphMaxNodes,
 		contextManagementSettings: {
@@ -81,10 +117,60 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 		setLocalIgnorePatterns: mockSetLocalIgnorePatterns,
 		localHonorGitignore: true,
 		setLocalHonorGitignore: mockSetLocalHonorGitignore,
+		fileExplorerMaxDepth: 5,
+		setFileExplorerMaxDepth: mockSetFileExplorerMaxDepth,
+		fileExplorerMaxEntries: 100_000,
+		setFileExplorerMaxEntries: mockSetFileExplorerMaxEntries,
+		sshReduceEntryCapEnabled: false,
+		setSshReduceEntryCapEnabled: mockSetSshReduceEntryCapEnabled,
+		sshReduceEntryCapFraction: 0.1,
+		setSshReduceEntryCapFraction: mockSetSshReduceEntryCapFraction,
 		showStarredInUnreadFilter: false,
 		setShowStarredInUnreadFilter: mockSetShowStarredInUnreadFilter,
 		showFilePreviewsInUnreadFilter: false,
 		setShowFilePreviewsInUnreadFilter: mockSetShowFilePreviewsInUnreadFilter,
+		showTerminalTabsInUnreadFilter: false,
+		setShowTerminalTabsInUnreadFilter: mockSetShowTerminalTabsInUnreadFilter,
+		showBrowserTabsInUnreadFilter: false,
+		setShowBrowserTabsInUnreadFilter: mockSetShowBrowserTabsInUnreadFilter,
+		fileEditWordWrap: true,
+		setFileEditWordWrap: mockSetFileEditWordWrap,
+		fileEditShowLineNumbers: true,
+		setFileEditShowLineNumbers: mockSetFileEditShowLineNumbers,
+		filePreviewToolbarVisibility: {
+			save: true,
+			wordWrap: true,
+			remoteImages: true,
+			htmlRender: true,
+			previewTier: true,
+			editToggle: true,
+			editImage: true,
+			copyContent: true,
+			publishGist: true,
+			documentGraph: true,
+			openInBrowser: true,
+			openInDefault: true,
+			revealInFolder: true,
+			copyPath: true,
+			delete: true,
+		},
+		setFilePreviewToolbarButtonVisibility: mockSetFilePreviewToolbarButtonVisibility,
+		chatFontFamily: '',
+		terminalFontFamily: '',
+		filePreviewFontFamily: '',
+		fileEditorFontFamily: '',
+		chatFontSize: 0,
+		terminalFontSize: 0,
+		filePreviewFontSize: 0,
+		fileEditorFontSize: 0,
+		fontZoom: 1,
+		setSurfaceFontFamily: mockSetSurfaceFontFamily,
+		setSurfaceFontSize: mockSetSurfaceFontSize,
+		setFontZoom: mockSetFontZoom,
+		resetTypography: mockResetTypography,
+		typographySnapshot: null,
+		saveTypographySnapshot: mockSaveTypographySnapshot,
+		restoreTypographySnapshot: mockRestoreTypographySnapshot,
 		...mockUseSettingsOverrides,
 	}),
 }));
@@ -131,27 +217,37 @@ vi.mock('../../../../../renderer/components/Settings/IgnorePatternsSection', () 
 	),
 }));
 
+// The real Modal needs the layer stack and the settings store, so it is stubbed
+// here. The stub still reflects the sizing props back as data attributes: those
+// are the only thing a resizable call site contributes, and a stub that drops
+// them silently passes whatever the caller sends, including nothing.
+vi.mock('../../../../../renderer/components/ui/Modal', () => ({
+	Modal: ({
+		title,
+		children,
+		resizeKey,
+		defaultSize,
+		minSize,
+	}: {
+		title: string;
+		children: React.ReactNode;
+		resizeKey?: string;
+		defaultSize?: { width?: number; height?: number };
+		minSize?: { width?: number; height?: number };
+	}) => (
+		<div
+			role="dialog"
+			aria-label={title}
+			data-modal-resize-key={resizeKey}
+			data-default-size={defaultSize ? `${defaultSize.width}x${defaultSize.height}` : undefined}
+			data-min-size={minSize ? `${minSize.width}x${minSize.height}` : undefined}
+		>
+			{children}
+		</div>
+	),
+}));
+
 // Sample theme for testing
-const mockTheme: Theme = {
-	id: 'dracula',
-	name: 'Dracula',
-	mode: 'dark',
-	colors: {
-		bgMain: '#282a36',
-		bgSidebar: '#21222c',
-		bgActivity: '#343746',
-		border: '#44475a',
-		textMain: '#f8f8f2',
-		textDim: '#6272a4',
-		accent: '#bd93f9',
-		accentDim: '#bd93f920',
-		accentText: '#ff79c6',
-		accentForeground: '#ffffff',
-		success: '#50fa7b',
-		warning: '#ffb86c',
-		error: '#ff5555',
-	},
-};
 
 describe('DisplayTab', () => {
 	beforeEach(() => {
@@ -171,6 +267,22 @@ describe('DisplayTab', () => {
 		mockUseSettingsOverrides = {};
 	});
 
+	describe('Group Chats', () => {
+		it('should render and toggle the auto-scroll setting', () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			expect(screen.getByText('Group Chats')).toBeInTheDocument();
+			const toggle = screen.getByRole('switch', {
+				name: 'Auto-scroll group chats to newest message',
+			});
+			expect(toggle).toHaveAttribute('aria-checked', 'true');
+
+			fireEvent.click(toggle);
+
+			expect(mockSetGroupChatAutoScroll).toHaveBeenCalledWith(false);
+		});
+	});
+
 	describe('Files Pane Icon Theme', () => {
 		it('should render the Files Pane Icon Theme control and helper copy', () => {
 			render(<DisplayTab theme={mockTheme} />);
@@ -179,6 +291,14 @@ describe('DisplayTab', () => {
 			expect(
 				screen.getByText(/Rich uses Material Icon Theme style file and folder SVGs/i)
 			).toBeInTheDocument();
+		});
+
+		it('should call setFileExplorerIconTheme when Flat is selected', () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			fireEvent.click(screen.getByRole('button', { name: 'Flat' }));
+
+			expect(mockSetFileExplorerIconTheme).toHaveBeenCalledWith('flat');
 		});
 
 		it('should call setFileExplorerIconTheme when Rich is selected', () => {
@@ -190,23 +310,122 @@ describe('DisplayTab', () => {
 		});
 	});
 
+	describe('Bionify Display Settings', () => {
+		it('renders the Reading Mode toggle and sub-options (ghosted when off)', () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			expect(screen.getByText('Bionify Emphasis')).toBeInTheDocument();
+			const toggle = screen.getByRole('switch', { name: 'Bionify reading mode' });
+			expect(toggle).toHaveAttribute('aria-checked', 'false');
+			// Sub-options remain in the DOM but are ghosted via opacity/pointer-events
+			expect(screen.getByText('Intensity')).toBeInTheDocument();
+			expect(screen.getByLabelText('Bionify algorithm')).toBeInTheDocument();
+			const ghosted = screen.getByText('Intensity').closest('.space-y-4') as HTMLElement;
+			expect(ghosted.style.opacity).toBe('0.4');
+			expect(ghosted.style.pointerEvents).toBe('none');
+		});
+
+		it('enables Bionify when the toggle is clicked', () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			fireEvent.click(screen.getByRole('switch', { name: 'Bionify reading mode' }));
+
+			expect(mockSetBionifyReadingMode).toHaveBeenCalledWith(true);
+		});
+
+		it('un-ghosts sub-options when enabled', () => {
+			mockUseSettingsOverrides = { bionifyReadingMode: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			expect(screen.getByLabelText('Bionify algorithm')).toHaveValue('- 0 1 1 2 0.4');
+			expect(screen.getByRole('button', { name: 'Info' })).toBeInTheDocument();
+			const panel = screen.getByText('Intensity').closest('.space-y-4') as HTMLElement;
+			expect(panel.style.opacity).toBe('1');
+			expect(panel.style.pointerEvents).toBe('auto');
+		});
+
+		it('opens the algorithm reference as a resizable modal', () => {
+			mockUseSettingsOverrides = { bionifyReadingMode: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			fireEvent.click(screen.getByRole('button', { name: 'Info' }));
+
+			const dialog = screen.getByRole('dialog', { name: 'Bionify Algorithm Reference' });
+			// Without a resizeKey the shared Modal falls back to fixed sizing and
+			// renders no resize handles, so the key is what makes it draggable.
+			expect(dialog).toHaveAttribute('data-modal-resize-key', 'bionify-reference');
+			expect(dialog).toHaveAttribute('data-default-size', '520x560');
+			expect(dialog).toHaveAttribute('data-min-size', '380x320');
+		});
+
+		it('updates Bionify intensity when a new value is chosen', async () => {
+			mockUseSettingsOverrides = { bionifyReadingMode: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			fireEvent.click(screen.getByRole('button', { name: 'Strong' }));
+
+			expect(mockSetBionifyIntensity).toHaveBeenCalledWith(1.35);
+		});
+
+		it('updates the algorithm string when edited', () => {
+			mockUseSettingsOverrides = { bionifyReadingMode: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			const input = screen.getByLabelText('Bionify algorithm');
+			fireEvent.change(input, { target: { value: '+ 1 1 2 2 0.55' } });
+			fireEvent.blur(input);
+
+			expect(mockSetBionifyAlgorithm).toHaveBeenLastCalledWith('+ 1 1 2 2 0.55');
+		});
+
+		it('shows validation feedback and avoids persisting invalid algorithm input', () => {
+			mockUseSettingsOverrides = { bionifyReadingMode: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			const input = screen.getByLabelText('Bionify algorithm');
+			fireEvent.change(input, { target: { value: '- 0 1 1' } });
+			fireEvent.blur(input);
+
+			expect(screen.getByText(/Enter `\+\|-/)).toBeInTheDocument();
+			expect(mockSetBionifyAlgorithm).not.toHaveBeenCalled();
+		});
+
+		it('opens an info modal with the upstream algorithm breakdown', () => {
+			mockUseSettingsOverrides = { bionifyReadingMode: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			fireEvent.click(screen.getByRole('button', { name: 'Info' }));
+
+			const dialog = screen.getByRole('dialog', { name: 'Bionify Algorithm Reference' });
+			expect(dialog).toBeInTheDocument();
+			expect(within(dialog).getAllByText(/- 0 1 1 2 0.4/).length).toBeGreaterThan(0);
+			expect(within(dialog).getByText(/common english words/i)).toBeInTheDocument();
+			expect(within(dialog).getByText(/fraction of each word/i)).toBeInTheDocument();
+		});
+	});
+
 	// =========================================================================
 	// Font Family
 	// =========================================================================
 
 	describe('Font Family', () => {
-		it('should render the Interface Font label', async () => {
+		it('should render the grouped Fonts section', async () => {
 			render(<DisplayTab theme={mockTheme} />);
 
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			expect(screen.getByText('Interface Font')).toBeInTheDocument();
+			// One "Fonts" heading now, with each surface labelled inside the card.
+			expect(screen.getByText('Fonts')).toBeInTheDocument();
+			expect(screen.getByText('Interface')).toBeInTheDocument();
+			expect(screen.getByText('Terminal')).toBeInTheDocument();
 		});
 
-		it('should show loading message while fonts are being detected', async () => {
-			// Make font detection slow so we can observe the loading state
+		it('should keep the font select mounted while fonts are being detected', async () => {
+			// Make font detection slow so we can observe the in-flight state.
+			// The select must stay mounted during load (the #1228 fix); previously a
+			// "Loading fonts..." placeholder replaced it and swallowed the first click.
 			let resolveFonts: (value: string[]) => void;
 			(window as any).maestro.fonts.detect = vi.fn(
 				() =>
@@ -222,14 +441,14 @@ describe('DisplayTab', () => {
 			});
 
 			// Trigger font loading by focusing the select
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			fireEvent.focus(fontSelect);
 
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(10);
 			});
 
-			expect(screen.getByText('Loading fonts...')).toBeInTheDocument();
+			expect(screen.getAllByRole('combobox')[0]).toBeInTheDocument();
 
 			// Resolve the font detection
 			await act(async () => {
@@ -245,7 +464,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			fireEvent.focus(fontSelect);
 
 			await act(async () => {
@@ -262,7 +481,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			fireEvent.click(fontSelect);
 
 			await act(async () => {
@@ -279,10 +498,12 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			fireEvent.change(fontSelect, { target: { value: 'Monaco' } });
 
-			expect(mockSetFontFamily).toHaveBeenCalledWith('Monaco');
+			// Pickers are generated from the surface registry, so the setter names
+			// the surface rather than being one of five near-identical functions.
+			expect(mockSetSurfaceFontFamily).toHaveBeenCalledWith('interface', 'Monaco');
 		});
 
 		it('should render font select with current fontFamily value', async () => {
@@ -292,7 +513,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const fontSelect = screen.getByRole('combobox') as HTMLSelectElement;
+			const fontSelect = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
 			expect(fontSelect.value).toBe('Menlo');
 		});
 
@@ -303,7 +524,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 
 			// First focus triggers load
 			fireEvent.focus(fontSelect);
@@ -327,6 +548,95 @@ describe('DisplayTab', () => {
 	// Custom Fonts
 	// =========================================================================
 
+	// =========================================================================
+	// Save / Restore Customizations
+	// =========================================================================
+
+	describe('Save & Restore Customizations', () => {
+		// The section is only useful if the buttons reach the STORE. Rendering
+		// it while the tab passed the wrong (or no) action would look identical
+		// on screen and silently do nothing on click.
+		it('wires Save Customizations to the store action', async () => {
+			render(<DisplayTab theme={mockTheme} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			fireEvent.click(screen.getByTestId('typography-snapshot-save'));
+
+			expect(mockSaveTypographySnapshot).toHaveBeenCalledTimes(1);
+		});
+
+		it('wires Restore Customizations to the store action once something is saved', async () => {
+			mockUseSettingsOverrides = {
+				typographySnapshot: {
+					savedAt: Date.now(),
+					fonts: { fontFamily: 'Verdana' },
+					sizes: { fontSize: 17 },
+				},
+			};
+			render(<DisplayTab theme={mockTheme} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			fireEvent.click(screen.getByTestId('typography-snapshot-restore'));
+
+			expect(mockRestoreTypographySnapshot).toHaveBeenCalledTimes(1);
+		});
+
+		it('offers no Restore to click until the user has saved something', async () => {
+			render(<DisplayTab theme={mockTheme} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			fireEvent.click(screen.getByTestId('typography-snapshot-restore'));
+
+			expect(mockRestoreTypographySnapshot).not.toHaveBeenCalled();
+		});
+
+		it('reports the saved setup as active when the live fonts still match it', async () => {
+			// Drives the readout off the REAL comparison rather than a flag, so
+			// the tab cannot claim a setup is active after a preset replaced it.
+			mockUseSettingsOverrides = {
+				fontFamily: 'Verdana',
+				fontSize: 17,
+				typographySnapshot: {
+					savedAt: Date.now(),
+					fonts: { fontFamily: 'Verdana' },
+					sizes: { fontSize: 17 },
+				},
+			};
+			render(<DisplayTab theme={mockTheme} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			expect(screen.getByText(/Your saved fonts are active/)).toBeInTheDocument();
+			expect(screen.getByTestId('typography-snapshot-restore')).toBeDisabled();
+		});
+
+		it('says the live fonts are not the saved ones after a preset replaced them', async () => {
+			mockUseSettingsOverrides = {
+				fontFamily: 'Roboto Mono',
+				fontSize: 14,
+				typographySnapshot: {
+					savedAt: Date.now(),
+					fonts: { fontFamily: 'Verdana' },
+					sizes: { fontSize: 17 },
+				},
+			};
+			render(<DisplayTab theme={mockTheme} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			expect(screen.getByText(/The fonts below are not it/)).toBeInTheDocument();
+			expect(screen.getByTestId('typography-snapshot-restore')).not.toBeDisabled();
+		});
+	});
+
 	describe('Custom Fonts', () => {
 		it('should add custom font via button click', async () => {
 			render(<DisplayTab theme={mockTheme} />);
@@ -335,7 +645,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const customFontInput = screen.getByPlaceholderText('Add custom font name...');
+			const customFontInput = screen.getAllByPlaceholderText('Add custom font name...')[0];
 			fireEvent.change(customFontInput, { target: { value: 'My Custom Font' } });
 
 			// Scope to the font input's parent container to avoid ambiguous "Add" button
@@ -358,7 +668,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const customFontInput = screen.getByPlaceholderText('Add custom font name...');
+			const customFontInput = screen.getAllByPlaceholderText('Add custom font name...')[0];
 			fireEvent.change(customFontInput, { target: { value: 'My Custom Font' } });
 			fireEvent.keyDown(customFontInput, { key: 'Enter' });
 
@@ -378,7 +688,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const customFontInput = screen.getByPlaceholderText('Add custom font name...');
+			const customFontInput = screen.getAllByPlaceholderText('Add custom font name...')[0];
 			fireEvent.change(customFontInput, { target: { value: '   ' } });
 
 			const fontContainer = customFontInput.closest('div')!.parentElement!;
@@ -407,7 +717,7 @@ describe('DisplayTab', () => {
 			});
 
 			// Trigger font loading to populate customFonts
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			fireEvent.focus(fontSelect);
 
 			await act(async () => {
@@ -445,7 +755,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const customFontInput = screen.getByPlaceholderText('Add custom font name...');
+			const customFontInput = screen.getAllByPlaceholderText('Add custom font name...')[0];
 
 			// Add first font
 			fireEvent.change(customFontInput, { target: { value: 'DuplicateFont' } });
@@ -483,7 +793,7 @@ describe('DisplayTab', () => {
 			});
 
 			// Trigger font loading
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 
 			await act(async () => {
 				fireEvent.focus(fontSelect);
@@ -495,7 +805,7 @@ describe('DisplayTab', () => {
 			});
 
 			// Re-query the combobox after state updates (component re-renders)
-			const updatedSelect = screen.getByRole('combobox');
+			const updatedSelect = screen.getAllByRole('combobox')[0];
 			const options = updatedSelect.querySelectorAll('option');
 			const optionValues = Array.from(options).map((o) => o.getAttribute('value'));
 			expect(optionValues).toContain('SavedFont1');
@@ -507,82 +817,112 @@ describe('DisplayTab', () => {
 	// Font Size
 	// =========================================================================
 
-	describe('Font Size', () => {
-		it('should render Font Size label', async () => {
+	describe('Per-surface sizes and zoom', () => {
+		// The single Small/Medium/Large/X-Large global size is gone: each surface
+		// now carries its own size, and Cmd+= drives a separate zoom multiplier
+		// so scaling preserves the proportions between them.
+		async function renderTab(overrides: Record<string, unknown> = {}) {
+			mockUseSettingsOverrides = overrides;
 			render(<DisplayTab theme={mockTheme} />);
-
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
+		}
 
-			expect(screen.getByText('Font Size')).toBeInTheDocument();
+		it('renders a size stepper for every surface', async () => {
+			await renderTab();
+
+			for (const surface of ['interface', 'chat', 'terminal', 'filePreview', 'fileEditor']) {
+				expect(screen.getByTestId(`font-size-${surface}-value`)).toBeInTheDocument();
+			}
 		});
 
-		it('should call setFontSize with 12 when Small is clicked', async () => {
-			render(<DisplayTab theme={mockTheme} />);
+		it('steps a surface size by one pixel', async () => {
+			await renderTab({ fontSize: 14 });
 
-			await act(async () => {
-				await vi.advanceTimersByTimeAsync(50);
-			});
-
-			fireEvent.click(screen.getByRole('button', { name: 'Small' }));
-			expect(mockSetFontSize).toHaveBeenCalledWith(12);
+			fireEvent.click(screen.getByTestId('font-size-interface-increase'));
+			expect(mockSetSurfaceFontSize).toHaveBeenCalledWith('interface', 15);
 		});
 
-		it('should call setFontSize with 14 when Medium is clicked', async () => {
-			render(<DisplayTab theme={mockTheme} />);
+		it('shows an unset surface as inheriting the interface size', async () => {
+			await renderTab({ fontSize: 16, chatFontSize: 0 });
 
-			await act(async () => {
-				await vi.advanceTimersByTimeAsync(50);
-			});
-
-			fireEvent.click(screen.getByRole('button', { name: 'Medium' }));
-			expect(mockSetFontSize).toHaveBeenCalledWith(14);
+			// The number stays in the fixed-width value slot and the state moves
+			// to the reserved trailing slot, so the row does not resize as a
+			// surface goes from inheriting to its own size.
+			expect(screen.getByTestId('font-size-chat-value')).toHaveTextContent('16px');
+			expect(screen.getByTestId('font-size-chat-inheriting')).toBeInTheDocument();
 		});
 
-		it('should call setFontSize with 16 when Large is clicked', async () => {
-			render(<DisplayTab theme={mockTheme} />);
+		it('shows a customized surface as its own size', async () => {
+			await renderTab({ fontSize: 16, terminalFontSize: 12 });
 
-			await act(async () => {
-				await vi.advanceTimersByTimeAsync(50);
-			});
-
-			fireEvent.click(screen.getByRole('button', { name: 'Large' }));
-			expect(mockSetFontSize).toHaveBeenCalledWith(16);
+			expect(screen.getByTestId('font-size-terminal-value')).toHaveTextContent('12px');
 		});
 
-		it('should call setFontSize with 18 when X-Large is clicked', async () => {
-			render(<DisplayTab theme={mockTheme} />);
+		it('sets the zoom rather than any surface size', async () => {
+			await renderTab();
 
+			const zoom = within(
+				document.querySelector('[data-setting-id="display-font-zoom"]') as HTMLElement
+			);
+			fireEvent.click(zoom.getByRole('button', { name: '150%' }));
+			expect(mockSetFontZoom).toHaveBeenCalledWith(1.5);
+			expect(mockSetSurfaceFontSize).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('Factory Reset Fonts', () => {
+		it('needs two clicks, because it overwrites ten settings', async () => {
+			render(<DisplayTab theme={mockTheme} />);
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			fireEvent.click(screen.getByRole('button', { name: 'X-Large' }));
-			expect(mockSetFontSize).toHaveBeenCalledWith(18);
+			fireEvent.click(screen.getByTestId('typography-reset-default'));
+			expect(mockResetTypography).not.toHaveBeenCalled();
+
+			fireEvent.click(screen.getByTestId('typography-reset-default'));
+			expect(mockResetTypography).toHaveBeenCalledWith('default');
 		});
 
-		it('should highlight selected font size (Medium when fontSize=14)', async () => {
+		it('leads the tab, with Save & Restore under it and the pickers last', async () => {
+			// The tab reads coarse to fine: set every font at once, keep a copy of
+			// what you set, then take the individual pickers apart. Both halves are
+			// asserted because the pair is the point - a reset that a user cannot
+			// undo from the section directly beneath it is the destructive control
+			// this ordering exists to make safe.
 			render(<DisplayTab theme={mockTheme} />);
-
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const mediumButton = screen.getByText('Medium');
-			expect(mediumButton).toHaveClass('ring-2');
+			const reset = document.querySelector('[data-setting-id="display-typography-reset"]')!;
+			const snapshot = document.querySelector('[data-setting-id="display-typography-snapshot"]')!;
+			const fonts = document.querySelector('[data-setting-id="display-fonts"]')!;
+
+			expect(
+				reset.compareDocumentPosition(snapshot) & Node.DOCUMENT_POSITION_FOLLOWING
+			).toBeTruthy();
+			expect(
+				snapshot.compareDocumentPosition(fonts) & Node.DOCUMENT_POSITION_FOLLOWING
+			).toBeTruthy();
 		});
 
-		it('should highlight Small when fontSize is 12', async () => {
-			mockUseSettingsOverrides = { fontSize: 12 };
+		it('is the first section on the tab', async () => {
+			// Guards the ordering against a section being inserted above it later:
+			// the position assertions above stay green if something else claims the
+			// top of the tab, since they only compare the three font sections.
 			render(<DisplayTab theme={mockTheme} />);
-
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const smallButton = screen.getByText('Small');
-			expect(smallButton).toHaveClass('ring-2');
+			const firstSectionId = document
+				.querySelector('[data-setting-id]')
+				?.getAttribute('data-setting-id');
+
+			expect(firstSectionId).toBe('display-typography-reset');
 		});
 	});
 
@@ -608,7 +948,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			fireEvent.click(screen.getByRole('button', { name: '1000' }));
+			fireEvent.click(screen.getByRole('button', { name: '1.0K' }));
 			expect(mockSetMaxLogBuffer).toHaveBeenCalledWith(1000);
 		});
 
@@ -619,7 +959,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			fireEvent.click(screen.getByRole('button', { name: '5000' }));
+			fireEvent.click(screen.getByRole('button', { name: '5.0K' }));
 			expect(mockSetMaxLogBuffer).toHaveBeenCalledWith(5000);
 		});
 
@@ -630,7 +970,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			fireEvent.click(screen.getByRole('button', { name: '10000' }));
+			fireEvent.click(screen.getByRole('button', { name: '10.0K' }));
 			expect(mockSetMaxLogBuffer).toHaveBeenCalledWith(10000);
 		});
 
@@ -641,7 +981,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			fireEvent.click(screen.getByRole('button', { name: '25000' }));
+			fireEvent.click(screen.getByRole('button', { name: '25.0K' }));
 			expect(mockSetMaxLogBuffer).toHaveBeenCalledWith(25000);
 		});
 
@@ -1068,6 +1408,66 @@ describe('DisplayTab', () => {
 
 			expect(toggle.getAttribute('aria-checked')).toBe('true');
 		});
+
+		it('should toggle terminal tabs in unread filter on when clicked (currently off)', async () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			const label = screen.getByText('Show terminal tabs when filtering by unread');
+			const section = label.closest('.flex.items-center.justify-between')!;
+			const toggle = section.querySelector('[role="switch"]') as HTMLElement;
+			fireEvent.click(toggle);
+
+			expect(mockSetShowTerminalTabsInUnreadFilter).toHaveBeenCalledWith(true);
+		});
+
+		it('should show aria-checked=true when terminal tabs in unread filter is enabled', async () => {
+			mockUseSettingsOverrides = { showTerminalTabsInUnreadFilter: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			const label = screen.getByText('Show terminal tabs when filtering by unread');
+			const section = label.closest('.flex.items-center.justify-between')!;
+			const toggle = section.querySelector('[role="switch"]') as HTMLElement;
+
+			expect(toggle.getAttribute('aria-checked')).toBe('true');
+		});
+
+		it('should toggle browser tabs in unread filter on when clicked (currently off)', async () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			const label = screen.getByText('Show browser tabs when filtering by unread');
+			const section = label.closest('.flex.items-center.justify-between')!;
+			const toggle = section.querySelector('[role="switch"]') as HTMLElement;
+			fireEvent.click(toggle);
+
+			expect(mockSetShowBrowserTabsInUnreadFilter).toHaveBeenCalledWith(true);
+		});
+
+		it('should show aria-checked=true when browser tabs in unread filter is enabled', async () => {
+			mockUseSettingsOverrides = { showBrowserTabsInUnreadFilter: true };
+			render(<DisplayTab theme={mockTheme} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			const label = screen.getByText('Show browser tabs when filtering by unread');
+			const section = label.closest('.flex.items-center.justify-between')!;
+			const toggle = section.querySelector('[role="switch"]') as HTMLElement;
+
+			expect(toggle.getAttribute('aria-checked')).toBe('true');
+		});
 	});
 
 	// =========================================================================
@@ -1082,7 +1482,11 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			expect(screen.getByText('Document Graph')).toBeInTheDocument();
+			// Also the label of the Document Graph font surface now, so scope this
+			// to the graph settings section rather than matching on text alone.
+			const section = document.querySelector('[data-setting-id="display-document-graph"]');
+			expect(section).not.toBeNull();
+			expect(within(section as HTMLElement).getByText('Document Graph')).toBeInTheDocument();
 		});
 
 		it('should render show external links toggle', async () => {
@@ -1110,6 +1514,24 @@ describe('DisplayTab', () => {
 			fireEvent.click(externalLinksSwitch);
 
 			expect(mockSetDocumentGraphShowExternalLinks).toHaveBeenCalledWith(false);
+		});
+
+		it('should turn the close confirmation off when clicked', async () => {
+			render(<DisplayTab theme={mockTheme} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(50);
+			});
+
+			const label = screen.getByText('Confirm before closing');
+			const section = label.closest('.flex.items-center.justify-between')!;
+			const toggle = section.querySelector('[role="switch"]') as HTMLElement;
+
+			await act(async () => {
+				fireEvent.click(toggle);
+			});
+
+			expect(mockSetDocumentGraphConfirmClose).toHaveBeenCalledWith(false);
 		});
 
 		it('should toggle external links on when clicked (currently off)', async () => {
@@ -1149,10 +1571,12 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			// Multiple sliders exist (doc graph, yellow threshold, red threshold)
-			// The doc graph slider is the first one
-			const sliders = screen.getAllByRole('slider');
-			const docGraphSlider = sliders[0];
+			// Scope to the Document Graph section so unrelated sliders elsewhere on
+			// the tab (e.g. left-panel pills-per-row) don't shift positional indices.
+			const docGraphSection = document.querySelector(
+				'[data-setting-id="display-document-graph"]'
+			) as HTMLElement;
+			const docGraphSlider = within(docGraphSection).getByRole('slider');
 			fireEvent.change(docGraphSlider, { target: { value: '500' } });
 
 			expect(mockSetDocumentGraphMaxNodes).toHaveBeenCalledWith(500);
@@ -1290,10 +1714,15 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			expect(screen.getByText('Yellow warning threshold')).toBeInTheDocument();
-			expect(screen.getByText('60%')).toBeInTheDocument();
-			expect(screen.getByText('Red warning threshold')).toBeInTheDocument();
-			expect(screen.getByText('80%')).toBeInTheDocument();
+			// Scope to the section: the Zoom row also renders 80% and 90%, so an
+			// unscoped query is ambiguous.
+			const warnings = within(
+				document.querySelector('[data-setting-id="display-context-warnings"]') as HTMLElement
+			);
+			expect(warnings.getByText('Yellow warning threshold')).toBeInTheDocument();
+			expect(warnings.getByText('60%')).toBeInTheDocument();
+			expect(warnings.getByText('Red warning threshold')).toBeInTheDocument();
+			expect(warnings.getByText('80%')).toBeInTheDocument();
 		});
 
 		it('should update yellow threshold when slider changes', async () => {
@@ -1303,10 +1732,11 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			// Find the yellow threshold slider (first range input in the threshold area)
-			const sliders = screen.getAllByRole('slider');
-			// First slider is document graph max nodes, second is yellow, third is red
-			const yellowSlider = sliders[1];
+			// Scope to the Context Window Warnings section: slider[0] is yellow, slider[1] is red.
+			const warningsSection = document.querySelector(
+				'[data-setting-id="display-context-warnings"]'
+			) as HTMLElement;
+			const yellowSlider = within(warningsSection).getAllByRole('slider')[0];
 			fireEvent.change(yellowSlider, { target: { value: '70' } });
 
 			expect(mockUpdateContextManagementSettings).toHaveBeenCalledWith({
@@ -1321,8 +1751,10 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const sliders = screen.getAllByRole('slider');
-			const yellowSlider = sliders[1];
+			const warningsSection = document.querySelector(
+				'[data-setting-id="display-context-warnings"]'
+			) as HTMLElement;
+			const yellowSlider = within(warningsSection).getAllByRole('slider')[0];
 
 			// Set yellow to 85, which is >= red (80)
 			fireEvent.change(yellowSlider, { target: { value: '85' } });
@@ -1340,8 +1772,10 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const sliders = screen.getAllByRole('slider');
-			const redSlider = sliders[2];
+			const warningsSection = document.querySelector(
+				'[data-setting-id="display-context-warnings"]'
+			) as HTMLElement;
+			const redSlider = within(warningsSection).getAllByRole('slider')[1];
 			fireEvent.change(redSlider, { target: { value: '90' } });
 
 			expect(mockUpdateContextManagementSettings).toHaveBeenCalledWith({
@@ -1356,8 +1790,10 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const sliders = screen.getAllByRole('slider');
-			const redSlider = sliders[2];
+			const warningsSection = document.querySelector(
+				'[data-setting-id="display-context-warnings"]'
+			) as HTMLElement;
+			const redSlider = within(warningsSection).getAllByRole('slider')[1];
 
 			// Set red to 50, which is <= yellow (60)
 			fireEvent.change(redSlider, { target: { value: '50' } });
@@ -1499,7 +1935,7 @@ describe('DisplayTab', () => {
 				.fn()
 				.mockRejectedValue(new Error('Font detection failed'));
 
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			render(<DisplayTab theme={mockTheme} />);
 
@@ -1508,7 +1944,7 @@ describe('DisplayTab', () => {
 			});
 
 			// Trigger font loading
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			fireEvent.focus(fontSelect);
 
 			await act(async () => {
@@ -1516,9 +1952,15 @@ describe('DisplayTab', () => {
 			});
 
 			// After the rejection resolves, the select should reappear (fontLoading goes false)
-			const fontSelectAfter = screen.getByRole('combobox');
+			const fontSelectAfter = screen.getAllByRole('combobox')[0];
 			expect(fontSelectAfter).toBeInTheDocument();
-			expect(consoleSpy).toHaveBeenCalledWith('Failed to load fonts:', expect.any(Error));
+			// No error is logged: on stock macOS and Windows there is no
+			// fontconfig, so a failed enumeration is the EXPECTED path, not an
+			// anomaly. It degrades to a result flagged unreliable, and the picker
+			// then suppresses availability annotations instead of claiming that
+			// installed fonts are missing.
+			expect(consoleSpy).not.toHaveBeenCalled();
+			expect(screen.queryByText(/\(Not Found\)/)).not.toBeInTheDocument();
 
 			consoleSpy.mockRestore();
 		});
@@ -1528,7 +1970,7 @@ describe('DisplayTab', () => {
 				.fn()
 				.mockRejectedValue(new Error('Font detection failed'));
 
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
 			render(<DisplayTab theme={mockTheme} />);
 
@@ -1537,7 +1979,7 @@ describe('DisplayTab', () => {
 			});
 
 			// Common fonts should be in the dropdown (before any loading is triggered)
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			const options = fontSelect.querySelectorAll('option');
 			// Option textContent has trailing whitespace from the JSX (font name + space + conditional)
 			const optionValues = Array.from(options).map((o) => o.getAttribute('value'));
@@ -1560,14 +2002,17 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 			const options = fontSelect.querySelectorAll('option');
 			const optionTexts = Array.from(options).map((o) => o.textContent?.trim());
 
-			// Verify common monospace fonts are present
-			expect(optionTexts).toContain('Roboto Mono');
-			expect(optionTexts).toContain('JetBrains Mono');
-			expect(optionTexts).toContain('Fira Code');
+			// Bundled families (Roboto Mono, JetBrains Mono, Fira Code) render in
+			// the "Bundled with Maestro" group and are deduplicated out of the
+			// system group, so their option text carries a note. The system-only
+			// faces below still appear verbatim.
+			expect(optionTexts.some((t) => t?.startsWith('Roboto Mono'))).toBe(true);
+			expect(optionTexts.some((t) => t?.startsWith('JetBrains Mono'))).toBe(true);
+			expect(optionTexts.some((t) => t?.startsWith('Fira Code'))).toBe(true);
 			expect(optionTexts).toContain('Monaco');
 			expect(optionTexts).toContain('Menlo');
 			expect(optionTexts).toContain('Consolas');
@@ -1584,7 +2029,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			expect(screen.getByPlaceholderText('Add custom font name...')).toBeInTheDocument();
+			expect(screen.getAllByPlaceholderText('Add custom font name...')[0]).toBeInTheDocument();
 		});
 
 		it('should show font availability indicators after loading', async () => {
@@ -1598,7 +2043,7 @@ describe('DisplayTab', () => {
 			});
 
 			// Trigger font loading
-			const fontSelect = screen.getByRole('combobox');
+			const fontSelect = screen.getAllByRole('combobox')[0];
 
 			await act(async () => {
 				fireEvent.focus(fontSelect);
@@ -1611,7 +2056,7 @@ describe('DisplayTab', () => {
 
 			// After fonts are loaded, unavailable fonts should show "(Not Found)"
 			// Re-query after state updates
-			const updatedSelect = screen.getByRole('combobox');
+			const updatedSelect = screen.getAllByRole('combobox')[0];
 			const options = updatedSelect.querySelectorAll('option');
 
 			// Find the Monaco option by value and check its text
@@ -1634,7 +2079,7 @@ describe('DisplayTab', () => {
 				await vi.advanceTimersByTimeAsync(50);
 			});
 
-			const customFontInput = screen.getByPlaceholderText('Add custom font name...');
+			const customFontInput = screen.getAllByPlaceholderText('Add custom font name...')[0];
 			const fontContainer = customFontInput.closest('div')!.parentElement!;
 			expect(within(fontContainer).getByRole('button', { name: 'Add' })).toBeInTheDocument();
 		});
@@ -1680,9 +2125,13 @@ describe('DisplayTab', () => {
 			});
 
 			// Font
-			expect(screen.getByText('Interface Font')).toBeInTheDocument();
+			// One "Fonts" heading now, with each surface labelled inside the card.
+			expect(screen.getByText('Fonts')).toBeInTheDocument();
+			expect(screen.getByText('Interface')).toBeInTheDocument();
+			expect(screen.getByText('Terminal')).toBeInTheDocument();
 			// Font Size
-			expect(screen.getByText('Font Size')).toBeInTheDocument();
+			expect(screen.getByText('Zoom')).toBeInTheDocument();
+			expect(screen.getByText('Factory Reset Fonts')).toBeInTheDocument();
 			// Max Log Buffer
 			expect(screen.getByText('Maximum Log Buffer')).toBeInTheDocument();
 			// Max Output Lines
@@ -1691,8 +2140,8 @@ describe('DisplayTab', () => {
 			expect(screen.getByText('User Message Alignment')).toBeInTheDocument();
 			// Window Chrome
 			expect(screen.getByText('Window Chrome')).toBeInTheDocument();
-			// Document Graph
-			expect(screen.getByText('Document Graph')).toBeInTheDocument();
+			// Document Graph (the settings section, not the font surface label)
+			expect(document.querySelector('[data-setting-id="display-document-graph"]')).not.toBeNull();
 			// Context Window Warnings
 			expect(screen.getByText('Context Window Warnings')).toBeInTheDocument();
 			// Local Ignore Patterns

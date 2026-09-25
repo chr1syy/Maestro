@@ -1,44 +1,35 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { SidebarActions } from '../../../../renderer/components/SessionList/SidebarActions';
-import type { Theme } from '../../../../renderer/types';
+import { useUIStore } from '../../../../renderer/stores/uiStore';
 
-const mockTheme: Theme = {
-	name: 'test',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgSidebar: '#16213e',
-		bgInput: '#0f3460',
-		textMain: '#e0e0e0',
-		textDim: '#888888',
-		accent: '#e94560',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		error: '#ff4444',
-		success: '#00cc66',
-		warning: '#ffaa00',
-	},
-} as Theme;
+import { mockTheme } from '../../../helpers/mockTheme';
 
 const defaultShortcuts = {
 	toggleSidebar: { keys: ['Cmd', 'B'], label: 'Toggle Sidebar' },
-	filterUnreadAgents: { keys: ['Meta', 'Shift', 'u'], label: 'Filter Unread Agents' },
+	filterUnreadAgents: { keys: ['Alt', 'u'], label: 'Filter Unread Agents' },
 } as any;
 
 function createProps(overrides: Partial<Parameters<typeof SidebarActions>[0]> = {}) {
 	return {
 		theme: mockTheme,
 		leftSidebarOpen: true,
+		sidebarWidth: 320,
 		hasNoSessions: false,
 		shortcuts: defaultShortcuts,
 		showUnreadAgentsOnly: false,
 		hasUnreadAgents: false,
 		addNewSession: vi.fn(),
-		setLeftSidebarOpen: vi.fn(),
 		toggleShowUnreadAgentsOnly: vi.fn(),
 		...overrides,
 	};
 }
+
+// SidebarActions calls setLeftSidebarOpen via useUIStore.getState() rather than
+// taking the setter as a prop, so reset the store between tests.
+beforeEach(() => {
+	useUIStore.setState({ leftSidebarOpen: true, leftSidebarHidden: false });
+});
 
 describe('SidebarActions', () => {
 	it('renders collapse button, New Agent, and Feedback when sidebar is open', () => {
@@ -81,40 +72,32 @@ describe('SidebarActions', () => {
 		expect(openFeedback).toHaveBeenCalledOnce();
 	});
 
-	it('toggles sidebar open/closed on collapse button click', () => {
-		const setLeftSidebarOpen = vi.fn();
-		render(<SidebarActions {...createProps({ leftSidebarOpen: true, setLeftSidebarOpen })} />);
+	it('collapses the sidebar on collapse-button click', () => {
+		useUIStore.setState({ leftSidebarOpen: true, leftSidebarHidden: false });
+		render(<SidebarActions {...createProps({ leftSidebarOpen: true })} />);
 
-		// Click the collapse button (first button)
 		const collapseBtn = screen.getByTitle(/Collapse Sidebar/);
 		fireEvent.click(collapseBtn);
-		expect(setLeftSidebarOpen).toHaveBeenCalledWith(false);
+		expect(useUIStore.getState().leftSidebarOpen).toBe(false);
 	});
 
 	it('prevents collapse when no sessions and sidebar is open', () => {
-		const setLeftSidebarOpen = vi.fn();
-		render(
-			<SidebarActions
-				{...createProps({ hasNoSessions: true, leftSidebarOpen: true, setLeftSidebarOpen })}
-			/>
-		);
+		useUIStore.setState({ leftSidebarOpen: true, leftSidebarHidden: false });
+		render(<SidebarActions {...createProps({ hasNoSessions: true, leftSidebarOpen: true })} />);
 
 		const collapseBtn = screen.getByTitle('Add an agent first to collapse sidebar');
 		fireEvent.click(collapseBtn);
-		expect(setLeftSidebarOpen).not.toHaveBeenCalled();
+		// Disabled button - no state change.
+		expect(useUIStore.getState().leftSidebarOpen).toBe(true);
 	});
 
-	it('allows expanding sidebar even with no sessions', () => {
-		const setLeftSidebarOpen = vi.fn();
-		render(
-			<SidebarActions
-				{...createProps({ hasNoSessions: true, leftSidebarOpen: false, setLeftSidebarOpen })}
-			/>
-		);
+	it('expands the sidebar on expand-button click', () => {
+		useUIStore.setState({ leftSidebarOpen: false, leftSidebarHidden: false });
+		render(<SidebarActions {...createProps({ hasNoSessions: true, leftSidebarOpen: false })} />);
 
 		const expandBtn = screen.getByTitle(/Expand Sidebar/);
 		fireEvent.click(expandBtn);
-		expect(setLeftSidebarOpen).toHaveBeenCalledWith(true);
+		expect(useUIStore.getState().leftSidebarOpen).toBe(true);
 	});
 
 	it('renders unread agents filter button', () => {

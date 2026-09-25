@@ -21,9 +21,10 @@ import type { SummarizeProgress, SummarizeResult } from '../../types/contextMerg
 import { contextSummarizationService } from '../../services/contextSummarizer';
 import { createTabAtPosition } from '../../utils/tabHelpers';
 import { useOperationStore, selectIsAnySummarizing } from '../../stores/operationStore';
-import { useSessionStore } from '../../stores/sessionStore';
+import { useSessionStore, selectActiveSession } from '../../stores/sessionStore';
 import { notifyToast } from '../../stores/notificationStore';
 import type { SummarizeState, TabSummarizeState } from '../../stores/operationStore';
+import { logger } from '../../utils/logger';
 
 // Re-export types from the canonical store location
 export type { SummarizeState, TabSummarizeState } from '../../stores/operationStore';
@@ -72,11 +73,16 @@ export interface UseSummarizeAndContinueResult {
  * Tracks per-tab state to allow non-blocking operations. While one tab is
  * summarizing, other tabs remain fully interactive.
  *
- * @param session - The Maestro session containing the tabs
+ * Takes no arguments. The active session is not a prop or param: reactive UI
+ * (the active tab's summarize chrome) subscribes to `activeTabId` alone, and
+ * imperative work (`startSummarize`, `handleSummarizeAndContinue`) resolves
+ * the session fresh via `selectActiveSession(useSessionStore.getState())` at
+ * call time, so callers never act on a stale closure value.
+ *
  * @returns Object with summarization state and control functions
  *
  * @example
- * function MyComponent({ session }) {
+ * function MyComponent() {
  *   const {
  *     summarizeState,
  *     progress,
@@ -85,11 +91,12 @@ export interface UseSummarizeAndContinueResult {
  *     startSummarize,
  *     canSummarize,
  *     getTabSummarizeState,
- *   } = useSummarizeAndContinue(session);
+ *   } = useSummarizeAndContinue();
  *
  *   const handleSummarize = async () => {
- *     const activeTab = getActiveTab(session);
- *     if (activeTab && canSummarize(session.contextUsage)) {
+ *     const session = selectActiveSession(useSessionStore.getState());
+ *     const activeTab = session && getActiveTab(session);
+ *     if (session && activeTab && canSummarize(session.contextUsage)) {
  *       const result = await startSummarize(activeTab.id);
  *       if (result) {
  *         // Update session and add system log entry
@@ -99,7 +106,7 @@ export interface UseSummarizeAndContinueResult {
  *   };
  *
  *   // Check if current tab is summarizing
- *   const tabState = getTabSummarizeState(session.activeTabId);
+ *   const tabState = getTabSummarizeState(activeTabId);
  *   const isTabSummarizing = tabState?.state === 'summarizing';
  *
  *   return (
@@ -109,13 +116,13 @@ export interface UseSummarizeAndContinueResult {
  *   );
  * }
  */
-export function useSummarizeAndContinue(session: Session | null): UseSummarizeAndContinueResult {
+export function useSummarizeAndContinue(): UseSummarizeAndContinueResult {
 	// Per-tab state lives in operationStore
 	const tabStates = useOperationStore((s) => s.summarizeStates);
 	const cancelRefs = useRef<Map<string, boolean>>(new Map());
 
-	// Get state for the active tab (for backwards compatibility)
-	const activeTabId = session?.activeTabId;
+	// Reactive UI only needs the active tab id, not the whole session object.
+	const activeTabId = useSessionStore((s) => selectActiveSession(s)?.activeTabId);
 	const activeTabState = activeTabId ? tabStates.get(activeTabId) : null;
 
 	// Selector: any tab currently summarizing?
@@ -154,6 +161,7 @@ export function useSummarizeAndContinue(session: Session | null): UseSummarizeAn
 		async (
 			sourceTabId: string
 		): Promise<{ newTabId: string; updatedSession: Session; systemLogEntry: LogEntry } | null> => {
+			const session = selectActiveSession(useSessionStore.getState());
 			if (!session) {
 				return null;
 			}
@@ -292,7 +300,7 @@ export function useSummarizeAndContinue(session: Session | null): UseSummarizeAn
 				return null;
 			}
 		},
-		[session, createSystemLogEntry]
+		[createSystemLogEntry]
 	);
 
 	/**
@@ -337,6 +345,7 @@ export function useSummarizeAndContinue(session: Session | null): UseSummarizeAn
 	 */
 	const handleSummarizeAndContinue = useCallback(
 		(tabId?: string) => {
+			const session = selectActiveSession(useSessionStore.getState());
 			if (!session || session.inputMode !== 'ai') return;
 
 			const targetTabId = tabId || session.activeTabId;
@@ -405,29 +414,39 @@ export function useSummarizeAndContinue(session: Session | null): UseSummarizeAn
 						// Clear the summarization state for this tab
 						clearTabState(targetTabId);
 					} else {
-						// startSummarize returned null (error already set in operationStore)
+						// startSummarize returned null after setting an error state in
+						// operationStore. Pull the actual error so the toast can
+						// surface it directly instead of pointing users at a "tab"
+						// that never renders details.
+						const tabState = useOperationStore.getState().summarizeStates.get(targetTabId);
+						const detail = tabState?.error?.trim();
 						notifyToast({
 							type: 'error',
 							title: 'Compaction Failed',
-							message: 'Failed to compact context. Check the tab for details.',
+							message: detail
+								? `Failed to compact context: ${detail}`
+								: 'Failed to compact context.',
 							sessionId: sourceSessionId,
 							tabId: targetTabId,
 						});
 					}
 				})
 				.catch((err) => {
-					console.error('[handleSummarizeAndContinue] Unexpected error:', err);
+					logger.error('[handleSummarizeAndContinue] Unexpected error:', undefined, err);
+					const detail = err instanceof Error ? err.message : String(err);
 					notifyToast({
 						type: 'error',
 						title: 'Compaction Failed',
-						message: 'An unexpected error occurred during compaction.',
+						message: detail
+							? `An unexpected error occurred during compaction: ${detail}`
+							: 'An unexpected error occurred during compaction.',
 						sessionId: sourceSessionId,
 						tabId: targetTabId,
 					});
 					clearTabState(targetTabId);
 				});
 		},
-		[session, canSummarize, startSummarize, clearTabState]
+		[canSummarize, startSummarize, clearTabState]
 	);
 
 	return {

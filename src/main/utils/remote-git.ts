@@ -12,6 +12,7 @@ import { SshRemoteConfig } from '../../shared/types';
 import { execFileNoThrow, ExecResult } from './execFile';
 import { buildSshCommand, RemoteCommandOptions } from './ssh-command-builder';
 import { logger } from './logger';
+import { isWorktreeAlreadyUsedError, parseWorktreePathForBranch } from '../../shared/gitUtils';
 
 const LOG_CONTEXT = '[RemoteGit]';
 
@@ -114,24 +115,61 @@ export async function execGit(
 }
 
 /**
+ * Options for `execShellRemote`.
+ */
+export interface RemoteShellOptions {
+	/** Working directory on the remote host */
+	cwd?: string;
+	/** Extra environment variables, merged over the SSH config's `remoteEnv` */
+	env?: Record<string, string>;
+	/** Timeout in milliseconds for the whole SSH invocation */
+	timeoutMs?: number;
+}
+
+/**
  * Execute a shell command on a remote host via SSH.
  *
  * @param shellCommand The shell command to execute on the remote
  * @param sshRemote SSH remote configuration
+ * @param options Optional remote cwd, extra env, and timeout
  * @returns Execution result
+ */
+export async function execShellRemote(
+	shellCommand: string,
+	sshRemote: SshRemoteConfig,
+	options?: RemoteShellOptions
+): Promise<ExecResult> {
+	// Keep `env` undefined when there's nothing to set so the SSH command builder
+	// doesn't prepend an empty `env` prefix to the remote command.
+	const mergedEnv = options?.env
+		? { ...(sshRemote.remoteEnv ?? {}), ...options.env }
+		: sshRemote.remoteEnv;
+
+	const remoteOptions: RemoteCommandOptions = {
+		command: 'sh',
+		args: ['-c', shellCommand],
+		cwd: options?.cwd,
+		env: mergedEnv,
+	};
+
+	const sshCommand = await buildSshCommand(sshRemote, remoteOptions);
+	return execFileNoThrow(
+		sshCommand.command,
+		sshCommand.args,
+		undefined,
+		options?.timeoutMs ? { timeout: options.timeoutMs } : undefined
+	);
+}
+
+/**
+ * Backwards-compatible wrapper for the many callers below that only need a
+ * bare remote shell command with no cwd, env, or timeout.
  */
 async function execRemoteShellCommand(
 	shellCommand: string,
 	sshRemote: SshRemoteConfig
 ): Promise<ExecResult> {
-	const remoteOptions: RemoteCommandOptions = {
-		command: 'sh',
-		args: ['-c', shellCommand],
-		env: sshRemote.remoteEnv,
-	};
-
-	const sshCommand = await buildSshCommand(sshRemote, remoteOptions);
-	return execFileNoThrow(sshCommand.command, sshCommand.args);
+	return execShellRemote(shellCommand, sshRemote);
 }
 
 /**
@@ -268,6 +306,42 @@ export interface RemoteWorktreeSetupResult extends Record<string, unknown> {
 	currentBranch?: string;
 	requestedBranch?: string;
 	branchMismatch?: boolean;
+	/** True when the branch was already attached to a worktree on disk. */
+	alreadyExisted?: boolean;
+	/** Path of the existing worktree when alreadyExisted is true. */
+	existingPath?: string;
+}
+
+/**
+ * Look up the worktree path currently checked out on the given branch by
+ * running `git worktree list --porcelain` against the remote main repo.
+ *
+ * Stale registrations (where the directory was removed manually without
+ * `git worktree prune`) are filtered out by a `test -d` check on the remote
+ * so callers never get a path that points at nothing.
+ *
+ * @returns Absolute worktree path on the remote, or null if not found / stale
+ */
+async function findRemoteWorktreeForBranch(
+	mainRepoCwd: string,
+	branchName: string,
+	sshRemote: SshRemoteConfig
+): Promise<string | null> {
+	const result = await execGitRemote(['worktree', 'list', '--porcelain'], {
+		sshRemote,
+		remoteCwd: mainRepoCwd,
+	});
+	if (result.exitCode !== 0) return null;
+	const existingPath = parseWorktreePathForBranch(result.stdout, branchName);
+	if (!existingPath) return null;
+	const existsResult = await execRemoteShellCommand(
+		`test -d '${existingPath}' && echo EXISTS || echo MISSING`,
+		sshRemote
+	);
+	if (existsResult.exitCode !== 0 || !existsResult.stdout.includes('EXISTS')) {
+		return null;
+	}
+	return existingPath;
 }
 
 /**
@@ -277,13 +351,17 @@ export interface RemoteWorktreeSetupResult extends Record<string, unknown> {
  * @param worktreePath Path where the worktree should be created
  * @param branchName Branch name for the worktree
  * @param sshRemote SSH remote configuration
+ * @param baseBranch When the branch does not exist, the ref to branch from
+ *                   (passed to `git worktree add -b <new> <path> <base>`).
+ *                   Defaults to the remote main repo's HEAD when omitted.
  * @returns Setup result with success/failure and branch info
  */
 export async function worktreeSetupRemote(
 	mainRepoCwd: string,
 	worktreePath: string,
 	branchName: string,
-	sshRemote: SshRemoteConfig
+	sshRemote: SshRemoteConfig,
+	baseBranch?: string
 ): Promise<RemoteGitResult<RemoteWorktreeSetupResult>> {
 	// Check if worktree path is inside the main repo (nested worktree)
 	const checkNestedResult = await execRemoteShellCommand(
@@ -416,10 +494,19 @@ export async function worktreeSetupRemote(
 
 	let createResult: ExecResult;
 	if (branchExists) {
+		// baseBranch is irrelevant when the branch already exists.
 		createResult = await execGitRemote(['worktree', 'add', worktreePath, branchName], {
 			sshRemote,
 			remoteCwd: mainRepoCwd,
 		});
+	} else if (baseBranch) {
+		createResult = await execGitRemote(
+			['worktree', 'add', '-b', branchName, worktreePath, baseBranch],
+			{
+				sshRemote,
+				remoteCwd: mainRepoCwd,
+			}
+		);
 	} else {
 		createResult = await execGitRemote(['worktree', 'add', '-b', branchName, worktreePath], {
 			sshRemote,
@@ -428,6 +515,31 @@ export async function worktreeSetupRemote(
 	}
 
 	if (createResult.exitCode !== 0) {
+		// Recover from "already used / already checked out" - the branch is
+		// attached to another worktree on the remote. Resolve that path so
+		// callers can open it instead of surfacing an opaque error.
+		const errMsg = createResult.stderr || '';
+		if (isWorktreeAlreadyUsedError(errMsg)) {
+			const existingPath = await findRemoteWorktreeForBranch(mainRepoCwd, branchName, sshRemote);
+			logger.debug(
+				`Worktree-already-used recovery: branch=${branchName} host=${sshRemote.host} existingPath=${existingPath ?? '<none>'}`,
+				LOG_CONTEXT
+			);
+			if (existingPath) {
+				return {
+					success: true,
+					data: {
+						success: true,
+						created: false,
+						alreadyExisted: true,
+						existingPath,
+						currentBranch: branchName,
+						requestedBranch: branchName,
+						branchMismatch: false,
+					},
+				};
+			}
+		}
 		return {
 			success: true,
 			data: {

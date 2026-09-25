@@ -1,20 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import {
-	useTabStore,
-	selectActiveTab,
-	selectActiveFileTab,
-	selectUnifiedTabs,
-	selectTabById,
-	selectFileTabById,
-	selectTabCount,
-	selectAllTabs,
-	selectAllFileTabs,
-	getTabState,
-	getTabActions,
-} from '../../../renderer/stores/tabStore';
+import { useTabStore } from '../../../renderer/stores/tabStore';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import type { Session, AITab, FilePreviewTab, TerminalTab } from '../../../renderer/types';
+import {
+	createMockAITab as createBaseMockAITab,
+	createMockFileTab as createBaseMockFileTab,
+} from '../../helpers/mockTab';
+import { createMockSession } from '../../helpers/mockSession';
 
 // ============================================================================
 // Test Helpers
@@ -22,79 +15,25 @@ import type { Session, AITab, FilePreviewTab, TerminalTab } from '../../../rende
 
 function createMockAITab(overrides: Partial<AITab> = {}): AITab {
 	const id = overrides.id ?? `tab-${Math.random().toString(36).slice(2, 8)}`;
-	return {
+	return createBaseMockAITab({
 		id,
-		agentSessionId: null,
-		name: overrides.name ?? null,
-		starred: false,
-		logs: [],
-		inputValue: '',
-		stagedImages: [],
-		createdAt: Date.now(),
-		state: 'idle',
 		hasUnread: false,
 		isAtBottom: true,
 		...overrides,
-	} as AITab;
+	});
 }
 
 function createMockFileTab(overrides: Partial<FilePreviewTab> = {}): FilePreviewTab {
 	const id = overrides.id ?? `file-${Math.random().toString(36).slice(2, 8)}`;
-	return {
+	return createBaseMockFileTab({
 		id,
 		path: overrides.path ?? `/test/${id}.ts`,
 		name: overrides.name ?? id,
-		extension: overrides.extension ?? '.ts',
-		content: overrides.content ?? 'test content',
-		scrollTop: 0,
-		searchQuery: '',
-		editMode: false,
-		editContent: undefined,
-		createdAt: Date.now(),
-		lastModified: Date.now(),
 		...overrides,
-	} as FilePreviewTab;
+	});
 }
 
-function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: overrides.id ?? `session-${Math.random().toString(36).slice(2, 8)}`,
-		name: overrides.name ?? 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test',
-		fullPath: '/test',
-		projectRoot: '/test',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
-		executionQueue: [],
-		activeTimeMs: 0,
-		aiTabs: [],
-		activeTabId: '',
-		closedTabHistory: [],
-		filePreviewTabs: [],
-		activeFileTabId: null,
-		browserTabs: [],
-		activeBrowserTabId: null,
-		unifiedTabOrder: [],
-		unifiedClosedTabHistory: [],
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	} as Session;
-}
+// createMockSession imported from shared helper
 
 /**
  * Set up sessionStore with an active session that has tabs.
@@ -466,10 +405,12 @@ describe('tabStore', () => {
 			useTabStore.getState().toggleReadOnly('tab-1');
 			let session = useSessionStore.getState().sessions[0];
 			expect(session.aiTabs[0].readOnlyMode).toBe(true);
+			expect(session.aiTabs[0].permissionMode).toBe('readonly');
 
 			useTabStore.getState().toggleReadOnly('tab-1');
 			session = useSessionStore.getState().sessions[0];
 			expect(session.aiTabs[0].readOnlyMode).toBe(false);
+			expect(session.aiTabs[0].permissionMode).toBe('full');
 		});
 
 		it('should toggle save to history', () => {
@@ -516,6 +457,206 @@ describe('tabStore', () => {
 			const session = useSessionStore.getState().sessions[0];
 			expect(session.aiTabs[0].starred).toBe(false);
 		});
+
+		it('should set and clear per-tab customModel', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			setupSessionWithTabs([tab1]);
+
+			useTabStore.getState().setTabModel('tab-1', 'claude-opus-4-7');
+			let session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs[0].customModel).toBe('claude-opus-4-7');
+
+			useTabStore.getState().setTabModel('tab-1', undefined);
+			session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs[0].customModel).toBeUndefined();
+
+			// Empty string also clears the override
+			useTabStore.getState().setTabModel('tab-1', 'claude-opus-4-7');
+			useTabStore.getState().setTabModel('tab-1', '');
+			session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs[0].customModel).toBeUndefined();
+		});
+
+		it('should set and clear per-tab customEffort', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			setupSessionWithTabs([tab1]);
+
+			useTabStore.getState().setTabEffort('tab-1', 'high');
+			let session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs[0].customEffort).toBe('high');
+
+			useTabStore.getState().setTabEffort('tab-1', undefined);
+			session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs[0].customEffort).toBeUndefined();
+		});
+
+		it('setTabModel/setTabEffort should not affect sibling tabs', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([tab1, tab2]);
+
+			useTabStore.getState().setTabModel('tab-1', 'claude-opus-4-7');
+			useTabStore.getState().setTabEffort('tab-1', 'high');
+
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs[0].customModel).toBe('claude-opus-4-7');
+			expect(session.aiTabs[0].customEffort).toBe('high');
+			expect(session.aiTabs[1].customModel).toBeUndefined();
+			expect(session.aiTabs[1].customEffort).toBeUndefined();
+		});
+	});
+
+	// ========================================================================
+	// Snooze
+	// ========================================================================
+
+	describe('snooze actions', () => {
+		const HOUR = 60 * 60 * 1000;
+
+		it('should snooze a tab out of the active session', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+
+			const entry = useTabStore
+				.getState()
+				.snoozeTab('tab-2', Date.now() + HOUR, { note: 'come back to this' });
+
+			expect(entry).not.toBeNull();
+			expect(entry!.note).toBe('come back to this');
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs.map((t) => t.id)).toEqual(['tab-1']);
+			expect(session.snoozedTabs).toHaveLength(1);
+		});
+
+		it('should return null when snoozing an unknown tab', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' })]);
+			expect(useTabStore.getState().snoozeTab('nope', Date.now() + HOUR)).toBeNull();
+		});
+
+		it('should unsnooze a tab back into its session', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+			const entry = useTabStore.getState().snoozeTab('tab-2', Date.now() + HOUR)!;
+
+			const result = useTabStore.getState().unsnoozeTab('test-session', entry.id);
+
+			expect(result).not.toBeNull();
+			expect(result!.tabId).toBe('tab-2');
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.aiTabs.map((t) => t.id)).toEqual(['tab-1', 'tab-2']);
+			expect(session.snoozedTabs).toHaveLength(0);
+		});
+
+		it('should dismiss a snooze without restoring the tab', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+			const entry = useTabStore.getState().snoozeTab('tab-2', Date.now() + HOUR)!;
+
+			useTabStore.getState().dismissSnoozedTab('test-session', entry.id);
+
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.snoozedTabs).toHaveLength(0);
+			expect(session.aiTabs.map((t) => t.id)).toEqual(['tab-1']);
+		});
+
+		it('should snooze a FILE tab, which the tab strip can now reach', () => {
+			// Non-AI chips offer Snooze Tab too. The store already handled every
+			// kind; the opener was the half that only knew about aiTabs.
+			setupSessionWithTabs(
+				[createMockAITab({ id: 'tab-1' })],
+				[createMockFileTab({ id: 'file-1' })]
+			);
+
+			const entry = useTabStore.getState().snoozeTab('file-1', Date.now() + HOUR);
+
+			expect(entry).not.toBeNull();
+			expect(entry!.type).toBe('file');
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs).toHaveLength(0);
+			expect(session.snoozedTabs).toHaveLength(1);
+		});
+
+		it('should not run a wake prompt for a non-AI tab', () => {
+			// The dialog hides the field for these kinds, so an entry should never
+			// carry one - but if one arrives from an older build or the CLI, there
+			// is no conversation to send it to and it must not be rerouted.
+			setupSessionWithTabs(
+				[createMockAITab({ id: 'tab-1' })],
+				[createMockFileTab({ id: 'file-1' })]
+			);
+			const entry = useTabStore
+				.getState()
+				.snoozeTab('file-1', Date.now() + HOUR, { wakePrompt: 'should never run' })!;
+
+			useTabStore.getState().unsnoozeTab('test-session', entry.id);
+
+			expect(useSessionStore.getState().sessions[0].executionQueue).toHaveLength(0);
+		});
+
+		it('should run the wake prompt when a tab is unsnoozed early', () => {
+			// The prompt is written against the tab COMING BACK, not against the
+			// clock, so pulling it back by hand counts.
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+			const entry = useTabStore
+				.getState()
+				.snoozeTab('tab-2', Date.now() + HOUR, { wakePrompt: 'where did we leave off?' })!;
+
+			useTabStore.getState().unsnoozeTab('test-session', entry.id);
+
+			const queue = useSessionStore.getState().sessions[0].executionQueue;
+			expect(queue).toHaveLength(1);
+			expect(queue[0]).toMatchObject({ tabId: 'tab-2', text: 'where did we leave off?' });
+		});
+
+		it('should not queue anything when a dismissed snooze carried a prompt', () => {
+			// Dismiss restores nothing, so there is no tab for a prompt to run in.
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+			const entry = useTabStore
+				.getState()
+				.snoozeTab('tab-2', Date.now() + HOUR, { wakePrompt: 'never runs' })!;
+
+			useTabStore.getState().dismissSnoozedTab('test-session', entry.id);
+
+			expect(useSessionStore.getState().sessions[0].executionQueue).toHaveLength(0);
+		});
+
+		it('should reschedule a snooze and update its note', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+			const entry = useTabStore
+				.getState()
+				.snoozeTab('tab-2', Date.now() + HOUR, { note: 'old note' })!;
+			const newWake = Date.now() + 5 * HOUR;
+
+			useTabStore
+				.getState()
+				.rescheduleSnoozedTab('test-session', entry.id, newWake, { note: 'new note' });
+
+			const snoozed = useSessionStore.getState().sessions[0].snoozedTabs![0];
+			expect(snoozed.wakeAt).toBe(newWake);
+			expect(snoozed.note).toBe('new note');
+		});
+
+		it('should act on a non-active session (the list modal spans agents)', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' }), createMockAITab({ id: 'tab-2' })]);
+			const entry = useTabStore.getState().snoozeTab('tab-2', Date.now() + HOUR)!;
+
+			// Point the store at a different active agent, then operate on the
+			// original by ID - this is what the Snoozed Tabs modal does.
+			const other = createMockSession({ id: 'other-session', aiTabs: [], unifiedTabOrder: [] });
+			useSessionStore.setState({
+				sessions: [useSessionStore.getState().sessions[0], other],
+				activeSessionId: 'other-session',
+			});
+
+			const result = useTabStore.getState().unsnoozeTab('test-session', entry.id);
+
+			expect(result).not.toBeNull();
+			const restored = useSessionStore.getState().sessions.find((s) => s.id === 'test-session')!;
+			expect(restored.aiTabs.map((t) => t.id)).toEqual(['tab-1', 'tab-2']);
+			expect(restored.snoozedTabs).toHaveLength(0);
+		});
+
+		it('should return null when unsnoozing from an unknown session', () => {
+			setupSessionWithTabs([createMockAITab({ id: 'tab-1' })]);
+			expect(useTabStore.getState().unsnoozeTab('ghost-session', 'whatever')).toBeNull();
+		});
 	});
 
 	// ========================================================================
@@ -552,7 +693,7 @@ describe('tabStore', () => {
 			const tab1 = createMockAITab({ id: 'tab-1' });
 			setupSessionWithTabs([tab1]);
 
-			// Out of bounds — should be a no-op
+			// Out of bounds - should be a no-op
 			useTabStore.getState().reorderTabs(0, 5);
 			useTabStore.getState().reorderTabs(-1, 0);
 
@@ -627,183 +768,123 @@ describe('tabStore', () => {
 			const session = useSessionStore.getState().sessions[0];
 			expect(session.filePreviewTabs[0].editContent).toBeUndefined();
 		});
+
+		it('should set file tab html render mode', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab1 = createMockFileTab({ id: 'file-1' });
+			setupSessionWithTabs([tab1], [fileTab1]);
+
+			useTabStore.getState().setFileTabHtmlRenderMode('file-1', true);
+			let session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].htmlRenderMode).toBe(true);
+
+			useTabStore.getState().setFileTabHtmlRenderMode('file-1', false);
+			session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].htmlRenderMode).toBe(false);
+		});
+
+		it('setFileTabHtmlRenderMode is a no-op for non-existent file tab', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab1 = createMockFileTab({ id: 'file-1' });
+			setupSessionWithTabs([tab1], [fileTab1]);
+
+			useTabStore.getState().setFileTabHtmlRenderMode('non-existent', true);
+
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].htmlRenderMode).toBeUndefined();
+		});
+
+		it('should set file tab edit mode to an explicit value', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab1 = createMockFileTab({ id: 'file-1', editMode: false });
+			setupSessionWithTabs([tab1], [fileTab1]);
+
+			// Unlike toggleFileTabEditMode, this sets the value directly - repeated
+			// calls with the same value are idempotent (tiled panes rely on this).
+			useTabStore.getState().setFileTabEditMode('file-1', true);
+			let session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].editMode).toBe(true);
+
+			useTabStore.getState().setFileTabEditMode('file-1', true);
+			session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].editMode).toBe(true);
+
+			useTabStore.getState().setFileTabEditMode('file-1', false);
+			session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].editMode).toBe(false);
+		});
+
+		it('setFileTabEditMode is a no-op for non-existent file tab', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab1 = createMockFileTab({ id: 'file-1', editMode: false });
+			setupSessionWithTabs([tab1], [fileTab1]);
+
+			useTabStore.getState().setFileTabEditMode('non-existent', true);
+
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs[0].editMode).toBe(false);
+		});
 	});
 
 	// ========================================================================
 	// Selectors
 	// ========================================================================
 
-	describe('selectors', () => {
-		describe('selectActiveTab', () => {
-			it('should return the active AI tab', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const tab2 = createMockAITab({ id: 'tab-2' });
-				setupSessionWithTabs([tab1, tab2], [], 'tab-2');
+	describe('session state access (tab derivations)', () => {
+		it('exposes the active AI tab via activeTabId', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([tab1, tab2], [], 'tab-2');
 
-				const result = selectActiveTab(useSessionStore.getState());
-				expect(result).toBeDefined();
-				expect(result!.id).toBe('tab-2');
-			});
-
-			it('should fall back to first tab if activeTabId not found', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				setupSessionWithTabs([tab1], [], 'non-existent');
-
-				const result = selectActiveTab(useSessionStore.getState());
-				expect(result).toBeDefined();
-				expect(result!.id).toBe('tab-1');
-			});
-
-			it('should return undefined with no active session', () => {
-				const result = selectActiveTab(useSessionStore.getState());
-				expect(result).toBeUndefined();
-			});
+			const session = useSessionStore.getState().sessions[0];
+			const active = session.aiTabs.find((t) => t.id === session.activeTabId);
+			expect(active?.id).toBe('tab-2');
 		});
 
-		describe('selectActiveFileTab', () => {
-			it('should return the active file tab', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const fileTab1 = createMockFileTab({ id: 'file-1' });
-				setupSessionWithTabs([tab1], [fileTab1], 'tab-1', 'file-1');
+		it('exposes the active file tab via activeFileTabId', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab1 = createMockFileTab({ id: 'file-1' });
+			setupSessionWithTabs([tab1], [fileTab1], 'tab-1', 'file-1');
 
-				const result = selectActiveFileTab(useSessionStore.getState());
-				expect(result).toBeDefined();
-				expect(result!.id).toBe('file-1');
-			});
-
-			it('should return undefined when no file tab is active', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				setupSessionWithTabs([tab1]);
-
-				const result = selectActiveFileTab(useSessionStore.getState());
-				expect(result).toBeUndefined();
-			});
+			const session = useSessionStore.getState().sessions[0];
+			const activeFile = session.filePreviewTabs.find((t) => t.id === session.activeFileTabId);
+			expect(activeFile?.id).toBe('file-1');
 		});
 
-		describe('selectUnifiedTabs', () => {
-			it('should return tabs in unified order', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const tab2 = createMockAITab({ id: 'tab-2' });
-				const fileTab1 = createMockFileTab({ id: 'file-1' });
+		it('looks up AI tab by ID', () => {
+			const tab1 = createMockAITab({ id: 'tab-1', name: 'Found' });
+			setupSessionWithTabs([tab1]);
 
-				const sessionId = 'test-session';
-				const session = createMockSession({
-					id: sessionId,
-					aiTabs: [tab1, tab2],
-					activeTabId: 'tab-1',
-					filePreviewTabs: [fileTab1],
-					unifiedTabOrder: [
-						{ type: 'ai', id: 'tab-1' },
-						{ type: 'file', id: 'file-1' },
-						{ type: 'ai', id: 'tab-2' },
-					],
-				});
-
-				useSessionStore.setState({
-					sessions: [session],
-					activeSessionId: sessionId,
-				});
-
-				const result = selectUnifiedTabs(useSessionStore.getState());
-				expect(result).toHaveLength(3);
-				expect(result[0]).toEqual({ type: 'ai', id: 'tab-1', data: tab1 });
-				expect(result[1]).toEqual({ type: 'file', id: 'file-1', data: fileTab1 });
-				expect(result[2]).toEqual({ type: 'ai', id: 'tab-2', data: tab2 });
-			});
-
-			it('should include orphan tabs not in unified order', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const tab2 = createMockAITab({ id: 'tab-2' });
-
-				const session = createMockSession({
-					id: 'test',
-					aiTabs: [tab1, tab2],
-					activeTabId: 'tab-1',
-					unifiedTabOrder: [{ type: 'ai', id: 'tab-1' }],
-					// tab-2 is NOT in unified order
-				});
-
-				useSessionStore.setState({
-					sessions: [session],
-					activeSessionId: 'test',
-				});
-
-				const result = selectUnifiedTabs(useSessionStore.getState());
-				expect(result).toHaveLength(2);
-				expect(result[0].id).toBe('tab-1');
-				expect(result[1].id).toBe('tab-2');
-			});
-
-			it('should return empty array with no active session', () => {
-				const result = selectUnifiedTabs(useSessionStore.getState());
-				expect(result).toEqual([]);
-			});
+			const session = useSessionStore.getState().sessions[0];
+			const found = session.aiTabs.find((t) => t.id === 'tab-1');
+			expect(found?.name).toBe('Found');
 		});
 
-		describe('selectTabById', () => {
-			it('should find tab by ID', () => {
-				const tab1 = createMockAITab({ id: 'tab-1', name: 'Found' });
-				setupSessionWithTabs([tab1]);
+		it('looks up file tab by ID', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab = createMockFileTab({ id: 'file-1', name: 'app' });
+			setupSessionWithTabs([tab1], [fileTab]);
 
-				const result = selectTabById('tab-1')(useSessionStore.getState());
-				expect(result).toBeDefined();
-				expect(result!.name).toBe('Found');
-			});
-
-			it('should return undefined for non-existent tab', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				setupSessionWithTabs([tab1]);
-
-				const result = selectTabById('non-existent')(useSessionStore.getState());
-				expect(result).toBeUndefined();
-			});
+			const session = useSessionStore.getState().sessions[0];
+			const found = session.filePreviewTabs.find((t) => t.id === 'file-1');
+			expect(found?.name).toBe('app');
 		});
 
-		describe('selectFileTabById', () => {
-			it('should find file tab by ID', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const fileTab = createMockFileTab({ id: 'file-1', name: 'app' });
-				setupSessionWithTabs([tab1], [fileTab]);
+		it('reports AI tab count', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([tab1, tab2]);
 
-				const result = selectFileTabById('file-1')(useSessionStore.getState());
-				expect(result).toBeDefined();
-				expect(result!.name).toBe('app');
-			});
+			expect(useSessionStore.getState().sessions[0].aiTabs).toHaveLength(2);
 		});
 
-		describe('selectTabCount', () => {
-			it('should return count of AI tabs', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const tab2 = createMockAITab({ id: 'tab-2' });
-				setupSessionWithTabs([tab1, tab2]);
+		it('exposes all file tabs', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const fileTab1 = createMockFileTab({ id: 'file-1' });
+			const fileTab2 = createMockFileTab({ id: 'file-2' });
+			setupSessionWithTabs([tab1], [fileTab1, fileTab2]);
 
-				expect(selectTabCount(useSessionStore.getState())).toBe(2);
-			});
-
-			it('should return 0 with no active session', () => {
-				expect(selectTabCount(useSessionStore.getState())).toBe(0);
-			});
-		});
-
-		describe('selectAllTabs / selectAllFileTabs', () => {
-			it('should return all AI tabs', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const tab2 = createMockAITab({ id: 'tab-2' });
-				setupSessionWithTabs([tab1, tab2]);
-
-				const result = selectAllTabs(useSessionStore.getState());
-				expect(result).toHaveLength(2);
-			});
-
-			it('should return all file tabs', () => {
-				const tab1 = createMockAITab({ id: 'tab-1' });
-				const fileTab1 = createMockFileTab({ id: 'file-1' });
-				const fileTab2 = createMockFileTab({ id: 'file-2' });
-				setupSessionWithTabs([tab1], [fileTab1, fileTab2]);
-
-				const result = selectAllFileTabs(useSessionStore.getState());
-				expect(result).toHaveLength(2);
-			});
+			expect(useSessionStore.getState().sessions[0].filePreviewTabs).toHaveLength(2);
 		});
 	});
 
@@ -824,11 +905,16 @@ describe('tabStore', () => {
 			expect(result.current).toEqual({ filename: 'test.md', content: 'hello' });
 		});
 
-		it('should subscribe to tab selectors via sessionStore', () => {
+		it('should subscribe to tab state via sessionStore', () => {
 			const tab1 = createMockAITab({ id: 'tab-1', name: 'First' });
 			setupSessionWithTabs([tab1]);
 
-			const { result } = renderHook(() => useSessionStore(selectActiveTab));
+			const { result } = renderHook(() =>
+				useSessionStore((s) => {
+					const active = s.sessions.find((sess) => sess.id === s.activeSessionId);
+					return active?.aiTabs.find((t) => t.id === active.activeTabId);
+				})
+			);
 
 			expect(result.current).toBeDefined();
 			expect(result.current!.id).toBe('tab-1');
@@ -847,9 +933,9 @@ describe('tabStore', () => {
 	// ========================================================================
 
 	describe('action stability', () => {
-		it('should return stable action references from getTabActions', () => {
-			const actions1 = getTabActions();
-			const actions2 = getTabActions();
+		it('should return stable action references from useTabStore.getState()', () => {
+			const actions1 = useTabStore.getState();
+			const actions2 = useTabStore.getState();
 
 			expect(actions1.createTab).toBe(actions2.createTab);
 			expect(actions1.closeTab).toBe(actions2.closeTab);
@@ -864,20 +950,19 @@ describe('tabStore', () => {
 	// ========================================================================
 
 	describe('non-React access', () => {
-		it('should provide current state via getTabState', () => {
+		it('should provide current state via useTabStore.getState()', () => {
 			const { setTabGistContent } = useTabStore.getState();
 			setTabGistContent({ filename: 'a.ts', content: 'code' });
 
-			const state = getTabState();
+			const state = useTabStore.getState();
 			expect(state.tabGistContent).toEqual({ filename: 'a.ts', content: 'code' });
 		});
 
-		it('should provide working actions via getTabActions', () => {
+		it('should provide working actions via useTabStore.getState()', () => {
 			const tab1 = createMockAITab({ id: 'tab-1', starred: false });
 			setupSessionWithTabs([tab1]);
 
-			const actions = getTabActions();
-			actions.starTab('tab-1');
+			useTabStore.getState().starTab('tab-1');
 
 			const session = useSessionStore.getState().sessions[0];
 			expect(session.aiTabs[0].starred).toBe(true);
@@ -1037,7 +1122,7 @@ describe('closeTerminalTab', () => {
 		setupSessionWithTerminalTabs([tab1, tab2]);
 
 		act(() => {
-			getTabActions().closeTerminalTab('term-2');
+			useTabStore.getState().closeTerminalTab('term-2');
 		});
 
 		expect(window.maestro.process.kill).toHaveBeenCalledTimes(1);
@@ -1053,7 +1138,7 @@ describe('closeTerminalTab', () => {
 		setupSessionWithTerminalTabs([tab1]);
 
 		act(() => {
-			getTabActions().closeTerminalTab('term-1');
+			useTabStore.getState().closeTerminalTab('term-1');
 		});
 
 		// PTY should be killed
@@ -1064,5 +1149,56 @@ describe('closeTerminalTab', () => {
 		const session = useSessionStore.getState().sessions[0];
 		expect(session.terminalTabs).toHaveLength(0);
 		expect(session.inputMode).toBe('ai');
+	});
+});
+
+describe('restartTerminalTab', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		useSessionStore.setState({ sessions: [], activeSessionId: null });
+	});
+
+	it('resets the exited tab, selects it, and switches to terminal mode', () => {
+		const tab = createMockTerminalTabForStore({
+			id: 'term-1',
+			pid: 4242,
+			state: 'exited',
+			exitCode: 255,
+		});
+		setupSessionWithTerminalTabs([tab]);
+
+		act(() => {
+			useTabStore.getState().restartTerminalTab('term-1');
+		});
+
+		const session = useSessionStore.getState().sessions[0];
+		expect(session.terminalTabs![0].pid).toBe(0);
+		expect(session.terminalTabs![0].state).toBe('idle');
+		expect(session.terminalTabs![0].exitCode).toBeUndefined();
+		expect(session.activeTerminalTabId).toBe('term-1');
+		expect(session.inputMode).toBe('terminal');
+	});
+
+	it('kills any lingering PTY before respawn', () => {
+		const tab = createMockTerminalTabForStore({ id: 'term-1', pid: 4242, state: 'exited' });
+		setupSessionWithTerminalTabs([tab]);
+
+		act(() => {
+			useTabStore.getState().restartTerminalTab('term-1');
+		});
+
+		expect(window.maestro.process.kill).toHaveBeenCalledTimes(1);
+		expect(window.maestro.process.kill).toHaveBeenCalledWith(expect.stringContaining('term-1'));
+	});
+
+	it('does nothing when the tab does not exist', () => {
+		const tab = createMockTerminalTabForStore({ id: 'term-1', state: 'exited' });
+		setupSessionWithTerminalTabs([tab]);
+
+		act(() => {
+			useTabStore.getState().restartTerminalTab('nonexistent');
+		});
+
+		expect(window.maestro.process.kill).not.toHaveBeenCalled();
 	});
 });

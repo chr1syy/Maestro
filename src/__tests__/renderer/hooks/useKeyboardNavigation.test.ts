@@ -2,45 +2,42 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useKeyboardNavigation, UseKeyboardNavigationDeps } from '../../../renderer/hooks';
 import type { Session, Group, FocusArea } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
-// Create a mock session
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: `session-${Date.now()}-${Math.random()}`,
-	name: 'Test Session',
-	toolType: 'claude-code',
-	state: 'idle',
-	cwd: '/test',
-	projectRoot: '/test',
-	fullPath: '/test',
-	port: 3000,
-	aiPid: 0,
-	inputMode: 'ai',
-	aiTabs: [
-		{
-			id: 'default-tab',
-			name: 'Main',
-			logs: [],
-		},
-	],
-	activeTabId: 'default-tab',
-	closedTabHistory: [],
-	shellLogs: [],
-	executionQueue: [],
-	usageStats: undefined,
-	contextUsage: 0,
-	workLog: [],
-	isGitRepo: false,
-	changedFiles: [],
-	gitBranches: [],
-	gitTags: [],
-	fileTree: [],
-	fileExplorerExpanded: [],
-	fileExplorerScrollPos: 0,
-	isLive: false,
-	terminalTabs: [],
-	activeTerminalTabId: null,
-	...overrides,
-});
+// Thin wrapper: pre-populates an AI tab so keyboard nav has a tab to
+// cycle through.
+const createMockSession = (overrides: Partial<Session> = {}): Session =>
+	baseCreateMockSession({
+		id: `session-${Date.now()}-${Math.random()}`,
+		cwd: '/test',
+		fullPath: '/test',
+		projectRoot: '/test',
+		port: 3000,
+		aiTabs: [
+			{
+				id: 'default-tab',
+				name: 'Main',
+				logs: [],
+			},
+		] as any,
+		activeTabId: 'default-tab',
+		gitBranches: [],
+		gitTags: [],
+		...overrides,
+	});
+
+// Minimal open StarredItem row
+const makeStarred = (key: string, parentSessionId: string, displayName = key) =>
+	({
+		kind: 'open' as const,
+		key,
+		displayName,
+		agentName: 'Agent',
+		parentSessionId,
+		tabId: `tab-${key}`,
+	}) as any;
+
+const makeGroupChat = (id: string, name = id) => ({ id, name }) as any;
 
 // Create mock dependencies
 const createMockDeps = (
@@ -55,6 +52,8 @@ const createMockDeps = (
 		bookmarkNavSize: overrides.bookmarkNavSize ?? 0,
 		selectedSidebarIndex: 0,
 		setSelectedSidebarIndex: vi.fn(),
+		sidebarExtraSelection: null,
+		setSidebarExtraSelection: vi.fn(),
 		activeSessionId: null,
 		setActiveSessionId: vi.fn(),
 		activeFocus: 'main',
@@ -65,6 +64,19 @@ const createMockDeps = (
 		setBookmarksCollapsed: vi.fn(),
 		inputRef: { current: null },
 		terminalOutputRef: { current: null },
+		// Starred Sessions + Group Chats sections
+		starredItems: [],
+		activateStarredItem: vi.fn(),
+		starredSectionCollapsed: false,
+		setStarredSectionCollapsed: vi.fn(),
+		groupChats: [],
+		handleOpenGroupChat: vi.fn(),
+		groupChatsExpanded: true,
+		setGroupChatsExpanded: vi.fn(),
+		groupChatSortAlphabetical: false,
+		showUnreadAgentsOnly: false,
+		ungroupedCollapsed: false,
+		setUngroupedCollapsed: vi.fn(),
 		...overrides,
 	};
 };
@@ -219,6 +231,35 @@ describe('useKeyboardNavigation', () => {
 			const handled = result.current.handleSidebarNavigation(event);
 
 			expect(handled).toBe(false);
+		});
+
+		it('should leave every modified arrow to the app shortcut chain', () => {
+			// Sidebar navigation owns BARE arrows only. Claiming a modified
+			// ArrowDown/ArrowUp made Opt+Cmd+Down (next unread) and Opt+Cmd+Up
+			// (focus active tab) dead whenever the Left Bar held focus.
+			const deps = createMockDeps({ activeFocus: 'sidebar' });
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const modified = [
+				{ key: 'ArrowDown', altKey: true, metaKey: true },
+				{ key: 'ArrowUp', altKey: true, metaKey: true },
+				{ key: 'ArrowDown', altKey: true, ctrlKey: true },
+				{ key: 'ArrowUp', metaKey: true },
+				{ key: 'ArrowRight', ctrlKey: true },
+			];
+
+			for (const init of modified) {
+				const event = new KeyboardEvent('keydown', init);
+				expect(result.current.handleSidebarNavigation(event)).toBe(false);
+			}
+		});
+
+		it('should still handle a bare arrow', () => {
+			const deps = createMockDeps({ activeFocus: 'sidebar' });
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'ArrowDown' });
+			expect(result.current.handleSidebarNavigation(event)).toBe(true);
 		});
 	});
 
@@ -442,6 +483,270 @@ describe('useKeyboardNavigation', () => {
 			});
 
 			expect(setSelectedSidebarIndex).toHaveBeenCalledWith(1);
+		});
+
+		it('stays on the cycled occurrence when the index already points at the active session', () => {
+			// A bookmarked agent appears twice in navSessions: the bookmark row (top)
+			// and its group/ungrouped row below. Cycling onto the lower occurrence sets
+			// selectedSidebarIndex to that row. The sync effect must NOT snap the
+			// highlight back up to the first (bookmark) occurrence - that was the
+			// panel-jump bug.
+			const sessionA = createMockSession({ id: 'a' });
+			const sessionB = createMockSession({ id: 'b', bookmarked: true });
+			const setSelectedSidebarIndex = vi.fn();
+			// navSessions: bookmark B (0), group A (1), group B (2). 'b' occurs at 0 and 2.
+			const deps = createMockDeps({
+				sortedSessions: [sessionA, sessionB],
+				navSessions: [sessionB, sessionA, sessionB],
+				activeSessionId: 'a',
+				selectedSidebarIndex: 1,
+				setSelectedSidebarIndex,
+			});
+
+			const { rerender } = renderHook(
+				({ activeSessionId, selectedSidebarIndex }) =>
+					useKeyboardNavigation({ ...deps, activeSessionId, selectedSidebarIndex }),
+				{ initialProps: { activeSessionId: 'a', selectedSidebarIndex: 1 } }
+			);
+			setSelectedSidebarIndex.mockClear();
+
+			// Cycle lands on the GROUP occurrence of B (index 2): both the active
+			// session and the index move together.
+			act(() => {
+				rerender({ activeSessionId: 'b', selectedSidebarIndex: 2 });
+			});
+
+			// Index already points at an occurrence of 'b' (navSessions[2]), so the
+			// effect bails - the highlight is NOT dragged to the bookmark row (0).
+			expect(setSelectedSidebarIndex).not.toHaveBeenCalled();
+		});
+
+		it('re-resolves to the first occurrence when the current index is stale', () => {
+			// When the index does NOT already point at the active session, the effect
+			// falls back to findIndex (first occurrence). For a bookmarked agent that
+			// is its bookmark row at the top.
+			const sessionA = createMockSession({ id: 'a' });
+			const sessionB = createMockSession({ id: 'b', bookmarked: true });
+			const setSelectedSidebarIndex = vi.fn();
+			// navSessions: bookmark B (0), group A (1), group B (2).
+			const deps = createMockDeps({
+				sortedSessions: [sessionA, sessionB],
+				navSessions: [sessionB, sessionA, sessionB],
+				activeSessionId: 'a',
+				selectedSidebarIndex: 1,
+				setSelectedSidebarIndex,
+			});
+
+			const { rerender } = renderHook(
+				({ activeSessionId, selectedSidebarIndex }) =>
+					useKeyboardNavigation({ ...deps, activeSessionId, selectedSidebarIndex }),
+				{ initialProps: { activeSessionId: 'a', selectedSidebarIndex: 1 } }
+			);
+			setSelectedSidebarIndex.mockClear();
+
+			// Active jumps to 'b' but the index stays at 1 (still pointing at A) - e.g.
+			// an external jump that did not pre-set the index.
+			act(() => {
+				rerender({ activeSessionId: 'b', selectedSidebarIndex: 1 });
+			});
+
+			// Stale index → re-resolve to the first 'b' occurrence (bookmark row, 0).
+			expect(setSelectedSidebarIndex).toHaveBeenCalledWith(0);
+		});
+	});
+
+	describe('starred + group chat sidebar navigation', () => {
+		it('ArrowUp from the first agent lands on the last starred row', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const setSelectedSidebarIndex = vi.fn();
+			const setSidebarExtraSelection = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: 0, // on the agent
+				setSelectedSidebarIndex,
+				setSidebarExtraSelection,
+				starredItems: [makeStarred('star-a', 'p1', 'Star A')],
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'ArrowUp' });
+			const handled = result.current.handleSidebarNavigation(event);
+
+			expect(handled).toBe(true);
+			// Cursor moves into the starred section: clears the agent index, sets the token.
+			expect(setSelectedSidebarIndex).toHaveBeenCalledWith(-1);
+			expect(setSidebarExtraSelection).toHaveBeenCalledWith({ kind: 'starred', key: 'star-a' });
+		});
+
+		it('ArrowDown from the last agent lands on the first group chat', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const setSelectedSidebarIndex = vi.fn();
+			const setSidebarExtraSelection = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: 0,
+				setSelectedSidebarIndex,
+				setSidebarExtraSelection,
+				groupChats: [makeGroupChat('gc1', 'Chat One')],
+				groupChatsExpanded: true,
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'ArrowDown' });
+			const handled = result.current.handleSidebarNavigation(event);
+
+			expect(handled).toBe(true);
+			expect(setSelectedSidebarIndex).toHaveBeenCalledWith(-1);
+			expect(setSidebarExtraSelection).toHaveBeenCalledWith({ kind: 'groupChat', id: 'gc1' });
+		});
+
+		it('wraps from the last group chat down to the first starred row', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const setSidebarExtraSelection = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: -1,
+				sidebarExtraSelection: { kind: 'groupChat', id: 'gc1' }, // on the only group chat
+				setSidebarExtraSelection,
+				starredItems: [makeStarred('star-a', 'p1', 'Star A')],
+				groupChats: [makeGroupChat('gc1', 'Chat One')],
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'ArrowDown' });
+			result.current.handleSidebarNavigation(event);
+
+			// Order: [starred, agent, groupChat]; down from groupChat wraps to starred.
+			expect(setSidebarExtraSelection).toHaveBeenCalledWith({ kind: 'starred', key: 'star-a' });
+		});
+
+		it('ArrowUp into a collapsed group expands it and lands on its member', () => {
+			const group1: Group = { id: 'g1', name: 'Group 1', emoji: '📁', collapsed: true };
+			const grouped = createMockSession({ id: 's1', groupId: 'g1' });
+			const ungrouped = createMockSession({ id: 's2' });
+			const setGroups = vi.fn();
+			const setSelectedSidebarIndex = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [grouped, ungrouped],
+				navSessions: [grouped, ungrouped], // navIndex 0 = grouped (collapsed g1), 1 = ungrouped
+				bookmarkNavSize: 0,
+				selectedSidebarIndex: 1, // on the ungrouped agent
+				groups: [group1],
+				setGroups,
+				setSelectedSidebarIndex,
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'ArrowUp' });
+			const handled = result.current.handleSidebarNavigation(event);
+
+			expect(handled).toBe(true);
+			// Group is expanded...
+			expect(setGroups).toHaveBeenCalled();
+			const updater = setGroups.mock.calls[0][0];
+			expect(updater([group1])[0].collapsed).toBe(false);
+			// ...and the cursor lands on the group's member (navIndex 0).
+			expect(setSelectedSidebarIndex).toHaveBeenCalledWith(0);
+		});
+
+		it('ArrowUp into a collapsed starred section expands it', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const setStarredSectionCollapsed = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: 0,
+				starredItems: [makeStarred('star-a', 'p1', 'Star A')],
+				starredSectionCollapsed: true,
+				setStarredSectionCollapsed,
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'ArrowUp' });
+			result.current.handleSidebarNavigation(event);
+
+			expect(setStarredSectionCollapsed).toHaveBeenCalledWith(false);
+		});
+
+		it('excludes starred + group chats when the unread-agents filter is on', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const setSidebarExtraSelection = vi.fn();
+			const setSelectedSidebarIndex = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: 0,
+				setSidebarExtraSelection,
+				setSelectedSidebarIndex,
+				starredItems: [makeStarred('star-a', 'p1', 'Star A')],
+				groupChats: [makeGroupChat('gc1', 'Chat One')],
+				showUnreadAgentsOnly: true,
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			// Only one agent in the virtual order → ArrowUp wraps back onto it, never
+			// touching the starred/group-chat sections.
+			const event = new KeyboardEvent('keydown', { key: 'ArrowUp' });
+			result.current.handleSidebarNavigation(event);
+
+			expect(setSidebarExtraSelection).not.toHaveBeenCalledWith(
+				expect.objectContaining({ kind: 'starred' })
+			);
+			expect(setSidebarExtraSelection).not.toHaveBeenCalledWith(
+				expect.objectContaining({ kind: 'groupChat' })
+			);
+		});
+
+		it('Enter on a starred row activates it', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const activateStarredItem = vi.fn();
+			const starred = makeStarred('star-a', 'p1', 'Star A');
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: -1,
+				sidebarExtraSelection: { kind: 'starred', key: 'star-a' },
+				starredItems: [starred],
+				activateStarredItem,
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'Enter' });
+			const handled = result.current.handleEnterToActivate(event);
+
+			expect(handled).toBe(true);
+			expect(activateStarredItem).toHaveBeenCalledWith(starred);
+		});
+
+		it('Enter on a group chat opens it', () => {
+			const session1 = createMockSession({ id: 's1', name: 'Session 1' });
+			const handleOpenGroupChat = vi.fn();
+			const deps = createMockDeps({
+				activeFocus: 'sidebar',
+				sortedSessions: [session1],
+				navSessions: [session1],
+				selectedSidebarIndex: -1,
+				sidebarExtraSelection: { kind: 'groupChat', id: 'gc1' },
+				groupChats: [makeGroupChat('gc1', 'Chat One')],
+				handleOpenGroupChat,
+			});
+			const { result } = renderHook(() => useKeyboardNavigation(deps));
+
+			const event = new KeyboardEvent('keydown', { key: 'Enter' });
+			const handled = result.current.handleEnterToActivate(event);
+
+			expect(handled).toBe(true);
+			expect(handleOpenGroupChat).toHaveBeenCalledWith('gc1');
 		});
 	});
 

@@ -2,7 +2,9 @@
 // Requires a Maestro agent ID. Optionally resumes an existing agent session.
 
 import { spawnAgent, detectAgent, type AgentResult } from '../services/agent-spawner';
+import { captureCliRun } from '../services/agent-run-capture';
 import { resolveAgentId, getSessionById } from '../services/storage';
+import { prepareMaestroSystemPromptCli } from '../services/system-prompt';
 import { estimateContextUsage } from '../../main/parsers/usage-aggregator';
 import { getAgentDefinition } from '../../main/agents/definitions';
 import { withMaestroClient } from '../services/maestro-client';
@@ -12,6 +14,11 @@ interface SendOptions {
 	session?: string;
 	readOnly?: boolean;
 	tab?: boolean;
+	// Commander auto-negates `--no-system-prompt` into `systemPrompt: false`,
+	// defaulting to true when the flag is omitted. Bots calling
+	// `maestro-cli send` get the Maestro system context by default - parity
+	// with desktop spawn sites that all pass `appendSystemPrompt`.
+	systemPrompt?: boolean;
 }
 
 interface SendResponse {
@@ -114,11 +121,43 @@ export async function send(
 	// when multiple callers (e.g. Discord threads) send concurrently.
 	const agentSessionId = options.session;
 
-	// Spawn agent — spawnAgent handles --resume vs fresh session internally
-	const result = await spawnAgent(agent.toolType, agent.cwd, message, agentSessionId, {
-		readOnlyMode: options.readOnly,
-		customModel: agent.customModel,
-	});
+	// Build the Maestro system prompt unless the caller opted out with
+	// `--no-system-prompt`. Failure to build (template missing, fs error) is
+	// non-fatal: spawn proceeds without the prompt rather than failing the
+	// whole send, matching the renderer's `prepareMaestroSystemPrompt` which
+	// returns undefined on failure (`src/renderer/utils/spawnHelpers.ts:35`).
+	const includeSystemPrompt = options.systemPrompt !== false;
+	const appendSystemPrompt = includeSystemPrompt
+		? await prepareMaestroSystemPromptCli(agent)
+		: undefined;
+
+	// Spawn agent - spawnAgent handles --resume vs fresh session internally.
+	// Wrapped in captureCliRun so the send lands in the agent-run ledger.
+	const result = await captureCliRun(
+		{
+			sessionId: agentSessionId ?? agentId,
+			toolType: agent.toolType,
+			cwd: agent.cwd,
+			prompt: message,
+			source: 'cli:send',
+		},
+		() =>
+			spawnAgent(agent.toolType, agent.cwd, message, agentSessionId, {
+				readOnlyMode: options.readOnly,
+				customModel: agent.customModel,
+				customEffort: agent.customEffort,
+				customArgs: agent.customArgs,
+				additionalDirectories: agent.additionalDirectories,
+				customEnvVars: agent.customEnvVars,
+				sshRemoteConfig: agent.sessionSshRemoteConfig,
+				appendSystemPrompt,
+				// Honor the agent's Claude token source for `maestro-cli send` turns.
+				enableMaestroP: agent.enableMaestroP,
+				maestroPMode: agent.maestroPMode,
+				maestroPPath: agent.maestroPPath,
+			}),
+		(r) => (r.success ? 0 : 1)
+	);
 	const response = buildResponse(agentId, agent.name, result, agent.toolType);
 
 	console.log(JSON.stringify(response, null, 2));

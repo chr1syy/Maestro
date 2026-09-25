@@ -18,10 +18,31 @@ export interface CliServerInfo {
 	token: string;
 	pid: number;
 	startedAt: number;
+	/**
+	 * Version of the desktop app that wrote this file (`app.getVersion()`).
+	 * Optional: older builds did not write it, so a missing value itself signals
+	 * an app predating version-skew detection. Read by `maestro-cli doctor` /
+	 * `status` to compare against the CLI's own build version.
+	 */
+	version?: string;
+	/**
+	 * Per-boot secret the CLI presents on its WebSocket upgrade
+	 * (`CLI_SECRET_HEADER`) so the Web Login gate admits it without a session
+	 * cookie. Optional: an older app did not write it, and the gate simply
+	 * stays closed to the CLI on such a build when Web Login is on.
+	 */
+	cliSecret?: string;
 }
 
 // Get the Maestro config directory path (lowercase "maestro")
 function getConfigDir(): string {
+	// Allow overriding the data directory (e.g. for dev mode: maestro-dev).
+	// Matches the override honored by src/cli/services/storage.ts so the CLI's
+	// discovery file lookup tracks the same data directory as its session reads.
+	if (process.env.MAESTRO_USER_DATA) {
+		return path.resolve(process.env.MAESTRO_USER_DATA);
+	}
+
 	const platform = os.platform();
 	const home = os.homedir();
 
@@ -101,7 +122,12 @@ export function isCliServerRunning(): boolean {
 	try {
 		process.kill(info.pid, 0); // Doesn't kill, just checks if process exists
 		return true;
-	} catch {
+	} catch (error) {
+		// EPERM means the process exists but this caller cannot signal it. This is
+		// common for sandboxed read-only monitors and must not turn a reachable
+		// desktop into a stale discovery result. The authenticated WebSocket
+		// connection remains the authoritative reachability check.
+		if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
 		return false;
 	}
 }

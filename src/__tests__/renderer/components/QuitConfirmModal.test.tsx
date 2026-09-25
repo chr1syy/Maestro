@@ -20,6 +20,8 @@ import type { Theme } from '../../../renderer/types';
 // Mock lucide-react
 vi.mock('lucide-react', () => ({
 	AlertTriangle: () => <svg data-testid="alert-triangle-icon" />,
+	MessageSquare: () => <svg data-testid="message-square-icon" />,
+	Hourglass: () => <svg data-testid="hourglass-icon" />,
 }));
 
 // Create a test theme
@@ -297,7 +299,7 @@ describe('QuitConfirmModal', () => {
 
 			expect(screen.getByText('Active Agents')).toBeInTheDocument();
 			expect(screen.getByText('Running Terminal Tasks')).toBeInTheDocument();
-			expect(screen.getByText(/interrupt all active work/)).toBeInTheDocument();
+			expect(screen.getByText(/interrupt active work/)).toBeInTheDocument();
 		});
 
 		it('shows +N more for terminal tasks exceeding 3', () => {
@@ -313,6 +315,127 @@ describe('QuitConfirmModal', () => {
 			);
 
 			expect(screen.getByText('+2 more')).toBeInTheDocument();
+		});
+	});
+
+	describe('feedback draft', () => {
+		// Drafts persist to disk and the quit handler writes the live editor out
+		// before the modal ever opens, so quitting is not a loss event for them.
+		// The modal must not claim otherwise.
+		it('never warns that a feedback draft will be discarded', () => {
+			renderWithLayerStack(
+				<QuitConfirmModal
+					theme={testTheme}
+					busyAgentCount={1}
+					busyAgentNames={['Agent A']}
+					onConfirmQuit={vi.fn()}
+					onCancel={vi.fn()}
+				/>
+			);
+
+			expect(screen.queryByText('Unsent Feedback')).not.toBeInTheDocument();
+			expect(screen.queryByText('Draft will be discarded')).not.toBeInTheDocument();
+			expect(screen.queryByText(/discard your (feedback )?draft/)).not.toBeInTheDocument();
+			expect(screen.queryByText(/unsent feedback/i)).not.toBeInTheDocument();
+		});
+	});
+
+	describe('Maestro Cue and group chats', () => {
+		it('shows Cue runs in the background operations section', () => {
+			renderWithLayerStack(
+				<QuitConfirmModal
+					theme={testTheme}
+					busyAgentCount={0}
+					busyAgentNames={[]}
+					activeCueRunCount={2}
+					onConfirmQuit={vi.fn()}
+					onQuitWhenIdle={vi.fn()}
+					onCancel={vi.fn()}
+				/>
+			);
+
+			expect(screen.getByText('Background Operations')).toBeInTheDocument();
+			expect(screen.getByText('Maestro Cue: 2')).toBeInTheDocument();
+			expect(screen.getByText(/2 Maestro Cue operations are running/)).toBeInTheDocument();
+		});
+
+		it('shows active group chats in the background operations section', () => {
+			renderWithLayerStack(
+				<QuitConfirmModal
+					theme={testTheme}
+					busyAgentCount={0}
+					busyAgentNames={[]}
+					activeGroupChatCount={1}
+					onConfirmQuit={vi.fn()}
+					onQuitWhenIdle={vi.fn()}
+					onCancel={vi.fn()}
+				/>
+			);
+
+			expect(screen.getByText('Background Operations')).toBeInTheDocument();
+			expect(screen.getByText('Group Chat: 1')).toBeInTheDocument();
+			expect(screen.getByText(/1 group chat is active/)).toBeInTheDocument();
+		});
+	});
+
+	describe('quit when idle', () => {
+		it('offers the quit-when-idle checkbox when operations are running', () => {
+			renderWithLayerStack(
+				<QuitConfirmModal
+					theme={testTheme}
+					busyAgentCount={1}
+					busyAgentNames={['Agent A']}
+					onConfirmQuit={vi.fn()}
+					onQuitWhenIdle={vi.fn()}
+					onCancel={vi.fn()}
+				/>
+			);
+
+			expect(screen.getByText('Quit when idle')).toBeInTheDocument();
+			expect(screen.getByRole('checkbox')).toBeInTheDocument();
+		});
+
+		it('hides the checkbox when nothing is actually running', () => {
+			renderWithLayerStack(
+				<QuitConfirmModal
+					theme={testTheme}
+					busyAgentCount={0}
+					busyAgentNames={[]}
+					onConfirmQuit={vi.fn()}
+					onQuitWhenIdle={vi.fn()}
+					onCancel={vi.fn()}
+				/>
+			);
+
+			expect(screen.queryByText('Quit when idle')).not.toBeInTheDocument();
+			expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+		});
+
+		it('swaps the primary button to "Quit When Idle" and calls onQuitWhenIdle when checked', () => {
+			const onConfirmQuit = vi.fn();
+			const onQuitWhenIdle = vi.fn();
+			renderWithLayerStack(
+				<QuitConfirmModal
+					theme={testTheme}
+					busyAgentCount={1}
+					busyAgentNames={['Agent A']}
+					onConfirmQuit={onConfirmQuit}
+					onQuitWhenIdle={onQuitWhenIdle}
+					onCancel={vi.fn()}
+				/>
+			);
+
+			// Default: primary button quits immediately.
+			expect(screen.getByRole('button', { name: 'Quit Anyway' })).toBeInTheDocument();
+
+			fireEvent.click(screen.getByRole('checkbox'));
+
+			const primary = screen.getByRole('button', { name: 'Quit When Idle' });
+			expect(primary).toBeInTheDocument();
+
+			fireEvent.click(primary);
+			expect(onQuitWhenIdle).toHaveBeenCalledTimes(1);
+			expect(onConfirmQuit).not.toHaveBeenCalled();
 		});
 	});
 

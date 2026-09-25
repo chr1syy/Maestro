@@ -4,13 +4,15 @@ description: Coordinate multiple AI agents in a single conversation with a moder
 icon: comments
 ---
 
-<Note>
-  Group Chat is currently in **Beta**. The feature is functional but under active development.
-</Note>
+Group Chat lets you coordinate multiple AI agents in a single conversation. You appoint one agent as the **moderator** and hand it your question; it orchestrates the discussion from there, routing to the right agents, following up when an answer is thin, and synthesizing what comes back.
 
-Group Chat lets you coordinate multiple AI agents in a single conversation. A moderator AI orchestrates the discussion, routing questions to the right agents and synthesizing their responses.
+The point of a Group Chat is that you are **delegating the moderating**. In an ordinary chat you can [`@mention`](./cross-agent-mentions) other agents too, but each mention is a single-turn consult and you are the one who keeps the conversation going. A moderator acts as your fiduciary in that job, wrangling the agents to work together across as many turns as the question needs. For a side-by-side overview of both approaches, see [Agent Collaboration](./agent-collaboration).
 
 ![Group chat](./screenshots/group-chat.png)
+
+<Tip>
+  Just need a quick one-off answer from another agent? [Cross-Agent Mentions](./cross-agent-mentions) let you `@mention` an agent inline from any chat. That answer arrives once and stops there: no moderator, no shared room, and no second round unless you type it. Reach for Group Chat when the agents need to deliberate together over several turns.
+</Tip>
 
 ## When to Use Group Chat
 
@@ -22,16 +24,16 @@ Group Chat lets you coordinate multiple AI agents in a single conversation. A mo
 
 ## How It Works
 
-1. **Create a Group Chat** — Use keyboard shortcut `Opt+Cmd+C` / `Alt+Ctrl+C`, click "+ New Chat" in the Group Chats section of the sidebar, or use Quick Actions (`Cmd+K` / `Ctrl+K`)
-2. **Select a moderator** — Choose which AI agent (Claude Code, OpenCode, or Codex) will coordinate the conversation
-3. **@mention agents** — In your message, @mention any Maestro session (e.g., `@Frontend`, `@Backend`). Agents are automatically added as participants when mentioned.
-4. **Send your question** — The moderator receives it first and decides how to proceed
-5. **Moderator coordinates** — Routes to relevant agents via @mentions, can make multiple rounds
-6. **Agents respond** — Each agent works in their own project context
-7. **Moderator synthesizes** — Combines responses into a coherent answer
+1. **Create a Group Chat** - Use keyboard shortcut `Opt+Cmd+G` / `Alt+Ctrl+G`, click "+ New Chat" in the Group Chats section of the sidebar, or use Quick Actions (`Cmd+K` / `Ctrl+K`)
+2. **Select a moderator** - Choose which AI agent (Claude Code, OpenCode, or Codex) will coordinate the conversation
+3. **@mention agents** - In your message, @mention any Maestro session (e.g., `@Frontend`, `@Backend`). Agents are automatically added as participants when mentioned.
+4. **Send your question** - The moderator receives it first and decides how to proceed
+5. **Moderator coordinates** - Routes to relevant agents via @mentions, can make multiple rounds
+6. **Agents respond** - Each agent works in their own project context
+7. **Moderator synthesizes** - Combines responses into a coherent answer
 
 <Tip>
-  Agents are automatically added as participants when you or the moderator @mention them. You don't need to pre-configure participants — just @mention any active Maestro session by name.
+  Agents are automatically added as participants when you or the moderator @mention them. You don't need to pre-configure participants - just @mention any active Maestro session by name.
 </Tip>
 
 ## The Moderator's Role
@@ -43,7 +45,9 @@ The moderator is an AI that controls the conversation flow:
 - **Follow-up**: If agent responses are incomplete, keeps asking until satisfied
 - **Synthesis**: Combines multiple agent perspectives into a final answer
 
-The moderator won't return to you until your question is properly answered — it will keep going back to agents as many times as needed.
+The moderator won't return to you until your question is properly answered - it will keep going back to agents as many times as needed. That is the capability you are buying, and it is the one thing a [Cross-Agent Mention](./cross-agent-mentions) cannot do: a mention is answered in a single turn, so every round after the first is yours to drive.
+
+Participants do not see each other's replies automatically. The moderator decides who hears what, quoting an earlier agent's answer forward when a later one needs it, which is why a Group Chat produces a coordinated result rather than several agents talking past each other.
 
 ## Example Conversation
 
@@ -80,7 +84,7 @@ Group Chat works seamlessly with [SSH Remote Execution](./ssh-remote-execution).
 - Any mix of local and remote agents
 - Agents spread across multiple SSH hosts
 
-Remote agents are identified by the **REMOTE** pill in the participant list. Each agent works in their own environment — the moderator coordinates across machines transparently.
+Remote agents are identified by the **REMOTE** pill in the participant list. Each agent works in their own environment - the moderator coordinates across machines transparently.
 
 **Use cases for remote Group Chat:**
 
@@ -89,14 +93,38 @@ Remote agents are identified by the **REMOTE** pill in the participant list. Eac
 - Coordinate changes that span multiple machines
 - Synthesize information from agents with different tool installations
 
+## Agent Availability
+
+An agent brought into a group chat runs as its own process, in that agent's own working directory. If you are already talking to that agent in its own tab, two processes end up editing the same files at once.
+
+**Only work with agents that are free** controls what happens then. It is on by default, and you set it when you create a group chat (or later, through Edit):
+
+| Setting          | Behavior                                                                                                                                                                                                                                                          |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **On** (default) | The moderator holds the request for any agent that is busy - with your own conversation, an Auto Run, or a CLI run - and sends it as soon as that agent is free. It posts a note in the chat naming who it is waiting for. Other agents still get their work now. |
+| **Off**          | The moderator hands work to an agent even while it is working. Two processes can edit the same files, overwrite each other, and leave both conversations acting on stale state.                                                                                   |
+
+<Warning>
+  Turn this off only when you know the work cannot collide - separate worktrees, separate projects, or read-only questions. There is no lock behind it; it is your judgment doing the work.
+</Warning>
+
+When an agent is busy, the chat shows a line like:
+
+```
+⏳ Waiting for @Backend - that agent is busy with their own work right now.
+```
+
+The turn stays open while it waits, and the request is delivered the moment that agent finishes. If the
+agent is still busy after 15 minutes, the chat says so and the turn moves on without it.
+
 ## Tips for Effective Group Chats
 
-- **Name agents descriptively** — Agent names appear in the chat, so "Frontend-React" is clearer than "Agent1"
-- **Be specific in questions** — The more context you provide, the better the moderator can route
-- **@mention explicitly** — You can direct questions to specific agents: "What does @Backend think?"
-- **Let the moderator work** — It may take multiple rounds for complex questions
-- **Mix local and remote** — Combine agents across machines for maximum coverage
-- **Hyphenated names for spaces** — If your session name has spaces, use hyphens in @mentions (e.g., `@My-Project` for "My Project")
+- **Name agents descriptively** - Agent names appear in the chat, so "Frontend-React" is clearer than "Agent1"
+- **Be specific in questions** - The more context you provide, the better the moderator can route
+- **@mention explicitly** - You can direct questions to specific agents: "What does @Backend think?"
+- **Let the moderator work** - It may take multiple rounds for complex questions
+- **Mix local and remote** - Combine agents across machines for maximum coverage
+- **Hyphenated names for spaces** - If your session name has spaces, use hyphens in @mentions (e.g., `@My-Project` for "My Project")
 
 ## Managing Group Chats
 
@@ -112,8 +140,28 @@ Right-click on a group chat in the sidebar to access the context menu:
 
 The Group Chat input supports the same features as direct agent conversations:
 
-- **Read-only mode** — Toggle to prevent agents from modifying files (participants receive the mode flag)
-- **Image attachments** — Attach images to include in your message
-- **Prompt Composer** — Open the full prompt composer with `Cmd+Shift+P` / `Ctrl+Shift+P`
-- **Enter/Cmd+Enter toggle** — Switch between send behaviors
-- **Message queuing** — Messages are queued if the moderator or agents are busy
+- **Read-only mode** - Toggle to prevent agents from modifying files (participants receive the mode flag)
+- **Image attachments** - Attach images to include in your message
+- **Prompt Composer** - Open the full prompt composer with `Cmd+Shift+P` / `Ctrl+Shift+P`
+- **Enter/Cmd+Enter toggle** - Switch between send behaviors
+- **Message queuing** - Messages are queued if the moderator or agents are busy
+
+### The message queue
+
+A message you send while the chat is busy waits in the queue until the moderator
+is free. The queue belongs to the chat, not to the window you typed in, so:
+
+- It is the same queue on every device. Something queued from your phone shows up
+  on the desktop and is sent from there.
+- It survives a reload, a closed browser tab, and quitting the app. A queue left
+  over from a previous session comes back **paused**, so relaunching Maestro does
+  not start a moderator just to flush it.
+- **Stop All pauses it.** Nothing queued is sent until you press Resume, so
+  stopping the room does not immediately restart it.
+- If a message cannot be sent, it is **kept**, not dropped. The chat pauses and
+  says why, and the same failing send is not retried on its own. Fix the cause and
+  press **Resume**.
+
+You can reorder queued messages by dragging them, or remove one you no longer
+want. The message currently being handed to the moderator is marked
+"Sending, cannot remove", because it has already left.

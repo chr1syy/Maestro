@@ -38,7 +38,7 @@ vi.mock('../../../main/utils/symphony-fork', () => ({
 	ensureForkSetup: vi.fn(),
 }));
 
-// Mock cliDetection — resolveGhPath returns 'gh' so existing assertions still match
+// Mock cliDetection - resolveGhPath returns 'gh' so existing assertions still match
 vi.mock('../../../main/utils/cliDetection', () => ({
 	resolveGhPath: vi.fn().mockResolvedValue('gh'),
 }));
@@ -156,6 +156,33 @@ describe('Symphony Runner Service', () => {
 				'https://github.com/owner/repo',
 				'/tmp/test-repo',
 			]);
+		});
+
+		it('writes two references sharing a basename to separate files', async () => {
+			// docs/architecture.md and spec/architecture.md both reduce to
+			// architecture.md. Both must survive rather than the second
+			// overwriting the first.
+			mockSuccessfulWorkflow();
+
+			await startContribution({
+				contributionId: 'test-id',
+				repoSlug: 'owner/repo',
+				repoUrl: 'https://github.com/owner/repo',
+				issueNumber: 123,
+				issueTitle: 'Test Issue',
+				documentPaths: [
+					{ name: 'docs/architecture.md', path: 'docs/architecture.md', isExternal: false },
+					{ name: 'spec/architecture.md', path: 'spec/architecture.md', isExternal: false },
+				],
+				localPath: '/tmp/test-repo',
+				branchName: 'symphony/test-branch',
+			});
+
+			const destinations = vi.mocked(fs.copyFile).mock.calls.map((c) => c[1]);
+			expect(destinations).toHaveLength(2);
+			expect(new Set(destinations).size).toBe(2);
+			expect(destinations.some((d) => String(d).endsWith('architecture.md'))).toBe(true);
+			expect(destinations.some((d) => String(d).endsWith('architecture-2.md'))).toBe(true);
 		});
 
 		it('returns true on successful clone (exitCode 0)', async () => {
@@ -711,7 +738,10 @@ describe('Symphony Runner Service', () => {
 				branchName: 'symphony/test-branch',
 			});
 
-			expect(mockFetch).toHaveBeenCalledWith('https://example.com/doc.md');
+			expect(mockFetch).toHaveBeenCalledWith(
+				'https://example.com/doc.md',
+				expect.objectContaining({ signal: expect.anything() })
+			);
 			expect(fs.writeFile).toHaveBeenCalledWith(
 				'/tmp/test-repo/.maestro/playbooks/doc.md',
 				expect.any(Buffer)
@@ -839,7 +869,10 @@ describe('Symphony Runner Service', () => {
 				branchName: 'symphony/test-branch',
 			});
 
-			expect(mockFetch).toHaveBeenCalledWith('https://example.com/external.md');
+			expect(mockFetch).toHaveBeenCalledWith(
+				'https://example.com/external.md',
+				expect.objectContaining({ signal: expect.anything() })
+			);
 			expect(logger.info).toHaveBeenCalledWith(
 				'Downloading external document',
 				expect.any(String),

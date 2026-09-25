@@ -19,8 +19,18 @@ vi.mock('../../../renderer/services/git', () => ({
 	},
 }));
 
+const refreshGitStatusMock = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../../renderer/contexts/GitStatusContext', () => ({
+	useGitDetail: () => ({
+		getFileDetails: () => undefined,
+		refreshGitStatus: refreshGitStatusMock,
+	}),
+}));
+
 import { useModalHandlers } from '../../../renderer/hooks/modal/useModalHandlers';
 import { useModalStore, getModalActions } from '../../../renderer/stores/modalStore';
+import { useAuthOutageStore } from '../../../renderer/stores/authOutageStore';
+import { useCenterFlashStore } from '../../../renderer/stores/centerFlashStore';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import { useGroupChatStore } from '../../../renderer/stores/groupChatStore';
@@ -28,6 +38,8 @@ import { useAgentStore } from '../../../renderer/stores/agentStore';
 import { useAgentErrorRecovery } from '../../../renderer/hooks/agent/useAgentErrorRecovery';
 import { gitService } from '../../../renderer/services/git';
 import type { Session, AITab } from '../../../renderer/types';
+import { createMockAITab as createBaseMockAITab, createMockFileTab } from '../../helpers/mockTab';
+import { createMockSession } from '../../helpers/mockSession';
 
 // ============================================================================
 // Helpers
@@ -41,59 +53,12 @@ const createTerminalOutputRef = () => ({
 	current: { focus: vi.fn() } as unknown as HTMLDivElement,
 });
 
-function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: overrides.id ?? 'session-1',
-		name: overrides.name ?? 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test',
-		fullPath: '/test',
-		projectRoot: '/test',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
-		executionQueue: [],
-		activeTimeMs: 0,
-		aiTabs: [],
-		activeTabId: '',
-		closedTabHistory: [],
-		filePreviewTabs: [],
-		activeFileTabId: null,
-		unifiedTabOrder: [],
-		unifiedClosedTabHistory: [],
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	} as Session;
-}
-
 function createMockAITab(overrides: Partial<AITab> = {}): AITab {
-	return {
-		id: overrides.id ?? 'tab-1',
-		agentSessionId: overrides.agentSessionId ?? null,
-		name: overrides.name ?? null,
-		starred: false,
-		logs: [],
-		inputValue: '',
-		stagedImages: [],
-		createdAt: Date.now(),
-		state: 'idle',
+	return createBaseMockAITab({
 		hasUnread: false,
 		isAtBottom: true,
 		...overrides,
-	} as AITab;
+	});
 }
 
 // ============================================================================
@@ -106,6 +71,9 @@ beforeEach(() => {
 
 	// Reset stores
 	useModalStore.setState({ modals: new Map() });
+	// Auth outages are provider-scoped and deliberately deduplicate, so a
+	// leftover outage would stop the next test's prompt from opening.
+	useAuthOutageStore.setState({ outages: {} });
 	useSessionStore.setState({
 		sessions: [],
 		activeSessionId: '',
@@ -114,7 +82,7 @@ beforeEach(() => {
 	});
 	useGroupChatStore.setState({
 		activeGroupChatId: null,
-		groupChatStagedImages: [],
+		groupChatStagedImagesById: {},
 	});
 
 	// Ensure window.maestro.app mock is present
@@ -835,11 +803,15 @@ describe('useModalHandlers', () => {
 			expect(inputRef.current!.focus).toHaveBeenCalled();
 		});
 
-		it('handleAuthenticateAfterError calls agent store, clears modal, and focuses input', () => {
+		it('handleAuthenticateAfterError calls agent store and swaps in the reauth modal', () => {
 			const mockAuth = vi.fn();
 			vi.spyOn(useAgentStore, 'getState').mockReturnValue({
 				...useAgentStore.getState(),
 				authenticateAfterError: mockAuth,
+			});
+			// The provider is resolved from the agent, so it has to exist.
+			useSessionStore.setState({
+				sessions: [createMockSession({ id: 'session-1', toolType: 'claude-code' })],
 			});
 			getModalActions().setAgentErrorModalSessionId('session-1');
 
@@ -851,11 +823,12 @@ describe('useModalHandlers', () => {
 
 			expect(mockAuth).toHaveBeenCalledWith('session-1');
 			expect(useModalStore.getState().isOpen('agentError')).toBe(false);
-
-			act(() => {
-				vi.advanceTimersByTime(10);
+			// The login now happens inside Maestro, so the error modal hands off to the
+			// re-authentication terminal instead of returning focus to the composer.
+			expect(useModalStore.getState().isOpen('reauth')).toBe(true);
+			expect(useModalStore.getState().getData('reauth')).toMatchObject({
+				providerKey: 'claude-code',
 			});
-			expect(inputRef.current!.focus).toHaveBeenCalled();
 		});
 	});
 
@@ -1057,7 +1030,7 @@ describe('useModalHandlers', () => {
 		it('handleDeleteLightboxImage removes image from group chat staged images', () => {
 			useGroupChatStore.setState({
 				activeGroupChatId: 'gc-1',
-				groupChatStagedImages: ['img1.png', 'img2.png', 'img3.png'],
+				groupChatStagedImagesById: { 'gc-1': ['img1.png', 'img2.png', 'img3.png'] },
 			});
 
 			// Open lightbox with isGroupChat = true
@@ -1073,7 +1046,10 @@ describe('useModalHandlers', () => {
 				result.current.handleDeleteLightboxImage('img2.png');
 			});
 
-			expect(useGroupChatStore.getState().groupChatStagedImages).toEqual(['img1.png', 'img3.png']);
+			expect(useGroupChatStore.getState().groupChatStagedImagesById['gc-1']).toEqual([
+				'img1.png',
+				'img3.png',
+			]);
 			const lightboxData = useModalStore.getState().getData('lightbox');
 			expect(lightboxData?.images).toEqual(['img1.png', 'img3.png']);
 		});
@@ -1186,6 +1162,28 @@ describe('useModalHandlers', () => {
 				vi.advanceTimersByTime(10);
 			});
 			expect(inputRef.current!.focus).toHaveBeenCalled();
+		});
+
+		it('handleClosePromptComposer focuses the group chat input while a room is open', () => {
+			useGroupChatStore.setState({ activeGroupChatId: 'chat-1' });
+			getModalActions().setPromptComposerOpen(true);
+
+			const inputRef = createInputRef();
+			const groupChatInputRef = createInputRef();
+			const { result } = renderHook(() =>
+				useModalHandlers(inputRef, createTerminalOutputRef(), undefined, groupChatInputRef)
+			);
+			act(() => {
+				result.current.handleClosePromptComposer();
+			});
+
+			act(() => {
+				vi.advanceTimersByTime(10);
+			});
+			// The agent composer isn't on screen in a room, so focusing it would
+			// drop the caret on the document instead of the room's input.
+			expect(groupChatInputRef.current!.focus).toHaveBeenCalled();
+			expect(inputRef.current!.focus).not.toHaveBeenCalled();
 		});
 
 		it('handleCloseCreatePRModal closes modal and clears session', () => {
@@ -1313,7 +1311,98 @@ describe('useModalHandlers', () => {
 			expect(useModalStore.getState().isOpen('renameTab')).toBe(true);
 		});
 
-		it('handleQuickActionsOpenTabSwitcher opens tab switcher when in AI mode', () => {
+		it('handleQuickActionsRenameTab targets the active file tab, pre-filling its custom name', () => {
+			const fileTab = createMockFileTab({ id: 'file-1', name: 'notes', customName: 'My Notes' });
+			const session = createMockSession({
+				id: 'session-1',
+				// File tabs keep inputMode 'ai' but set activeFileTabId; the handler
+				// must target the visible file tab, not the hidden AI tab.
+				inputMode: 'ai',
+				activeTabId: 'tab-1',
+				activeFileTabId: 'file-1',
+				aiTabs: [createMockAITab({ id: 'tab-1' })],
+				filePreviewTabs: [fileTab],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'session-1' });
+
+			const { result } = renderHook(() =>
+				useModalHandlers(createInputRef(), createTerminalOutputRef())
+			);
+			act(() => {
+				result.current.handleQuickActionsRenameTab();
+			});
+
+			expect(useModalStore.getState().isOpen('renameTab')).toBe(true);
+			const renameData = useModalStore.getState().getData('renameTab');
+			expect(renameData?.tabId).toBe('file-1');
+			expect(renameData?.initialName).toBe('My Notes');
+		});
+
+		it('handleQuickActionsRenameTab pre-fills empty when the file tab has no custom name', () => {
+			const fileTab = createMockFileTab({ id: 'file-1', name: 'notes', customName: undefined });
+			const session = createMockSession({
+				id: 'session-1',
+				inputMode: 'ai',
+				activeFileTabId: 'file-1',
+				filePreviewTabs: [fileTab],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'session-1' });
+
+			const { result } = renderHook(() =>
+				useModalHandlers(createInputRef(), createTerminalOutputRef())
+			);
+			act(() => {
+				result.current.handleQuickActionsRenameTab();
+			});
+
+			expect(useModalStore.getState().isOpen('renameTab')).toBe(true);
+			const renameData = useModalStore.getState().getData('renameTab');
+			expect(renameData?.tabId).toBe('file-1');
+			expect(renameData?.initialName).toBe('');
+		});
+
+		it('handleQuickActionsRenameTab targets the focused pane of an active tiled group', () => {
+			const session = createMockSession({
+				id: 'session-1',
+				inputMode: 'ai',
+				activeTabId: 'tab-1',
+				aiTabs: [createMockAITab({ id: 'tab-1', name: 'My Tab' })],
+				terminalTabs: [{ id: 'term-1', name: null } as any],
+				activeGroupId: 'group-1',
+				tabGroups: [
+					{
+						id: 'group-1',
+						name: 'Group: Terminal 1',
+						focusedPaneId: 'leaf-term',
+						createdAt: 0,
+						layout: {
+							kind: 'split',
+							id: 'split-1',
+							direction: 'row',
+							sizes: [0.5, 0.5],
+							children: [
+								{ kind: 'leaf', id: 'leaf-ai', tab: { type: 'ai', id: 'tab-1' } },
+								{ kind: 'leaf', id: 'leaf-term', tab: { type: 'terminal', id: 'term-1' } },
+							],
+						},
+					} as any,
+				],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'session-1' });
+
+			const { result } = renderHook(() =>
+				useModalHandlers(createInputRef(), createTerminalOutputRef())
+			);
+			act(() => {
+				result.current.handleQuickActionsRenameTab();
+			});
+
+			const renameData = useModalStore.getState().getData('renameTab');
+			expect(renameData?.tabId).toBe('term-1');
+			expect(renameData?.initialName).toBe('');
+		});
+
+		it('handleQuickActionsOpenTabSwitcher opens tab switcher when session has aiTabs', () => {
 			const tab = createMockAITab({ id: 'tab-1' });
 			const session = createMockSession({
 				id: 'session-1',
@@ -1332,11 +1421,12 @@ describe('useModalHandlers', () => {
 			expect(useModalStore.getState().isOpen('tabSwitcher')).toBe(true);
 		});
 
-		it('handleQuickActionsOpenTabSwitcher does nothing when not in AI mode', () => {
+		it('handleQuickActionsOpenTabSwitcher opens tab switcher in shell mode when aiTabs exist', () => {
+			const tab = createMockAITab({ id: 'tab-1' });
 			const session = createMockSession({
 				id: 'session-1',
 				inputMode: 'terminal' as any,
-				aiTabs: [],
+				aiTabs: [tab],
 			});
 			useSessionStore.setState({ sessions: [session], activeSessionId: 'session-1' });
 
@@ -1347,7 +1437,7 @@ describe('useModalHandlers', () => {
 				result.current.handleQuickActionsOpenTabSwitcher();
 			});
 
-			expect(useModalStore.getState().isOpen('tabSwitcher')).toBe(false);
+			expect(useModalStore.getState().isOpen('tabSwitcher')).toBe(true);
 		});
 
 		it('handleQuickActionsStartTour sets tourFromWizard false and opens tour', () => {
@@ -1847,6 +1937,30 @@ describe('useModalHandlers', () => {
 			expect(useModalStore.getState().getData('gitDiff')?.diff).toBe('diff --git a/file.ts');
 		});
 
+		it('flashes a notification and re-polls git status when the diff is empty', async () => {
+			const session = createMockSession({
+				isGitRepo: true,
+				cwd: '/projects/my-repo',
+				inputMode: 'ai',
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: session.id });
+			(gitService.getDiff as ReturnType<typeof vi.fn>).mockResolvedValue({ diff: '' });
+			useCenterFlashStore.getState().setActive(null);
+			refreshGitStatusMock.mockClear();
+
+			const { result } = renderHook(() =>
+				useModalHandlers(createInputRef(), createTerminalOutputRef())
+			);
+
+			await act(async () => {
+				await result.current.handleViewGitDiff();
+			});
+
+			expect(useModalStore.getState().isOpen('gitDiff')).toBe(false);
+			expect(useCenterFlashStore.getState().active?.message).toBe('No diff to examine');
+			expect(refreshGitStatusMock).toHaveBeenCalledTimes(1);
+		});
+
 		it('uses shellCwd when in terminal mode', async () => {
 			const session = createMockSession({
 				isGitRepo: true,
@@ -1904,10 +2018,12 @@ describe('useModalHandlers', () => {
 			);
 
 			act(() => {
-				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1');
+				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1', 'My Session');
 			});
 
-			expect(resumeRef.current).toHaveBeenCalledWith('agent-sess-1');
+			// Arg 2 is `providedMessages`, left undefined so the resume reads the
+			// transcript itself; the name goes in arg 3.
+			expect(resumeRef.current).toHaveBeenCalledWith('agent-sess-1', undefined, 'My Session');
 		});
 
 		it('defers resume when on different session, then resumes after activeSession change', () => {
@@ -1925,7 +2041,7 @@ describe('useModalHandlers', () => {
 
 			// Call with sourceSessionId='session-1' while activeSession is session-2
 			act(() => {
-				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1');
+				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1', 'My Session');
 			});
 
 			// Should have switched to session-1
@@ -1933,8 +2049,52 @@ describe('useModalHandlers', () => {
 
 			// The setActiveSessionId triggers a store update + re-render within the same act(),
 			// which fires the pending resume effect synchronously. The resume should have been
-			// called with the deferred agentSessionId.
-			expect(resumeRef.current).toHaveBeenCalledWith('agent-sess-1');
+			// called with the deferred agentSessionId - and the name, which has to
+			// survive the agent switch because the entry that carried it is gone.
+			expect(resumeRef.current).toHaveBeenCalledWith('agent-sess-1', undefined, 'My Session');
+		});
+
+		it('leaves the active group chat when jumping to a different agent', () => {
+			const session1 = createMockSession({ id: 'session-1' });
+			const session2 = createMockSession({ id: 'session-2' });
+			useSessionStore.setState({
+				sessions: [session1, session2],
+				activeSessionId: 'session-2',
+			});
+			useGroupChatStore.setState({ activeGroupChatId: 'gc-1' });
+
+			const resumeRef = { current: vi.fn() };
+			const { result } = renderHook(() =>
+				useModalHandlers(createInputRef(), createTerminalOutputRef(), resumeRef)
+			);
+
+			act(() => {
+				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1');
+			});
+
+			expect(useGroupChatStore.getState().activeGroupChatId).toBeNull();
+			expect(useSessionStore.getState().activeSessionId).toBe('session-1');
+			// Arg 2 is `providedMessages` and arg 3 the recorded session name; both
+			// are absent here because this call supplies no name.
+			expect(resumeRef.current).toHaveBeenCalledWith('agent-sess-1', undefined, undefined);
+		});
+
+		it('leaves the active group chat when the target agent is already active', () => {
+			const session = createMockSession({ id: 'session-1' });
+			useSessionStore.setState({ sessions: [session], activeSessionId: session.id });
+			useGroupChatStore.setState({ activeGroupChatId: 'gc-1' });
+
+			const resumeRef = { current: vi.fn() };
+			const { result } = renderHook(() =>
+				useModalHandlers(createInputRef(), createTerminalOutputRef(), resumeRef)
+			);
+
+			act(() => {
+				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1');
+			});
+
+			expect(useGroupChatStore.getState().activeGroupChatId).toBeNull();
+			expect(resumeRef.current).toHaveBeenCalledWith('agent-sess-1', undefined, undefined);
 		});
 
 		it('does not call resume when ref is null', () => {
@@ -1950,7 +2110,7 @@ describe('useModalHandlers', () => {
 				result.current.handleDirectorNotesResumeSession('session-1', 'agent-sess-1');
 			});
 
-			// Should not throw — no-op
+			// Should not throw - no-op
 			expect(useModalStore.getState().isOpen('directorNotes')).toBe(false);
 		});
 	});

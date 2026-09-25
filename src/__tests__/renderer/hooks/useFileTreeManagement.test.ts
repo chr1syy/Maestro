@@ -13,18 +13,37 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useFileTreeManagement, type UseFileTreeManagementDeps } from '../../../renderer/hooks';
 import type { Session } from '../../../renderer/types';
+import { createMockSession } from '../../helpers/mockSession';
+import { withWorkingDirectory } from '../../../renderer/utils/agentWorkingDirectory';
 import type { FileNode } from '../../../renderer/types/fileTree';
 import type { RightPanelHandle } from '../../../renderer/components/RightPanel';
 import type { RefObject, SetStateAction } from 'react';
-import { loadFileTree, compareFileTrees } from '../../../renderer/utils/fileExplorer';
+import {
+	loadFileTree,
+	loadFileTreeRemoteBatched,
+	compareFileTrees,
+} from '../../../renderer/utils/fileExplorer';
 import { gitService } from '../../../renderer/services/git';
 import { useFileExplorerStore } from '../../../renderer/stores/fileExplorerStore';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
+import { isWebDesktop } from '../../../renderer/utils/runtimeContext';
 
-vi.mock('../../../renderer/utils/fileExplorer', () => ({
-	loadFileTree: vi.fn(),
-	compareFileTrees: vi.fn(),
-}));
+vi.mock('../../../renderer/utils/fileExplorer', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../../../renderer/utils/fileExplorer')>();
+	return {
+		...actual,
+		loadFileTree: vi.fn(),
+		loadFileTreeRemoteBatched: vi.fn(),
+		compareFileTrees: vi.fn(),
+	};
+});
+
+/** Wrap a tree array into the shape loadFileTree now returns. */
+const asResult = (tree: FileNode[], truncated = false) => ({
+	tree,
+	truncated,
+	filesFound: tree.length,
+});
 
 vi.mock('../../../renderer/services/git', () => ({
 	gitService: {
@@ -34,39 +53,23 @@ vi.mock('../../../renderer/services/git', () => ({
 	},
 }));
 
+// Switching agents cancels an in-flight walk ONLY in the browser build, where
+// every readDir shares one WebSocket. The real `isWebDesktop` memoizes its
+// answer on first call, so drive it through the module mock rather than by
+// poking `window.__MAESTRO_CONFIG__` mid-test.
+vi.mock('../../../renderer/utils/runtimeContext', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../../../renderer/utils/runtimeContext')>();
+	return { ...actual, isWebDesktop: vi.fn(() => false) };
+});
+
+/** Run the enclosing test as the browser build instead of Electron. */
+const asWebDesktop = () => vi.mocked(isWebDesktop).mockReturnValue(true);
+
 // ============================================================================
 // Test Helpers
 // ============================================================================
 
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: 'session-1',
-	name: 'Test Session',
-	toolType: 'claude-code',
-	state: 'idle',
-	cwd: '/test/project',
-	fullPath: '/test/project',
-	projectRoot: '/test/project',
-	aiLogs: [],
-	shellLogs: [],
-	workLog: [],
-	contextUsage: 0,
-	inputMode: 'ai',
-	aiPid: 0,
-	terminalPid: 0,
-	port: 0,
-	isLive: false,
-	changedFiles: [],
-	isGitRepo: false,
-	fileTree: [],
-	fileExplorerExpanded: [],
-	fileExplorerScrollPos: 0,
-	executionQueue: [],
-	activeTimeMs: 0,
-	aiTabs: [],
-	activeTabId: 'tab-1',
-	closedTabHistory: [],
-	...overrides,
-});
+// createMockSession imported from shared helper
 
 const createSessionsState = (initialSessions: Session[]) => {
 	let sessions = initialSessions;
@@ -87,7 +90,6 @@ const createDeps = (
 	state: ReturnType<typeof createSessionsState>,
 	overrides: Partial<UseFileTreeManagementDeps> = {}
 ): UseFileTreeManagementDeps => ({
-	sessions: state.getSessions(),
 	sessionsRef: state.sessionsRef,
 	setSessions: state.setSessions,
 	activeSessionId: state.getSessions()[0]?.id ?? null,
@@ -105,6 +107,9 @@ describe('useFileTreeManagement', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// clearAllMocks wipes call history but keeps implementations, so a test
+		// that opted into the browser build would leak into the next one.
+		vi.mocked(isWebDesktop).mockReturnValue(false);
 		useFileExplorerStore.setState({ fileTreeFilter: '' });
 		// Most tests assume sessions are loaded (safety timeout can fire)
 		useSessionStore.setState({ sessionsLoaded: true });
@@ -137,7 +142,7 @@ describe('useFileTreeManagement', () => {
 			removedFolders: 0,
 		};
 
-		vi.mocked(loadFileTree).mockResolvedValue(nextTree);
+		vi.mocked(loadFileTree).mockResolvedValue(asResult(nextTree));
 		vi.mocked(compareFileTrees).mockReturnValue(changes);
 
 		const state = createSessionsState([createMockSession({ fileTree: initialTree })]);
@@ -149,19 +154,178 @@ describe('useFileTreeManagement', () => {
 			returnedChanges = await result.current.refreshFileTree(state.getSessions()[0].id);
 		});
 
-		// For local sessions (no sshRemoteId), sshContext and localOptions are undefined
+		// For local sessions (no sshRemoteId), sshContext and localOptions are undefined.
+		// loadFullTree always forwards an 8th `signal` arg (undefined when caller omits extras).
 		expect(loadFileTree).toHaveBeenCalledWith(
 			'/test/project',
-			10,
+			5,
 			0,
 			undefined,
 			undefined,
+			undefined,
+			100_000,
 			undefined
 		);
 		expect(compareFileTrees).toHaveBeenCalledWith(initialTree, nextTree);
 		expect(returnedChanges).toEqual(changes);
 		expect(state.getSessions()[0].fileTree).toEqual(nextTree);
 		expect(state.getSessions()[0].fileTreeError).toBeUndefined();
+	});
+
+	describe('refreshFileTree fileTree identity (#1180)', () => {
+		it('preserves the existing fileTree reference when a refresh reports no structural changes', async () => {
+			const existingTree: FileNode[] = [
+				{
+					name: 'src',
+					type: 'folder',
+					children: [{ name: 'index.ts', type: 'file' }],
+				},
+			];
+			const reloadedTree: FileNode[] = [
+				{
+					name: 'src',
+					type: 'folder',
+					children: [{ name: 'index.ts', type: 'file' }],
+				},
+			];
+			const noChanges = {
+				totalChanges: 0,
+				newFiles: 0,
+				newFolders: 0,
+				removedFiles: 0,
+				removedFolders: 0,
+			};
+
+			vi.mocked(loadFileTree).mockResolvedValue(asResult(reloadedTree));
+			vi.mocked(compareFileTrees).mockReturnValue(noChanges);
+
+			const session = createMockSession({
+				fileTree: existingTree,
+				fileTreeStats: {
+					fileCount: 1,
+					folderCount: 1,
+					totalSize: 128,
+				},
+			});
+			const state = createSessionsState([session]);
+			const deps = createDeps(state);
+			const { result } = renderHook(() => useFileTreeManagement(deps));
+
+			let returnedChanges: typeof noChanges | undefined;
+			await act(async () => {
+				returnedChanges = await result.current.refreshFileTree(session.id);
+			});
+
+			expect(compareFileTrees).toHaveBeenCalledWith(existingTree, reloadedTree);
+			expect(returnedChanges).toEqual(noChanges);
+			expect(state.getSessions()[0].fileTree).toBe(existingTree);
+			expect(state.getSessions()[0].fileTree).not.toBe(reloadedTree);
+		});
+
+		it('replaces the fileTree reference when a refresh reports structural changes', async () => {
+			const existingTree: FileNode[] = [{ name: 'old.txt', type: 'file' }];
+			const reloadedTree: FileNode[] = [
+				{ name: 'old.txt', type: 'file' },
+				{ name: 'new.txt', type: 'file' },
+			];
+			const changes = {
+				totalChanges: 2,
+				newFiles: 1,
+				newFolders: 0,
+				removedFiles: 1,
+				removedFolders: 0,
+			};
+
+			vi.mocked(loadFileTree).mockResolvedValue(asResult(reloadedTree));
+			vi.mocked(compareFileTrees).mockReturnValue(changes);
+
+			const session = createMockSession({
+				fileTree: existingTree,
+				fileTreeStats: {
+					fileCount: 1,
+					folderCount: 0,
+					totalSize: 64,
+				},
+			});
+			const state = createSessionsState([session]);
+			const deps = createDeps(state);
+			const { result } = renderHook(() => useFileTreeManagement(deps));
+
+			let returnedChanges: typeof changes | undefined;
+			await act(async () => {
+				returnedChanges = await result.current.refreshFileTree(session.id);
+			});
+
+			expect(compareFileTrees).toHaveBeenCalledWith(existingTree, reloadedTree);
+			expect(returnedChanges).toEqual(changes);
+			expect(state.getSessions()[0].fileTree).toBe(reloadedTree);
+			expect(state.getSessions()[0].fileTree).not.toBe(existingTree);
+		});
+	});
+
+	describe('opening a folder the depth cap cut off', () => {
+		const cappedTree: FileNode[] = [
+			{ name: 'a', type: 'folder', children: [{ name: 'b', type: 'folder', children: [] }] },
+		];
+		const stats = { fileCount: 0, folderCount: 2, totalSize: 0 };
+
+		const renderWithExpansion = (maxDepth: number) => {
+			vi.mocked(loadFileTree).mockResolvedValue(asResult(cappedTree));
+			vi.mocked(compareFileTrees).mockReturnValue({
+				totalChanges: 0,
+				newFiles: 0,
+				newFolders: 0,
+				removedFiles: 0,
+				removedFolders: 0,
+			});
+			const state = createSessionsState([
+				createMockSession({ fileTree: cappedTree, fileTreeStats: stats, fileExplorerExpanded: [] }),
+			]);
+			const { rerender } = renderHook(
+				(deps: UseFileTreeManagementDeps) => useFileTreeManagement(deps),
+				{
+					initialProps: createDeps(state, { fileExplorerMaxDepth: maxDepth }),
+				}
+			);
+			const expand = (paths: string[]) => {
+				state.setSessions((prev) => prev.map((s) => ({ ...s, fileExplorerExpanded: paths })));
+				rerender(createDeps(state, { fileExplorerMaxDepth: maxDepth }));
+			};
+			return { expand };
+		};
+
+		it('rescans with the expanded folders and skips the stats scan', async () => {
+			const { expand } = renderWithExpansion(2);
+			vi.mocked(window.maestro.fs.directorySize).mockClear();
+
+			await act(async () => {
+				expand(['a', 'a/b']);
+			});
+
+			await waitFor(() => {
+				expect(loadFileTree).toHaveBeenCalledWith(
+					'/test/project',
+					2,
+					0,
+					undefined,
+					undefined,
+					{ expandedPaths: ['a', 'a/b'] },
+					100_000,
+					undefined
+				);
+			});
+			expect(window.maestro.fs.directorySize).not.toHaveBeenCalled();
+		});
+
+		it('does not rescan when the opened folder is above the cap', async () => {
+			const { expand } = renderWithExpansion(5);
+
+			await act(async () => {
+				expand(['a', 'a/b']);
+			});
+
+			expect(loadFileTree).not.toHaveBeenCalled();
+		});
 	});
 
 	it('refreshFileTree handles load errors', async () => {
@@ -186,7 +350,18 @@ describe('useFileTreeManagement', () => {
 	it('refreshGitFileState refreshes git metadata and history', async () => {
 		const nextTree: FileNode[] = [{ name: 'src', type: 'folder', children: [] }];
 
-		vi.mocked(loadFileTree).mockResolvedValue(nextTree);
+		vi.mocked(loadFileTree).mockResolvedValue(asResult(nextTree));
+		// This asserts the tree is REPLACED, so it has to say so: clearAllMocks keeps
+		// implementations, and the #1180 identity guard preserves the old reference
+		// whenever compareFileTrees reports no changes. Inheriting a previous test's
+		// zeroed mock is what made this pass or fail on test order.
+		vi.mocked(compareFileTrees).mockReturnValue({
+			totalChanges: 1,
+			newFiles: 1,
+			newFolders: 0,
+			removedFiles: 0,
+			removedFolders: 0,
+		});
 		vi.mocked(gitService.isRepo).mockResolvedValue(true);
 		vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
 		vi.mocked(gitService.getTags).mockResolvedValue(['v1.0.0']);
@@ -207,14 +382,17 @@ describe('useFileTreeManagement', () => {
 			await result.current.refreshGitFileState(session.id);
 		});
 
-		// loadFileTree always uses projectRoot (treeRoot), not shellCwd
-		// Git operations use shellCwd when inputMode is 'terminal'
+		// loadFileTree always uses projectRoot (treeRoot), not shellCwd.
+		// Git operations use shellCwd when inputMode is 'terminal'.
+		// loadFullTree always forwards an 8th `signal` arg (undefined when caller omits extras).
 		expect(loadFileTree).toHaveBeenCalledWith(
 			'/test/project',
-			10,
+			5,
 			0,
 			undefined,
 			undefined,
+			undefined,
+			100_000,
 			undefined
 		);
 		expect(gitService.isRepo).toHaveBeenCalledWith('/test/shell', undefined);
@@ -266,27 +444,29 @@ describe('useFileTreeManagement', () => {
 	it('loads file tree on mount when active session tree is empty', async () => {
 		const nextTree: FileNode[] = [{ name: 'loaded.txt', type: 'file' }];
 
-		vi.mocked(loadFileTree).mockResolvedValue(nextTree);
+		vi.mocked(loadFileTree).mockResolvedValue(asResult(nextTree));
 
 		const state = createSessionsState([createMockSession({ fileTree: [] })]);
 		const deps = createDeps(state);
 		renderHook(() => useFileTreeManagement(deps));
 
 		await waitFor(() => {
-			// loadFileTree is now called with (path, maxDepth, currentDepth, sshContext)
+			// loadFileTree is called with (path, maxDepth, currentDepth, sshContext, onProgress, localOptions, maxEntries, signal)
 			expect(loadFileTree).toHaveBeenCalledWith(
 				'/test/project',
-				10,
+				5,
 				0,
 				undefined,
+				expect.any(Function),
 				undefined,
-				undefined
+				100_000,
+				expect.any(AbortSignal)
 			);
 			expect(state.getSessions()[0].fileTree).toEqual(nextTree);
 		});
 	});
 
-	it('passes SSH context when session has sshRemoteId', async () => {
+	it('routes SSH refresh through the batched find loader', async () => {
 		const nextTree: FileNode[] = [{ name: 'remote-file.txt', type: 'file' }];
 		const changes = {
 			totalChanges: 0,
@@ -296,7 +476,8 @@ describe('useFileTreeManagement', () => {
 			removedFolders: 0,
 		};
 
-		vi.mocked(loadFileTree).mockResolvedValue(nextTree);
+		vi.mocked(loadFileTree).mockResolvedValue(asResult(nextTree));
+		vi.mocked(loadFileTreeRemoteBatched).mockResolvedValue(asResult(nextTree));
 		vi.mocked(compareFileTrees).mockReturnValue(changes);
 
 		// Create session with SSH context
@@ -309,27 +490,31 @@ describe('useFileTreeManagement', () => {
 		const deps = createDeps(state);
 		const { result } = renderHook(() => useFileTreeManagement(deps));
 
+		// The initial-load effect fires a shallow loadFileTree pass for SSH on mount.
+		// That's tested separately ("fires shallow load before batched full load …");
+		// here we only care about what the *refresh* path dispatches.
+		vi.mocked(loadFileTree).mockClear();
+		vi.mocked(loadFileTreeRemoteBatched).mockClear();
+
 		await act(async () => {
 			await result.current.refreshFileTree(sshSession.id);
 		});
 
-		// Verify SSH context is passed to loadFileTree
-		expect(loadFileTree).toHaveBeenCalledWith(
+		// Verify SSH refresh dispatches to the batched loader (not recursive readDir)
+		expect(loadFileTreeRemoteBatched).toHaveBeenCalledWith(
 			'/test/project',
-			10,
-			0,
-			{
+			expect.objectContaining({
+				maxDepth: 5,
+				maxEntries: 100_000,
 				sshRemoteId: 'my-ssh-remote',
-				remoteCwd: '/remote/project',
-				honorGitignore: undefined,
-				ignorePatterns: undefined,
-			},
-			undefined,
-			undefined
+			})
 		);
+		// Recursive loadFileTree must NOT be called for SSH refreshes - the whole
+		// point of the batched loader is to skip the per-directory round-trips.
+		expect(loadFileTree).not.toHaveBeenCalled();
 	});
 
-	it('fires shallow load before full load for SSH sessions on initial mount', async () => {
+	it('fires shallow load before batched full load for SSH sessions on initial mount', async () => {
 		const shallowTree: FileNode[] = [
 			{ name: 'src', type: 'folder', children: [] },
 			{ name: 'README.md', type: 'file' },
@@ -343,8 +528,10 @@ describe('useFileTreeManagement', () => {
 			{ name: 'README.md', type: 'file' },
 		];
 
-		// First call (shallow, depth=1) returns quickly, second call (full, depth=10) returns later
-		vi.mocked(loadFileTree).mockResolvedValueOnce(shallowTree).mockResolvedValueOnce(fullTree);
+		// Shallow pass goes through loadFileTree (depth=1, single readDir round-trip).
+		vi.mocked(loadFileTree).mockResolvedValueOnce(asResult(shallowTree));
+		// Full pass goes through the batched find-based loader.
+		vi.mocked(loadFileTreeRemoteBatched).mockResolvedValueOnce(asResult(fullTree));
 
 		const mockDirectorySize = vi.fn().mockResolvedValue({
 			fileCount: 2,
@@ -372,23 +559,26 @@ describe('useFileTreeManagement', () => {
 		renderHook(() => useFileTreeManagement(deps));
 
 		await waitFor(() => {
-			// Shallow load should be called with depth=1
+			// Shallow load: depth=1, no entry cap, recursive readDir path.
 			expect(loadFileTree).toHaveBeenCalledWith(
 				'/test/project',
 				1,
 				0,
 				expect.objectContaining({ sshRemoteId: 'my-ssh-remote' }),
 				undefined,
-				undefined
+				undefined,
+				Number.POSITIVE_INFINITY,
+				expect.any(AbortSignal)
 			);
-			// Full load should be called with depth=10
-			expect(loadFileTree).toHaveBeenCalledWith(
+			// Full load: dispatched to batched find-based loader.
+			expect(loadFileTreeRemoteBatched).toHaveBeenCalledWith(
 				'/test/project',
-				10,
-				0,
-				expect.objectContaining({ sshRemoteId: 'my-ssh-remote' }),
-				expect.any(Function),
-				undefined
+				expect.objectContaining({
+					maxDepth: 5,
+					maxEntries: 100_000,
+					sshRemoteId: 'my-ssh-remote',
+					signal: expect.any(AbortSignal),
+				})
 			);
 		});
 
@@ -405,7 +595,7 @@ describe('useFileTreeManagement', () => {
 
 	it('does not fire shallow load for local sessions on initial mount', async () => {
 		const fullTree: FileNode[] = [{ name: 'loaded.txt', type: 'file' }];
-		vi.mocked(loadFileTree).mockResolvedValue(fullTree);
+		vi.mocked(loadFileTree).mockResolvedValue(asResult(fullTree));
 
 		const state = createSessionsState([createMockSession({ fileTree: [] })]);
 		const deps = createDeps(state);
@@ -420,19 +610,362 @@ describe('useFileTreeManagement', () => {
 		expect(loadFileTree).toHaveBeenCalledTimes(1);
 		expect(loadFileTree).toHaveBeenCalledWith(
 			'/test/project',
-			10,
+			5,
 			0,
 			undefined,
+			expect.any(Function), // onProgress
 			undefined,
-			undefined
+			100_000,
+			expect.any(AbortSignal)
 		);
+	});
+
+	it('clears the spinner when a refresh overtakes an in-flight initial load', async () => {
+		// The initial load owns the spinner. A refresh bumps the load sequence and
+		// orphans it, so the refresh has to put the spinner down itself.
+		let resolveInitial: (value: ReturnType<typeof asResult>) => void = () => {};
+		const pendingInitial = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveInitial = resolve;
+		});
+		const refreshedTree: FileNode[] = [{ name: 'fresh.txt', type: 'file' }];
+		vi.mocked(loadFileTree)
+			.mockReturnValueOnce(pendingInitial)
+			.mockResolvedValue(asResult(refreshedTree));
+		vi.mocked(compareFileTrees).mockReturnValue({ added: [], removed: [], modified: [] });
+
+		const state = createSessionsState([createMockSession({ fileTree: [] })]);
+		const deps = createDeps(state);
+		const { result } = renderHook(() => useFileTreeManagement(deps));
+
+		await waitFor(() => {
+			expect(state.getSessions()[0].fileTreeLoading).toBe(true);
+		});
+
+		await act(async () => {
+			await result.current.refreshFileTree(state.getSessions()[0].id);
+		});
+
+		expect(state.getSessions()[0].fileTree).toEqual(refreshedTree);
+		expect(state.getSessions()[0].fileTreeLoading).toBe(false);
+		expect(state.getSessions()[0].fileTreeLoadingProgress).toBeUndefined();
+
+		// The orphaned initial load settling afterwards must not resurrect the spinner.
+		await act(async () => {
+			resolveInitial(asResult([{ name: 'stale.txt', type: 'file' }]));
+			await Promise.resolve();
+		});
+		expect(state.getSessions()[0].fileTree).toEqual(refreshedTree);
+		expect(state.getSessions()[0].fileTreeLoading).toBe(false);
+	});
+
+	it('discards a scan that finishes after the agent moved to another directory', async () => {
+		// The move (withWorkingDirectory) clears the tree and puts the spinner
+		// down. If the scan it orphaned resolves BEFORE the auto-loader gets to
+		// start a fresh one, it is not yet stale by sequence number - so the
+		// writes must check the root instead, or the old project's tree and
+		// stats land on the relocated agent (and the stats then block a reload).
+		let resolveLoad: (value: ReturnType<typeof asResult>) => void = () => {};
+		const pending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveLoad = resolve;
+		});
+		vi.mocked(loadFileTree).mockReturnValue(pending);
+		let resolveStats: (value: {
+			fileCount: number;
+			folderCount: number;
+			totalSize: number;
+		}) => void = () => {};
+		vi.mocked(window.maestro.fs.directorySize).mockReturnValue(
+			new Promise((resolve) => {
+				resolveStats = resolve;
+			})
+		);
+
+		const state = createSessionsState([
+			createMockSession({ fileTree: [], cwd: '/projects/old', projectRoot: '/projects/old' }),
+		]);
+		const deps = createDeps(state);
+		renderHook(() => useFileTreeManagement(deps));
+
+		await waitFor(() => {
+			expect(state.getSessions()[0].fileTreeLoading).toBe(true);
+		});
+
+		// Relocate without re-rendering the hook: no new load has started yet.
+		state.setSessions((prev) => prev.map((s) => withWorkingDirectory(s, '/projects/new')));
+
+		await act(async () => {
+			resolveLoad(asResult([{ name: 'old-project.txt', type: 'file' }]));
+			resolveStats({ fileCount: 1, folderCount: 0, totalSize: 10 });
+			await Promise.resolve();
+		});
+
+		const moved = state.getSessions()[0];
+		expect(moved.projectRoot).toBe('/projects/new');
+		expect(moved.fileTree).toEqual([]);
+		expect(moved.fileTreeStats).toBeUndefined();
+		expect(moved.fileTreeLoading).toBe(false);
+	});
+
+	it('does not schedule a retry on the new directory when the old scan fails after a move', async () => {
+		let rejectLoad: (reason: Error) => void = () => {};
+		const pending = new Promise<ReturnType<typeof asResult>>((_resolve, reject) => {
+			rejectLoad = reject;
+		});
+		vi.mocked(loadFileTree).mockReturnValue(pending);
+
+		const state = createSessionsState([
+			createMockSession({ fileTree: [], cwd: '/projects/old', projectRoot: '/projects/old' }),
+		]);
+		const deps = createDeps(state);
+		renderHook(() => useFileTreeManagement(deps));
+
+		await waitFor(() => {
+			expect(state.getSessions()[0].fileTreeLoading).toBe(true);
+		});
+
+		state.setSessions((prev) => prev.map((s) => withWorkingDirectory(s, '/projects/new')));
+
+		await act(async () => {
+			rejectLoad(new Error('EACCES'));
+			await Promise.resolve();
+		});
+
+		const moved = state.getSessions()[0];
+		expect(moved.fileTreeError).toBeUndefined();
+		expect(moved.fileTreeRetryAt).toBeUndefined();
+		expect(moved.fileTreeLoading).toBe(false);
+	});
+
+	it('cancelFileTreeLoad aborts the in-flight load signal and clears loading state', async () => {
+		// Hold the load open so we can cancel while it's pending.
+		let resolveLoad: (value: ReturnType<typeof asResult>) => void = () => {};
+		const pending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveLoad = resolve;
+		});
+		vi.mocked(loadFileTree).mockReturnValue(pending);
+
+		const state = createSessionsState([createMockSession({ fileTree: [] })]);
+		const deps = createDeps(state);
+		const { result } = renderHook(() => useFileTreeManagement(deps));
+
+		// Wait until the auto-load effect has kicked off and marked the session as loading.
+		await waitFor(() => {
+			expect(state.getSessions()[0].fileTreeLoading).toBe(true);
+			expect(loadFileTree).toHaveBeenCalled();
+		});
+
+		// Grab the AbortSignal passed into loadFileTree and confirm it starts unaborted.
+		const callArgs = vi.mocked(loadFileTree).mock.calls[0];
+		const signal = callArgs[callArgs.length - 1] as AbortSignal;
+		expect(signal).toBeInstanceOf(AbortSignal);
+		expect(signal.aborted).toBe(false);
+
+		// Cancel and verify the signal aborted and the UI state was cleared.
+		await act(async () => {
+			result.current.cancelFileTreeLoad(state.getSessions()[0].id);
+		});
+
+		expect(signal.aborted).toBe(true);
+		expect(state.getSessions()[0].fileTreeLoading).toBe(false);
+		expect(state.getSessions()[0].fileTreeLoadingProgress).toBeUndefined();
+
+		// Resolve the pending load so the promise machinery settles cleanly.
+		resolveLoad(asResult([]));
+	});
+
+	it('cancels an unfinished tree load when the active session changes (web-desktop)', async () => {
+		asWebDesktop();
+		let resolveFirst: (value: ReturnType<typeof asResult>) => void = () => {};
+		let resolveSecond: (value: ReturnType<typeof asResult>) => void = () => {};
+		const firstPending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveFirst = resolve;
+		});
+		const secondPending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveSecond = resolve;
+		});
+		vi.mocked(loadFileTree).mockReturnValueOnce(firstPending).mockReturnValueOnce(secondPending);
+
+		const firstSession = createMockSession({ id: 'session-a', fileTree: [] });
+		const secondSession = createMockSession({ id: 'session-b', fileTree: [] });
+		const state = createSessionsState([firstSession, secondSession]);
+		const baseDeps = createDeps(state);
+		const { rerender } = renderHook(
+			({ activeSessionId, activeSession }: { activeSessionId: string; activeSession: Session }) =>
+				useFileTreeManagement({ ...baseDeps, activeSessionId, activeSession }),
+			{
+				initialProps: { activeSessionId: firstSession.id, activeSession: firstSession },
+			}
+		);
+
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledTimes(1));
+		const firstSignal = vi.mocked(loadFileTree).mock.calls[0].at(-1) as AbortSignal;
+		expect(firstSignal.aborted).toBe(false);
+
+		rerender({ activeSessionId: secondSession.id, activeSession: secondSession });
+
+		await waitFor(() => {
+			expect(firstSignal.aborted).toBe(true);
+			expect(loadFileTree).toHaveBeenCalledTimes(2);
+		});
+		expect(
+			state.getSessions().find((session) => session.id === firstSession.id)?.fileTreeLoading
+		).toBe(false);
+
+		await act(async () => {
+			resolveFirst(asResult([{ name: 'stale.txt', type: 'file' }]));
+			resolveSecond(asResult([{ name: 'current.txt', type: 'file' }]));
+			await Promise.all([firstPending, secondPending]);
+		});
+
+		expect(state.getSessions().find((session) => session.id === firstSession.id)?.fileTree).toEqual(
+			[]
+		);
+		expect(
+			state.getSessions().find((session) => session.id === secondSession.id)?.fileTree
+		).toEqual([{ name: 'current.txt', type: 'file' }]);
+	});
+
+	it('keeps an unfinished tree load running when the active session changes on desktop', async () => {
+		// Electron issues readDir over per-call IPC with no shared choke point, so
+		// switching agents is not a reason to throw away a walk in progress. The
+		// load must finish and land its tree even though the user is looking at a
+		// different agent - otherwise coming back restarts the whole scan.
+		let resolveFirst: (value: ReturnType<typeof asResult>) => void = () => {};
+		const firstPending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveFirst = resolve;
+		});
+		vi.mocked(loadFileTree)
+			.mockReturnValueOnce(firstPending)
+			.mockReturnValue(Promise.resolve(asResult([{ name: 'b.txt', type: 'file' }])));
+
+		const firstSession = createMockSession({ id: 'session-a', fileTree: [] });
+		const secondSession = createMockSession({ id: 'session-b', fileTree: [] });
+		const state = createSessionsState([firstSession, secondSession]);
+		const baseDeps = createDeps(state);
+		const { rerender } = renderHook(
+			({ activeSessionId, activeSession }: { activeSessionId: string; activeSession: Session }) =>
+				useFileTreeManagement({ ...baseDeps, activeSessionId, activeSession }),
+			{ initialProps: { activeSessionId: firstSession.id, activeSession: firstSession } }
+		);
+
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledTimes(1));
+		const firstSignal = vi.mocked(loadFileTree).mock.calls[0].at(-1) as AbortSignal;
+
+		rerender({ activeSessionId: secondSession.id, activeSession: secondSession });
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledTimes(2));
+
+		// The walk it left behind is untouched: still marked loading, not aborted.
+		expect(firstSignal.aborted).toBe(false);
+		expect(
+			state.getSessions().find((session) => session.id === firstSession.id)?.fileTreeLoading
+		).toBe(true);
+
+		await act(async () => {
+			resolveFirst(asResult([{ name: 'a.txt', type: 'file' }]));
+			await firstPending;
+		});
+
+		// And it still lands, so switching back shows a finished tree rather than
+		// starting the scan over.
+		expect(state.getSessions().find((session) => session.id === firstSession.id)).toMatchObject({
+			fileTree: [{ name: 'a.txt', type: 'file' }],
+			fileTreeLoading: false,
+		});
+	});
+
+	it('does not let an old A load clear a newer A load after an A to B to A switch', async () => {
+		// Web-desktop only: the restart this guards against exists because the
+		// switch away cancelled A. On Electron nothing cancels, so there is never
+		// a second A load to be clobbered by the first.
+		asWebDesktop();
+		let resolveFirst: (value: ReturnType<typeof asResult>) => void = () => {};
+		let resolveSecond: (value: ReturnType<typeof asResult>) => void = () => {};
+		let resolveThird: (value: ReturnType<typeof asResult>) => void = () => {};
+		const firstPending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveFirst = resolve;
+		});
+		const secondPending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveSecond = resolve;
+		});
+		const thirdPending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveThird = resolve;
+		});
+		vi.mocked(loadFileTree)
+			.mockReturnValueOnce(firstPending)
+			.mockReturnValueOnce(secondPending)
+			.mockReturnValueOnce(thirdPending);
+
+		const firstSession = createMockSession({ id: 'session-a', fileTree: [] });
+		const secondSession = createMockSession({ id: 'session-b', fileTree: [] });
+		const state = createSessionsState([firstSession, secondSession]);
+		const baseDeps = createDeps(state);
+		const { rerender } = renderHook(
+			({ activeSessionId, activeSession }: { activeSessionId: string; activeSession: Session }) =>
+				useFileTreeManagement({ ...baseDeps, activeSessionId, activeSession }),
+			{ initialProps: { activeSessionId: firstSession.id, activeSession: firstSession } }
+		);
+
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledTimes(1));
+		rerender({ activeSessionId: secondSession.id, activeSession: secondSession });
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledTimes(2));
+		rerender({ activeSessionId: firstSession.id, activeSession: firstSession });
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledTimes(3));
+
+		await act(async () => {
+			resolveFirst(asResult([{ name: 'stale-a.txt', type: 'file' }]));
+			await firstPending;
+		});
+		expect(
+			state.getSessions().find((session) => session.id === firstSession.id)?.fileTreeLoading
+		).toBe(true);
+
+		await act(async () => {
+			resolveSecond(asResult([{ name: 'stale-b.txt', type: 'file' }]));
+			resolveThird(asResult([{ name: 'current-a.txt', type: 'file' }]));
+			await Promise.all([secondPending, thirdPending]);
+		});
+		expect(state.getSessions().find((session) => session.id === firstSession.id)).toMatchObject({
+			fileTree: [{ name: 'current-a.txt', type: 'file' }],
+			fileTreeLoading: false,
+		});
+	});
+
+	it('ignores load progress and completion after unmount', async () => {
+		let resolveLoad: (value: ReturnType<typeof asResult>) => void = () => {};
+		const pending = new Promise<ReturnType<typeof asResult>>((resolve) => {
+			resolveLoad = resolve;
+		});
+		vi.mocked(loadFileTree).mockReturnValue(pending);
+
+		const state = createSessionsState([createMockSession({ fileTree: [] })]);
+		const { unmount } = renderHook(() => useFileTreeManagement(createDeps(state)));
+		await waitFor(() => expect(loadFileTree).toHaveBeenCalledOnce());
+		await act(async () => {});
+
+		const onProgress = vi.mocked(loadFileTree).mock.calls[0][4] as
+			| ((progress: {
+					directoriesScanned: number;
+					filesFound: number;
+					currentDirectory: string;
+			  }) => void)
+			| undefined;
+		const writesBeforeUnmount = state.setSessions.mock.calls.length;
+		unmount();
+
+		await act(async () => {
+			onProgress?.({ directoriesScanned: 1, filesFound: 1, currentDirectory: '/stale' });
+			resolveLoad(asResult([{ name: 'stale.txt', type: 'file' }]));
+			await pending;
+		});
+
+		expect(state.setSessions).toHaveBeenCalledTimes(writesBeforeUnmount);
 	});
 
 	it('decouples stats from tree display in initial load', async () => {
 		const fullTree: FileNode[] = [{ name: 'file.txt', type: 'file' }];
 
 		// Tree resolves immediately
-		vi.mocked(loadFileTree).mockResolvedValue(fullTree);
+		vi.mocked(loadFileTree).mockResolvedValue(asResult(fullTree));
 
 		// Stats resolve after a delay
 		let resolveStats: (value: {
@@ -560,7 +1093,7 @@ describe('useFileTreeManagement', () => {
 			vi.advanceTimersByTime(6000);
 		});
 
-		// initialFileTreeReady should still be false — gated timer hasn't started yet
+		// initialFileTreeReady should still be false - gated timer hasn't started yet
 		expect(useSessionStore.getState().initialFileTreeReady).toBe(false);
 
 		// Now mark sessions as loaded
@@ -588,7 +1121,7 @@ describe('useFileTreeManagement', () => {
 	it('absolute backstop fires at 8s even if sessionsLoaded is never set', () => {
 		vi.useFakeTimers();
 
-		// sessionsLoaded stays false — simulates a stuck session restoration
+		// sessionsLoaded stays false - simulates a stuck session restoration
 		useSessionStore.setState({ sessionsLoaded: false, initialFileTreeReady: false });
 
 		const state = createSessionsState([createMockSession({ fileTree: [] })]);
@@ -596,13 +1129,13 @@ describe('useFileTreeManagement', () => {
 
 		renderHook(() => useFileTreeManagement(deps));
 
-		// At 7.9s — backstop hasn't fired yet
+		// At 7.9s - backstop hasn't fired yet
 		act(() => {
 			vi.advanceTimersByTime(7900);
 		});
 		expect(useSessionStore.getState().initialFileTreeReady).toBe(false);
 
-		// At 8s — backstop fires
+		// At 8s - backstop fires
 		act(() => {
 			vi.advanceTimersByTime(200);
 		});
@@ -646,5 +1179,41 @@ describe('useFileTreeManagement', () => {
 		if (originalFs) {
 			window.maestro.fs = originalFs;
 		}
+	});
+
+	it('repaints filteredFileTree when store fileTree refreshes without an injected activeSession', () => {
+		const initialTree: FileNode[] = [{ name: 'old.txt', type: 'file' }];
+		const nextTree: FileNode[] = [{ name: 'new.txt', type: 'file' }];
+		const session = createMockSession({ fileTree: initialTree });
+
+		useSessionStore.setState({
+			sessions: [session],
+			activeSessionId: session.id,
+			sessionsLoaded: true,
+		});
+
+		const state = createSessionsState([session]);
+		const { result } = renderHook(() =>
+			useFileTreeManagement({
+				sessionsRef: state.sessionsRef,
+				setSessions: state.setSessions,
+				activeSessionId: session.id,
+				// Omit activeSession: exercise the self-sourced store path.
+				rightPanelRef: {
+					current: { refreshHistoryPanel: vi.fn() },
+				} as RefObject<RightPanelHandle | null>,
+			})
+		);
+
+		expect(result.current.filteredFileTree).toEqual(initialTree);
+
+		act(() => {
+			useSessionStore.setState({
+				sessions: [{ ...session, fileTree: nextTree }],
+				activeSessionId: session.id,
+			});
+		});
+
+		expect(result.current.filteredFileTree).toEqual(nextTree);
 	});
 });

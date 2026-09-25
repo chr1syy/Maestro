@@ -1,10 +1,19 @@
-import type { AgentConfig, Session, ToolType, Theme } from '../../types';
+import type React from 'react';
+import type { AdditionalDirectory, AgentConfig, Session, ToolType, Theme } from '../../types';
+import { PICKABLE_AGENT_IDS } from '../../../shared/agentMetadata';
 
-// Maximum character length for nudge message
+// Maximum character length for nudge message and new session message
 export const NUDGE_MESSAGE_MAX_LENGTH = 1000;
+export const NEW_SESSION_MESSAGE_MAX_LENGTH = 5000;
 
-// Supported agents that are fully implemented
-export const SUPPORTED_AGENTS = ['claude-code', 'opencode', 'codex', 'factory-droid'];
+/**
+ * Providers a user may pick in the New Agent modal.
+ *
+ * Re-exported from the shared picker registry rather than hand-written, so this
+ * list cannot drift from the wizard's tile strip or the Group Chat moderator
+ * dropdown the way it did while Grok and Qwen3 Coder were listed only here.
+ */
+export const SUPPORTED_AGENTS: readonly string[] = PICKABLE_AGENT_IDS;
 
 export interface AgentDebugInfo {
 	agentId: string;
@@ -22,6 +31,8 @@ export interface SessionSshRemoteConfig {
 	enabled: boolean;
 	remoteId: string | null;
 	workingDirOverride?: string;
+	syncHistory?: boolean;
+	shareHistoryToProjectDir?: boolean;
 }
 
 export interface NewInstanceModalProps {
@@ -32,17 +43,30 @@ export interface NewInstanceModalProps {
 		workingDir: string,
 		name: string,
 		nudgeMessage?: string,
+		newSessionMessage?: string,
 		customPath?: string,
 		customArgs?: string,
 		customEnvVars?: Record<string, string>,
 		customModel?: string,
 		customContextWindow?: number,
 		customProviderPath?: string,
-		sessionSshRemoteConfig?: SessionSshRemoteConfig
+		sessionSshRemoteConfig?: SessionSshRemoteConfig,
+		customEffort?: string,
+		groupId?: string,
+		enableMaestroP?: boolean,
+		maestroPPath?: string,
+		maestroPMode?: 'interactive' | 'dynamic',
+		retryOnAvailabilityErrors?: boolean,
+		retryOnTokenExhaustion?: boolean,
+		additionalDirectories?: AdditionalDirectory[],
+		/** Codex only: spend a reset credit automatically on quota exhaustion. Defaults off. */
+		codexAutoResetOnExhaustion?: boolean
 	) => void;
 	theme: Theme;
 	existingSessions: Session[];
 	sourceSession?: Session; // Optional session to duplicate from
+	presetGroupId?: string | null; // Group to place the new agent in (ignored when duplicating - duplicate inherits source's group)
+	presetWorkingDir?: string | null; // Working directory to seed, plus a default name from its basename (ignored when duplicating - duplicate inherits source's cwd)
 }
 
 export interface EditAgentModalProps {
@@ -53,12 +77,28 @@ export interface EditAgentModalProps {
 		name: string,
 		toolType?: ToolType,
 		nudgeMessage?: string,
+		newSessionMessage?: string,
 		customPath?: string,
 		customArgs?: string,
 		customEnvVars?: Record<string, string>,
 		customModel?: string,
+		customEffort?: string,
 		customContextWindow?: number,
-		sessionSshRemoteConfig?: SessionSshRemoteConfig
+		sessionSshRemoteConfig?: SessionSshRemoteConfig,
+		enableMaestroP?: boolean,
+		maestroPPath?: string,
+		maestroPMode?: 'interactive' | 'dynamic',
+		retryOnAvailabilityErrors?: boolean,
+		retryOnTokenExhaustion?: boolean,
+		additionalDirectories?: AdditionalDirectory[],
+		/** Provenance of `customContextWindow` (finding AD1). */
+		contextWindowSource?: 'user-edited',
+		/** Env vars parked with the eye button: kept, but never handed to a spawn. */
+		customEnvVarsDisabled?: Record<string, string>,
+		/** New working directory; `undefined` when the user left it unchanged. */
+		workingDirectory?: string,
+		/** Codex only: spend a reset credit automatically on quota exhaustion. Defaults off. */
+		codexAutoResetOnExhaustion?: boolean
 	) => void;
 	theme: Theme;
 	session: Session | null;
@@ -77,6 +117,12 @@ export interface NudgeMessageFieldProps {
 	value: string;
 	onChange: (value: string) => void;
 	maxLength?: number;
+	label?: string;
+	labelSuffix?: string;
+	description?: React.ReactNode;
+	placeholder?: string;
+	/** Key the user's dragged textarea height is remembered under. */
+	sizeKey?: string;
 }
 
 export interface RemotePathStatusProps {
@@ -89,7 +135,16 @@ export interface AgentPickerGridProps {
 	theme: Theme;
 	loading: boolean;
 	sshConnectionError: string | null;
-	sortedAgents: AgentConfig[];
+	/** The rows to render - already sorted AND filtered by the availability toggle. */
+	visibleAgents: AgentConfig[];
+	/** Supported providers detected on the target machine, across the WHOLE list. */
+	availableProviderCount: number;
+	/** Supported providers in total. Never the length of `visibleAgents`. */
+	totalProviderCount: number;
+	/** Follows "available" in the summary - "locally" or "on <host>". */
+	providerLocationLabel: string;
+	showAllProviders: boolean;
+	onShowAllProvidersChange: (showAll: boolean) => void;
 	selectedAgent: string;
 	expandedAgent: string | null;
 	refreshingAgent: string | null;
@@ -97,6 +152,10 @@ export interface AgentPickerGridProps {
 	customAgentPaths: Record<string, string>;
 	customAgentArgs: Record<string, string>;
 	customAgentEnvVars: Record<string, Record<string, string>>;
+	enableMaestroPByAgent?: Record<string, boolean>;
+	maestroPModeByAgent?: Record<string, 'interactive' | 'dynamic'>;
+	maestroPPathByAgent?: Record<string, string>;
+	detectedMaestroPPath?: string;
 	agentConfigs: Record<string, Record<string, any>>;
 	availableModels: Record<string, string[]>;
 	loadingModels: Record<string, boolean>;
@@ -106,6 +165,9 @@ export interface AgentPickerGridProps {
 	onDismissDebug: () => void;
 	onCustomPathChange: (agentId: string, value: string) => void;
 	onCustomArgsChange: (agentId: string, value: string) => void;
+	onEnableMaestroPChange?: (agentId: string, value: boolean) => void;
+	onMaestroPModeChange?: (agentId: string, value: 'interactive' | 'dynamic') => void;
+	onMaestroPPathChange?: (agentId: string, value: string) => void;
 	onEnvVarKeyChange: (agentId: string, oldKey: string, newKey: string, value: string) => void;
 	onEnvVarValueChange: (agentId: string, key: string, value: string) => void;
 	onEnvVarRemove: (agentId: string, key: string) => void;
@@ -118,4 +180,7 @@ export interface AgentPickerGridProps {
 	dynamicOptions?: Record<string, Record<string, string[]>>;
 	loadingDynamicOptions?: Record<string, boolean>;
 	onLoadDynamicOptionsForAgent?: (agentId: string) => void;
+	/** Codex automatic usage resets, per agent id. Defaults off when absent. */
+	codexAutoResetByAgent?: Record<string, boolean>;
+	onCodexAutoResetChange?: (agentId: string, value: boolean) => void;
 }

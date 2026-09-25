@@ -1,7 +1,9 @@
 import { ipcMain } from 'electron';
 import Store from 'electron-store';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import type { AgentConfigsData, SessionsData } from '../../stores/types';
 import {
 	AgentDetector,
 	AGENT_DEFINITIONS,
@@ -10,7 +12,13 @@ import {
 	extractModelsFromConfig,
 	getOpenCodeConfigPaths,
 	getOpenCodeCommandDirs,
+	getCodexSkillDirs,
+	getCodexPromptDirs,
+	parseCodexMarkdownDoc,
 } from '../../agents';
+import { capabilitySnapshots } from '../../agents/capability-snapshot';
+import type { AgentCapabilitiesSnapshotMap } from '../../../shared/agentCapabilities';
+import { probeRemoteMaestroP, ensureRemoteMaestroPProbed } from '../../agents/probeRemoteMaestroP';
 import { execFileNoThrow } from '../../utils/execFile';
 import { logger } from '../../utils/logger';
 import { getWhichCommand } from '../../../shared/platformDetection';
@@ -22,7 +30,38 @@ import {
 import { buildSshCommand, RemoteCommandOptions } from '../../utils/ssh-command-builder';
 import { stripAnsi } from '../../utils/stripAnsi';
 import { SshRemoteConfig } from '../../../shared/types';
+import type { AgentCapabilities } from '../../../shared/types';
 import { MaestroSettings } from './persistence';
+import { captureException } from '../../utils/sentry';
+import { parseJsonWithBom } from '../../../shared/jsonUtils';
+import {
+	getAllSnapshots as getAllClaudeUsageSnapshots,
+	getRetainedSnapshots as getRetainedClaudeUsageSnapshots,
+	resolveConfigDirKey,
+} from '../../stores/claudeUsageStore';
+import { getLimitResetAt } from '../../agents/limitResetEstimator';
+import {
+	getAllCodexUsageSnapshots,
+	getRetainedCodexUsageSnapshots,
+	resolveCodexHomeKey,
+} from '../../stores/codexUsageStore';
+import { pruneMissingQuotaAccounts } from '../../stores/quotaAccountsStore';
+import type { UsageSnapshot } from '../../agents/claude-mode-selector';
+import type { CodexUsageSnapshot } from '../../stores/codexUsageStore';
+import {
+	runStartupUsageSampling,
+	getMaestroPBinPath,
+	discoverClaudeConfigDirs,
+} from '../../agents/claude-usage-startup';
+import { runCodexUsageSampling, discoverCodexHomes } from '../../agents/codex-usage-startup';
+import {
+	consumeCodexResetCredit,
+	fetchCodexResetCredits,
+	type CodexResetCreditsReadResult,
+} from '../../agents/codex-reset-credits';
+import type { CodexResetCreditConsumeResult } from '../../../shared/codexResetCredits';
+import type { KnownAuthDirs } from '../../../shared/authPaths';
+import { rememberableEnvVarKeys, type KnownEnvVarKeys } from '../../../shared/envVarCatalog';
 
 const LOG_CONTEXT = '[AgentDetector]';
 const CONFIG_LOG_CONTEXT = '[AgentConfig]';
@@ -35,6 +74,100 @@ const handlerOpts = (
 	context,
 	operation,
 });
+
+type AuthPathResolver = (env: NodeJS.ProcessEnv) => string;
+
+function getCustomEnvVars(value: unknown): Record<string, unknown> {
+	if (!value || typeof value !== 'object' || !('customEnvVars' in value)) {
+		return {};
+	}
+	const customEnvVars = value.customEnvVars;
+	return customEnvVars && typeof customEnvVars === 'object'
+		? (customEnvVars as Record<string, unknown>)
+		: {};
+}
+
+function isSshEnabled(value: unknown): boolean {
+	if (value === true || value === 1) return true;
+	return typeof value === 'string' && (value === '1' || value.toLowerCase() === 'true');
+}
+
+function isLocalSession(session: Record<string, unknown>): boolean {
+	if (typeof session.sshRemoteId === 'string' && session.sshRemoteId.length > 0) {
+		return false;
+	}
+	const sshRemoteConfig = session.sessionSshRemoteConfig;
+	if (
+		sshRemoteConfig &&
+		typeof sshRemoteConfig === 'object' &&
+		'enabled' in sshRemoteConfig &&
+		isSshEnabled(sshRemoteConfig.enabled)
+	) {
+		return false;
+	}
+	return typeof session.cwd !== 'string' || !session.cwd.includes('://');
+}
+
+function collectKnownAuthPaths(
+	agentEnvVars: Record<string, unknown>,
+	sessions: Array<Record<string, unknown>>,
+	toolType: string,
+	envVarName: 'CLAUDE_CONFIG_DIR' | 'CODEX_HOME',
+	resolveKey: AuthPathResolver
+): string[] {
+	const pathsByKey = new Map<string, string>();
+	const addPath = (envVars: Record<string, unknown>) => {
+		const value = envVars[envVarName];
+		if (typeof value !== 'string' || value.length === 0) return;
+		const canonicalPath = resolveKey({ [envVarName]: value });
+		if (!pathsByKey.has(canonicalPath)) {
+			pathsByKey.set(canonicalPath, canonicalPath);
+		}
+	};
+
+	addPath(agentEnvVars);
+	for (const session of sessions) {
+		if (session.toolType !== toolType || !isLocalSession(session)) continue;
+		addPath({ ...agentEnvVars, ...getCustomEnvVars(session) });
+	}
+
+	return Array.from(pathsByKey.values()).sort((a, b) => a.localeCompare(b));
+}
+/** One env-var record off a config or session, active or parked. */
+function envVarRecord(value: unknown, field: string): Record<string, unknown> {
+	if (!value || typeof value !== 'object' || !(field in value)) return {};
+	const record = (value as Record<string, unknown>)[field];
+	return record && typeof record === 'object' ? (record as Record<string, unknown>) : {};
+}
+
+// Copilot CLI built-in slash commands (always available in interactive mode)
+const COPILOT_BUILTIN_COMMANDS = [
+	'help',
+	'clear',
+	'compact',
+	'context',
+	'model',
+	'usage',
+	'session',
+	'share',
+	'mcp',
+	'fleet',
+	'tasks',
+	'delegate',
+	'review',
+];
+
+/**
+ * Discover GitHub Copilot CLI slash commands.
+ *
+ * Unlike Claude Code (which emits commands via its init JSON event), Copilot
+ * commands are interactive-only and cannot be discovered by spawning the CLI
+ * in batch mode.  We return a static list of well-documented built-in commands.
+ */
+function discoverCopilotSlashCommands(): { name: string; description: string }[] {
+	logger.info(`Discovered ${COPILOT_BUILTIN_COMMANDS.length} Copilot slash commands`, LOG_CONTEXT);
+	return COPILOT_BUILTIN_COMMANDS.map((cmd) => ({ name: cmd, description: '' }));
+}
 
 /**
  * Discover OpenCode slash commands by reading from disk.
@@ -49,7 +182,7 @@ const handlerOpts = (
  *    Windows: %LOCALAPPDATA%/opencode/)
  *
  * Built-in commands (init, review, undo, redo, share, help, models) are excluded
- * because they only work in OpenCode's interactive TUI mode — they have no prompt
+ * because they only work in OpenCode's interactive TUI mode - they have no prompt
  * .md file and cannot be executed via batch mode (`opencode run`).
  *
  * Unlike Claude Code (which emits commands via init event), OpenCode commands
@@ -58,6 +191,79 @@ const handlerOpts = (
 interface DiscoveredCommand {
 	name: string;
 	prompt?: string; // .md file content for custom commands; absent for built-ins
+	description?: string; // frontmatter description for Claude Code skills; absent otherwise
+}
+
+/**
+ * Read descriptions for Claude Code skills from disk.
+ *
+ * Claude Code emits skill names via its init message but without descriptions,
+ * so we read the frontmatter from each skill's SKILL.md (with skill.md fallback
+ * for legacy layouts). Project-local skills take precedence over user-level skills.
+ *
+ * Returns a map of skill directory name → description. Names with no description
+ * frontmatter are omitted rather than returned as empty strings, so the renderer
+ * can fall back to its built-in description table.
+ */
+async function readClaudeSkillDescriptions(cwd: string): Promise<Map<string, string>> {
+	const descriptions = new Map<string, string>();
+	const homeDir = os.homedir();
+	const skillDirs = [
+		path.join(cwd, '.claude', 'skills'), // project-local (wins)
+		path.join(homeDir, '.claude', 'skills'), // user-level
+	];
+
+	// Extract the YAML frontmatter block from a file so we don't pick up a
+	// body line that happens to start with "description:". Matches the
+	// bounded parser used by scanSkillsDir in claude.ts.
+	const extractFrontmatter = (content: string): string | null => {
+		const trimmed = content.trimStart();
+		if (!trimmed.startsWith('---')) return null;
+		const endIndex = trimmed.indexOf('\n---', 3);
+		if (endIndex === -1) return null;
+		return trimmed.slice(3, endIndex);
+	};
+
+	for (const dir of skillDirs) {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			// Missing skills directory is the norm - skip. Anything else
+			// (permission errors, IO errors) should surface to Sentry.
+			if (isMissingEntryError(error)) continue;
+			throw error;
+		}
+		if (!Array.isArray(entries)) continue;
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			if (descriptions.has(entry.name)) continue; // project-local already set
+			for (const candidate of ['SKILL.md', 'skill.md']) {
+				let content: string;
+				try {
+					content = await fs.promises.readFile(path.join(dir, entry.name, candidate), 'utf-8');
+				} catch (error) {
+					if (isMissingEntryError(error)) continue;
+					throw error;
+				}
+				const frontmatter = extractFrontmatter(content);
+				if (frontmatter) {
+					const match = frontmatter.match(/^description:\s*(.+)$/m);
+					if (match) {
+						descriptions.set(entry.name, match[1].trim().replace(/^["']|["']$/g, ''));
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	return descriptions;
+}
+
+function isMissingEntryError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 async function discoverOpenCodeSlashCommands(cwd: string): Promise<DiscoveredCommand[]> {
@@ -145,10 +351,98 @@ async function discoverOpenCodeSlashCommands(cwd: string): Promise<DiscoveredCom
 }
 
 /**
- * Interface for agent configuration store data
+ * Discover Codex slash commands by reading from disk.
+ *
+ * Codex commands come from these sources (checked in priority order):
+ * 1. Project-local skills:  <cwd>/.codex/skills/<name>/SKILL.md
+ * 2. User-global skills:    <CODEX_HOME>/skills/<name>/SKILL.md
+ * 3. Project-local prompts: <cwd>/.codex/prompts/<name>.md
+ * 4. User-global prompts:   <CODEX_HOME>/prompts/<name>.md
+ *
+ * Every discovered command carries the file body as its `prompt`, because
+ * Maestro drives Codex through headless `codex exec`, where the CLI does not
+ * expand `/name` itself - the renderer substitutes the body before sending
+ * (see `useInputProcessing`), exactly as it already does for OpenCode.
+ *
+ * Codex's own built-in commands (/init, /compact, /review, ...) are excluded:
+ * they are implemented inside the TUI and have no on-disk prompt to inline, so
+ * offering them would send a literal "/compact" to the model.
  */
-interface AgentConfigsData {
-	configs: Record<string, Record<string, any>>;
+async function discoverCodexSlashCommands(cwd: string): Promise<DiscoveredCommand[]> {
+	const commands = new Map<string, DiscoveredCommand>();
+
+	const addCommand = (name: string, content: string) => {
+		if (commands.has(name)) return; // project-local wins over global
+		const doc = parseCodexMarkdownDoc(content);
+		// `user-invocable: false` marks a background/reference skill that Codex
+		// itself never offers as a `/name`, so Maestro must not either.
+		if (!doc.userInvocable) return;
+		if (!doc.body) return;
+		commands.set(name, { name, prompt: doc.body, description: doc.description });
+	};
+
+	// Skills: one directory per command, holding a SKILL.md.
+	const addSkillsFromDir = async (dir: string) => {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if (isMissingEntryError(error)) {
+				logger.debug(`Codex skills directory not found: ${dir}`, LOG_CONTEXT);
+				return;
+			}
+			throw error;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			// `.system/` holds Codex's own internal skills, and dotted names are
+			// hidden from its picker.
+			if (entry.name.startsWith('.')) continue;
+			if (commands.has(entry.name)) continue;
+			try {
+				const raw = await fs.promises.readFile(path.join(dir, entry.name, 'SKILL.md'), 'utf-8');
+				addCommand(entry.name, raw);
+			} catch (error) {
+				// A directory without a SKILL.md is not a skill.
+				if (!isMissingEntryError(error)) throw error;
+			}
+		}
+	};
+
+	// Prompts: one .md file per command.
+	const addPromptsFromDir = async (dir: string) => {
+		let files: string[];
+		try {
+			files = await fs.promises.readdir(dir);
+		} catch (error) {
+			if (isMissingEntryError(error)) {
+				logger.debug(`Codex prompts directory not found: ${dir}`, LOG_CONTEXT);
+				return;
+			}
+			throw error;
+		}
+		for (const file of files) {
+			if (!file.endsWith('.md')) continue;
+			const name = file.replace(/\.md$/, '');
+			if (commands.has(name)) continue;
+			try {
+				addCommand(name, await fs.promises.readFile(path.join(dir, file), 'utf-8'));
+			} catch (error) {
+				if (!isMissingEntryError(error)) throw error;
+			}
+		}
+	};
+
+	for (const dir of getCodexSkillDirs(cwd)) {
+		await addSkillsFromDir(dir);
+	}
+	for (const dir of getCodexPromptDirs(cwd)) {
+		await addPromptsFromDir(dir);
+	}
+
+	const commandList = Array.from(commands.values());
+	logger.info(`Discovered ${commandList.length} Codex slash commands`, LOG_CONTEXT);
+	return commandList;
 }
 
 /**
@@ -159,6 +453,13 @@ export interface AgentsHandlerDependencies {
 	agentConfigsStore: Store<AgentConfigsData>;
 	/** The settings store (MaestroSettings) - required for SSH remote lookup */
 	settingsStore?: Store<MaestroSettings>;
+	/**
+	 * Sessions store - required for handlers that need to read or persist
+	 * per-session state (e.g. resolving the Batch Mode usage snapshot for a
+	 * specific tab). Optional so registration doesn't break for legacy boot
+	 * paths that wire only the read-only handlers.
+	 */
+	sessionsStore?: Store<SessionsData>;
 }
 
 /**
@@ -186,37 +487,37 @@ function getSshRemoteById(
 	return config;
 }
 
+/** Drop every function-valued property so the object survives structured clone. */
+function withoutFunctionProps(obj: any) {
+	return Object.fromEntries(Object.entries(obj).filter(([, value]) => typeof value !== 'function'));
+}
+
 /**
  * Helper to strip non-serializable functions from agent configs.
- * Agent configs can have function properties that cannot be sent over IPC:
- * - argBuilder in configOptions
- * - resumeArgs, modelArgs, workingDirArgs, imageArgs, promptArgs on the agent config
+ * Agent definitions carry arg builders (resumeArgs, modelArgs, additionalDirArgs,
+ * argBuilder in configOptions, ...) that cannot be sent over IPC - a single one left
+ * behind makes the whole detect response fail to clone, so this drops them by type
+ * rather than by name.
+ *
+ * Also attaches the current capability snapshot (if any) for the requested
+ * environment so renderer code can render status pills directly from the
+ * detect result.
  */
-function stripAgentFunctions(agent: any) {
+function stripAgentFunctions(agent: any, sshRemoteId?: string) {
 	if (!agent) return null;
 
-	// Destructure to remove function properties from agent config
-	const {
-		resumeArgs: _resumeArgs,
-		modelArgs: _modelArgs,
-		workingDirArgs: _workingDirArgs,
-		imageArgs: _imageArgs,
-		promptArgs: _promptArgs,
-		...serializableAgent
-	} = agent;
+	const snapshot = agent.id ? capabilitySnapshots.get(agent.id, sshRemoteId) : undefined;
 
 	return {
-		...serializableAgent,
-		configOptions: agent.configOptions?.map((opt: any) => {
-			const { argBuilder: _argBuilder, ...serializableOpt } = opt;
-			return serializableOpt;
-		}),
+		...withoutFunctionProps(agent),
+		configOptions: agent.configOptions?.map(withoutFunctionProps),
+		...(snapshot ? { snapshot } : {}),
 	};
 }
 
 /**
  * Detect agents on a remote SSH host.
- * Uses 'which' command over SSH to check for agent binaries.
+ * Uses POSIX 'command -v' over SSH to check for agent binaries.
  * Includes a timeout to handle unreachable hosts gracefully.
  */
 async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
@@ -228,10 +529,13 @@ async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
 	let connectionError: string | undefined;
 
 	for (const agentDef of AGENT_DEFINITIONS) {
-		// Build SSH command to check for the binary using 'which'
+		// Build SSH command to check for the binary using POSIX 'command -v'.
+		// Preferred over 'which' because it's a shell builtin (no PATH lookup needed),
+		// avoids /usr/bin/which on hosts without it, and behaves consistently across
+		// bash/dash/zsh. The command runs inside /bin/bash via buildSshCommand().
 		const remoteOptions: RemoteCommandOptions = {
-			command: 'which',
-			args: [agentDef.binaryName],
+			command: 'command',
+			args: ['-v', agentDef.binaryName],
 		};
 
 		try {
@@ -284,6 +588,30 @@ async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
 				capabilities: getAgentCapabilities(agentDef.id),
 				error: connectionError,
 			});
+
+			// Mirror remote detection into the snapshot store, keyed by the
+			// stable SSH remote UUID so each host has its own readiness pill.
+			// Skip when the observed state matches the existing snapshot -
+			// otherwise an `agents:reprobe` for a single agent would emit
+			// snapshot-updated broadcasts for every other agent on the host.
+			if (agentDef.id !== 'terminal') {
+				const existing = capabilitySnapshots.get(agentDef.id, sshRemote.id);
+				if (available) {
+					if (existing?.status === 'auth_required') {
+						// no-op: reactive auth_required state stays intact
+					} else if (existing?.status !== 'ok' || existing.path !== path) {
+						capabilitySnapshots.markOk(agentDef.id, { path }, sshRemote.id);
+					}
+				} else if (!connectionError && existing?.status !== 'not_installed') {
+					capabilitySnapshots.markNotInstalled(agentDef.id, sshRemote.id);
+				} else if (connectionError && existing?.status !== 'failed') {
+					// In-band SSH connection failure: stderr matched a connection
+					// error without throwing, so the catch below never runs. Resolve
+					// a pending `probing` snapshot (from an `agents:reprobe`) to
+					// `failed` instead of leaving the status pill spinning forever.
+					capabilitySnapshots.markFailed(agentDef.id, connectionError, sshRemote.id);
+				}
+			}
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			connectionError = errorMessage;
@@ -297,6 +625,9 @@ async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
 				capabilities: getAgentCapabilities(agentDef.id),
 				error: `Failed to connect: ${errorMessage}`,
 			});
+			if (agentDef.id !== 'terminal') {
+				capabilitySnapshots.markFailed(agentDef.id, errorMessage, sshRemote.id);
+			}
 		}
 	}
 
@@ -306,6 +637,15 @@ async function detectAgentsRemote(sshRemote: SshRemoteConfig): Promise<any[]> {
 			`Failed to connect to SSH remote ${sshRemote.host}: ${connectionError}`,
 			LOG_CONTEXT
 		);
+	}
+
+	// Piggyback a maestro-p availability probe on the same connection. The
+	// Token Source selector disables the TUI option, and resolveClaudeSpawnMode
+	// falls a remote TUI spawn back to API, when the remote can't run it. Only
+	// when the connection actually worked - an unreachable host leaves the
+	// availability unknown rather than caching a false.
+	if (connectionSucceeded) {
+		await probeRemoteMaestroP(sshRemote);
 	}
 
 	return agents;
@@ -438,7 +778,7 @@ async function discoverModelsRemote(
 
 	const remoteOptions: RemoteCommandOptions = {
 		command: agentDef.binaryName,
-		args: ['models'],
+		args: agentId === 'omp' ? ['models', '--json'] : ['models'],
 		env: sshRemote.remoteEnv,
 	};
 
@@ -476,16 +816,40 @@ async function discoverModelsRemote(
 
 		const seen = new Set<string>();
 		const models: string[] = [];
+		const sanitizedStdout = stripAnsi(result.stdout);
 
-		// Source 1: CLI-discovered models
-		const cliModels = stripAnsi(result.stdout)
-			.split('\n')
-			.map((l) => l.trim())
-			.filter((l) => l.length > 0);
-		for (const m of cliModels) {
-			if (!seen.has(m)) {
-				seen.add(m);
-				models.push(m);
+		if (agentId === 'omp') {
+			// `omp models` prints a human table; the machine-readable form is
+			// `omp models --json` -> { models: [{ selector, id, ... }] }. Use the
+			// provider-qualified selector, mirroring the local discovery path so the
+			// remote picker is not filled with table headings/box rows.
+			try {
+				const parsed = parseJsonWithBom<{ models?: Array<{ id?: string; selector?: string }> }>(
+					sanitizedStdout
+				);
+				for (const entry of parsed.models ?? []) {
+					const modelId = entry.selector || entry.id;
+					if (modelId && !seen.has(modelId)) {
+						seen.add(modelId);
+						models.push(modelId);
+					}
+				}
+			} catch (parseError) {
+				logger.warn('Failed to parse remote omp models --json output', LOG_CONTEXT, {
+					error: parseError,
+				});
+			}
+		} else {
+			// Source 1: CLI-discovered models (one per line)
+			const cliModels = sanitizedStdout
+				.split('\n')
+				.map((l) => l.trim())
+				.filter((l) => l.length > 0);
+			for (const m of cliModels) {
+				if (!seen.has(m)) {
+					seen.add(m);
+					models.push(m);
+				}
 			}
 		}
 
@@ -510,7 +874,7 @@ async function discoverModelsRemote(
 
 		return models;
 	} catch (error) {
-		// Timeout is an expected SSH failure — return empty gracefully
+		// Timeout is an expected SSH failure - return empty gracefully
 		if (error instanceof Error && error.message.includes('SSH model discovery timed out')) {
 			logger.warn(
 				`Timed out discovering models for "${agentDef.name}" on ${sshRemote.host}`,
@@ -661,7 +1025,7 @@ async function discoverOpenCodeSlashCommandsRemote(
 }
 
 export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
-	const { getAgentDetector, agentConfigsStore, settingsStore } = deps;
+	const { getAgentDetector, agentConfigsStore, settingsStore, sessionsStore } = deps;
 
 	// Detect all available agents (supports SSH remote detection via optional sshRemoteId)
 	ipcMain.handle(
@@ -677,13 +1041,16 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 						LOG_CONTEXT
 					);
 					return AGENT_DEFINITIONS.map((agentDef) =>
-						stripAgentFunctions({
-							...agentDef,
-							available: false,
-							path: undefined,
-							capabilities: getAgentCapabilities(agentDef.id),
-							error: `SSH remote configuration not found: ${sshRemoteId}`,
-						})
+						stripAgentFunctions(
+							{
+								...agentDef,
+								available: false,
+								path: undefined,
+								capabilities: getAgentCapabilities(agentDef.id),
+								error: `SSH remote configuration not found: ${sshRemoteId}`,
+							},
+							sshRemoteId
+						)
 					);
 				}
 				logger.info(`Detecting agents on remote host: ${sshConfig.host}`, LOG_CONTEXT);
@@ -695,7 +1062,7 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 						agents: agents.map((a: any) => a.id),
 					}
 				);
-				return agents.map(stripAgentFunctions);
+				return agents.map((a) => stripAgentFunctions(a, sshConfig.id));
 			}
 
 			// Local detection
@@ -706,7 +1073,7 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 				agents: agents.map((a) => a.id),
 			});
 			// Strip argBuilder functions before sending over IPC
-			return agents.map(stripAgentFunctions);
+			return agents.map((a) => stripAgentFunctions(a));
 		})
 	);
 
@@ -754,13 +1121,13 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 				}
 
 				logger.info(`Agent refresh debug info for ${agentId}`, LOG_CONTEXT, debugInfo);
-				return { agents: agents.map(stripAgentFunctions), debugInfo };
+				return { agents: agents.map((a) => stripAgentFunctions(a)), debugInfo };
 			}
 
 			logger.info(`Refreshed agent detection`, LOG_CONTEXT, {
 				agents: agents.map((a) => ({ id: a.id, available: a.available, path: a.path })),
 			});
-			return { agents: agents.map(stripAgentFunctions), debugInfo: null };
+			return { agents: agents.map((a) => stripAgentFunctions(a)), debugInfo: null };
 		})
 	);
 
@@ -780,13 +1147,16 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 					if (!agentDef) {
 						throw new Error(`Unknown agent: ${agentId}`);
 					}
-					return stripAgentFunctions({
-						...agentDef,
-						available: false,
-						path: undefined,
-						capabilities: getAgentCapabilities(agentDef.id),
-						error: `SSH remote configuration not found: ${sshRemoteId}`,
-					});
+					return stripAgentFunctions(
+						{
+							...agentDef,
+							available: false,
+							path: undefined,
+							capabilities: getAgentCapabilities(agentDef.id),
+							error: `SSH remote configuration not found: ${sshRemoteId}`,
+						},
+						sshRemoteId
+					);
 				}
 
 				logger.info(`Getting agent ${agentId} on remote host: ${sshConfig.host}`, LOG_CONTEXT);
@@ -797,10 +1167,11 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 					throw new Error(`Unknown agent: ${agentId}`);
 				}
 
-				// Build SSH command to check for the binary using 'which'
+				// Build SSH command to check for the binary using POSIX 'command -v'.
+				// See detectAgentsRemote() for rationale.
 				const remoteOptions: RemoteCommandOptions = {
-					command: 'which',
-					args: [agentDef.binaryName],
+					command: 'command',
+					args: ['-v', agentDef.binaryName],
 				};
 
 				try {
@@ -858,25 +1229,45 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 						logger.debug(`Agent "${agentDef.name}" not found on remote`, LOG_CONTEXT);
 					}
 
-					return stripAgentFunctions({
-						...agentDef,
-						available,
-						path,
-						capabilities: getAgentCapabilities(agentDef.id),
-						error: connectionError,
-					});
+					if (agentDef.id !== 'terminal') {
+						if (available) {
+							const existing = capabilitySnapshots.get(agentDef.id, sshConfig.id);
+							if (existing?.status !== 'auth_required') {
+								capabilitySnapshots.markOk(agentDef.id, { path }, sshConfig.id);
+							}
+						} else if (!connectionError) {
+							capabilitySnapshots.markNotInstalled(agentDef.id, sshConfig.id);
+						}
+					}
+
+					return stripAgentFunctions(
+						{
+							...agentDef,
+							available,
+							path,
+							capabilities: getAgentCapabilities(agentDef.id),
+							error: connectionError,
+						},
+						sshConfig.id
+					);
 				} catch (error) {
 					const errorMessage = error instanceof Error ? error.message : String(error);
 					logger.warn(
 						`Failed to check agent "${agentDef.name}" on remote: ${errorMessage}`,
 						LOG_CONTEXT
 					);
-					return stripAgentFunctions({
-						...agentDef,
-						available: false,
-						capabilities: getAgentCapabilities(agentDef.id),
-						error: `Failed to connect: ${errorMessage}`,
-					});
+					if (agentDef.id !== 'terminal') {
+						capabilitySnapshots.markFailed(agentDef.id, errorMessage, sshConfig.id);
+					}
+					return stripAgentFunctions(
+						{
+							...agentDef,
+							available: false,
+							capabilities: getAgentCapabilities(agentDef.id),
+							error: `Failed to connect: ${errorMessage}`,
+						},
+						sshConfig.id
+					);
 				}
 			}
 
@@ -906,6 +1297,26 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 			logger.debug(`Getting capabilities for agent: ${agentId}`, LOG_CONTEXT);
 			return getAgentCapabilities(agentId);
 		})
+	);
+
+	// Get capabilities for EVERY known agent type in one round trip.
+	// The renderer capability cache is otherwise only populated for the agent
+	// types the user has actually opened, which makes "never looked it up"
+	// indistinguishable from "unsupported" for background work such as CLI
+	// dispatch. The lookup is a synchronous static map, so this is cheap.
+	ipcMain.handle(
+		'agents:getAllCapabilities',
+		withIpcErrorLogging(
+			handlerOpts('getAllCapabilities'),
+			async (): Promise<Record<string, AgentCapabilities>> => {
+				const all: Record<string, AgentCapabilities> = {};
+				for (const agentDef of AGENT_DEFINITIONS) {
+					all[agentDef.id] = getAgentCapabilities(agentDef.id);
+				}
+				logger.debug(`Getting capabilities for all ${Object.keys(all).length} agents`, LOG_CONTEXT);
+				return all;
+			}
+		)
 	);
 
 	// Get all configuration for an agent
@@ -1163,6 +1574,95 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 		})
 	);
 
+	// Return only account paths explicitly configured on local sessions or
+	// agent settings. This deliberately does not inspect the filesystem: stale
+	// config directories can trigger provider OAuth flows when sampled.
+	ipcMain.handle(
+		'agents:getKnownAuthDirs',
+		withIpcErrorLogging(
+			handlerOpts('getKnownAuthDirs', CONFIG_LOG_CONTEXT),
+			async (): Promise<KnownAuthDirs> => {
+				const allConfigs = agentConfigsStore.get('configs', {});
+				const sessions = sessionsStore?.get('sessions', []) ?? [];
+				return {
+					claudeConfigDirs: collectKnownAuthPaths(
+						getCustomEnvVars(allConfigs['claude-code']),
+						sessions,
+						'claude-code',
+						'CLAUDE_CONFIG_DIR',
+						resolveConfigDirKey
+					),
+					codexHomes: collectKnownAuthPaths(
+						getCustomEnvVars(allConfigs.codex),
+						sessions,
+						'codex',
+						'CODEX_HOME',
+						resolveCodexHomeKey
+					),
+				};
+			}
+		)
+	);
+
+	// Names the user has already set, so the env-var editors can offer them back
+	// instead of asking everyone to retype a variable they configured once. Only
+	// names travel; values stay where they were set, because a remembered value
+	// is often a credential and nothing here needs one.
+	ipcMain.handle(
+		'agents:getKnownEnvVarKeys',
+		withIpcErrorLogging(
+			handlerOpts('getKnownEnvVarKeys', CONFIG_LOG_CONTEXT),
+			async (): Promise<KnownEnvVarKeys> => {
+				const allConfigs = agentConfigsStore.get('configs', {});
+				const sessions = sessionsStore?.get('sessions', []) ?? [];
+
+				const byProvider = new Map<string, Set<string>>();
+				const remember = (toolType: unknown, source: Record<string, unknown>) => {
+					if (typeof toolType !== 'string' || toolType.length === 0) return;
+					const keys = [
+						...rememberableEnvVarKeys(envVarRecord(source, 'customEnvVars')),
+						...rememberableEnvVarKeys(envVarRecord(source, 'customEnvVarsDisabled')),
+					];
+					if (keys.length === 0) return;
+					let bucket = byProvider.get(toolType);
+					if (!bucket) {
+						bucket = new Set<string>();
+						byProvider.set(toolType, bucket);
+					}
+					for (const key of keys) bucket.add(key);
+				};
+
+				for (const [toolType, config] of Object.entries(allConfigs)) {
+					if (config && typeof config === 'object') {
+						remember(toolType, config as Record<string, unknown>);
+					}
+				}
+				for (const session of sessions) {
+					if (session && typeof session === 'object') {
+						remember(session.toolType, session);
+					}
+				}
+
+				const globalKeys = new Set<string>([
+					...rememberableEnvVarKeys(settingsStore?.get('shellEnvVars', {})),
+					...rememberableEnvVarKeys(settingsStore?.get('shellEnvVarsDisabled', {})),
+				]);
+
+				return {
+					byProvider: Object.fromEntries(
+						Array.from(byProvider.entries())
+							.sort(([a], [b]) => a.localeCompare(b))
+							.map(([toolType, keys]) => [
+								toolType,
+								Array.from(keys).sort((a, b) => a.localeCompare(b)),
+							])
+					),
+					global: Array.from(globalKeys).sort((a, b) => a.localeCompare(b)),
+				};
+			}
+		)
+	);
+
 	// Discover available models for an agent that supports model selection
 	// Supports SSH remote discovery via optional sshRemoteId parameter
 	ipcMain.handle(
@@ -1238,6 +1738,26 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 					return discoverOpenCodeSlashCommands(cwd);
 				}
 
+				if (agentId === 'codex') {
+					// Codex skills/prompts live on the machine that runs the CLI.
+					// For an SSH-remote agent that is the remote host, so return
+					// nothing rather than offering this machine's commands - a
+					// command the remote Codex has never heard of is worse than none.
+					if (sshRemoteId) {
+						logger.debug(
+							'Skipping Codex slash command discovery for SSH remote agent',
+							LOG_CONTEXT
+						);
+						return null;
+					}
+					return discoverCodexSlashCommands(cwd);
+				}
+
+				if (agentId === 'copilot-cli') {
+					return discoverCopilotSlashCommands();
+				}
+
+				// Only Claude Code supports slash command discovery via init message
 				if (agentId !== 'claude-code') {
 					logger.debug(`Agent ${agentId} does not support slash command discovery`, LOG_CONTEXT);
 					return null;
@@ -1297,7 +1817,26 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 									`Discovered ${msg.slash_commands.length} slash commands for ${agentId}`,
 									LOG_CONTEXT
 								);
-								return (msg.slash_commands as string[]).map((name: string) => ({ name }));
+								// Description enrichment is best-effort: a permission/IO
+								// error on the skills dir shouldn't lose the user's
+								// entire slash-command list. Capture the exception for
+								// Sentry and fall back to names-only.
+								let skillDescriptions = new Map<string, string>();
+								try {
+									skillDescriptions = await readClaudeSkillDescriptions(cwd);
+								} catch (err) {
+									void captureException(err);
+									logger.warn(
+										`Skill description enrichment failed; returning slash commands without descriptions`,
+										LOG_CONTEXT,
+										{ error: String(err) }
+									);
+								}
+								return (msg.slash_commands as string[]).map((name: string) => {
+									const lookupKey = name.startsWith('/') ? name.slice(1) : name;
+									const description = skillDescriptions.get(lookupKey);
+									return description ? { name, description } : { name };
+								});
 							}
 						} catch {
 							// Not valid JSON, skip
@@ -1307,11 +1846,328 @@ export function registerAgentsHandlers(deps: AgentsHandlerDependencies): void {
 					logger.warn(`No init message found in slash command discovery output`, LOG_CONTEXT);
 					return null;
 				} catch (error) {
+					void captureException(error);
 					logger.error(`Error discovering slash commands for ${agentId}`, LOG_CONTEXT, {
 						error: String(error),
 					});
 					return null;
 				}
+			}
+		)
+	);
+
+	// Get the persisted capability snapshot for a single agent in a given
+	// environment (local or per-SSH-remote). Returns null when no snapshot
+	// has been written yet - callers should fall back to detection.
+	ipcMain.handle(
+		'agents:getSnapshot',
+		withIpcErrorLogging(
+			handlerOpts('getSnapshot'),
+			async (agentId: string, sshRemoteId?: string) => {
+				return capabilitySnapshots.get(agentId, sshRemoteId) ?? null;
+			}
+		)
+	);
+
+	// Auto-detected maestro-p binary path (bundled with the app). The renderer's
+	// AgentConfigPanel shows this as helper text for the Batch Mode path override.
+	// Returns null when no bundled script can be located - usually means the user
+	// is running a dev build without `npm run build` having produced
+	// `dist/cli/maestro-p.js`.
+	ipcMain.handle(
+		'agents:getMaestroPDetectedPath',
+		withIpcErrorLogging(
+			handlerOpts('getMaestroPDetectedPath'),
+			async (): Promise<string | null> => {
+				return getMaestroPBinPath();
+			}
+		)
+	);
+
+	// Whether `maestro-p` is on the PATH of an SSH remote. The AgentConfigPanel
+	// uses this to disable the TUI token-source option (and default an
+	// unconfigured remote agent to API) when the remote can't run it. Returns a
+	// fresh cached result, otherwise probes the remote on demand. `null` means
+	// the availability could not be determined (no such remote / unreachable).
+	//
+	// `force` bypasses the TTL cache and re-probes the remote immediately - wired
+	// to the Refresh button next to the Claude Token Source selector, so a user
+	// who just installed maestro-p on the remote can re-check without waiting out
+	// the 5-minute cache window.
+	ipcMain.handle(
+		'agents:getRemoteMaestroPAvailable',
+		withIpcErrorLogging(
+			handlerOpts('getRemoteMaestroPAvailable'),
+			async (sshRemoteId?: string, force?: boolean): Promise<boolean | null> => {
+				if (!sshRemoteId) {
+					return null;
+				}
+				const sshConfig = getSshRemoteById(settingsStore, sshRemoteId);
+				if (!sshConfig) {
+					return null;
+				}
+				if (force) {
+					return (await probeRemoteMaestroP(sshConfig)) ?? null;
+				}
+				return (await ensureRemoteMaestroPProbed(sshConfig)) ?? null;
+			}
+		)
+	);
+
+	// Get every persisted snapshot - used by the renderer at startup to
+	// hydrate the agents store before the first live detection completes.
+	ipcMain.handle(
+		'agents:getAllSnapshots',
+		withIpcErrorLogging(
+			handlerOpts('getAllSnapshots'),
+			async (): Promise<AgentCapabilitiesSnapshotMap> => capabilitySnapshots.getAll()
+		)
+	);
+
+	// Re-probe a single agent: clear its snapshot, then run detection so a
+	// fresh status emits via the snapshot-updated event channel. The
+	// returned snapshot reflects the post-detection state.
+	ipcMain.handle(
+		'agents:reprobe',
+		withIpcErrorLogging(handlerOpts('reprobe'), async (agentId: string, sshRemoteId?: string) => {
+			// `terminal` is internal - detection paths intentionally skip it,
+			// so a probe call would leave the snapshot stuck at `probing` forever.
+			if (agentId === 'terminal') {
+				return null;
+			}
+
+			capabilitySnapshots.clear(agentId, sshRemoteId);
+
+			if (sshRemoteId) {
+				const sshConfig = getSshRemoteById(settingsStore, sshRemoteId);
+				if (!sshConfig) {
+					capabilitySnapshots.markFailed(
+						agentId,
+						`SSH remote not found: ${sshRemoteId}`,
+						sshRemoteId
+					);
+					return capabilitySnapshots.get(agentId, sshRemoteId) ?? null;
+				}
+				capabilitySnapshots.markProbing(agentId, sshRemoteId);
+				// `detectAgentsRemote` enumerates every agent on the remote in
+				// one SSH round-trip per binary. Other agents' snapshots only
+				// flip when their detected state actually changes (see
+				// `markOk` + detector's change-suppression logic) so the
+				// requested agent is the dominant signal.
+				await detectAgentsRemote(sshConfig);
+				return capabilitySnapshots.get(agentId, sshRemoteId) ?? null;
+			}
+
+			const agentDetector = requireDependency(getAgentDetector, 'Agent detector');
+			capabilitySnapshots.markProbing(agentId);
+			agentDetector.clearCache();
+			agentDetector.clearModelCache(agentId);
+			await agentDetector.detectAgents();
+			return capabilitySnapshots.get(agentId) ?? null;
+		})
+	);
+
+	// Snapshot mirror for the renderer: returns every RETAINED Claude plan usage
+	// snapshot keyed by canonical CLAUDE_CONFIG_DIR - expired ones included, so a
+	// panel row keeps its last known bars (the UI badges them stale) rather than
+	// vanishing 24h after the account's last agent moved away. Decision paths
+	// (mode selector, spawner) read the live map instead. The renderer's
+	// claudeUsageStore lazily fetches via this handler on first read and re-fetches
+	// whenever `process:claude-mode-resolved` arrives (the only signal that
+	// `sampleUsage()` may have refreshed the on-disk map).
+	ipcMain.handle(
+		'agents:getClaudeUsageSnapshots',
+		withIpcErrorLogging(
+			handlerOpts('getClaudeUsageSnapshots'),
+			async (): Promise<Record<string, UsageSnapshot>> => {
+				return getRetainedClaudeUsageSnapshots();
+			}
+		)
+	);
+
+	// Every Claude account this machine has: the `~/.claude-*` dirs on disk plus
+	// the ones Maestro has actually sampled (`quotaAccountsStore`). The second
+	// source is what keeps an account the discovery sweep cannot see - symlinked,
+	// outside $HOME, or named like a backup - on the dashboard once its agents
+	// move away. Remembered accounts whose dir is gone are forgotten here.
+	ipcMain.handle(
+		'agents:getClaudeUsageAccountKeys',
+		withIpcErrorLogging(handlerOpts('getClaudeUsageAccountKeys'), async (): Promise<string[]> => {
+			const configDirs = await discoverClaudeConfigDirs();
+			const keys = new Set(
+				configDirs.map((configDir) => resolveConfigDirKey({ CLAUDE_CONFIG_DIR: configDir }))
+			);
+			for (const key of await pruneMissingQuotaAccounts('claude-code')) {
+				keys.add(key);
+			}
+			return Array.from(keys);
+		})
+	);
+
+	// Best-effort estimate of when a paused agent's provider limit window reopens,
+	// used by auto-resume (Phase 3) to schedule its next probe. Claude reads its
+	// cached usage snapshot; other providers return undefined (fixed-interval
+	// fallback). Never throws - the renderer treats the result as advisory.
+	ipcMain.handle(
+		'agents:getLimitResetAt',
+		withIpcErrorLogging(
+			handlerOpts('getLimitResetAt'),
+			async (agentId: string, claudeConfigDir?: string): Promise<number | undefined> => {
+				return getLimitResetAt(agentId, claudeConfigDir);
+			}
+		)
+	);
+
+	// On-demand re-sampler. Delegates to the same `runStartupUsageSampling()`
+	// the boot path calls, so the dashboard / settings refresh button takes the
+	// exact same code path that populated the store on launch. Returns a count
+	// of how many account snapshots are now in the store after sampling - the
+	// renderer surfaces this in the optimistic spinner state.
+	//
+	// Reports `{ refreshed: 0 }` (rather than throwing) when a required dep is
+	// missing on this boot path - keeps the renderer's optimistic refresh flow
+	// from blowing up in dev/test contexts where the agents handler was wired
+	// without the full main dependency set.
+	ipcMain.handle(
+		'claude:usage:refresh-all',
+		withIpcErrorLogging(
+			handlerOpts('refreshClaudeUsage'),
+			async (): Promise<{ refreshed: number }> => {
+				const agentDetector = getAgentDetector();
+				if (!agentDetector || !sessionsStore || !settingsStore) {
+					logger.warn(
+						'Skipping claude:usage:refresh-all - agents handler missing required deps',
+						LOG_CONTEXT,
+						{
+							hasDetector: !!agentDetector,
+							hasSessionsStore: !!sessionsStore,
+							hasSettingsStore: !!settingsStore,
+						}
+					);
+					return { refreshed: 0 };
+				}
+
+				await runStartupUsageSampling({
+					sessionsStore,
+					agentConfigsStore,
+					settingsStore: settingsStore as unknown as Store<MaestroSettings>,
+					agentDetector,
+					mode: 'manual',
+				});
+
+				const refreshed = Object.keys(getAllClaudeUsageSnapshots()).length;
+				logger.info(`Refreshed Claude usage snapshots`, LOG_CONTEXT, { refreshed });
+				return { refreshed };
+			}
+		)
+	);
+
+	// Snapshot mirror for the renderer: returns every RETAINED Codex quota usage
+	// snapshot keyed by canonical CODEX_HOME (expired included, same reasoning as
+	// the Claude mirror above). The auth-sensitive auth.json read and ChatGPT
+	// metadata request stay in the main process.
+	ipcMain.handle(
+		'agents:getCodexUsageSnapshots',
+		withIpcErrorLogging(
+			handlerOpts('getCodexUsageSnapshots'),
+			async (): Promise<Record<string, CodexUsageSnapshot>> => {
+				return getRetainedCodexUsageSnapshots();
+			}
+		)
+	);
+
+	// READ primitive for Codex reset credits: the full per-credit list (ids,
+	// titles, expiry) for one account. The count alone rides the usage snapshot,
+	// so this is only called when a surface actually renders the list.
+	ipcMain.handle(
+		'agents:getCodexResetCredits',
+		withIpcErrorLogging(
+			handlerOpts('getCodexResetCredits'),
+			async (_event, codexHome: string): Promise<CodexResetCreditsReadResult> => {
+				return fetchCodexResetCredits({ codexHome });
+			}
+		)
+	);
+
+	// WRITE primitive: redeem one credit. Irreversible and finite, so it is only
+	// ever reached from an explicit user click or an explicitly enabled
+	// per-agent automation - never from a refresh, sweep, or retry default.
+	// Re-samples afterwards so the bars the user is looking at reflect the reset
+	// they just paid for rather than the pre-reset numbers.
+	ipcMain.handle(
+		'agents:consumeCodexResetCredit',
+		withIpcErrorLogging(
+			handlerOpts('consumeCodexResetCredit'),
+			async (
+				_event,
+				codexHome: string,
+				creditId: string,
+				idempotencyKey?: string
+			): Promise<CodexResetCreditConsumeResult> => {
+				const result = await consumeCodexResetCredit({ codexHome, creditId, idempotencyKey });
+				if (result.ok) {
+					const agentDetector = getAgentDetector();
+					if (agentDetector && sessionsStore) {
+						// Best-effort: a stale bar after a successful reset is confusing but
+						// not a failed redemption, so never let this turn a good spend into
+						// a reported error.
+						await runCodexUsageSampling({
+							sessionsStore,
+							agentConfigsStore,
+							agentDetector,
+						}).catch((error) => {
+							logger.warn('Post-reset Codex usage re-sample failed', LOG_CONTEXT, { error });
+						});
+					}
+				}
+				return result;
+			}
+		)
+	);
+
+	// Discovered `~/.codex-*` homes plus the ones Maestro has sampled before, so
+	// an account keeps its dashboard row after its last agent moves off it.
+	ipcMain.handle(
+		'agents:getCodexUsageAccountKeys',
+		withIpcErrorLogging(handlerOpts('getCodexUsageAccountKeys'), async (): Promise<string[]> => {
+			const codexHomes = await discoverCodexHomes();
+			const keys = new Set(
+				codexHomes.map((codexHome) => resolveCodexHomeKey({ CODEX_HOME: codexHome }))
+			);
+			for (const key of await pruneMissingQuotaAccounts('codex')) {
+				keys.add(key);
+			}
+			return Array.from(keys);
+		})
+	);
+
+	ipcMain.handle(
+		'codex:usage:refresh-all',
+		withIpcErrorLogging(
+			handlerOpts('refreshCodexUsage'),
+			async (): Promise<{ refreshed: number }> => {
+				const agentDetector = getAgentDetector();
+				if (!agentDetector || !sessionsStore) {
+					logger.warn(
+						'Skipping codex:usage:refresh-all - agents handler missing required deps',
+						LOG_CONTEXT,
+						{
+							hasDetector: !!agentDetector,
+							hasSessionsStore: !!sessionsStore,
+						}
+					);
+					return { refreshed: 0 };
+				}
+
+				await runCodexUsageSampling({
+					sessionsStore,
+					agentConfigsStore,
+					agentDetector,
+				});
+
+				const refreshed = Object.keys(getAllCodexUsageSnapshots()).length;
+				logger.info(`Refreshed Codex usage snapshots`, LOG_CONTEXT, { refreshed });
+				return { refreshed };
 			}
 		)
 	);

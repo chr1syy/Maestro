@@ -1,19 +1,34 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Folder, AlertTriangle } from 'lucide-react';
-import type { AgentConfig, Session, ToolType } from '../../types';
+import type { AdditionalDirectory, AgentConfig, Session, ToolType } from '../../types';
 import type { SshRemoteConfig, AgentSshRemoteConfig } from '../../../shared/types';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { validateNewSession } from '../../utils/sessionValidation';
+import { isAdaptiveModeDefaultOn, resilienceEnabled } from '../../../shared/agentConstants';
+import { normalizeAdditionalDirectories } from '../../../shared/additionalDirectories';
+import { getBasename } from '../../../shared/formatters';
 import { FormInput } from '../ui/FormInput';
+import { AdditionalDirectoriesSection } from '../shared/AdditionalDirectoriesSection';
+import { AgentResilienceSection } from './AgentResilienceSection';
 import { Modal, ModalFooter } from '../ui/Modal';
 import { SshRemoteSelector } from '../shared/SshRemoteSelector';
+import { ThemedSelect } from '../shared/ThemedSelect';
+import { useSessionStore } from '../../stores/sessionStore';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
 import type { AgentDebugInfo, NewInstanceModalProps } from './types';
-import { SUPPORTED_AGENTS } from './types';
+import { SUPPORTED_AGENTS, NEW_SESSION_MESSAGE_MAX_LENGTH } from './types';
 import { useRemotePathValidation } from '../../hooks/agent/useRemotePathValidation';
 import { NudgeMessageField } from './NudgeMessageField';
 import { RemotePathStatus } from './RemotePathStatus';
 import { AgentPickerGrid } from './AgentPickerGrid';
+import {
+	filterToAvailableProviders,
+	providerLocationLabel,
+} from '../../utils/providerAvailability';
+import { logger } from '../../utils/logger';
+import { getEffortConfigKey, readEffortFromConfig } from '../../utils/agentEffort';
+import { gitService } from '../../services/git';
+import { withBlankEnvVarRow } from '../../../shared/envVarCatalog';
 
 export function NewInstanceModal({
 	isOpen,
@@ -22,13 +37,18 @@ export function NewInstanceModal({
 	theme,
 	existingSessions,
 	sourceSession,
+	presetGroupId,
+	presetWorkingDir,
 }: NewInstanceModalProps) {
 	const [agents, setAgents] = useState<AgentConfig[]>([]);
 	const [selectedAgent, setSelectedAgent] = useState('');
 	const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+	const [showAllProviders, setShowAllProviders] = useState(false);
 	const [workingDir, setWorkingDir] = useState('');
+	const [additionalDirectories, setAdditionalDirectories] = useState<AdditionalDirectory[]>([]);
 	const [instanceName, setInstanceName] = useState('');
 	const [nudgeMessage, setNudgeMessage] = useState('');
+	const [newSessionMessage, setNewSessionMessage] = useState('');
 	const [loading, setLoading] = useState(true);
 	const [refreshingAgent, setRefreshingAgent] = useState<string | null>(null);
 	const [debugInfo, setDebugInfo] = useState<AgentDebugInfo | null>(null);
@@ -38,6 +58,21 @@ export function NewInstanceModal({
 	const [customAgentEnvVars, setCustomAgentEnvVars] = useState<
 		Record<string, Record<string, string>>
 	>({});
+	const [enableMaestroPByAgent, setEnableMaestroPByAgent] = useState<Record<string, boolean>>({});
+	const [maestroPModeByAgent, setMaestroPModeByAgent] = useState<
+		Record<string, 'interactive' | 'dynamic'>
+	>({});
+	const [maestroPPathByAgent, setMaestroPPathByAgent] = useState<Record<string, string>>({});
+	const [detectedMaestroPPath, setDetectedMaestroPPath] = useState<string | undefined>(undefined);
+	// Agent Resilience (auto-retry) per-agent toggles. Both default ON; a map
+	// only holds a value once the user flips a switch, so we read with `?? true`.
+	const [retryAvailabilityByAgent, setRetryAvailabilityByAgent] = useState<Record<string, boolean>>(
+		{}
+	);
+	const [retryTokenByAgent, setRetryTokenByAgent] = useState<Record<string, boolean>>({});
+	// Codex automatic usage resets, per provider. Defaults OFF - unlike the
+	// resilience toggles above, spending a reset credit is irreversible.
+	const [codexAutoResetByAgent, setCodexAutoResetByAgent] = useState<Record<string, boolean>>({});
 	const [agentConfigs, setAgentConfigs] = useState<Record<string, Record<string, any>>>({});
 	const [availableModels, setAvailableModels] = useState<Record<string, string[]>>({});
 	const [loadingModels, setLoadingModels] = useState<Record<string, boolean>>({});
@@ -46,6 +81,11 @@ export function NewInstanceModal({
 	);
 	const [loadingDynamicOptions, setLoadingDynamicOptions] = useState<Record<string, boolean>>({});
 	const [directoryWarningAcknowledged, setDirectoryWarningAcknowledged] = useState(false);
+	// Git repo status of the selected working directory.
+	// 'unknown' = haven't checked yet, 'is-repo' / 'not-repo' = checked.
+	const [gitRepoStatus, setGitRepoStatus] = useState<'unknown' | 'is-repo' | 'not-repo'>('unknown');
+	const [isInitializingRepo, setIsInitializingRepo] = useState(false);
+	const [initRepoError, setInitRepoError] = useState<string | null>(null);
 	// SSH Remote configuration
 	const [sshRemotes, setSshRemotes] = useState<SshRemoteConfig[]>([]);
 	const [agentSshRemoteConfigs, setAgentSshRemoteConfigs] = useState<
@@ -54,11 +94,24 @@ export function NewInstanceModal({
 	// SSH connection error state - shown when we can't connect to the selected remote
 	const [sshConnectionError, setSshConnectionError] = useState<string | null>(null);
 
+	// Group placement: '' means "No Group (Ungrouped)". Initialized when the modal
+	// opens from the source session (when duplicating) or the caller's preset.
+	const [selectedGroupId, setSelectedGroupId] = useState<string>('');
+	const groups = useSessionStore((s) => s.groups);
+
 	const nameInputRef = useRef<HTMLInputElement>(null);
 
 	// Fetch home directory on mount for tilde expansion
 	useEffect(() => {
 		window.maestro.fs.homeDir().then(setHomeDir);
+	}, []);
+
+	// Resolve the auto-detected maestro-p path for the Batch Mode toggle's helper text.
+	useEffect(() => {
+		void window.maestro.agents
+			.getMaestroPDetectedPath()
+			.then((p) => setDetectedMaestroPPath(p ?? undefined))
+			.catch(() => setDetectedMaestroPPath(undefined));
 	}, []);
 
 	// Expand tilde in path
@@ -163,6 +216,11 @@ export function NewInstanceModal({
 				setCustomAgentPaths({});
 				setCustomAgentArgs({});
 				setCustomAgentEnvVars({});
+				setEnableMaestroPByAgent({});
+				setMaestroPModeByAgent({});
+				setMaestroPPathByAgent({});
+				setRetryAvailabilityByAgent({});
+				setRetryTokenByAgent({});
 				setAgentSshRemoteConfigs({});
 			}
 
@@ -177,8 +235,11 @@ export function NewInstanceModal({
 				configs[agent.id] = config;
 
 				// Extract per-agent settings from the loaded config
-				if (config.customPath) {
-					paths[agent.id] = config.customPath;
+				// Local detection validates and recovers rotating binary paths. SSH paths
+				// belong to the remote host and must not be validated against the local filesystem.
+				const customPath = sshRemoteId ? config.customPath : agent.customPath;
+				if (customPath) {
+					paths[agent.id] = customPath;
 				}
 				if (config.customArgs) {
 					args[agent.id] = config.customArgs;
@@ -199,6 +260,13 @@ export function NewInstanceModal({
 				}
 				if (source.customProviderPath) {
 					sourceConfig.providerPath = source.customProviderPath;
+				}
+				if (source.customEffort) {
+					// Agents use either `effort` (Claude Code) or `reasoningEffort` (Codex,
+					// Copilot-CLI, Factory Droid). Pick whichever key the source agent
+					// actually defines so the value round-trips through the modal.
+					const sourceAgent = detectedAgents.find((a: AgentConfig) => a.id === source.toolType);
+					sourceConfig[getEffortConfigKey(sourceAgent)] = source.customEffort;
 				}
 				configs[source.toolType] = sourceConfig;
 			}
@@ -222,9 +290,22 @@ export function NewInstanceModal({
 
 			// Pre-fill form fields AFTER agents are loaded (ensures no race condition)
 			if (source) {
-				handleWorkingDirChange(source.cwd);
+				// For an SSH agent the field must show the REMOTE directory the agent
+				// actually runs in. A CLI-created agent (`create-agent --ssh-cwd`) keeps
+				// a local placeholder in `cwd` and the real path in the override, so the
+				// override is what the copy should start from. The value on screen is
+				// then the single source for the new agent's cwd AND its override.
+				handleWorkingDirChange(
+					(source.sessionSshRemoteConfig?.enabled &&
+						source.sessionSshRemoteConfig.workingDirOverride) ||
+						source.cwd
+				);
+				// Clone the grants, don't alias them - the rows are edited in place and
+				// would otherwise mutate the source agent's persisted array.
+				setAdditionalDirectories((source.additionalDirectories ?? []).map((d) => ({ ...d })));
 				setInstanceName(`${source.name} (Copy)`);
 				setNudgeMessage(source.nudgeMessage || '');
+				setNewSessionMessage(source.newSessionMessage || '');
 
 				// Pre-fill custom agent configuration
 				setCustomAgentPaths((prev) => ({
@@ -238,6 +319,44 @@ export function NewInstanceModal({
 				setCustomAgentEnvVars((prev) => ({
 					...prev,
 					[source.toolType]: source.customEnvVars || {},
+				}));
+				// Mirror the source agent's EXPLICIT Adaptive Mode choice so a duplicate
+				// inherits it. When the source never configured a token source, leave the
+				// entry unset so the duplicate falls through to the same default path as a
+				// fresh agent (see agentEnableMaestroP below) instead of pinning a falsy
+				// default as if it were an explicit "API" choice.
+				setEnableMaestroPByAgent((prev) => {
+					const next = { ...prev };
+					if (source.enableMaestroP === undefined) {
+						delete next[source.toolType];
+					} else {
+						next[source.toolType] = source.enableMaestroP;
+					}
+					return next;
+				});
+				setMaestroPModeByAgent((prev) => ({
+					...prev,
+					[source.toolType]: source.maestroPMode ?? 'dynamic',
+				}));
+				setMaestroPPathByAgent((prev) => ({
+					...prev,
+					[source.toolType]: source.maestroPPath || '',
+				}));
+				// Mirror the source agent's Agent Resilience toggles (default ON).
+				setRetryAvailabilityByAgent((prev) => ({
+					...prev,
+					[source.toolType]: resilienceEnabled(source.retryOnAvailabilityErrors),
+				}));
+				setRetryTokenByAgent((prev) => ({
+					...prev,
+					[source.toolType]: resilienceEnabled(source.retryOnTokenExhaustion),
+				}));
+				// Duplicating an agent carries its automatic-reset preference too, so a
+				// copy does not silently start spending credits the original never did
+				// (and vice versa).
+				setCodexAutoResetByAgent((prev) => ({
+					...prev,
+					[source.toolType]: source.codexAutoResetOnExhaustion === true,
 				}));
 
 				// Pre-fill SSH remote configuration if source session has it
@@ -253,7 +372,7 @@ export function NewInstanceModal({
 				}
 			}
 		} catch (error) {
-			console.error('Failed to load agents:', error);
+			logger.error('Failed to load agents:', undefined, error);
 		} finally {
 			setLoading(false);
 		}
@@ -266,6 +385,67 @@ export function NewInstanceModal({
 		}
 	}, [handleWorkingDirChange]);
 
+	// Resolve the SSH remote ID currently selected (pending or per-agent).
+	const effectiveSshRemoteId = useMemo(() => {
+		if (!isSshEnabled) return undefined;
+		const config = selectedAgent
+			? agentSshRemoteConfigs[selectedAgent]
+			: agentSshRemoteConfigs['_pending_'];
+		return config?.remoteId || undefined;
+	}, [isSshEnabled, selectedAgent, agentSshRemoteConfigs]);
+
+	// Debounced git repo detection - checks if the selected working dir is
+	// already a git repo so we can offer to `git init` it if not.
+	useEffect(() => {
+		const trimmed = workingDir.trim();
+		// Reset stale state from a previous directory before the async check
+		// resolves - otherwise the previous "not-repo" panel keeps rendering
+		// (with a clickable Init button) against the new, unvalidated path
+		// during the 500ms debounce window.
+		setGitRepoStatus('unknown');
+		setInitRepoError(null);
+		if (!trimmed) {
+			return;
+		}
+
+		// For SSH, wait until the remote path validates as a directory.
+		if (isSshEnabled && !remotePathValidation.valid) {
+			return;
+		}
+
+		let cancelled = false;
+		const timeoutId = setTimeout(async () => {
+			const expanded = expandTilde(trimmed);
+			const isRepo = await gitService.isRepo(expanded, effectiveSshRemoteId);
+			if (!cancelled) {
+				setGitRepoStatus(isRepo ? 'is-repo' : 'not-repo');
+			}
+		}, 500);
+
+		return () => {
+			cancelled = true;
+			clearTimeout(timeoutId);
+		};
+	}, [workingDir, isSshEnabled, remotePathValidation.valid, effectiveSshRemoteId, expandTilde]);
+
+	const handleInitRepo = React.useCallback(async () => {
+		const trimmed = workingDir.trim();
+		if (!trimmed || isInitializingRepo) return;
+		setIsInitializingRepo(true);
+		setInitRepoError(null);
+		try {
+			const expanded = expandTilde(trimmed);
+			const result = await gitService.init(expanded, effectiveSshRemoteId);
+			if (!result.success) {
+				setInitRepoError(result.error || 'Failed to initialize git repository');
+				return;
+			}
+			setGitRepoStatus('is-repo');
+		} finally {
+			setIsInitializingRepo(false);
+		}
+	}, [workingDir, isInitializingRepo, expandTilde, effectiveSshRemoteId]);
+
 	const handleRefreshAgent = React.useCallback(async (agentId: string) => {
 		setRefreshingAgent(agentId);
 		setDebugInfo(null);
@@ -276,7 +456,7 @@ export function NewInstanceModal({
 				setDebugInfo(result.debugInfo);
 			}
 		} catch (error) {
-			console.error('Failed to refresh agent:', error);
+			logger.error('Failed to refresh agent:', undefined, error);
 		} finally {
 			setRefreshingAgent(null);
 		}
@@ -297,7 +477,7 @@ export function NewInstanceModal({
 				const models = await window.maestro.agents.getModels(agentId, forceRefresh);
 				setAvailableModels((prev) => ({ ...prev, [agentId]: models }));
 			} catch (error) {
-				console.error(`Failed to load models for ${agentId}:`, error);
+				logger.error(`Failed to load models for ${agentId}:`, undefined, error);
 			} finally {
 				setLoadingModels((prev) => ({ ...prev, [agentId]: false }));
 			}
@@ -343,15 +523,21 @@ export function NewInstanceModal({
 	const handleCreate = React.useCallback(() => {
 		const name = instanceName.trim();
 		if (!name) return; // Name is required
-		// Expand tilde before passing to callback
-		const expandedWorkingDir = expandTilde(workingDir.trim());
 
-		// Validate before creating
 		const sshConfig = agentSshRemoteConfigs[selectedAgent] || agentSshRemoteConfigs['_pending_'];
 		const sshRemoteId = sshConfig?.enabled ? sshConfig?.remoteId : null;
+		// With SSH enabled the field holds a REMOTE path, so a leading `~` is the
+		// remote user's home and only the remote shell can expand it: every
+		// remote `cd`/`ls`/`stat` renders it as `"$HOME/..."`. Expanding locally
+		// turned `~/git-projects` into `/Users/<local>/git-projects`, a path that
+		// validated green here (the validator statted the raw text) and then did
+		// not exist on the host the agent started on.
+		const effectiveWorkingDir = sshRemoteId ? workingDir.trim() : expandTilde(workingDir.trim());
+
+		// Validate before creating
 		const result = validateNewSession(
 			name,
-			expandedWorkingDir,
+			effectiveWorkingDir,
 			selectedAgent as ToolType,
 			existingSessions,
 			sshRemoteId
@@ -370,44 +556,122 @@ export function NewInstanceModal({
 		// Get contextWindow and providerPath from agent config
 		const agentCustomContextWindow = agentConfigs[selectedAgent]?.contextWindow || undefined;
 		const agentCustomProviderPath = agentConfigs[selectedAgent]?.providerPath?.trim() || undefined;
+		// Effort/reasoningEffort: agents use one or the other key (e.g. Codex stores
+		// it under `reasoningEffort`, Claude Code uses `effort`).
+		const agentCustomEffort = readEffortFromConfig(agentConfigs[selectedAgent]);
 
 		// Get SSH remote configuration for this session (stored per-session, not per-agent)
 		const sshRemoteConfig = agentSshRemoteConfigs[selectedAgent];
 		// Convert to session-level format: ALWAYS pass explicitly to override any agent-level config
-		// For new sessions, this ensures consistent behavior with the UI selection
+		// For new sessions, this ensures consistent behavior with the UI selection.
+		// `shareHistoryToProjectDir` persists regardless of SSH enablement so it also
+		// applies to agents that run locally but are controlled from another Maestro.
 		const sessionSshRemoteConfig =
 			sshRemoteConfig?.enabled && sshRemoteConfig?.remoteId
 				? {
 						enabled: true,
 						remoteId: sshRemoteConfig.remoteId,
-						workingDirOverride: sshRemoteConfig.workingDirOverride,
+						// When SSH is enabled, the Working Directory field contains a remote path.
+						// Use it as workingDirOverride so SSH terminals cd to the right place.
+						// Always the directory TYPED here, never a value carried over from
+						// the agent being duplicated: that carry-over pinned every terminal,
+						// git call and file tree of the new agent to the OLD agent's remote
+						// directory while the agent itself started in the new one.
+						workingDirOverride: effectiveWorkingDir || undefined,
 						syncHistory: sshRemoteConfig.syncHistory,
+						shareHistoryToProjectDir: sshRemoteConfig.shareHistoryToProjectDir,
 					}
-				: { enabled: false, remoteId: null };
+				: {
+						enabled: false,
+						remoteId: null,
+						shareHistoryToProjectDir: sshRemoteConfig?.shareHistoryToProjectDir,
+					};
+
+		// The dropdown's selected value wins - it was seeded from the source
+		// session's group (when duplicating) or the caller's preset (e.g. "New
+		// Agent in Group" from the group context menu), so explicit user
+		// selection naturally overrides those defaults.
+		const targetGroupId = selectedGroupId || undefined;
+
+		// New agents default Adaptive Mode on for Claude Code (isAdaptiveModeDefaultOn);
+		// an explicit toggle in the form (true/false) always wins over the default.
+		// The explicit choice must NOT be collapsed by `|| undefined` - an explicit
+		// `false` (API) has to survive, or over SSH it reverts to the TUI default
+		// and spawns maestro-p on a remote that may not have it (exit 127). Only the
+		// unset->default path keeps the `|| undefined` collapse (a falsy default
+		// stays "unconfigured").
+		const explicitMaestroP = enableMaestroPByAgent[selectedAgent];
+		const agentEnableMaestroP =
+			explicitMaestroP ?? (isAdaptiveModeDefaultOn(selectedAgent) || undefined);
+		const agentMaestroPPath =
+			agentEnableMaestroP && maestroPPathByAgent[selectedAgent]?.trim()
+				? maestroPPathByAgent[selectedAgent].trim()
+				: undefined;
+		// Token-source refinement only travels with the opt-in (defaults to dynamic).
+		const agentMaestroPMode = agentEnableMaestroP
+			? (maestroPModeByAgent[selectedAgent] ?? 'dynamic')
+			: undefined;
 
 		onCreate(
 			selectedAgent,
-			expandedWorkingDir,
+			effectiveWorkingDir,
 			name,
 			nudgeMessage.trim() || undefined,
+			newSessionMessage.trim() || undefined,
 			agentCustomPath,
 			agentCustomArgs,
 			agentCustomEnvVars,
 			agentCustomModel,
 			agentCustomContextWindow,
 			agentCustomProviderPath,
-			sessionSshRemoteConfig
+			sessionSshRemoteConfig,
+			agentCustomEffort,
+			targetGroupId ?? undefined,
+			agentEnableMaestroP,
+			agentMaestroPPath,
+			agentMaestroPMode,
+			retryAvailabilityByAgent[selectedAgent] ?? true,
+			retryTokenByAgent[selectedAgent] ?? true,
+			normalizeAdditionalDirectories(additionalDirectories, homeDir),
+			codexAutoResetByAgent[selectedAgent] ?? false
 		);
 		onClose();
 
 		// Reset
 		setInstanceName('');
 		handleWorkingDirChange('');
+		setAdditionalDirectories([]);
 		setNudgeMessage('');
+		setNewSessionMessage('');
 		// Reset per-agent config for selected agent
 		setCustomAgentPaths((prev) => ({ ...prev, [selectedAgent]: '' }));
 		setCustomAgentArgs((prev) => ({ ...prev, [selectedAgent]: '' }));
 		setCustomAgentEnvVars((prev) => ({ ...prev, [selectedAgent]: {} }));
+		// Clear the explicit override (rather than forcing false) so the agent's
+		// default (on for Claude Code) applies again on the next open.
+		setEnableMaestroPByAgent((prev) => {
+			const next = { ...prev };
+			delete next[selectedAgent];
+			return next;
+		});
+		// Clear the explicit mode override too so the default (dynamic) applies again.
+		setMaestroPModeByAgent((prev) => {
+			const next = { ...prev };
+			delete next[selectedAgent];
+			return next;
+		});
+		setMaestroPPathByAgent((prev) => ({ ...prev, [selectedAgent]: '' }));
+		// Clear the resilience overrides so the default (both ON) applies next open.
+		setRetryAvailabilityByAgent((prev) => {
+			const next = { ...prev };
+			delete next[selectedAgent];
+			return next;
+		});
+		setRetryTokenByAgent((prev) => {
+			const next = { ...prev };
+			delete next[selectedAgent];
+			return next;
+		});
 		setAgentSshRemoteConfigs((prev) => {
 			const newConfigs = { ...prev };
 			delete newConfigs[selectedAgent];
@@ -417,10 +681,16 @@ export function NewInstanceModal({
 		instanceName,
 		selectedAgent,
 		workingDir,
+		additionalDirectories,
+		homeDir,
 		nudgeMessage,
+		newSessionMessage,
 		customAgentPaths,
 		customAgentArgs,
 		customAgentEnvVars,
+		enableMaestroPByAgent,
+		maestroPModeByAgent,
+		maestroPPathByAgent,
 		agentConfigs,
 		agentSshRemoteConfigs,
 		onCreate,
@@ -428,6 +698,7 @@ export function NewInstanceModal({
 		expandTilde,
 		handleWorkingDirChange,
 		existingSessions,
+		selectedGroupId,
 	]);
 
 	// Check if form is valid for submission
@@ -460,40 +731,72 @@ export function NewInstanceModal({
 		customAgentPaths,
 	]);
 
-	// Handle keyboard shortcuts
-	const handleKeyDown = useCallback(
-		(e: React.KeyboardEvent) => {
+	// Handle keyboard shortcuts via window listener (Modal stops propagation on its backdrop)
+	useEffect(() => {
+		if (!isOpen) return;
+		const handler = (e: KeyboardEvent) => {
 			// Handle Cmd+O for folder picker (disabled when SSH remote is active)
 			if ((e.key === 'o' || e.key === 'O') && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault();
-				e.stopPropagation();
 				if (!isSshEnabled) {
 					handleSelectFolder();
 				}
 				return;
 			}
-			// Handle Cmd+Enter for creating agent
-			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+			// Handle Cmd+Enter or Cmd+S for creating agent
+			if ((e.metaKey || e.ctrlKey) && (e.key === 'Enter' || e.key === 's') && !e.shiftKey) {
 				e.preventDefault();
-				e.stopPropagation();
 				if (isFormValid) {
 					handleCreate();
 				}
-				return;
 			}
-		},
-		[handleSelectFolder, handleCreate, isFormValid, isSshEnabled]
-	);
+		};
+		window.addEventListener('keydown', handler, true);
+		return () => window.removeEventListener('keydown', handler, true);
+	}, [isOpen, handleSelectFolder, handleCreate, isFormValid, isSshEnabled]);
 
-	// Sort agents: supported first, then coming soon at the bottom
+	// Sort agents: supported first, then coming soon at the bottom. Each bucket is
+	// alphabetical by the name the row renders, matching the wizard's tile strip
+	// and the Group Chat moderator dropdown.
 	const sortedAgents = useMemo(() => {
+		const byName = (a: AgentConfig, b: AgentConfig) => a.name.localeCompare(b.name);
 		const visible = agents.filter((a) => !a.hidden);
-		const supported = visible.filter((a) => SUPPORTED_AGENTS.includes(a.id));
-		const comingSoon = visible.filter((a) => !SUPPORTED_AGENTS.includes(a.id));
+		const supported = visible.filter((a) => SUPPORTED_AGENTS.includes(a.id)).sort(byName);
+		const comingSoon = visible.filter((a) => !SUPPORTED_AGENTS.includes(a.id)).sort(byName);
 		return [...supported, ...comingSoon];
 	}, [agents]);
 
+	// The rows the picker draws. Same rule as the wizard's tile strip: hide what
+	// this machine cannot run, unless asked, and never filter down to nothing.
+	const visibleAgents = useMemo(
+		() =>
+			filterToAvailableProviders(
+				sortedAgents,
+				(agent) => SUPPORTED_AGENTS.includes(agent.id) && !!agent.available,
+				showAllProviders,
+				(agent) => agent.id === selectedAgent
+			),
+		[sortedAgents, showAllProviders, selectedAgent]
+	);
+
+	// Counted over ALL supported providers, not the filtered rows - a count that
+	// shrank with the list would read "4 of 4" and answer nothing.
+	const providerCounts = useMemo(() => {
+		const supported = sortedAgents.filter((agent) => SUPPORTED_AGENTS.includes(agent.id));
+		return {
+			total: supported.length,
+			available: supported.filter((agent) => agent.available).length,
+		};
+	}, [sortedAgents]);
+
+	// The counts describe whichever machine detection probed, so name that machine
+	// rather than claiming "locally" while an SSH remote is selected.
+	const providerLocation = useMemo(() => providerLocationLabel(sshRemoteHost), [sshRemoteHost]);
+
 	// Effects - load agents and optionally pre-fill from source session
+	// Dependency uses sourceSession?.id (not the full object) so unrelated
+	// `sessions` store updates don't re-fire pre-fill and clobber what the
+	// user has typed (issue #827).
 	useEffect(() => {
 		if (isOpen) {
 			// Pass sourceSession to loadAgents to handle pre-fill AFTER agents are loaded
@@ -507,8 +810,19 @@ export function NewInstanceModal({
 			}
 			// Reset warning acknowledgment when modal opens
 			setDirectoryWarningAcknowledged(false);
+			// Seed group selection: duplicate inherits source's group; otherwise
+			// honor any presetGroupId from the caller.
+			setSelectedGroupId(sourceSession?.groupId ?? presetGroupId ?? '');
+			// Seed the working directory from the caller (e.g. "New Agent Here" on a
+			// folder in the Files panel). Skipped when duplicating - loadAgents fills
+			// the working dir from the source session instead. The folder's basename
+			// is a sensible default name, and both fields stay editable.
+			if (!sourceSession && presetWorkingDir) {
+				handleWorkingDirChange(presetWorkingDir);
+				setInstanceName(getBasename(presetWorkingDir));
+			}
 		}
-	}, [isOpen, sourceSession]);
+	}, [isOpen, sourceSession?.id, presetGroupId, presetWorkingDir, handleWorkingDirChange]);
 
 	// Load SSH remote configurations independently of agent detection
 	// This ensures SSH remotes are available even if agent detection fails
@@ -521,7 +835,7 @@ export function NewInstanceModal({
 						setSshRemotes(sshConfigsResult.configs);
 					}
 				} catch (sshError) {
-					console.error('Failed to load SSH remote configs:', sshError);
+					logger.error('Failed to load SSH remote configs:', undefined, sshError);
 				}
 			};
 			loadSshConfigs();
@@ -585,259 +899,376 @@ export function NewInstanceModal({
 	if (!isOpen) return null;
 
 	return (
-		<div onKeyDown={handleKeyDown} role="group" aria-label="Create new agent dialog">
-			<Modal
-				theme={theme}
-				title="Create New Agent"
-				priority={MODAL_PRIORITIES.NEW_INSTANCE}
-				onClose={onClose}
-				width={600}
-				initialFocusRef={nameInputRef}
-				footer={
-					<ModalFooter
-						theme={theme}
-						onCancel={onClose}
-						onConfirm={handleCreate}
-						confirmLabel="Create Agent"
-						confirmDisabled={!isFormValid}
-					/>
-				}
-			>
-				<div className="space-y-5">
-					{/* Agent Name */}
-					<FormInput
-						ref={nameInputRef}
-						id="agent-name-input"
-						theme={theme}
-						label="Agent Name"
-						value={instanceName}
-						onChange={setInstanceName}
-						placeholder=""
-						error={validation.errorField === 'name' ? validation.error : undefined}
-						heightClass="p-2"
-					/>
+		<Modal
+			theme={theme}
+			title="Create New Agent"
+			priority={MODAL_PRIORITIES.NEW_INSTANCE}
+			onClose={onClose}
+			width={600}
+			initialFocusRef={nameInputRef}
+			footer={
+				<ModalFooter
+					theme={theme}
+					onCancel={onClose}
+					onConfirm={handleCreate}
+					confirmLabel="Create Agent"
+					confirmDisabled={!isFormValid}
+				/>
+			}
+		>
+			<div className="space-y-5">
+				{/* Agent Name */}
+				<FormInput
+					ref={nameInputRef}
+					id="agent-name-input"
+					theme={theme}
+					label="Agent Name"
+					value={instanceName}
+					onChange={setInstanceName}
+					placeholder=""
+					error={validation.errorField === 'name' ? validation.error : undefined}
+					heightClass="p-2"
+				/>
 
-					{/* Agent Selection */}
-					<AgentPickerGrid
-						theme={theme}
-						loading={loading}
-						sshConnectionError={sshConnectionError}
-						sortedAgents={sortedAgents}
-						selectedAgent={selectedAgent}
-						expandedAgent={expandedAgent}
-						refreshingAgent={refreshingAgent}
-						debugInfo={debugInfo}
-						customAgentPaths={customAgentPaths}
-						customAgentArgs={customAgentArgs}
-						customAgentEnvVars={customAgentEnvVars}
-						agentConfigs={agentConfigs}
-						availableModels={availableModels}
-						loadingModels={loadingModels}
-						onAgentSelect={(agentId) => setSelectedAgent(agentId)}
-						onAgentExpand={(agentId) => setExpandedAgent(agentId)}
-						onRefreshAgent={handleRefreshAgent}
-						onDismissDebug={() => setDebugInfo(null)}
-						onCustomPathChange={(agentId, value) => {
-							setCustomAgentPaths((prev) => ({ ...prev, [agentId]: value }));
-						}}
-						onCustomArgsChange={(agentId, value) => {
-							setCustomAgentArgs((prev) => ({ ...prev, [agentId]: value }));
-						}}
-						onEnvVarKeyChange={(agentId, oldKey, newKey, value) => {
-							const currentVars = { ...customAgentEnvVars[agentId] };
-							delete currentVars[oldKey];
-							currentVars[newKey] = value;
+				{/* Agent Group - only shown when at least one group exists */}
+				{groups.length > 0 && (
+					<div className="w-full">
+						<label
+							htmlFor="agent-group-select"
+							className="block text-xs font-bold opacity-70 uppercase mb-2"
+							style={{ color: theme.colors.textMain }}
+						>
+							Agent Group
+						</label>
+						<ThemedSelect
+							id="agent-group-select"
+							theme={theme}
+							value={selectedGroupId}
+							onChange={setSelectedGroupId}
+							aria-label="Agent Group"
+							options={[
+								{ value: '', label: 'No Group (Ungrouped)' },
+								...groups.map((g) => ({
+									value: g.id,
+									label: `${g.emoji} ${g.name}`.trim(),
+								})),
+							]}
+						/>
+					</div>
+				)}
+
+				{/* Agent Selection */}
+				<AgentPickerGrid
+					theme={theme}
+					loading={loading}
+					sshConnectionError={sshConnectionError}
+					visibleAgents={visibleAgents}
+					availableProviderCount={providerCounts.available}
+					totalProviderCount={providerCounts.total}
+					providerLocationLabel={providerLocation}
+					showAllProviders={showAllProviders}
+					onShowAllProvidersChange={setShowAllProviders}
+					selectedAgent={selectedAgent}
+					expandedAgent={expandedAgent}
+					refreshingAgent={refreshingAgent}
+					debugInfo={debugInfo}
+					customAgentPaths={customAgentPaths}
+					customAgentArgs={customAgentArgs}
+					customAgentEnvVars={customAgentEnvVars}
+					enableMaestroPByAgent={enableMaestroPByAgent}
+					maestroPModeByAgent={maestroPModeByAgent}
+					maestroPPathByAgent={maestroPPathByAgent}
+					detectedMaestroPPath={detectedMaestroPPath}
+					agentConfigs={agentConfigs}
+					availableModels={availableModels}
+					loadingModels={loadingModels}
+					onAgentSelect={(agentId) => setSelectedAgent(agentId)}
+					onAgentExpand={(agentId) => setExpandedAgent(agentId)}
+					onRefreshAgent={handleRefreshAgent}
+					onDismissDebug={() => setDebugInfo(null)}
+					onCustomPathChange={(agentId, value) => {
+						setCustomAgentPaths((prev) => ({ ...prev, [agentId]: value }));
+					}}
+					onCustomArgsChange={(agentId, value) => {
+						setCustomAgentArgs((prev) => ({ ...prev, [agentId]: value }));
+					}}
+					onEnableMaestroPChange={(agentId, value) => {
+						setEnableMaestroPByAgent((prev) => ({ ...prev, [agentId]: value }));
+					}}
+					onMaestroPModeChange={(agentId, value) => {
+						setMaestroPModeByAgent((prev) => ({ ...prev, [agentId]: value }));
+					}}
+					onMaestroPPathChange={(agentId, value) => {
+						setMaestroPPathByAgent((prev) => ({ ...prev, [agentId]: value }));
+					}}
+					onEnvVarKeyChange={(agentId, oldKey, newKey, value) => {
+						const currentVars = { ...customAgentEnvVars[agentId] };
+						delete currentVars[oldKey];
+						currentVars[newKey] = value;
+						setCustomAgentEnvVars((prev) => ({
+							...prev,
+							[agentId]: currentVars,
+						}));
+					}}
+					onEnvVarValueChange={(agentId, key, value) => {
+						setCustomAgentEnvVars((prev) => ({
+							...prev,
+							[agentId]: {
+								...prev[agentId],
+								[key]: value,
+							},
+						}));
+					}}
+					onEnvVarRemove={(agentId, key) => {
+						const currentVars = { ...customAgentEnvVars[agentId] };
+						delete currentVars[key];
+						if (Object.keys(currentVars).length > 0) {
 							setCustomAgentEnvVars((prev) => ({
 								...prev,
 								[agentId]: currentVars,
 							}));
-						}}
-						onEnvVarValueChange={(agentId, key, value) => {
-							setCustomAgentEnvVars((prev) => ({
-								...prev,
-								[agentId]: {
-									...prev[agentId],
-									[key]: value,
-								},
-							}));
-						}}
-						onEnvVarRemove={(agentId, key) => {
-							const currentVars = { ...customAgentEnvVars[agentId] };
-							delete currentVars[key];
-							if (Object.keys(currentVars).length > 0) {
-								setCustomAgentEnvVars((prev) => ({
-									...prev,
-									[agentId]: currentVars,
-								}));
-							} else {
-								setCustomAgentEnvVars((prev) => {
-									const newVars = { ...prev };
-									delete newVars[agentId];
-									return newVars;
-								});
-							}
-						}}
-						onEnvVarAdd={(agentId) => {
-							const currentVars = customAgentEnvVars[agentId] || {};
-							let newKey = 'NEW_VAR';
-							let counter = 1;
-							while (currentVars[newKey]) {
-								newKey = `NEW_VAR_${counter}`;
-								counter++;
-							}
-							setCustomAgentEnvVars((prev) => ({
-								...prev,
-								[agentId]: {
-									...prev[agentId],
-									[newKey]: '',
-								},
-							}));
-						}}
-						onConfigChange={(agentId, key, value) => {
-							setAgentConfigs((prev) => ({
-								...prev,
-								[agentId]: {
-									...prev[agentId],
-									[key]: value,
-								},
-							}));
-						}}
-						onConfigBlur={(agentId, key, value) => {
-							const updatedConfig = {
-								...(agentConfigs[agentId] || {}),
+						} else {
+							setCustomAgentEnvVars((prev) => {
+								const newVars = { ...prev };
+								delete newVars[agentId];
+								return newVars;
+							});
+						}
+					}}
+					onEnvVarAdd={(agentId) => {
+						setCustomAgentEnvVars((prev) => ({
+							...prev,
+							[agentId]: withBlankEnvVarRow(prev[agentId] ?? {}),
+						}));
+					}}
+					onConfigChange={(agentId, key, value) => {
+						setAgentConfigs((prev) => ({
+							...prev,
+							[agentId]: {
+								...prev[agentId],
 								[key]: value,
-							};
-							void window.maestro.agents.setConfig(agentId, updatedConfig).catch((error) => {
-								console.error(`Failed to persist config for ${agentId}:`, error);
-							});
-						}}
-						onRefreshModels={(agentId) => loadModelsForAgent(agentId, true)}
-						onTransferPendingSshConfig={(agentId) => {
-							setAgentSshRemoteConfigs((prev) => {
-								const pendingConfig = prev['_pending_'];
-								if (pendingConfig && !prev[agentId]) {
-									return {
-										...prev,
-										[agentId]: pendingConfig,
-									};
-								}
-								return prev;
-							});
-						}}
-						onLoadModelsForAgent={(agentId) => loadModelsForAgent(agentId)}
-						dynamicOptions={dynamicOptions}
-						loadingDynamicOptions={loadingDynamicOptions}
-						onLoadDynamicOptionsForAgent={loadDynamicOptionsForAgent}
-					/>
+							},
+						}));
+					}}
+					onConfigBlur={(agentId, key, value) => {
+						const updatedConfig = {
+							...(agentConfigs[agentId] || {}),
+							[key]: value,
+						};
+						void window.maestro.agents.setConfig(agentId, updatedConfig).catch((error) => {
+							logger.error(`Failed to persist config for ${agentId}:`, undefined, error);
+						});
+					}}
+					onRefreshModels={(agentId) => loadModelsForAgent(agentId, true)}
+					onTransferPendingSshConfig={(agentId) => {
+						setAgentSshRemoteConfigs((prev) => {
+							const pendingConfig = prev['_pending_'];
+							if (pendingConfig && !prev[agentId]) {
+								return {
+									...prev,
+									[agentId]: pendingConfig,
+								};
+							}
+							return prev;
+						});
+					}}
+					onLoadModelsForAgent={(agentId) => loadModelsForAgent(agentId)}
+					dynamicOptions={dynamicOptions}
+					loadingDynamicOptions={loadingDynamicOptions}
+					onLoadDynamicOptionsForAgent={loadDynamicOptionsForAgent}
+					codexAutoResetByAgent={codexAutoResetByAgent}
+					onCodexAutoResetChange={(agentId, value) =>
+						setCodexAutoResetByAgent((prev) => ({ ...prev, [agentId]: value }))
+					}
+				/>
 
-					{/* Working Directory */}
-					<FormInput
+				{/* Agent Resilience: auto-retry toggles (default ON). Sits directly
+				    under the agent provider per design. */}
+				{selectedAgent && (
+					<AgentResilienceSection
 						theme={theme}
-						label="Working Directory"
-						value={workingDir}
-						onChange={handleWorkingDirChange}
-						placeholder={
-							isSshEnabled
-								? `Enter remote path${sshRemoteHost ? ` on ${sshRemoteHost}` : ''} (e.g., /home/user/project)`
-								: 'Select directory...'
+						retryOnAvailabilityErrors={retryAvailabilityByAgent[selectedAgent] ?? true}
+						retryOnTokenExhaustion={retryTokenByAgent[selectedAgent] ?? true}
+						onChangeAvailability={(value) =>
+							setRetryAvailabilityByAgent((prev) => ({ ...prev, [selectedAgent]: value }))
 						}
-						error={validation.errorField === 'directory' ? validation.error : undefined}
-						monospace
-						heightClass="p-2"
-						addon={
-							<button
-								onClick={isSshEnabled ? undefined : handleSelectFolder}
-								disabled={isSshEnabled}
-								className={`p-2 rounded border transition-colors ${isSshEnabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-opacity-10'}`}
-								style={{ borderColor: theme.colors.border, color: theme.colors.textMain }}
-								title={
-									isSshEnabled
-										? `Folder picker unavailable for SSH remote${sshRemoteHost ? ` (${sshRemoteHost})` : ''}. Enter the remote path manually.`
-										: `Browse folders (${formatShortcutKeys(['Meta', 'o'])})`
-								}
-							>
-								<Folder className="w-5 h-5" />
-							</button>
+						onChangeTokenExhaustion={(value) =>
+							setRetryTokenByAgent((prev) => ({ ...prev, [selectedAgent]: value }))
 						}
 					/>
+				)}
 
-					{/* Remote path validation status (only shown when SSH is enabled) */}
-					{isSshEnabled && workingDir.trim() && (
-						<RemotePathStatus
-							theme={theme}
-							validation={remotePathValidation}
-							remoteHost={sshRemoteHost}
-						/>
-					)}
+				{/* Working Directory */}
+				<FormInput
+					theme={theme}
+					label="Working Directory"
+					value={workingDir}
+					onChange={handleWorkingDirChange}
+					placeholder={
+						isSshEnabled
+							? `Enter remote path${sshRemoteHost ? ` on ${sshRemoteHost}` : ''} (e.g., /home/user/project)`
+							: 'Select directory...'
+					}
+					error={validation.errorField === 'directory' ? validation.error : undefined}
+					monospace
+					heightClass="p-2"
+					addon={
+						<button
+							onClick={isSshEnabled ? undefined : handleSelectFolder}
+							disabled={isSshEnabled}
+							className={`p-2 rounded border transition-colors ${isSshEnabled ? 'opacity-40 cursor-not-allowed' : 'row-hover'}`}
+							style={{ borderColor: theme.colors.border, color: theme.colors.textMain }}
+							title={
+								isSshEnabled
+									? `Folder picker unavailable for SSH remote${sshRemoteHost ? ` (${sshRemoteHost})` : ''}. Enter the remote path manually.`
+									: `Browse folders (${formatShortcutKeys(['Meta', 'o'])})`
+							}
+						>
+							<Folder className="w-5 h-5" />
+						</button>
+					}
+				/>
 
-					{/* Directory Warning with Acknowledgment */}
-					{validation.warning && validation.warningField === 'directory' && (
-						<div
-							className="p-3 rounded border"
+				{/* Remote path validation status (only shown when SSH is enabled) */}
+				{isSshEnabled && workingDir.trim() && (
+					<RemotePathStatus
+						theme={theme}
+						validation={remotePathValidation}
+						remoteHost={sshRemoteHost}
+					/>
+				)}
+
+				{/* Git repo hint - offer to `git init` when the selected dir isn't a repo */}
+				{workingDir.trim() && gitRepoStatus === 'not-repo' && (
+					<div
+						className="flex items-center gap-3 p-3 rounded border"
+						style={{
+							backgroundColor: theme.colors.bgSidebar,
+							borderColor: theme.colors.border,
+						}}
+					>
+						<div className="flex-1">
+							<p className="text-sm" style={{ color: theme.colors.textMain }}>
+								Not a Git repository
+							</p>
+							{initRepoError && (
+								<p className="text-xs mt-1" style={{ color: theme.colors.error }}>
+									{initRepoError}
+								</p>
+							)}
+						</div>
+						<button
+							type="button"
+							onClick={handleInitRepo}
+							disabled={isInitializingRepo}
+							className="text-xs px-3 py-1.5 rounded border transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2"
 							style={{
-								backgroundColor: theme.colors.warning + '15',
-								borderColor: theme.colors.warning + '50',
+								backgroundColor: 'transparent',
+								borderColor: theme.colors.accent,
+								color: theme.colors.accent,
+								opacity: isInitializingRepo ? 0.6 : 1,
+								cursor: isInitializingRepo ? 'wait' : 'pointer',
+								['--tw-ring-color' as any]: theme.colors.accent,
+								['--tw-ring-offset-color' as any]: theme.colors.bgMain,
 							}}
 						>
-							<div className="flex items-start gap-2">
-								<AlertTriangle
-									className="w-4 h-4 flex-shrink-0 mt-0.5"
-									style={{ color: theme.colors.warning }}
-								/>
-								<div className="flex-1">
-									<p className="text-sm" style={{ color: theme.colors.textMain }}>
-										{validation.warning}
-									</p>
-									<p className="text-xs mt-2" style={{ color: theme.colors.textDim }}>
-										We recommend using a unique directory for each managed agent.
-									</p>
-									<label className="flex items-center gap-2 mt-3 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={directoryWarningAcknowledged}
-											onChange={(e) => setDirectoryWarningAcknowledged(e.target.checked)}
-											className="w-4 h-4 rounded"
-											style={{ accentColor: theme.colors.warning }}
-										/>
-										<span className="text-sm" style={{ color: theme.colors.textMain }}>
-											I understand the risk and want to proceed
-										</span>
-									</label>
-								</div>
+							{isInitializingRepo ? 'Initializing…' : 'Initialize as Git Repository'}
+						</button>
+					</div>
+				)}
+
+				{/* Directory Warning with Acknowledgment */}
+				{validation.warning && validation.warningField === 'directory' && (
+					<div
+						className="p-3 rounded border"
+						style={{
+							backgroundColor: theme.colors.warning + '15',
+							borderColor: theme.colors.warning + '50',
+						}}
+					>
+						<div className="flex items-start gap-2">
+							<AlertTriangle
+								className="w-4 h-4 flex-shrink-0 mt-0.5"
+								style={{ color: theme.colors.warning }}
+							/>
+							<div className="flex-1">
+								<p className="text-sm" style={{ color: theme.colors.textMain }}>
+									{validation.warning}
+								</p>
+								<p className="text-xs mt-2" style={{ color: theme.colors.textDim }}>
+									We recommend using a unique directory for each managed agent.
+								</p>
+								<label className="flex items-center gap-2 mt-3 cursor-pointer">
+									<input
+										type="checkbox"
+										checked={directoryWarningAcknowledged}
+										onChange={(e) => setDirectoryWarningAcknowledged(e.target.checked)}
+										className="w-4 h-4 rounded"
+										style={{ accentColor: theme.colors.warning }}
+									/>
+									<span className="text-sm" style={{ color: theme.colors.textMain }}>
+										I understand the risk and want to proceed
+									</span>
+								</label>
 							</div>
 						</div>
-					)}
+					</div>
+				)}
 
-					{/* SSH Remote Execution - Top Level */}
-					{/* Show SSH selector when remotes are configured, regardless of agent selection */}
-					{/* This allows users to see and configure SSH settings even while troubleshooting agent detection */}
-					{/* Uses '_pending_' key when no agent selected, transfers to agent when selected */}
-					{sshRemotes.length > 0 && (
-						<SshRemoteSelector
-							theme={theme}
-							sshRemotes={sshRemotes}
-							sshRemoteConfig={
-								agentSshRemoteConfigs[selectedAgent] || agentSshRemoteConfigs['_pending_']
+				{/* Additional Directories: extra read/write grants beyond the working dir */}
+				<AdditionalDirectoriesSection
+					theme={theme}
+					directories={additionalDirectories}
+					onChange={setAdditionalDirectories}
+					disableBrowse={isSshEnabled}
+					nativelyEnforced={
+						!!agents.find((a) => a.id === selectedAgent)?.capabilities
+							?.supportsAdditionalDirectories
+					}
+				/>
+
+				{/* SSH Remote Execution - Top Level.
+				    Always rendered, even when no remotes are configured, so the
+				    "remote-controlled" toggle is reachable - it mirrors history
+				    to the local project dir for a Maestro SSH'd into this
+				    machine, independent of local SSH remote setup.
+				    Uses '_pending_' key when no agent selected, transfers to
+				    agent when selected. */}
+				<SshRemoteSelector
+					theme={theme}
+					sshRemotes={sshRemotes}
+					sshRemoteConfig={
+						agentSshRemoteConfigs[selectedAgent] || agentSshRemoteConfigs['_pending_']
+					}
+					onSshRemoteConfigChange={(config) => {
+						setAgentSshRemoteConfigs((prev) => {
+							const newConfigs: Record<string, AgentSshRemoteConfig> = {
+								...prev,
+								_pending_: config,
+							};
+							if (selectedAgent) {
+								newConfigs[selectedAgent] = config;
 							}
-							onSshRemoteConfigChange={(config) => {
-								setAgentSshRemoteConfigs((prev) => {
-									const newConfigs: Record<string, AgentSshRemoteConfig> = {
-										...prev,
-										_pending_: config,
-									};
-									if (selectedAgent) {
-										newConfigs[selectedAgent] = config;
-									}
-									return newConfigs;
-								});
-							}}
-						/>
-					)}
+							return newConfigs;
+						});
+					}}
+				/>
 
-					{/* Nudge Message */}
-					<NudgeMessageField theme={theme} value={nudgeMessage} onChange={setNudgeMessage} />
-				</div>
-			</Modal>
-		</div>
+				{/* New Session Message */}
+				<NudgeMessageField
+					theme={theme}
+					value={newSessionMessage}
+					onChange={setNewSessionMessage}
+					maxLength={NEW_SESSION_MESSAGE_MAX_LENGTH}
+					label="New Session Message"
+					description="This text is prefixed to your first message whenever a new session is created (not visible in chat)."
+					placeholder="Instructions sent with the first message of every new session..."
+					sizeKey="new-session-message"
+				/>
+
+				{/* Nudge Message */}
+				<NudgeMessageField theme={theme} value={nudgeMessage} onChange={setNudgeMessage} />
+			</div>
+		</Modal>
 	);
 }

@@ -19,26 +19,25 @@ import * as path from 'path';
 import * as fsSync from 'fs';
 import Store from 'electron-store';
 import { execFileNoThrow } from '../../utils/execFile';
+import { peekShellPath } from '../../runtime/getShellPath';
+import { fallbackFontResult, type FontDetectionResult } from '../../../shared/fontDetection';
 import { logger } from '../../utils/logger';
 import { detectShells } from '../../utils/shellDetector';
 import { isCloudflaredInstalled } from '../../utils/cliDetection';
 import { tunnelManager as tunnelManagerInstance } from '../../tunnel-manager';
 import { checkForUpdates } from '../../update-checker';
+import { sendCheckin } from '../../checkin';
 import { setAllowPrerelease } from '../../auto-updater';
 import { WebServer } from '../../web-server';
 import { powerManager } from '../../power-manager';
+import { setMenuShortcutKeys } from '../../app-menu';
 import { MaestroSettings } from './persistence';
+import { captureException } from '../../utils/sentry';
+import { createSafeSend } from '../../utils/safe-send';
+import type { BootstrapSettings } from '../../stores/types';
 
 // Type for tunnel manager instance
 type TunnelManagerType = typeof tunnelManagerInstance;
-
-/**
- * Interface for bootstrap settings (custom storage location)
- */
-interface BootstrapSettings {
-	customSyncPath?: string;
-	iCloudSyncEnabled?: boolean; // Legacy - kept for backwards compatibility
-}
 
 /**
  * Dependencies required for system handlers
@@ -50,6 +49,32 @@ export interface SystemHandlerDependencies {
 	tunnelManager: TunnelManagerType;
 	getWebServer: () => WebServer | null;
 	bootstrapStore?: Store<BootstrapSettings>;
+}
+
+/**
+ * Decode a data URL into a NativeImage for the clipboard.
+ *
+ * `nativeImage.createFromDataURL()` trusts the DECLARED media type and accepts
+ * only `image/png` and `image/jpeg`, so a JPEG announced as `image/jpg` decodes
+ * to an empty image and the copy silently degrades to pasting the data URL as
+ * text. Every producer here should emit a canonical type (see
+ * `getImageMimeType`), but the clipboard follows the BYTES rather than the
+ * label: on an empty decode the base64 payload is handed to
+ * `createFromBuffer`, which sniffs the PNG/JPEG magic itself.
+ *
+ * Formats Chromium's image decoder does not expose to nativeImage (webp, gif)
+ * still come back empty - the renderer rasterizes those to PNG before it gets
+ * here.
+ */
+function decodeClipboardImage(dataUrl: string): Electron.NativeImage {
+	const direct = nativeImage.createFromDataURL(dataUrl);
+	if (!direct.isEmpty()) return direct;
+
+	const comma = dataUrl.indexOf(',');
+	if (comma < 0 || !/^data:[^,]*;base64$/i.test(dataUrl.slice(0, comma))) {
+		return direct;
+	}
+	return nativeImage.createFromBuffer(Buffer.from(dataUrl.slice(comma + 1), 'base64'));
 }
 
 /**
@@ -80,6 +105,7 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 
 			return result.filePaths[0];
 		} catch (error) {
+			void captureException(error);
 			// Log the error but return null to ensure IPC reply is sent
 			logger.error('dialog:selectFolder failed', 'Dialog', { error });
 			return null;
@@ -117,47 +143,54 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 	// ============ Font Detection Handlers ============
 
 	// Font detection
-	ipcMain.handle('fonts:detect', async () => {
+	ipcMain.handle('fonts:detect', async (): Promise<FontDetectionResult> => {
+		// fc-list is fontconfig, which ships with essentially no macOS or Windows
+		// install - it is present on a dev Mac only because Homebrew pulled it in
+		// as a dependency. It was also being executed with the GUI process PATH,
+		// which does not include /opt/homebrew/bin, so even a machine that HAS it
+		// failed once the app was packaged. Both failures returned the hard-coded
+		// list silently, and the picker then annotated genuinely-installed fonts
+		// "(Not Found)".
+		//
+		// The renderer now tries Chromium's Local Font Access API first (native,
+		// cross-platform, no external binary) and only falls back to here. This
+		// handler keeps fc-list for Linux, where fontconfig IS the system font
+		// database, and now runs it with the login-shell PATH.
 		try {
-			// Use fc-list on all platforms (faster than system_profiler on macOS)
-			// macOS: 0.74s (was 8.77s with system_profiler) - 11.9x faster
-			// Linux/Windows: 0.5-0.6s
-			const result = await execFileNoThrow('fc-list', [':', 'family']);
+			const shellPath = peekShellPath();
+			const env = shellPath ? { ...process.env, PATH: shellPath } : undefined;
+			const result = await execFileNoThrow('fc-list', [':', 'family'], undefined, { env });
 
 			if (result.exitCode === 0 && result.stdout) {
-				// Parse font list and deduplicate
-				const fonts = result.stdout
-					.split('\n')
-					.filter(Boolean)
-					.map((line: string) => line.trim())
-					.filter((font) => font.length > 0);
-
-				// Deduplicate fonts (fc-list can return duplicates)
-				return [...new Set(fonts)];
+				// fc-list prints comma-separated aliases per family ("DejaVu Sans,
+				// DejaVu Sans Book"). Splitting on the comma recovers each real name;
+				// the previous parse kept the whole line, so a family with aliases
+				// never matched a picker entry by name.
+				const fonts = new Set<string>();
+				for (const line of result.stdout.split('\n')) {
+					for (const alias of line.split(',')) {
+						const name = alias.trim();
+						if (name) fonts.add(name);
+					}
+				}
+				if (fonts.size > 0) {
+					return { fonts: [...fonts], source: 'fc-list', reliable: true };
+				}
 			}
 
-			// Fallback if fc-list not available (rare on modern systems)
-			return [
-				'Monaco',
-				'Menlo',
-				'Courier New',
-				'Consolas',
-				'Roboto Mono',
-				'Fira Code',
-				'JetBrains Mono',
-			];
+			logger.info('Font detection: fc-list unavailable, availability unknown', 'Fonts', {
+				exitCode: result.exitCode,
+				hadShellPath: Boolean(shellPath),
+			});
+			return fallbackFontResult('fontconfig (fc-list) is not installed on this system');
 		} catch (error) {
-			console.error('Font detection error:', error);
-			// Return common monospace fonts as fallback
-			return [
-				'Monaco',
-				'Menlo',
-				'Courier New',
-				'Consolas',
-				'Roboto Mono',
-				'Fira Code',
-				'JetBrains Mono',
-			];
+			// Not reported to Sentry: on macOS and Windows a missing fc-list is the
+			// EXPECTED path, not an anomaly, and the renderer has already tried the
+			// native API by the time it asks us.
+			logger.info('Font detection: fc-list threw, availability unknown', 'Fonts', {
+				reason: error instanceof Error ? error.message : String(error),
+			});
+			return fallbackFontResult('the system font list could not be read');
 		}
 	});
 
@@ -177,6 +210,7 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 			);
 			return shells;
 		} catch (error) {
+			void captureException(error);
 			logger.error('Shell detection error', 'ShellDetector', error);
 			// Return default shell list with all marked as unavailable
 			return [
@@ -190,7 +224,16 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 	});
 
 	// Shell operations - open external URLs
-	const ALLOWED_PROTOCOLS = ['http:', 'https:', 'mailto:'];
+	//
+	// `clickup:` lets a ClickUp task link open the native desktop app instead of a browser tab. ClickUp
+	// registers the scheme (CFBundleURLSchemes) but declares no associated-domains, so macOS universal links
+	// never redirect app.clickup.com on their own - the scheme is the only route to the app, and this
+	// allowlist was the one thing standing in the way.
+	//
+	// Safe on the same grounds that already admit `mailto:`: the OS hands the URL to whichever app claims the
+	// scheme, with no code execution here, and unlike `file:` (handled above) it cannot reach the filesystem.
+	// The vectors this list exists to stop, `javascript:` and `data:`, remain blocked.
+	const ALLOWED_PROTOCOLS = ['http:', 'https:', 'mailto:', 'clickup:'];
 	ipcMain.handle('shell:openExternal', async (_event, url: string) => {
 		// Validate URL before opening - Fixes MAESTRO-1S
 		if (!url || typeof url !== 'string') {
@@ -200,7 +243,7 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		try {
 			parsed = new URL(url);
 		} catch {
-			// Detect absolute file paths and redirect to openPath — Fixes MAESTRO-FN/FA/F4
+			// Detect absolute file paths and redirect to openPath - Fixes MAESTRO-FN/FA/F4
 			if (path.isAbsolute(url)) {
 				if (fsSync.existsSync(url)) {
 					const errorMessage = await shell.openPath(url);
@@ -211,11 +254,11 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 				}
 				throw new Error(`Path does not exist: ${url}`);
 			}
-			// Relative paths (LICENSE, ./README.md, vscode/**) are not actionable — log and return
+			// Relative paths (LICENSE, ./README.md, vscode/**) are not actionable - log and return
 			logger.warn(`Ignored non-URL string passed to openExternal: "${url}"`, 'Shell');
 			return;
 		}
-		// Redirect file:// URLs to shell.openPath instead of rejecting — Fixes MAESTRO-9M
+		// Redirect file:// URLs to shell.openPath instead of rejecting - Fixes MAESTRO-9M
 		if (parsed.protocol === 'file:') {
 			const filePath = decodeURIComponent(parsed.pathname);
 			if (!fsSync.existsSync(filePath)) {
@@ -250,14 +293,18 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		}
 		// Resolve to absolute path and verify it exists
 		const absolutePath = path.resolve(itemPath);
+		// Path missing → user's intent (delete) is already satisfied; no-op gracefully
+		// rather than rejecting the IPC promise, which surfaces as an unhandled
+		// rejection in the renderer. Fixes MAESTRO-JD/JC.
 		if (!fsSync.existsSync(absolutePath)) {
-			throw new Error(`Path does not exist: ${absolutePath}`);
+			logger.warn(`shell:trashItem - path does not exist: ${absolutePath}`, 'Shell');
+			return;
 		}
 		try {
 			await shell.trashItem(absolutePath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			// User or system cancelled the trash operation — not a real error
+			// User or system cancelled the trash operation - not a real error
 			// Fixes MAESTRO-A4
 			if (
 				message.includes('aborted') ||
@@ -278,8 +325,12 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		}
 		// Resolve to absolute path and verify it exists
 		const absolutePath = path.resolve(itemPath);
+		// Stale path → log + return rather than rejecting the IPC, which produces
+		// noisy unhandled rejections from fire-and-forget callers in the renderer.
+		// Mirrors the shell:openPath fix (MAESTRO-B3). Fixes MAESTRO-K1/HN/HS.
 		if (!fsSync.existsSync(absolutePath)) {
-			throw new Error(`Path does not exist: ${absolutePath}`);
+			logger.warn(`shell:showItemInFolder - path does not exist: ${absolutePath}`, 'Shell');
+			return;
 		}
 		shell.showItemInFolder(absolutePath);
 	});
@@ -291,7 +342,7 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		}
 		const absolutePath = path.resolve(itemPath);
 		if (!fsSync.existsSync(absolutePath)) {
-			// Path doesn't exist — log and return gracefully since many callers
+			// Path doesn't exist - log and return gracefully since many callers
 			// fire-and-forget without catching. Fixes MAESTRO-B3
 			logger.warn(`shell:openPath - path does not exist: ${absolutePath}`, 'Shell');
 			return;
@@ -302,17 +353,69 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		}
 	});
 
-	// Clipboard operations - copy image to system clipboard via Electron native API
+	// Clipboard operations - copy text/image to system clipboard via Electron native API
+	ipcMain.handle('clipboard:writeText', async (_event, text: string) => {
+		if (typeof text !== 'string') {
+			throw new Error('Invalid clipboard text: must be a string');
+		}
+		clipboard.writeText(text);
+	});
+
 	ipcMain.handle('clipboard:writeImage', async (_event, dataUrl: string) => {
 		if (!dataUrl || typeof dataUrl !== 'string') {
 			throw new Error('Invalid data URL: must be a non-empty string');
 		}
-		const img = nativeImage.createFromDataURL(dataUrl);
+		const img = decodeClipboardImage(dataUrl);
 		if (img.isEmpty()) {
 			throw new Error('Failed to create image from data URL');
 		}
 		clipboard.writeImage(img);
 	});
+
+	// Read image from system clipboard. Returns a PNG data URL, or null when
+	// the clipboard does not currently hold an image.
+	ipcMain.handle('clipboard:readImage', async (): Promise<string | null> => {
+		const img = clipboard.readImage();
+		if (img.isEmpty()) return null;
+		return img.toDataURL();
+	});
+
+	// ============ Page Capture ============
+
+	// Screenshot the calling window exactly as it is painted, as a PNG data URL.
+	// `rect` (CSS pixels, viewport-relative) narrows the shot to one region;
+	// omit it for the whole page. Captures from the SENDER rather than the main
+	// window so a graph opened in a second window shoots itself, not window one.
+	ipcMain.handle(
+		'window:capturePage',
+		async (
+			event,
+			rect?: { x: number; y: number; width: number; height: number }
+		): Promise<string | null> => {
+			const contents = event.sender;
+			if (!contents || contents.isDestroyed()) return null;
+
+			// getBoundingClientRect() hands back floats; Chromium wants whole
+			// DIPs and answers an out-of-range rect with an empty image, so the
+			// region is rounded and clamped before it goes over.
+			let area: Electron.Rectangle | undefined;
+			if (rect) {
+				const x = Math.max(0, Math.floor(rect.x));
+				const y = Math.max(0, Math.floor(rect.y));
+				area = {
+					x,
+					y,
+					width: Math.floor(rect.x + rect.width) - x,
+					height: Math.floor(rect.y + rect.height) - y,
+				};
+				if (area.width <= 0 || area.height <= 0) return null;
+			}
+
+			const image = area ? await contents.capturePage(area) : await contents.capturePage();
+			if (image.isEmpty()) return null;
+			return image.toDataURL();
+		}
+	);
 
 	// ============ Tunnel Handlers (Cloudflare) ============
 
@@ -351,7 +454,25 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 	});
 
 	ipcMain.handle('tunnel:getStatus', async () => {
-		return tunnelManager.getStatus();
+		const status = tunnelManager.getStatus();
+		if (!status.isRunning || !status.url) return status;
+
+		// Append the web server's token path so the URL stays usable.
+		// tunnelManager itself is token-agnostic - composition happens here,
+		// matching tunnel:start above.
+		const webServer = getWebServer();
+		const serverUrl = webServer?.getSecureUrl();
+		if (!serverUrl) return status;
+
+		try {
+			const tokenPath = new URL(serverUrl).pathname;
+			if (tokenPath && tokenPath !== '/' && !status.url.endsWith(tokenPath)) {
+				return { ...status, url: status.url + tokenPath };
+			}
+		} catch {
+			// Malformed server URL - fall back to bare tunnel URL
+		}
+		return status;
 	});
 
 	// ============ DevTools Handlers ============
@@ -381,11 +502,39 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		}
 	});
 
+	// ============ Application Menu Handlers ============
+
+	// The renderer owns the shortcut map (bundled defaults merged with the
+	// user's remaps), so it pushes the merged bindings here on mount and on
+	// every change. The menu is rebuilt so the accelerators it displays match
+	// what is actually bound. Display only - see src/main/app-menu.ts.
+	ipcMain.on('menu:setShortcutKeys', (_event, keys: Record<string, string[]>) => {
+		setMenuShortcutKeys(keys);
+	});
+
 	// ============ Update Check Handler ============
 
 	ipcMain.handle('updates:check', async (_event, includePrerelease: boolean = false) => {
 		const currentVersion = app.getVersion();
 		return checkForUpdates(currentVersion, includePrerelease);
+	});
+
+	// Anonymous DAU/MAU check-in ping. Fired by the renderer alongside the update
+	// check, gated by the same "check for updates" preference. Fire-and-forget:
+	// we kick it off and return immediately so it never blocks the update check,
+	// and sendCheckin swallows all failures internally.
+	ipcMain.handle('updates:checkin', async () => {
+		// Resolve the active theme id best-effort so we can measure theme
+		// popularity. The store is seeded with the default ('dracula'), so this
+		// returns a value for every user. Never let it block or throw the ping.
+		let theme: string | undefined;
+		try {
+			const value = settingsStore.get('activeThemeId' as keyof MaestroSettings);
+			if (typeof value === 'string') theme = value;
+		} catch {
+			theme = undefined;
+		}
+		void sendCheckin(app, theme);
 	});
 
 	// Set whether to allow prerelease updates (for electron-updater)
@@ -634,6 +783,14 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 		logger.info('Sleep prevention restored from settings', 'PowerManager');
 	}
 
+	const savedKeepDisplayAwake = settingsStore.get(
+		'preventDisplaySleepEnabled' as keyof MaestroSettings
+	);
+	if (savedKeepDisplayAwake === true) {
+		powerManager.setKeepDisplayAwake(true);
+		logger.info('Display sleep prevention restored from settings', 'PowerManager');
+	}
+
 	// Set whether sleep prevention is enabled
 	ipcMain.handle('power:setEnabled', async (_event, enabled: boolean) => {
 		powerManager.setEnabled(enabled);
@@ -643,6 +800,12 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 	// Check if sleep prevention is enabled
 	ipcMain.handle('power:isEnabled', async () => {
 		return powerManager.isEnabled();
+	});
+
+	// Lift blockers to prevent-display-sleep (screen saver / lock / idle logout)
+	ipcMain.handle('power:setKeepDisplayAwake', async (_event, keepAwake: boolean) => {
+		powerManager.setKeepDisplayAwake(keepAwake);
+		settingsStore.set('preventDisplaySleepEnabled' as keyof MaestroSettings, keepAwake);
 	});
 
 	// Get current power management status
@@ -662,24 +825,52 @@ export function registerSystemHandlers(deps: SystemHandlerDependencies): void {
 }
 
 /**
+ * How long to coalesce log entries before forwarding them to the renderer.
+ * Each `webContents.send` carries fixed serialization overhead, so buffering
+ * burst output (debug mode, noisy components) materially reduces IPC pressure.
+ */
+const LOGGER_FORWARD_FLUSH_INTERVAL_MS = 50;
+/** Hard cap on buffered entries - flush early if we exceed this size. */
+const LOGGER_FORWARD_FLUSH_SIZE = 100;
+
+/**
  * Setup logger event forwarding to renderer.
  * This should be called after the main window is created.
+ *
+ * Entries are buffered and dispatched in batches via `logger:newLogBatch`
+ * to amortize IPC serialization overhead. The preload layer fans batches
+ * out to per-entry consumers so the public API stays single-entry.
  */
 export function setupLoggerEventForwarding(getMainWindow: () => BrowserWindow | null): void {
+	const safeSend = createSafeSend(getMainWindow);
+	let buffer: unknown[] = [];
+	let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const flush = () => {
+		if (flushTimer) {
+			clearTimeout(flushTimer);
+			flushTimer = null;
+		}
+		if (buffer.length === 0) return;
+
+		const batch = buffer;
+		buffer = [];
+
+		// safeSend handles null/destroyed windows and fans the batch out to
+		// web-desktop bridge clients so remote log viewers stay in sync.
+		safeSend('logger:newLogBatch', batch);
+	};
+
 	logger.on('newLog', (entry) => {
-		const mainWindow = getMainWindow();
-		// Safely send - handle cases where renderer is disposed (GPU crash, window closing)
-		try {
-			if (
-				mainWindow &&
-				!mainWindow.isDestroyed() &&
-				mainWindow.webContents &&
-				!mainWindow.webContents.isDestroyed()
-			) {
-				mainWindow.webContents.send('logger:newLog', entry);
-			}
-		} catch {
-			// Silently ignore - renderer not available
+		buffer.push(entry);
+
+		if (buffer.length >= LOGGER_FORWARD_FLUSH_SIZE) {
+			flush();
+			return;
+		}
+
+		if (!flushTimer) {
+			flushTimer = setTimeout(flush, LOGGER_FORWARD_FLUSH_INTERVAL_MS);
 		}
 	});
 }

@@ -144,6 +144,28 @@ describe('useNavigationHistory', () => {
 			expect(result.current.canGoBack()).toBe(true);
 		});
 
+		it('should not ignore entry with same sessionId and tabId but different tabKind', () => {
+			const { result } = renderHook(() => useNavigationHistory());
+
+			act(() => {
+				result.current.pushNavigation({ sessionId: 'session1', tabId: 'tab1', tabKind: 'ai' });
+				result.current.pushNavigation({ sessionId: 'session1', tabId: 'tab1', tabKind: 'file' });
+			});
+
+			expect(result.current.canGoBack()).toBe(true);
+		});
+
+		it('should ignore duplicate entry with same sessionId, tabId, and tabKind', () => {
+			const { result } = renderHook(() => useNavigationHistory());
+
+			act(() => {
+				result.current.pushNavigation({ sessionId: 'session1', tabId: 'b1', tabKind: 'browser' });
+				result.current.pushNavigation({ sessionId: 'session1', tabId: 'b1', tabKind: 'browser' });
+			});
+
+			expect(result.current.canGoBack()).toBe(false);
+		});
+
 		it('should clear forward stack on new push', () => {
 			const { result } = renderHook(() => useNavigationHistory());
 
@@ -1113,6 +1135,86 @@ describe('useNavigationHistory', () => {
 			});
 
 			expect(entry).toEqual({ groupChatId: 'gc1' });
+		});
+	});
+	/**
+	 * A breadcrumb entry can go stale (its tab or agent was closed) or become
+	 * redundant (it names the tab already on screen). Visiting one moves nothing,
+	 * so the keypress must step over it instead of burning a press per tombstone.
+	 */
+	describe('canUse filter', () => {
+		it('should skip and DISCARD unusable entries when going back', () => {
+			const { result } = renderHook(() => useNavigationHistory());
+
+			act(() => {
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'a', tabKind: 'ai' });
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'dead', tabKind: 'file' });
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'b', tabKind: 'terminal' });
+			});
+
+			let entry: NavHistoryEntry | null = null;
+			act(() => {
+				entry = result.current.navigateBack((e) => e.tabId !== 'dead');
+				vi.runAllTimers();
+			});
+
+			expect(entry).toEqual({ sessionId: 's1', tabId: 'a', tabKind: 'ai' });
+			// The dead entry is gone for good, not parked on the forward stack:
+			// forward returns to where we came from, skipping nothing.
+			expect(result.current.canGoBack()).toBe(false);
+
+			let forwardEntry: NavHistoryEntry | null = null;
+			act(() => {
+				forwardEntry = result.current.navigateForward((e) => e.tabId !== 'dead');
+				vi.runAllTimers();
+			});
+			expect(forwardEntry).toEqual({ sessionId: 's1', tabId: 'b', tabKind: 'terminal' });
+		});
+
+		it('should skip unusable entries when going forward', () => {
+			const { result } = renderHook(() => useNavigationHistory());
+
+			act(() => {
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'a' });
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'dead' });
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'b' });
+			});
+			act(() => {
+				result.current.navigateBack();
+				vi.runAllTimers();
+			});
+			act(() => {
+				result.current.navigateBack();
+				vi.runAllTimers();
+			});
+
+			let entry: NavHistoryEntry | null = null;
+			act(() => {
+				entry = result.current.navigateForward((e) => e.tabId !== 'dead');
+				vi.runAllTimers();
+			});
+
+			expect(entry).toEqual({ sessionId: 's1', tabId: 'b' });
+		});
+
+		it('should return null and leave nothing behind when every entry is unusable', () => {
+			const { result } = renderHook(() => useNavigationHistory());
+
+			act(() => {
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'a' });
+				result.current.pushNavigation({ sessionId: 's1', tabId: 'b' });
+			});
+
+			let entry: NavHistoryEntry | null = null;
+			act(() => {
+				entry = result.current.navigateBack(() => false);
+				vi.runAllTimers();
+			});
+
+			expect(entry).toBeNull();
+			expect(result.current.canGoBack()).toBe(false);
+			// Current never moved, so nothing was pushed onto the forward stack.
+			expect(result.current.canGoForward()).toBe(false);
 		});
 	});
 });

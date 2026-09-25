@@ -14,6 +14,9 @@ export {
 	validateAgentPromptHasTaskReference,
 } from './batchUtils';
 
+// Whether a run is parked waiting on the user (agent error or HITL gate)
+export { useAutoRunErrorPaused } from './useAutoRunPause';
+
 // Debounce hook for per-session state updates
 export { useSessionDebounce } from './useSessionDebounce';
 export type { UseSessionDebounceOptions, UseSessionDebounceReturn } from './useSessionDebounce';
@@ -110,6 +113,32 @@ export type {
 	UseWorktreeValidationReturn,
 	UseWorktreeValidationDeps,
 } from './useWorktreeValidation';
+
+// Task/Document fresh-context recommendation engine
+export { useTaskSelectionRecommendation } from './useTaskSelectionRecommendation';
+export type {
+	UseTaskSelectionRecommendationReturn,
+	UseTaskSelectionRecommendationDeps,
+} from './useTaskSelectionRecommendation';
+
+// Goal-Driven Auto Run config (tab, goal, exit criteria, max iterations)
+export { useGoalDrivenConfig } from './useGoalDrivenConfig';
+export type { UseGoalDrivenConfigReturn, UseGoalDrivenConfigDeps } from './useGoalDrivenConfig';
+
+// Agent prompt state (text, saved/default flags, composer, template variables)
+export { usePromptComposerState } from './usePromptComposerState';
+export type {
+	UsePromptComposerStateReturn,
+	UsePromptComposerStateDeps,
+} from './usePromptComposerState';
+
+// Spec-Driven Auto Run config (documents, task counts, loop mode)
+export { useSpecDrivenConfig } from './useSpecDrivenConfig';
+export type { UseSpecDrivenConfigReturn, UseSpecDrivenConfigDeps } from './useSpecDrivenConfig';
+
+// Worktree run-target selection (which worktree a run dispatches to)
+export { useWorktreeRunTarget } from './useWorktreeRunTarget';
+export type { UseWorktreeRunTargetReturn, UseWorktreeRunTargetDeps } from './useWorktreeRunTarget';
 
 // Auto Run achievements/badges
 export { useAchievements, queueAchievement } from './useAchievements';

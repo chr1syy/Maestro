@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { logger } from '../../utils/logger';
 import { DATA_BUFFER_FLUSH_INTERVAL, DATA_BUFFER_SIZE_THRESHOLD } from '../constants';
 import type { ManagedProcess } from '../types';
+import { captureException } from '../../utils/sentry';
 
 /**
  * Manages data buffering for process output to reduce IPC event frequency.
@@ -16,8 +17,8 @@ export class DataBufferManager {
 	 * Buffer data and emit in batches.
 	 * Data is accumulated and flushed every 50ms or when buffer exceeds 8KB.
 	 */
-	emitDataBuffered(sessionId: string, data: string): void {
-		const managedProcess = this.processes.get(sessionId);
+	emitDataBuffered(sessionId: string, data: string, process?: ManagedProcess): void {
+		const managedProcess = process ?? this.processes.get(sessionId);
 		if (!managedProcess) {
 			this.emitter.emit('data', sessionId, data);
 			return;
@@ -26,13 +27,13 @@ export class DataBufferManager {
 		managedProcess.dataBuffer = (managedProcess.dataBuffer || '') + data;
 
 		if (managedProcess.dataBuffer.length > DATA_BUFFER_SIZE_THRESHOLD) {
-			this.flushDataBuffer(sessionId);
+			this.flushDataBuffer(sessionId, managedProcess);
 			return;
 		}
 
 		if (!managedProcess.dataBufferTimeout) {
 			managedProcess.dataBufferTimeout = setTimeout(() => {
-				this.flushDataBuffer(sessionId);
+				this.flushDataBuffer(sessionId, managedProcess);
 			}, DATA_BUFFER_FLUSH_INTERVAL);
 		}
 	}
@@ -40,8 +41,8 @@ export class DataBufferManager {
 	/**
 	 * Flush the data buffer for a session
 	 */
-	flushDataBuffer(sessionId: string): void {
-		const managedProcess = this.processes.get(sessionId);
+	flushDataBuffer(sessionId: string, process?: ManagedProcess): void {
+		const managedProcess = process ?? this.processes.get(sessionId);
 		if (!managedProcess) return;
 
 		if (managedProcess.dataBufferTimeout) {
@@ -53,6 +54,7 @@ export class DataBufferManager {
 			try {
 				this.emitter.emit('data', sessionId, managedProcess.dataBuffer);
 			} catch (err) {
+				void captureException(err);
 				logger.error('[ProcessManager] Error flushing data buffer', 'ProcessManager', {
 					sessionId,
 					error: String(err),

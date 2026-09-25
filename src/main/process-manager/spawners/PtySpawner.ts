@@ -2,11 +2,19 @@ import { EventEmitter } from 'events';
 import * as pty from 'node-pty';
 import { stripControlSequences } from '../../utils/terminalFilter';
 import { logger } from '../../utils/logger';
+import { needsWindowsShell } from '../../utils/execFile';
 import type { ProcessConfig, ManagedProcess, SpawnResult } from '../types';
 import type { DataBufferManager } from '../handlers/DataBufferManager';
-import { buildPtyTerminalEnv, buildChildProcessEnv } from '../utils/envBuilder';
+import {
+	buildPtyTerminalEnv,
+	buildChildProcessEnv,
+	collectMaestroEnvVars,
+} from '../utils/envBuilder';
+import { DEFAULT_QUERY_SOURCE } from '../../../shared/querySource';
 import { resolveShellPath } from '../utils/pathResolver';
+import { escapeArgsForShell } from '../utils/shellEscape';
 import { isWindows } from '../../../shared/platformDetection';
+import { nextSpawnGeneration, isSupersededGeneration } from '../generation';
 
 /**
  * Handles spawning of PTY (pseudo-terminal) processes.
@@ -43,7 +51,7 @@ export class PtySpawner {
 
 			if (isTerminal) {
 				if (!shell) {
-					// No shell specified — use the explicit command/args directly (e.g. ssh for remote terminals)
+					// No shell specified - use the explicit command/args directly (e.g. ssh for remote terminals)
 					ptyCommand = command;
 					ptyArgs = args;
 				} else {
@@ -74,8 +82,18 @@ export class PtySpawner {
 				}
 			} else {
 				// Spawn the AI agent directly with PTY support
-				ptyCommand = command;
-				ptyArgs = args;
+				if (isWindows() && needsWindowsShell(command)) {
+					ptyCommand = process.env.ComSpec || 'cmd.exe';
+					ptyArgs = [
+						'/d',
+						'/s',
+						'/c',
+						escapeArgsForShell([command, ...args], ptyCommand).join(' '),
+					];
+				} else {
+					ptyCommand = command;
+					ptyArgs = args;
+				}
 			}
 
 			// Build environment for PTY process
@@ -100,7 +118,13 @@ export class PtySpawner {
 				// For AI agents in PTY mode: use same env building logic as child processes
 				// This ensures tilde expansion (~/ paths), Electron var stripping, and consistent
 				// global shell environment variable handling across all spawner types
-				ptyEnv = buildChildProcessEnv(customEnvVars, false, shellEnvVars);
+				ptyEnv = buildChildProcessEnv(
+					customEnvVars,
+					false,
+					shellEnvVars,
+					config.extraPathDirs,
+					config.querySource
+				);
 			}
 
 			const ptyProcess = pty.spawn(ptyCommand, ptyArgs, {
@@ -117,13 +141,34 @@ export class PtySpawner {
 				ptyProcess,
 				cwd,
 				pid: ptyProcess.pid,
-				isTerminal: true,
+				isTerminal,
 				startTime: Date.now(),
 				command: ptyCommand,
 				args: ptyArgs,
+				// Terminal PTY env only honors shellEnvVars; agents-in-PTY also honor customEnvVars.
+				maestroEnvVars: collectMaestroEnvVars(
+					shellEnvVars,
+					isTerminal ? undefined : customEnvVars,
+					false,
+					isTerminal ? undefined : (config.querySource ?? DEFAULT_QUERY_SOURCE)
+				),
 			};
 
+			// A killed PTY can still deliver data and its exit after ProcessManager
+			// has registered a replacement under the same sessionId key (`spawn()`
+			// kills the predecessor first, then the spawner re-uses the key). Late
+			// events keyed by sessionId alone would land on the live successor:
+			// the predecessor's exit code would be reported as the successor dying
+			// and the `delete` below would orphan a process that is still running.
+			//
+			// Generation, not map identity - see process-manager/generation.ts for
+			// why "am I still the map entry?" stops working once the successor
+			// finishes and removes its own entry.
+			managedProcess.spawnGeneration = nextSpawnGeneration(sessionId);
 			this.processes.set(sessionId, managedProcess);
+
+			const isSuperseded = (): boolean =>
+				isSupersededGeneration(sessionId, managedProcess.spawnGeneration);
 
 			// Terminal session IDs use the format {sessionId}-terminal-{tabId} (desktop)
 			// or {sessionId}-terminal (web). xterm.js renders escape sequences itself,
@@ -133,15 +178,16 @@ export class PtySpawner {
 
 			// Handle output
 			ptyProcess.onData((data) => {
+				if (isSuperseded()) return;
 				if (isTerminalTab) {
-					// Raw pass-through for xterm.js terminal tabs — no filtering
+					// Raw pass-through for xterm.js terminal tabs - no filtering
 					if (data.length > 0) {
 						logger.debug('[ProcessManager] PTY onData (raw)', 'ProcessManager', {
 							sessionId,
 							pid: ptyProcess.pid,
 							dataLength: data.length,
 						});
-						this.bufferManager.emitDataBuffered(sessionId, data);
+						this.bufferManager.emitDataBuffered(sessionId, data, managedProcess);
 					}
 				} else {
 					const managedProc = this.processes.get(sessionId);
@@ -153,21 +199,56 @@ export class PtySpawner {
 					});
 					// Only emit if there's actual content after filtering
 					if (cleanedData.trim()) {
-						this.bufferManager.emitDataBuffered(sessionId, cleanedData);
+						this.bufferManager.emitDataBuffered(sessionId, cleanedData, managedProcess);
 					}
 				}
 			});
 
-			ptyProcess.onExit(({ exitCode }) => {
+			ptyProcess.onExit(({ exitCode, signal }) => {
+				if (isSuperseded()) {
+					logger.warn('[ProcessManager] Ignoring exit from superseded PTY', 'ProcessManager', {
+						sessionId,
+						pid: ptyProcess.pid,
+						exitCode,
+						signal,
+					});
+					return;
+				}
+
 				// Flush any remaining buffered data before exit
-				this.bufferManager.flushDataBuffer(sessionId);
+				this.bufferManager.flushDataBuffer(sessionId, managedProcess);
+
+				// flushDataBuffer() above synchronously emits 'data', and EventEmitter
+				// runs listeners in-line - a listener that reacts to output by
+				// re-spawning this session id (e.g. a Cue completion chain) can claim
+				// the key before we get here. Re-check before the side effects below,
+				// which are both keyed by sessionId alone and would otherwise land on
+				// the successor: `exit` would report this process's code as the live
+				// agent dying, and the unconditional delete would untrack it.
+				if (isSuperseded()) {
+					logger.warn(
+						'[ProcessManager] Session re-spawned during PTY final flush, suppressing exit',
+						'ProcessManager',
+						{ sessionId, pid: ptyProcess.pid, exitCode, signal }
+					);
+					return;
+				}
 
 				logger.debug('[ProcessManager] PTY onExit', 'ProcessManager', {
 					sessionId,
 					exitCode,
+					signal,
 				});
-				this.emitter.emit('exit', sessionId, exitCode);
-				this.processes.delete(sessionId);
+				// Forward `signal` so consumers can tell a shell the user exited from
+				// one that was killed out from under them (OOM killer, SIGHUP, crash).
+				// Only settle OUR entry: a successor that already claimed the key must
+				// not be untracked, or the user is left with a process they cannot
+				// stop. Released before the emit so a listener that synchronously
+				// spawns the next process owns the key uncontested.
+				const currentProcess = this.processes.get(sessionId);
+				if (currentProcess && currentProcess !== managedProcess) return;
+				if (currentProcess === managedProcess) this.processes.delete(sessionId);
+				this.emitter.emit('exit', sessionId, exitCode, signal);
 			});
 
 			logger.debug('[ProcessManager] PTY process created', 'ProcessManager', {

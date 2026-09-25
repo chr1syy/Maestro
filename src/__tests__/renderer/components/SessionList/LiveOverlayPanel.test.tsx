@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { LiveOverlayPanel } from '../../../../renderer/components/SessionList/LiveOverlayPanel';
 import type { Theme } from '../../../../renderer/types';
 
+import { mockTheme } from '../../../helpers/mockTheme';
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -24,23 +25,6 @@ vi.mock('../../../../renderer/utils/clipboard', () => ({
 		getStatus: vi.fn().mockResolvedValue({ isRunning: false, url: null, error: null }),
 	},
 };
-
-const mockTheme: Theme = {
-	name: 'test',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgSidebar: '#16213e',
-		bgInput: '#0f3460',
-		bgActivity: '#1e1e3a',
-		textMain: '#e0e0e0',
-		textDim: '#888888',
-		accent: '#e94560',
-		border: '#333333',
-		error: '#ff4444',
-		success: '#00cc66',
-		warning: '#ffaa00',
-	},
-} as Theme;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -173,8 +157,9 @@ describe('LiveOverlayPanel', () => {
 
 		it('disables toggle when tunnel is starting', () => {
 			render(<LiveOverlayPanel {...createDefaultProps({ tunnelStatus: 'starting' })} />);
-			const toggleBtn = screen.getByTitle('Enable remote control');
+			const toggleBtn = screen.getByTitle('Starting tunnel…');
 			expect(toggleBtn).toBeDisabled();
+			expect(toggleBtn.getAttribute('aria-busy')).toBe('true');
 		});
 
 		it('shows loading spinner when tunnel is starting', () => {
@@ -182,6 +167,13 @@ describe('LiveOverlayPanel', () => {
 				<LiveOverlayPanel {...createDefaultProps({ tunnelStatus: 'starting' })} />
 			);
 			expect(container.querySelector('.animate-spin')).toBeTruthy();
+		});
+
+		it('shows inline starting status with live region when tunnel is starting', () => {
+			render(<LiveOverlayPanel {...createDefaultProps({ tunnelStatus: 'starting' })} />);
+			const status = screen.getByRole('status');
+			expect(status.textContent).toMatch(/Starting tunnel/i);
+			expect(status.getAttribute('aria-live')).toBe('polite');
 		});
 
 		it('displays tunnel error message', () => {
@@ -218,6 +210,30 @@ describe('LiveOverlayPanel', () => {
 			);
 
 			expect(screen.getByText(/Remote tunnel active/)).toBeTruthy();
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// Persistent Web Link
+	// -----------------------------------------------------------------------
+	describe('persistent web link', () => {
+		it('renders the toggle as a switch reflecting the current value', () => {
+			render(<LiveOverlayPanel {...createDefaultProps({ persistentWebLink: true })} />);
+			const toggle = screen.getByRole('switch', { name: 'Persistent Web Link' });
+			expect(toggle).toHaveAttribute('aria-checked', 'true');
+			expect(toggle).toHaveAttribute('title', 'Disable persistent link');
+		});
+
+		it('flips the value on click', () => {
+			const setPersistentWebLink = vi.fn().mockResolvedValue(undefined);
+			render(
+				<LiveOverlayPanel
+					{...createDefaultProps({ persistentWebLink: false, setPersistentWebLink })}
+				/>
+			);
+
+			fireEvent.click(screen.getByRole('switch', { name: 'Persistent Web Link' }));
+			expect(setPersistentWebLink).toHaveBeenCalledWith(true);
 		});
 	});
 
@@ -322,7 +338,7 @@ describe('LiveOverlayPanel', () => {
 			);
 
 			fireEvent.blur(screen.getByPlaceholderText('8080'));
-			// handleServerRestart is async — flush microtasks
+			// handleServerRestart is async - flush microtasks
 			await vi.waitFor(() => {
 				expect(restartWebServer).toHaveBeenCalled();
 				expect(restartTunnel).toHaveBeenCalled();

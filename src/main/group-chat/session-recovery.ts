@@ -18,6 +18,7 @@ import { getErrorPatterns, matchErrorPattern } from '../parsers/error-patterns';
 import { readLog, type GroupChatMessage } from './group-chat-log';
 import { loadGroupChat, updateParticipant, getGroupChatDir } from './group-chat-storage';
 import { logger } from '../utils/logger';
+import { captureException } from '../utils/sentry';
 
 const LOG_CONTEXT = '[SessionRecovery]';
 
@@ -48,11 +49,13 @@ export function detectSessionNotFoundError(output: string, agentId?: string): bo
 		}
 	}
 
-	// Also check for raw error message that might not be in JSON format
+	// Also check for raw error message that might not be in JSON format.
+	// Anchored to the literal phrases each agent actually emits, not broad
+	// `.*` wildcards, which would match any line that merely mentions both
+	// words.
 	const sessionNotFoundPatterns = [
 		/no conversation found with session id/i,
-		/session.*not found/i,
-		/invalid.*session.*id/i,
+		/\bsession not found\b/i,
 	];
 
 	for (const pattern of sessionNotFoundPatterns) {
@@ -190,6 +193,7 @@ export async function initiateSessionRecovery(
 
 		return true;
 	} catch (error) {
+		void captureException(error);
 		logger.error('Failed to initiate session recovery', LOG_CONTEXT, {
 			groupChatId,
 			participantName,

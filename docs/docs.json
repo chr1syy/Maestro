@@ -29,82 +29,104 @@
 		}
 	},
 	"navigation": {
-		"dropdowns": [
+		"groups": [
 			{
-				"dropdown": "Docs",
-				"icon": "book",
-				"description": "Everything you need to use Maestro",
-				"groups": [
+				"group": "Overview",
+				"pages": ["index", "about/overview", "features", "screenshots"],
+				"icon": "house"
+			},
+			{
+				"group": "Getting Started",
+				"pages": ["installation", "getting-started"]
+			},
+			{
+				"group": "General Usage",
+				"pages": [
+					"general-usage",
+					"multi-window",
+					"keyboard-shortcuts",
+					"slash-commands",
+					"prompt-customization",
+					"history",
+					"memories",
+					"context-management",
+					"document-graph",
+					"git-worktrees",
+					"agent-collaboration",
+					"group-chat",
+					"cross-agent-mentions",
+					"image-annotator",
+					"media-player",
+					"file-formats",
+					"parquet-preview",
+					"remote-control",
+					"ssh-remote-execution",
+					"agent-resilience",
+					"feedback",
+					"configuration"
+				]
+			},
+			{
+				"group": "Auto Run",
+				"icon": "play",
+				"pages": [
+					"autorun-playbooks",
+					"playbook-exchange",
+					"local-manifest",
+					"speckit-commands",
+					"openspec-commands",
+					"bmad-commands"
+				]
+			},
+			{
+				"group": "Encore Features",
+				"icon": "flask",
+				"pages": [
+					"encore-features",
+					"director-notes",
+					"usage-dashboard",
+					"symphony",
+					"concerto",
+					"pianola",
+					"coworking",
 					{
-						"group": "Overview",
-						"pages": ["index", "about/overview", "features", "screenshots"],
-						"icon": "house"
-					},
-					{
-						"group": "Getting Started",
-						"pages": ["installation", "getting-started"]
-					},
-					{
-						"group": "General Usage",
+						"group": "Maestro Cue",
+						"icon": "bolt",
+						"expanded": true,
 						"pages": [
-							"general-usage",
-							"keyboard-shortcuts",
-							"slash-commands",
-							"history",
-							"context-management",
-							"document-graph",
-							"git-worktrees",
-							"group-chat",
-							"remote-control",
-							"ssh-remote-execution",
-							"feedback",
-							"configuration"
-						]
-					},
-					{
-						"group": "Auto Run",
-						"icon": "play",
-						"pages": [
-							"autorun-playbooks",
-							"playbook-exchange",
-							"speckit-commands",
-							"openspec-commands",
-							"bmad-commands"
-						]
-					},
-					{
-						"group": "Encore Features",
-						"icon": "flask",
-						"pages": [
-							"encore-features",
-							"director-notes",
-							"usage-dashboard",
-							"symphony",
 							"maestro-cue",
 							"maestro-cue-configuration",
 							"maestro-cue-events",
 							"maestro-cue-advanced",
-							"maestro-cue-examples"
+							"maestro-cue-examples",
+							"maestro-cue-karpathy-loop",
+							"maestro-cue-marketing-example"
 						]
-					},
-					{
-						"group": "Providers & CLI",
-						"pages": ["provider-notes", "multi-claude", "cli"]
-					},
-					{
-						"group": "Integrations",
-						"pages": ["mcp-server", "deep-links"],
-						"icon": "plug"
-					},
-					{
-						"group": "Reference",
-						"pages": ["releases", "achievements", "performance-profiling", "troubleshooting"],
-						"icon": "life-ring"
 					}
 				]
+			},
+			{
+				"group": "Providers & CLI",
+				"pages": ["provider-notes", "multi-provider", "cli", "cli-reference"]
+			},
+			{
+				"group": "Integrations",
+				"pages": ["mcp-server", "deep-links"],
+				"icon": "plug"
+			},
+			{
+				"group": "Reference",
+				"pages": ["releases", "achievements", "performance-profiling", "troubleshooting"],
+				"icon": "life-ring"
 			}
 		]
 	},
+	"redirects": [
+		{
+			"source": "/multi-claude",
+			"destination": "/multi-provider"
+		}
+	],
 	"navbar": {
 		"links": [
 			{

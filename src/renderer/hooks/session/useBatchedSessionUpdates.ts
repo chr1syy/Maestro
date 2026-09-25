@@ -3,10 +3,10 @@
  *
  * A hook that batches session state updates to reduce React re-renders.
  * During AI streaming, IPC handlers can trigger 100+ state updates per second.
- * This hook accumulates updates in a ref and flushes them every 150ms.
+ * This hook accumulates updates in a ref and flushes them on a fixed cadence.
  *
  * Features:
- * - Configurable flush interval (default 150ms)
+ * - Configurable flush interval (default 200ms)
  * - Support for multiple update types: appendLog, setStatus, updateUsage, etc.
  * - Proper ordering of updates within each flush
  * - Immediate flush capability for critical moments (user input, session switch)
@@ -16,9 +16,58 @@
 import { useRef, useCallback, useEffect, useMemo } from 'react';
 import type { Session, SessionState, UsageStats, LogEntry } from '../../types';
 import { useSessionStore } from '../../stores/sessionStore';
+import { canAppendToLogEntry } from '../../utils/logEntries';
+import { isAiTabHidden } from '../../utils/unifiedTabOrderUtils';
 
-// Default flush interval in milliseconds (imperceptible to users)
-export const DEFAULT_BATCH_FLUSH_INTERVAL = 150;
+// Default flush interval in milliseconds. 200ms is the sweet spot we landed on:
+// - 150ms collided with high-throughput streams (jitter from setInterval drift
+//   produced visible micro-stutters during peak agent output)
+// - 250ms is perceptibly laggy for users typing in the input area
+// - 200ms keeps streaming smooth without measurable input latency
+export const DEFAULT_BATCH_FLUSH_INTERVAL = 200;
+
+/**
+ * Merge the context-window half of a usage delta into the existing stats.
+ *
+ * `buildUsageStats` in the main process ALWAYS emits a context window, falling
+ * back to `FALLBACK_CONTEXT_WINDOW` (200k) when it could not resolve the real
+ * one (e.g. an omp model catalog that has not primed yet). Taking that value at
+ * face value downgrades a gauge that already showed an authoritative 1M back to
+ * 200k for the rest of the turn. So an unresolved delta never overwrites an
+ * already-resolved window; a resolved delta always wins, which keeps genuine
+ * model switches (they arrive resolved) propagating normally.
+ *
+ * Preservation is scoped to the SAME model (`contextWindowModel`): a switch to a
+ * different omp model that is absent from the primed catalog arrives unresolved,
+ * and must NOT keep showing the previous model's window. Providers with a single
+ * static window carry no model tag, so both sides are undefined and preservation
+ * applies as before.
+ */
+export function mergeContextWindow(
+	delta: Pick<UsageStats, 'contextWindow' | 'contextWindowResolved' | 'contextWindowModel'>,
+	existing:
+		| Pick<UsageStats, 'contextWindow' | 'contextWindowResolved' | 'contextWindowModel'>
+		| undefined
+): { contextWindow: number; contextWindowResolved?: boolean; contextWindowModel?: string } {
+	const sameModel = delta.contextWindowModel === existing?.contextWindowModel;
+	if (existing?.contextWindowResolved && !delta.contextWindowResolved && sameModel) {
+		return {
+			contextWindow: existing.contextWindow,
+			contextWindowResolved: true,
+			contextWindowModel: existing.contextWindowModel,
+		};
+	}
+	// The winning window's model tag rides along so the next turn's same-model
+	// check compares against the model that actually produced the stored window.
+	const deltaWins = Boolean(delta.contextWindow);
+	return {
+		contextWindow: delta.contextWindow || existing?.contextWindow || 0,
+		contextWindowResolved: deltaWins
+			? delta.contextWindowResolved
+			: existing?.contextWindowResolved,
+		contextWindowModel: deltaWins ? delta.contextWindowModel : existing?.contextWindowModel,
+	};
+}
 
 /**
  * Accumulated log data for efficient string concatenation
@@ -202,17 +251,25 @@ export function useBatchedSessionUpdates(
 
 					// Apply AI tab logs
 					if (aiTabLogs.size > 0 && updatedSession.aiTabs) {
+						// When the session's resolved Claude mode is interactive, tag
+						// non-stderr entries with renderStyle: 'text-stream' so the
+						// "Captured via interactive TUI" footer pill renders on them.
+						// stderr stays untagged - error frames aren't interactive output.
+						const isInteractive = updatedSession.claudeInteractive?.mode === 'interactive';
+
 						updatedSession = {
 							...updatedSession,
 							aiTabs: updatedSession.aiTabs.map((tab) => {
 								const logData = aiTabLogs.get(tab.id);
 								if (!logData) return tab;
 
-								// Clear thinking/tool entries when new AI output arrives (final result replaces thinking)
-								// BUT: if showThinking is 'sticky', preserve both thinking and tool logs
+								// ThinkingMode contract - inline clear point.
+								// When new assistant text arrives, drop transient thinking/tool entries
+								// from prior reasoning so the final answer replaces them. The matching
+								// exit-time clear lives in useAgentListeners → cleanupExitedTabLogs.
+								// Sticky mode opts out of BOTH clear points.
 								const existingLogs = tab.logs.filter((log) => {
 									if (log.source === 'thinking' || log.source === 'tool') {
-										// Only preserve thinking/tool logs in sticky mode
 										return tab.showThinking === 'sticky';
 									}
 									return true;
@@ -222,11 +279,32 @@ export function useBatchedSessionUpdates(
 								// Determine the source based on stderr flag
 								const logSource = logData.isStderr ? 'stderr' : 'stdout';
 
-								// Time-based grouping for AI output (500ms window) - only group same source types
+								// Time-based grouping for AI output (500ms window). canAppendToLogEntry
+								// answers both halves of "may this be appended to": same source, AND not
+								// a self-contained card. Source alone is not enough - a `!` command's
+								// output card is `source: 'stdout'` but owns its own text, so streamed
+								// agent output used to land inside it. See utils/logEntries.ts.
+								//
+								// (A `logger.warn` for "refusing to coalesce into a non-stream entry"
+								// used to sit here. It was unreachable: it required lastLog.source to
+								// equal logSource while NOT being stdout/stderr, but logSource is always
+								// one of those two. It never fired for the bug it was meant to catch.)
 								const shouldGroup =
-									lastLog &&
-									lastLog.source === logSource &&
+									canAppendToLogEntry(lastLog, logSource) &&
 									logData.timestamp - lastLog.timestamp < 500;
+
+								const shouldTagInteractive = isInteractive && !logData.isStderr;
+
+								// Stamp the turn's codified model/effort onto the entry so the
+								// transcript records which configuration produced this response
+								// (rendered as footer pills next to the token-source pill). Read
+								// from the tab's send-time stamp, never the live tab/agent values:
+								// a model change made while this turn streams applies to the NEXT
+								// message, not to the one already running.
+								const turnSettings = {
+									...(tab.turnModel ? { turnModel: tab.turnModel } : {}),
+									...(tab.turnEffort ? { turnEffort: tab.turnEffort } : {}),
+								};
 
 								let updatedLogs: LogEntry[];
 								if (shouldGroup) {
@@ -234,6 +312,8 @@ export function useBatchedSessionUpdates(
 									updatedLogs[updatedLogs.length - 1] = {
 										...lastLog,
 										text: lastLog.text + logData.data,
+										...(shouldTagInteractive ? { renderStyle: 'text-stream' } : {}),
+										...turnSettings,
 									};
 								} else {
 									const newLog: LogEntry = {
@@ -241,6 +321,8 @@ export function useBatchedSessionUpdates(
 										timestamp: logData.timestamp,
 										source: logSource,
 										text: logData.data,
+										...(shouldTagInteractive ? { renderStyle: 'text-stream' } : {}),
+										...turnSettings,
 									};
 									updatedLogs = [...existingLogs, newLog];
 								}
@@ -250,7 +332,7 @@ export function useBatchedSessionUpdates(
 						};
 					}
 
-					// Apply shell logs (legacy fallback — only when no terminal tabs present)
+					// Apply shell logs (legacy fallback - only when no terminal tabs present)
 					// TODO: Remove shellLogs once terminal tabs migration is complete
 					if ((shellStdout || shellStderr) && !updatedSession.terminalTabs?.length) {
 						const shellLogs = [...updatedSession.shellLogs];
@@ -258,7 +340,7 @@ export function useBatchedSessionUpdates(
 						if (shellStdout) {
 							const lastLog = shellLogs[shellLogs.length - 1];
 							const shouldGroup =
-								lastLog && lastLog.source === 'stdout' && updatedSession.state === 'busy';
+								canAppendToLogEntry(lastLog, 'stdout') && updatedSession.state === 'busy';
 
 							if (shouldGroup) {
 								shellLogs[shellLogs.length - 1] = {
@@ -278,7 +360,7 @@ export function useBatchedSessionUpdates(
 						if (shellStderr) {
 							const lastLog = shellLogs[shellLogs.length - 1];
 							const shouldGroup =
-								lastLog && lastLog.source === 'stderr' && updatedSession.state === 'busy';
+								canAppendToLogEntry(lastLog, 'stderr') && updatedSession.state === 'busy';
 
 							if (shouldGroup) {
 								shellLogs[shellLogs.length - 1] = {
@@ -324,22 +406,35 @@ export function useBatchedSessionUpdates(
 					const sessionUsageDelta = acc.usageDeltas.get(null);
 					if (sessionUsageDelta) {
 						const existing = updatedSession.usageStats;
-						updatedSession = {
-							...updatedSession,
-							usageStats: {
-								inputTokens: (existing?.inputTokens || 0) + sessionUsageDelta.inputTokens,
-								outputTokens: (existing?.outputTokens || 0) + sessionUsageDelta.outputTokens,
-								cacheReadInputTokens:
-									(existing?.cacheReadInputTokens || 0) + sessionUsageDelta.cacheReadInputTokens,
-								cacheCreationInputTokens:
-									(existing?.cacheCreationInputTokens || 0) +
-									sessionUsageDelta.cacheCreationInputTokens,
-								totalCostUsd: (existing?.totalCostUsd || 0) + sessionUsageDelta.totalCostUsd,
-								reasoningTokens:
-									(existing?.reasoningTokens || 0) + (sessionUsageDelta.reasoningTokens || 0),
-								contextWindow: sessionUsageDelta.contextWindow,
-							},
-						};
+						if (sessionUsageDelta.contextWindowCorrectionOnly) {
+							// Window-only correction: its token/cost fields replay an already-counted
+							// turn, so keep every accumulated total and update only the context window.
+							// No prior stats means nothing was counted, so the replay seeds it.
+							updatedSession = {
+								...updatedSession,
+								usageStats: {
+									...(existing ?? sessionUsageDelta),
+									...mergeContextWindow(sessionUsageDelta, existing),
+								},
+							};
+						} else {
+							updatedSession = {
+								...updatedSession,
+								usageStats: {
+									inputTokens: (existing?.inputTokens || 0) + sessionUsageDelta.inputTokens,
+									outputTokens: (existing?.outputTokens || 0) + sessionUsageDelta.outputTokens,
+									cacheReadInputTokens:
+										(existing?.cacheReadInputTokens || 0) + sessionUsageDelta.cacheReadInputTokens,
+									cacheCreationInputTokens:
+										(existing?.cacheCreationInputTokens || 0) +
+										sessionUsageDelta.cacheCreationInputTokens,
+									totalCostUsd: (existing?.totalCostUsd || 0) + sessionUsageDelta.totalCostUsd,
+									reasoningTokens:
+										(existing?.reasoningTokens || 0) + (sessionUsageDelta.reasoningTokens || 0),
+									...mergeContextWindow(sessionUsageDelta, existing),
+								},
+							};
+						}
 					}
 
 					// Tab-level usage
@@ -351,13 +446,46 @@ export function useBatchedSessionUpdates(
 								if (!tabUsageDelta) return tab;
 
 								const existing = tab.usageStats;
+								if (tabUsageDelta.contextWindowCorrectionOnly) {
+									// Window-only correction: preserve this tab's already-counted
+									// tokens/cost and update only the context window.
+									return {
+										...tab,
+										usageStats: {
+											...(existing ?? tabUsageDelta),
+											...mergeContextWindow(tabUsageDelta, existing),
+										},
+									};
+								}
+								// An "output-only" delta carries new output tokens but zero
+								// input/cache. Copilot CLI streams these per-turn (each
+								// assistant.message reports only outputTokens; the real
+								// input/cache/context snapshot lands once on exit via disk
+								// reconciliation). Replacing input/cache with these zeros would
+								// wipe the reconciled context-window gauge to 0 the moment the
+								// next turn starts producing output. Preserve the prior snapshot
+								// for output-only deltas; a real usage report (any input or
+								// cache) still replaces it. No legitimate full snapshot consumes
+								// zero input AND zero cache while producing output, so this is
+								// safe for every agent.
+								const isOutputOnlyDelta =
+									tabUsageDelta.inputTokens === 0 &&
+									tabUsageDelta.cacheReadInputTokens === 0 &&
+									tabUsageDelta.cacheCreationInputTokens === 0 &&
+									tabUsageDelta.outputTokens > 0;
 								return {
 									...tab,
 									usageStats: {
-										inputTokens: tabUsageDelta.inputTokens, // Current (not accumulated)
-										cacheReadInputTokens: tabUsageDelta.cacheReadInputTokens,
-										cacheCreationInputTokens: tabUsageDelta.cacheCreationInputTokens,
-										contextWindow: tabUsageDelta.contextWindow,
+										inputTokens: isOutputOnlyDelta
+											? (existing?.inputTokens ?? 0)
+											: tabUsageDelta.inputTokens, // Current (not accumulated)
+										cacheReadInputTokens: isOutputOnlyDelta
+											? (existing?.cacheReadInputTokens ?? 0)
+											: tabUsageDelta.cacheReadInputTokens,
+										cacheCreationInputTokens: isOutputOnlyDelta
+											? (existing?.cacheCreationInputTokens ?? 0)
+											: tabUsageDelta.cacheCreationInputTokens,
+										...mergeContextWindow(tabUsageDelta, existing),
 										outputTokens: tabUsageDelta.outputTokens, // Current (not accumulated)
 										totalCostUsd: (existing?.totalCostUsd || 0) + tabUsageDelta.totalCostUsd,
 										reasoningTokens: tabUsageDelta.reasoningTokens,
@@ -422,6 +550,10 @@ export function useBatchedSessionUpdates(
 						aiTabs: updatedSession.aiTabs.map((tab) => {
 							const unread = acc.unreadTabs?.get(tab.id);
 							if (unread === undefined) return tab;
+							// A hidden consult tab is answered in the background and draws no
+							// chip, so it must never be SET unread - there would be nothing on
+							// screen to clear the badge with. Clearing one is still allowed.
+							if (unread && isAiTabHidden(tab)) return tab;
 							return { ...tab, hasUnread: unread };
 						}),
 					};
@@ -519,6 +651,36 @@ export function useBatchedSessionUpdates(
 			}
 
 			const existing = acc.usageDeltas.get(tabId);
+
+			// A context-window correction replays an already-counted turn, so it must
+			// never add tokens/cost. Fold its corrected window onto a real delta still
+			// pending in this batch (keeping that turn's tokens), or park a zero-token
+			// correction the flush applies as window-only against the committed stats.
+			if (usage.contextWindowCorrectionOnly) {
+				acc.usageDeltas.set(
+					tabId,
+					existing
+						? {
+								...existing,
+								...mergeContextWindow(usage, existing),
+							}
+						: {
+								inputTokens: 0,
+								outputTokens: 0,
+								cacheReadInputTokens: 0,
+								cacheCreationInputTokens: 0,
+								totalCostUsd: 0,
+								reasoningTokens: 0,
+								contextWindow: usage.contextWindow,
+								contextWindowResolved: usage.contextWindowResolved,
+								contextWindowModel: usage.contextWindowModel,
+								contextWindowCorrectionOnly: true,
+							}
+				);
+				hasPendingRef.current = true;
+				return;
+			}
+
 			if (existing) {
 				// For tab-level: inputTokens etc. are current (not accumulated), but outputTokens and cost are accumulated
 				if (tabId !== null) {
@@ -526,7 +688,7 @@ export function useBatchedSessionUpdates(
 						inputTokens: usage.inputTokens,
 						cacheReadInputTokens: usage.cacheReadInputTokens,
 						cacheCreationInputTokens: usage.cacheCreationInputTokens,
-						contextWindow: usage.contextWindow,
+						...mergeContextWindow(usage, existing),
 						outputTokens: usage.outputTokens,
 						totalCostUsd: existing.totalCostUsd + usage.totalCostUsd,
 						reasoningTokens: usage.reasoningTokens,
@@ -541,7 +703,7 @@ export function useBatchedSessionUpdates(
 							existing.cacheCreationInputTokens + usage.cacheCreationInputTokens,
 						totalCostUsd: existing.totalCostUsd + usage.totalCostUsd,
 						reasoningTokens: (existing.reasoningTokens || 0) + (usage.reasoningTokens || 0),
-						contextWindow: usage.contextWindow,
+						...mergeContextWindow(usage, existing),
 					});
 				}
 			} else {

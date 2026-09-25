@@ -12,17 +12,29 @@ import { ensureForkSetup } from '../utils/symphony-fork';
 import { resolveGhPath } from '../utils/cliDetection';
 import type { DocumentReference } from '../../shared/symphony-types';
 import { PLAYBOOKS_DIR } from '../../shared/maestro-paths';
+import { captureException } from '../utils/sentry';
+import { fetchWithTimeout } from '../utils/fetchWithTimeout';
+import {
+	toSafeDocumentFileName,
+	uniqueDocumentFileName,
+	SYMPHONY_DOCUMENT_FETCH_TIMEOUT_MS,
+} from '../ipc/handlers/symphony/shared';
 
 const LOG_CONTEXT = '[SymphonyRunner]';
 
 /**
  * Clean up local repository directory on failure.
+ *
+ * No provenance check here, unlike symphony:cancel: this runner clones into
+ * localPath itself earlier in the same call, so the directory is known to be
+ * ours, and a half-finished clone still has to be removable.
  */
 async function cleanupLocalRepo(localPath: string): Promise<void> {
 	try {
 		await fs.rm(localPath, { recursive: true, force: true });
 		logger.info('Cleaned up local repository', LOG_CONTEXT, { localPath });
 	} catch (error) {
+		void captureException(error);
 		logger.warn('Failed to cleanup local repository', LOG_CONTEXT, { localPath, error });
 	}
 }
@@ -164,7 +176,7 @@ Closes #${issueNumber}
  */
 async function downloadFile(url: string, destPath: string): Promise<boolean> {
 	try {
-		const response = await fetch(url);
+		const response = await fetchWithTimeout(url, {}, SYMPHONY_DOCUMENT_FETCH_TIMEOUT_MS);
 		if (!response.ok) {
 			logger.error('Failed to download file', LOG_CONTEXT, { url, status: response.status });
 			return false;
@@ -173,6 +185,7 @@ async function downloadFile(url: string, destPath: string): Promise<boolean> {
 		await fs.writeFile(destPath, Buffer.from(buffer));
 		return true;
 	} catch (error) {
+		void captureException(error);
 		logger.error('Error downloading file', LOG_CONTEXT, { url, error });
 		return false;
 	}
@@ -189,8 +202,32 @@ async function setupAutoRunDocs(
 	const autoRunPath = path.posix.join(localPath, PLAYBOOKS_DIR);
 	await fs.mkdir(autoRunPath, { recursive: true });
 
+	// Names already written in this batch, so two references that reduce to the
+	// same file name do not overwrite each other.
+	const usedFileNames = new Set<string>();
+
 	for (const doc of documentPaths) {
-		const destPath = path.posix.join(autoRunPath, doc.name);
+		// The name is link text from the issue body, so reduce it to a bare file
+		// name before joining it onto the Auto Run docs directory.
+		const safeFileName = toSafeDocumentFileName(doc.name);
+		if (!safeFileName) {
+			logger.warn('Skipping document with unusable name', LOG_CONTEXT, { name: doc.name });
+			continue;
+		}
+		const uniqueFileName = uniqueDocumentFileName(safeFileName, usedFileNames);
+		if (!uniqueFileName) {
+			logger.warn('Skipping document, cannot find a free file name', LOG_CONTEXT, {
+				name: doc.name,
+			});
+			continue;
+		}
+		if (uniqueFileName !== safeFileName) {
+			logger.info('Renamed document to avoid a name collision', LOG_CONTEXT, {
+				name: doc.name,
+				to: uniqueFileName,
+			});
+		}
+		const destPath = path.posix.join(autoRunPath, uniqueFileName);
 
 		if (doc.isExternal) {
 			// Download external file (GitHub attachment)
@@ -262,7 +299,7 @@ export async function startContribution(options: SymphonyRunnerOptions): Promise
 			return { success: false, error: 'Branch creation failed' };
 		}
 
-		// 2.5. Fork setup — detect if user needs a fork for push access
+		// 2.5. Fork setup - detect if user needs a fork for push access
 		logger.info('Checking fork requirements', LOG_CONTEXT, { repoSlug });
 		const forkResult = await ensureForkSetup(localPath, repoSlug);
 		if (forkResult.error) {
@@ -420,7 +457,7 @@ export async function cancelContribution(
 	const ghCommand = await resolveGhPath();
 	const closeArgs = ['pr', 'close', prNumber.toString()];
 	if (!upstreamSlug) {
-		// Only delete branch for non-fork PRs — cross-fork delete-branch fails due to permissions
+		// Only delete branch for non-fork PRs - cross-fork delete-branch fails due to permissions
 		closeArgs.push('--delete-branch');
 	} else {
 		closeArgs.push('--repo', upstreamSlug);

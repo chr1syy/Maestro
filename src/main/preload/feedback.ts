@@ -36,6 +36,64 @@ export type FeedbackCategory =
 	| 'improvement'
 	| 'general_feedback';
 
+export interface FeedbackDraftAttachment {
+	id: string;
+	name: string;
+	dataUrl: string;
+	sizeBytes: number;
+}
+
+export interface FeedbackDraftMessage {
+	role: 'user' | 'assistant' | 'system';
+	content: string;
+	timestamp: number;
+	confidence?: number;
+	category?: FeedbackCategory;
+	summary?: string;
+}
+
+export interface FeedbackDraftStructured {
+	expectedBehavior: string;
+	actualBehavior: string;
+	reproductionSteps: string;
+	additionalContext: string;
+}
+
+export interface FeedbackDraftResponse {
+	confidence: number;
+	ready: boolean;
+	message: string;
+	category: FeedbackCategory;
+	summary: string;
+	structured: FeedbackDraftStructured;
+}
+
+export interface FeedbackDraft {
+	id: string;
+	suggestedName: string;
+	category: FeedbackCategory;
+	summary: string;
+	confidence: number;
+	agentType: string;
+	messages: FeedbackDraftMessage[];
+	attachments: FeedbackDraftAttachment[];
+	inputDraft: string;
+	includeDebugPackage: boolean;
+	createdAt: number;
+	updatedAt: number;
+	lastResponse?: FeedbackDraftResponse | null;
+}
+
+export interface SubmittedIssue {
+	number: number;
+	url: string;
+	title: string;
+	category: FeedbackCategory;
+	submittedAt: number;
+	state: 'open' | 'closed';
+	lastCheckedAt: number;
+}
+
 export interface FeedbackSubmissionPayload {
 	sessionId: string;
 	category: FeedbackCategory;
@@ -63,6 +121,12 @@ export interface FeedbackConversationSubmitPayload {
 	sshRemoteEnabled?: boolean;
 	attachments?: FeedbackAttachmentPayload[];
 	includeDebugPackage?: boolean;
+	/**
+	 * Absolute path to a temp performance-trace .zip captured via
+	 * debug:stopProfilingToFile. When present, it is uploaded and linked in the
+	 * issue body, then deleted.
+	 */
+	performanceTracePath?: string;
 }
 
 export interface FeedbackApi {
@@ -81,7 +145,7 @@ export interface FeedbackApi {
 	/**
 	 * Get the conversation system prompt for the feedback chat interface
 	 */
-	getConversationPrompt: () => Promise<{ prompt: string; environment: string }>;
+	getConversationPrompt: () => Promise<{ prompt: string; environment: string; cwd: string }>;
 	/**
 	 * Submit feedback from the conversational interface
 	 */
@@ -107,6 +171,20 @@ export interface FeedbackApi {
 	 * Subscribe to an existing issue (+1 reaction) and optionally comment
 	 */
 	subscribeIssue: (issueNumber: number, comment?: string) => Promise<FeedbackSubmitResponse>;
+	/**
+	 * Persisted, resumable feedback drafts (list / upsert / delete)
+	 */
+	drafts: {
+		list: () => Promise<{ drafts: FeedbackDraft[] }>;
+		save: (draft: FeedbackDraft) => Promise<{ draft: FeedbackDraft }>;
+		delete: (id: string) => Promise<Record<string, never>>;
+	};
+	/** Persisted history of issues the user has submitted (list / delete / refresh state) */
+	issues: {
+		list: () => Promise<{ issues: SubmittedIssue[] }>;
+		delete: (issueNumber: number) => Promise<Record<string, never>>;
+		refreshStates: () => Promise<{ issues: SubmittedIssue[] }>;
+	};
 }
 
 /**
@@ -128,7 +206,7 @@ export function createFeedbackApi(): FeedbackApi {
 		): Promise<{ prompt: string }> =>
 			ipcRenderer.invoke('feedback:compose-prompt', { feedbackText, attachments }),
 
-		getConversationPrompt: (): Promise<{ prompt: string; environment: string }> =>
+		getConversationPrompt: (): Promise<{ prompt: string; environment: string; cwd: string }> =>
 			ipcRenderer.invoke('feedback:get-conversation-prompt'),
 
 		submitConversation: (
@@ -140,5 +218,20 @@ export function createFeedbackApi(): FeedbackApi {
 
 		subscribeIssue: (issueNumber: number, comment?: string): Promise<FeedbackSubmitResponse> =>
 			ipcRenderer.invoke('feedback:subscribe-issue', { issueNumber, comment }),
+
+		drafts: {
+			list: (): Promise<{ drafts: FeedbackDraft[] }> => ipcRenderer.invoke('feedback:drafts:list'),
+			save: (draft: FeedbackDraft): Promise<{ draft: FeedbackDraft }> =>
+				ipcRenderer.invoke('feedback:drafts:save', draft),
+			delete: (id: string): Promise<Record<string, never>> =>
+				ipcRenderer.invoke('feedback:drafts:delete', { id }),
+		},
+		issues: {
+			list: (): Promise<{ issues: SubmittedIssue[] }> => ipcRenderer.invoke('feedback:issues:list'),
+			delete: (issueNumber: number): Promise<Record<string, never>> =>
+				ipcRenderer.invoke('feedback:issues:delete', { number: issueNumber }),
+			refreshStates: (): Promise<{ issues: SubmittedIssue[] }> =>
+				ipcRenderer.invoke('feedback:issues:refresh-states'),
+		},
 	};
 }

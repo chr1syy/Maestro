@@ -8,14 +8,110 @@
  * - formatTokens: Token counts with K/M/B suffixes (~prefix)
  * - formatTokensCompact: Token counts without ~prefix
  * - formatRelativeTime: Relative timestamps ("5m ago", "2h ago")
+ * - formatCacheAge: Cache age labels ("just now", "5m ago", "2h ago")
+ * - formatAgeShort: Compact age badge ("new", "5m", "3h", "5d", "3w", "6mo", "3.5y")
  * - formatActiveTime: Duration display (1D, 2H 30M, <1M)
  * - formatElapsedTime: Precise elapsed time (1h 10m, 30s, 500ms)
  * - formatElapsedTimeColon: Timer-style elapsed time (mm:ss or hh:mm:ss)
+ * - formatDurationHuman: Human-readable duration without ms precision (1h 5m, 30s, 0s)
+ * - formatDurationCompact: Compact duration without seconds in minute range (5m, 2h 30m)
+ * - formatDurationVerbose: Verbose duration with full words (5 minutes 30 seconds)
+ * - formatDurationParts: Multi-part duration with days support (2d 5h 30m)
+ * - formatDurationLong: Two-unit duration laddering seconds -> years (6d 7h, 3w 2d, 1y 7w)
+ * - formatDurationDecimal: Decimal duration for CLI output (5.2m, 1.3h)
  * - formatCost: USD currency display ($1.23, <$0.01)
  * - estimateTokenCount: Estimate token count from text (~4 chars/token)
+ * - estimateTokensFromLogs: Estimate token count from log entry arrays
+ * - formatTimestamp: Format timestamps in various styles (time, datetime, smart, full)
  * - truncatePath: Truncate file paths for display (.../<parent>/<current>)
  * - truncateCommand: Truncate command text for display with ellipsis
+ * - formatSshTarget: SSH connection target for display (user@host:port)
+ * - abbreviateGroupName: Shorten a group name for badge/pill display
  */
+
+// ============================================================================
+// Cached Intl formatters
+// ============================================================================
+// `date.toLocaleTimeString(...)`, `date.toLocaleString(...)` and
+// `number.toLocaleString(...)` construct a brand new `Intl` formatter on EVERY
+// call, and constructing one costs one to two orders of magnitude more than
+// formatting with one that already exists.
+//
+// This is not a micro-optimization. A field performance trace (Sep 2026,
+// 95-second window) measured `formatTimestamp` alone at 2.1s of renderer
+// main-thread self-time - 38% of ALL renderer JS work in that window - because
+// a transcript and a history list each call it once per visible row on every
+// React render, and every one of those calls built a throwaway
+// `Intl.DateTimeFormat`.
+//
+// These are lazy module singletons rather than a keyed cache so there is no
+// per-call key to build either. `undefined` as the locale resolves to the
+// user's default, which is exactly what `toLocale*String()` and
+// `toLocale*String([])` resolve to, so output is byte-identical to the calls
+// these replaced (including the implicit numeric year/month/day/hour/minute/
+// second option set that a bare `toLocaleString()` expands to).
+//
+// Adding a new date or number format: add a singleton here rather than calling
+// `toLocale*String` in a formatter body.
+
+function lazyDateTimeFormat(
+	locale: string | undefined,
+	options?: Intl.DateTimeFormatOptions
+): () => Intl.DateTimeFormat {
+	let cached: Intl.DateTimeFormat | undefined;
+	return () => (cached ??= new Intl.DateTimeFormat(locale, options));
+}
+
+function lazyNumberFormat(
+	locale?: string,
+	options?: Intl.NumberFormatOptions
+): () => Intl.NumberFormat {
+	let cached: Intl.NumberFormat | undefined;
+	return () => (cached ??= new Intl.NumberFormat(locale, options));
+}
+
+/** `8:30 AM` in the user's locale. */
+const dtfLocalTime = lazyDateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+/** `Mar 5, 8:30 AM` in the user's locale. */
+const dtfLocalDateTime = lazyDateTimeFormat(undefined, {
+	month: 'short',
+	day: 'numeric',
+	hour: 'numeric',
+	minute: '2-digit',
+});
+/** `Mar 5` in the user's locale. */
+const dtfLocalMonthDay = lazyDateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+/** `3/5/2026, 8:30:45 AM` - the option set a bare `toLocaleString()` expands to. */
+const dtfLocalFull = lazyDateTimeFormat(undefined, {
+	year: 'numeric',
+	month: 'numeric',
+	day: 'numeric',
+	hour: 'numeric',
+	minute: 'numeric',
+	second: 'numeric',
+});
+/** `Mar 5`, always US English (these call sites hard-coded `en-US`). */
+const dtfUsMonthDay = lazyDateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+/** `8:30 AM`, always US English. */
+const dtfUsTime = lazyDateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+/** `Thu`, always US English. */
+const dtfUsWeekday = lazyDateTimeFormat('en-US', { weekday: 'short' });
+/** `1,204,993` in the user's locale. */
+const nfLocalCount = lazyNumberFormat();
+/** `40,950.60`, always US English, always two decimals. */
+const nfUsdAmount = lazyNumberFormat('en-US', {
+	minimumFractionDigits: 2,
+	maximumFractionDigits: 2,
+});
+
+/** True when both dates fall on the same local calendar day. */
+function isSameLocalDay(a: Date, b: Date): boolean {
+	return (
+		a.getFullYear() === b.getFullYear() &&
+		a.getMonth() === b.getMonth() &&
+		a.getDate() === b.getDate()
+	);
+}
 
 /**
  * Format a file size in bytes to a human-readable string.
@@ -39,10 +135,26 @@ export function formatSize(bytes: number): string {
  * @returns Formatted string (e.g., "1.5k", "2.3M", "1.0B")
  */
 export function formatNumber(num: number): string {
-	if (num < 1000) return num.toFixed(1);
-	if (num < 1000000) return `${(num / 1000).toFixed(1)}k`;
+	if (num < 1000) return num.toString();
+	if (num < 1000000) return `${(num / 1000).toFixed(1)}K`;
 	if (num < 1000000000) return `${(num / 1000000).toFixed(1)}M`;
 	return `${(num / 1000000000).toFixed(1)}B`;
+}
+
+/**
+ * Format a count exactly, with locale digit grouping.
+ *
+ * The counterpart to {@link formatNumber}: use this wherever the number IS the
+ * information rather than a rough magnitude on a badge. `1,204,993 of
+ * 8,412,004 rows match` tells a person how selective their filter was;
+ * `1.2M of 8.4M` tells them nothing they did not already assume, and rounds
+ * away exactly the digits they were reading for.
+ *
+ * @param count - The number to format
+ * @returns Formatted string (e.g., "42", "1,204,993")
+ */
+export function formatCount(count: number): string {
+	return nfLocalCount().format(count);
 }
 
 /**
@@ -78,9 +190,14 @@ export function formatTokensCompact(tokens: number): string {
  * Accepts either a timestamp (number of milliseconds) or a date string.
  *
  * @param dateOrTimestamp - Either a Date object, timestamp in milliseconds, or ISO date string
+ * @param options - Optional formatting options
+ * @param options.includeSeconds - When true, sub-minute durations render as "Ns ago" instead of "just now"
  * @returns Relative time string (e.g., "just now", "5m ago", "3d ago", or localized date)
  */
-export function formatRelativeTime(dateOrTimestamp: Date | number | string): string {
+export function formatRelativeTime(
+	dateOrTimestamp: Date | number | string,
+	options?: { includeSeconds?: boolean }
+): string {
 	let timestamp: number;
 
 	if (typeof dateOrTimestamp === 'number') {
@@ -93,64 +210,162 @@ export function formatRelativeTime(dateOrTimestamp: Date | number | string): str
 
 	const now = Date.now();
 	const diffMs = now - timestamp;
+	const diffSecs = Math.floor(diffMs / 1000);
 	const diffMins = Math.floor(diffMs / 60000);
 	const diffHours = Math.floor(diffMins / 60);
 	const diffDays = Math.floor(diffHours / 24);
 
-	if (diffMins < 1) return 'just now';
+	if (diffMins < 1) {
+		if (options?.includeSeconds) {
+			return `${Math.max(0, diffSecs)}s ago`;
+		}
+		return 'just now';
+	}
 	if (diffMins < 60) return `${diffMins}m ago`;
 	if (diffHours < 24) return `${diffHours}h ago`;
 	if (diffDays < 7) return `${diffDays}d ago`;
 	// Show compact date format (e.g., "Dec 3") for older dates
-	return new Date(timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+	return dtfUsMonthDay().format(new Date(timestamp));
 }
 
 /**
- * Format duration in milliseconds as compact display string.
- * Uses uppercase units (D, H, M) for consistency.
+ * Format a cache age duration in milliseconds for compact status labels.
  *
- * @param ms - Duration in milliseconds
- * @returns Formatted string (e.g., "1D", "2H 30M", "15M", "<1M")
+ * Unlike `formatRelativeTime`, this receives an elapsed age rather than an
+ * absolute timestamp and intentionally never rolls into days.
  */
-export function formatActiveTime(ms: number): string {
-	const totalSeconds = Math.floor(ms / 1000);
-	const totalMinutes = Math.floor(totalSeconds / 60);
-	const totalHours = Math.floor(totalMinutes / 60);
-	const totalDays = Math.floor(totalHours / 24);
+export function formatCacheAge(cacheAgeMs: number | null): string {
+	if (cacheAgeMs === null || cacheAgeMs === 0) return 'just now';
 
-	if (totalDays > 0) {
-		return `${totalDays}D`;
-	} else if (totalHours > 0) {
-		const remainingMinutes = totalMinutes % 60;
-		if (remainingMinutes > 0) {
-			return `${totalHours}H ${remainingMinutes}M`;
-		}
-		return `${totalHours}H`;
-	} else if (totalMinutes > 0) {
-		return `${totalMinutes}M`;
-	} else {
-		return '<1M';
-	}
-}
-
-/**
- * Format elapsed time in milliseconds as precise human-readable format.
- * Shows milliseconds for sub-second, seconds for <1m, minutes+seconds for <1h,
- * and hours+minutes for longer durations.
- *
- * @param ms - Duration in milliseconds
- * @returns Formatted string (e.g., "500ms", "30s", "5m 12s", "1h 10m")
- */
-export function formatElapsedTime(ms: number): string {
-	if (ms < 1000) return `${ms}ms`;
-	const seconds = Math.floor(ms / 1000);
-	if (seconds < 60) return `${seconds}s`;
+	const seconds = Math.floor(cacheAgeMs / 1000);
 	const minutes = Math.floor(seconds / 60);
-	const remainingSeconds = seconds % 60;
-	if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
 	const hours = Math.floor(minutes / 60);
-	const remainingMinutes = minutes % 60;
-	return `${hours}h ${remainingMinutes}m`;
+
+	if (hours > 0) return `${hours}h ago`;
+	if (minutes > 0) return `${minutes}m ago`;
+	return 'just now';
+}
+
+/**
+ * Format an age (elapsed time since a creation timestamp) as the most compact
+ * human-readable string that still fits a small badge. Used by the dashboard
+ * agent cards where space is at a premium.
+ *
+ * Output ladder:
+ *   - < 1 minute     → "new"
+ *   - < 1 hour       → "5m"
+ *   - < 1 day        → "3h"
+ *   - < 7 days       → "5d"
+ *   - < 30 days      → "3w"
+ *   - < 365 days     → "6mo"
+ *   - < 10 years     → "3.5y" (one decimal, .0 suffix dropped → "3y" / "3.5y")
+ *   - >= 10 years    → "12y"
+ *
+ * Month = 30 days, year = 365 days - coarse enough that the badge stays stable
+ * across renders without overengineering calendar math.
+ */
+export function formatAgeShort(dateOrTimestamp: Date | number | string): string {
+	let timestamp: number;
+	if (typeof dateOrTimestamp === 'number') {
+		timestamp = dateOrTimestamp;
+	} else if (typeof dateOrTimestamp === 'string') {
+		timestamp = new Date(dateOrTimestamp).getTime();
+	} else {
+		timestamp = dateOrTimestamp.getTime();
+	}
+
+	const diffMs = Math.max(0, Date.now() - timestamp);
+	const minutes = Math.floor(diffMs / 60_000);
+	if (minutes < 1) return 'new';
+	if (minutes < 60) return `${minutes}m`;
+
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h`;
+
+	const days = Math.floor(hours / 24);
+	if (days < 7) return `${days}d`;
+	if (days < 30) return `${Math.floor(days / 7)}w`;
+	if (days < 365) return `${Math.floor(days / 30)}mo`;
+
+	const years = days / 365;
+	if (years < 10) {
+		const rounded = Math.round(years * 10) / 10;
+		return Number.isInteger(rounded) ? `${rounded}y` : `${rounded.toFixed(1)}y`;
+	}
+	return `${Math.floor(years)}y`;
+}
+
+/**
+ * Format a calendar day (`YYYY-MM-DD`) for display, e.g. "Jul 10, 2026".
+ *
+ * The parts are read out of the string and fed to a LOCAL `Date` rather than
+ * letting `new Date('2026-07-10')` do it: that form is parsed as UTC midnight,
+ * so every timezone west of Greenwich renders the day before. Returns the input
+ * unchanged when it is not a well-formed day, since the caller's alternative is
+ * showing nothing at all.
+ */
+export function formatCalendarDay(isoDay: string): string {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDay.trim());
+	if (!match) return isoDay;
+	const [, year, month, day] = match;
+	const date = new Date(Number(year), Number(month) - 1, Number(day));
+	if (Number.isNaN(date.getTime())) return isoDay;
+	return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/**
+ * Format a future timestamp as a forward-looking relative string.
+ *
+ * `formatRelativeTime` only models the past - every future timestamp collapses
+ * to "just now" because the `diffMins < 1` branch fires on negative diffs. This
+ * helper is the symmetric forward variant for things like quota reset times.
+ *
+ * Output ladder, chosen to mirror Anthropic's `/usage` web panel ("Resets in
+ * 43 min" / "Resets Thu 10:00 AM"):
+ *   - < 1 minute   → "in <1m"
+ *   - < 60 minutes → "in 43m"
+ *   - same calendar day in user's locale → "today at 7:00 PM"
+ *   - within 7 days → "Thu 10:00 AM"
+ *   - beyond a week → "May 22 at 10:00 AM"
+ *
+ * If `timestamp` is already past `now` (sample is older than the reset),
+ * returns "just now" - same calling-site sentinel as `formatRelativeTime`'s
+ * floor so consumers don't need to special-case stale snapshots.
+ */
+export function formatFutureTime(dateOrTimestamp: Date | number | string): string {
+	let timestamp: number;
+	if (typeof dateOrTimestamp === 'number') {
+		timestamp = dateOrTimestamp;
+	} else if (typeof dateOrTimestamp === 'string') {
+		timestamp = new Date(dateOrTimestamp).getTime();
+	} else {
+		timestamp = dateOrTimestamp.getTime();
+	}
+
+	const now = Date.now();
+	const diffMs = timestamp - now;
+	if (diffMs <= 0) return 'just now';
+
+	const diffMins = Math.floor(diffMs / 60000);
+	const diffHours = Math.floor(diffMs / 3_600_000);
+	const diffDays = Math.floor(diffMs / 86_400_000);
+
+	if (diffMins < 1) return 'in <1m';
+	if (diffMins < 60) return `in ${diffMins}m`;
+
+	const target = new Date(timestamp);
+	const sameDay = isSameLocalDay(target, new Date(now));
+
+	const timeStr = dtfUsTime().format(target);
+
+	if (sameDay) return `today at ${timeStr}`;
+	if (diffHours < 24) return `in ${diffHours}h`;
+	if (diffDays < 7) {
+		const weekday = dtfUsWeekday().format(target);
+		return `${weekday} ${timeStr}`;
+	}
+	const dateStr = dtfUsMonthDay().format(target);
+	return `${dateStr} at ${timeStr}`;
 }
 
 /**
@@ -163,7 +378,9 @@ export function formatElapsedTime(ms: number): string {
 export function formatCost(cost: number): string {
 	if (cost === 0) return '$0.00';
 	if (cost < 0.01) return '<$0.01';
-	return '$' + cost.toFixed(2);
+	// Thousands separators: large all-time totals (e.g. $40,950.60) are unreadable
+	// as an undelimited digit run.
+	return '$' + nfUsdAmount().format(cost);
 }
 
 /**
@@ -237,6 +454,69 @@ export function getParentDir(path: string): string {
 }
 
 /**
+ * Returns true if `path` is an absolute filesystem path.
+ *
+ * Matches Unix absolute paths (`/foo`), Windows drive paths (`C:\foo`,
+ * `C:/foo`), and UNC / drive-relative paths starting with a backslash
+ * (`\\server\share`, `\foo`).
+ */
+export function isAbsolutePath(path: string): boolean {
+	if (!path) return false;
+	return /^(\/|\\|[a-zA-Z]:[/\\])/.test(path);
+}
+
+/**
+ * Extract the final path segment (file or folder name) from a path.
+ * Handles both `/` and `\` separators and ignores a trailing separator.
+ * Returns the input unchanged when it contains no separators.
+ */
+export function getBasename(path: string): string {
+	if (!path) return '';
+	const trimmed = path.replace(/[/\\]+$/, '');
+	const parts = trimmed.split(/[/\\]/);
+	return parts[parts.length - 1] || trimmed;
+}
+
+/**
+ * Join path segments onto a base path, using whichever separator the base
+ * already speaks (backslash only when the base is Windows-style).
+ *
+ * Node's `path.join` is not available in the renderer, and a hardcoded `/`
+ * breaks Windows while a hardcoded `\` breaks SSH remotes (always POSIX), so
+ * the base path is the source of truth. Segments may use either separator.
+ */
+export function joinPath(base: string, ...segments: string[]): string {
+	const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
+	const trimmedBase = base.replace(/[/\\]+$/, '');
+	const tail = segments
+		.map((s) => s.replace(/^[/\\]+|[/\\]+$/g, '').replace(/[/\\]+/g, sep))
+		.filter(Boolean);
+	return tail.length > 0 ? `${trimmedBase}${sep}${tail.join(sep)}` : trimmedBase;
+}
+
+/**
+ * Format an SSH remote's connection target for display, e.g. "pedram@10.0.50.63:2222".
+ *
+ * The username prefix is omitted when none is set (SSH falls back to ~/.ssh/config or
+ * the current user). The port is always shown because an agent connects to the *saved*
+ * port: a remote saved with port 22 looks identical to one saved with 2222 unless the
+ * port is visible, which is a common source of "it connected to the wrong port"
+ * confusion when the display name doesn't match the actual port field.
+ *
+ * @param remote - SSH remote fields (host required; port/username optional)
+ * @returns Display target string (e.g. "pedram@host:2222" or "host:22")
+ */
+export function formatSshTarget(remote: {
+	host: string;
+	port?: number;
+	username?: string;
+}): string {
+	const user = remote.username?.trim();
+	const prefix = user ? `${user}@` : '';
+	return `${prefix}${remote.host}:${remote.port ?? 22}`;
+}
+
+/**
  * Truncate command text for display.
  * Replaces newlines with spaces, trims whitespace, and adds ellipsis if truncated.
  *
@@ -250,3 +530,197 @@ export function truncateCommand(command: string, maxLength: number = 40): string
 	if (singleLine.length <= maxLength) return singleLine;
 	return singleLine.slice(0, maxLength - 1) + '…';
 }
+
+/**
+ * Truncate arbitrary display text to a maximum length with a trailing ellipsis.
+ * Unlike {@link truncateCommand} it does not collapse newlines - use it for
+ * short single-token labels (agent names, titles) where the caller surfaces the
+ * full value elsewhere (e.g. a tooltip).
+ *
+ * @param text - The text to truncate
+ * @param maxLength - Maximum length of the returned string (default: 24)
+ * @returns Truncated string (e.g., "a-very-long-agent-nam…")
+ */
+export function truncateText(text: string, maxLength: number = 24): string {
+	if (text.length <= maxLength) return text;
+	return text.slice(0, maxLength - 1) + '…';
+}
+
+/**
+ * Estimate token count from an array of log entries.
+ * Uses the same ~4 characters per token heuristic as estimateTokenCount.
+ *
+ * @param logs - Array of objects with text property
+ * @returns Estimated total token count
+ */
+export function estimateTokensFromLogs(logs: { text: string }[]): number {
+	const totalChars = logs.reduce((sum, log) => sum + (log.text?.length || 0), 0);
+	return Math.ceil(totalChars / 4);
+}
+
+/**
+ * Cleverly shorten a group name so it fits in a small badge/pill.
+ *
+ * Strategy ladder - first rung that meets `max` wins:
+ *   1. Already short enough → return as-is.
+ *   2. Contains "&" or " and " conjunction → acronym joined by "&"
+ *      ("Amini & Conant" → "A&C", "Foo and Bar and Baz" → "F&B&B").
+ *   3. Multi-word (split on whitespace, "_", "-", "/") → initials ("Acme Corp" → "AC").
+ *      Each initial is the word's first letter, so leading numbering/bracket
+ *      tokens drop out ("[1] Aleyemma/Money-Sessions" → "AMS", not "[AMS").
+ *   4. Single long word → strip vowels keeping the first character
+ *      ("Engineering" → "Engnrng", "Documentation" → "Dcmnttn").
+ *   5. Still too long → hard-truncate the devoweled form.
+ *
+ * Aim for `target` chars, accept up to `max`. Defaults match the bookmark
+ * badge in the Left Bar (target 8, allow 10).
+ */
+export function abbreviateGroupName(
+	name: string,
+	options?: { target?: number; max?: number }
+): string {
+	const max = options?.max ?? 10;
+	const trimmed = name.trim();
+	if (!trimmed) return trimmed;
+
+	// Bracketed tag prefix wins: "[ARP] Auditoria Relatório Pessoal" → "ARP".
+	// Users put their preferred short form in brackets. Without this rule the
+	// initials path below would fold the bracketed acronym into the following
+	// words ("[ARP] Auditoria Relatório Pessoal" → "AARP"), so honor the tag
+	// verbatim (issue #1017). Require a letter so pure-numbering prefixes like
+	// "[1]" fall through to the initials path, which drops them ("[1] A/B" → "AB").
+	const tagMatch = trimmed.match(/^\[([^\]]+)\]/);
+	if (tagMatch) {
+		const tag = tagMatch[1].trim();
+		if (tag && /[a-z]/i.test(tag) && tag.length <= max) return tag;
+	}
+
+	if (trimmed.length <= max) return trimmed;
+
+	// First letter of a word, skipping any leading non-letters so numbering or
+	// bracket prefixes drop out entirely ("[1]" → "", "MONEY" → "M").
+	const firstLetter = (word: string): string => {
+		const match = word.match(/[a-z]/i);
+		return match ? match[0].toUpperCase() : '';
+	};
+
+	// Acronym joined by "&" - handles "A & B" and "A and B" forms.
+	const conjunctionParts = trimmed
+		.split(/\s*&\s*|\s+and\s+/i)
+		.map((p) => firstLetter(p))
+		.filter(Boolean);
+	if (conjunctionParts.length >= 2) {
+		const acronym = conjunctionParts.join('&');
+		if (acronym.length <= max) return acronym;
+	}
+
+	// Plain initials for multi-word names.
+	const initials = trimmed
+		.split(/[\s_\-/]+/)
+		.map((w) => firstLetter(w))
+		.filter(Boolean)
+		.join('');
+	if (initials.length >= 2) {
+		if (initials.length <= max) return initials;
+		return initials.slice(0, max);
+	}
+
+	// Single word: drop vowels but preserve the first character so "Amini" → "Amn", not "mn".
+	const first = trimmed.charAt(0);
+	const devoweled = first + trimmed.slice(1).replace(/[aeiouAEIOU]/g, '');
+	if (devoweled.length <= max) return devoweled;
+	return devoweled.slice(0, max);
+}
+
+/**
+ * Format a timestamp for display in various styles.
+ *
+ * Styles:
+ * - 'time': Time only (e.g., "2:30 PM")
+ * - 'datetime': Date and time (e.g., "Jan 5, 2:30 PM")
+ * - 'smart': Time if today, date+time otherwise (default)
+ * - 'full': Full locale string (e.g., "1/5/2025, 2:30:00 PM")
+ *
+ * @param timestamp - Unix timestamp in milliseconds, or ISO date string
+ * @param style - Output format style (default: 'smart')
+ * @returns Formatted timestamp string
+ */
+export function formatTimestamp(
+	timestamp: number | string,
+	style: 'time' | 'datetime' | 'smart' | 'full' = 'smart'
+): string {
+	const date = new Date(timestamp);
+	// `Intl.DateTimeFormat.format()` THROWS on an invalid date, where the
+	// `toLocale*String()` calls the cached formatters replaced returned the string
+	// "Invalid Date". Callers pass whatever a transcript, a group chat, or a
+	// history row carries - a numeric string that `Date` cannot parse reaches here
+	// in practice - so keep the old, non-throwing answer rather than letting a
+	// single bad row take a render down.
+	if (Number.isNaN(date.getTime())) return 'Invalid Date';
+
+	switch (style) {
+		case 'time':
+			return dtfLocalTime().format(date);
+
+		case 'datetime':
+			return dtfLocalDateTime().format(date);
+
+		case 'full':
+			return dtfLocalFull().format(date);
+
+		case 'smart':
+		default: {
+			if (isSameLocalDay(date, new Date())) {
+				return dtfLocalTime().format(date);
+			}
+			return dtfLocalMonthDay().format(date) + ' ' + dtfLocalTime().format(date);
+		}
+	}
+}
+
+/**
+ * `20260713-142530` - a filesystem-safe, chronologically sortable stamp for a
+ * generated file name (saved chat images, exports).
+ *
+ * Local time on purpose: the name is read by a human who pasted the image at
+ * that wall-clock moment, and a UTC stamp reads as the wrong hour to everyone
+ * outside UTC.
+ */
+export function fileTimestampSlug(dateOrTimestamp: Date | number = new Date()): string {
+	const date = typeof dateOrTimestamp === 'number' ? new Date(dateOrTimestamp) : dateOrTimestamp;
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return (
+		`${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
+		`-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+	);
+}
+
+// ============================================================================
+// Durations
+// ============================================================================
+// Every duration formatter lives in ./duration.ts, built on one shared unit
+// ladder. They are re-exported here because ~50 call sites already import them
+// from this module, and because a duration is a formatter - somebody looking
+// for one should find it. Import either path; ./duration.ts is canonical and is
+// where new duration work belongs.
+
+export {
+	humanizeDuration,
+	formatDurationHuman,
+	formatDurationCompact,
+	formatDurationVerbose,
+	formatDurationParts,
+	formatDurationDecimal,
+	formatDurationLong,
+	formatDurationWords,
+	formatActiveTime,
+	formatElapsedTime,
+	formatElapsedTicker,
+	formatElapsedTickerCompact,
+	formatTurnDuration,
+	DURATION_MS,
+	DURATION_LADDER_FULL,
+	DURATION_LADDER_DAYS,
+	DURATION_LADDER_HOURS,
+} from './duration';
+export type { DurationUnit, DurationStyle, HumanizeDurationOptions } from './duration';

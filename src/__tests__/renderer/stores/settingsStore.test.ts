@@ -2,21 +2,84 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import {
 	useSettingsStore,
 	loadAllSettings,
-	getBadgeLevelForTime,
 	selectIsLeaderboardRegistered,
-	getSettingsState,
-	getSettingsActions,
-	DEFAULT_CONTEXT_MANAGEMENT_SETTINGS,
-	DEFAULT_AUTO_RUN_STATS,
-	DEFAULT_USAGE_STATS,
-	DEFAULT_KEYBOARD_MASTERY_STATS,
-	DEFAULT_ONBOARDING_STATS,
-	DEFAULT_AI_COMMANDS,
+	clampAutoRunMaxTaskDurationMin,
+	sanitizeLoadedAutoRunMaxTaskDurationMin,
+	DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN,
+	resolveForceParallel,
+	FILE_PREVIEW_TOOLBAR_BUTTON_KEYS,
+	DEFAULT_FILE_PREVIEW_TOOLBAR_VISIBILITY,
 } from '../../../renderer/stores/settingsStore';
 import type { SettingsStoreState } from '../../../renderer/stores/settingsStore';
+import { SETTINGS_METADATA } from '../../../shared/settingsMetadata';
+import { MAESTRO_FONT_STACK } from '../../../shared/fontStack';
+import { DEFAULT_CUE_HISTORY_RETENTION_DAYS } from '../../../shared/cue/retention';
+import { useUIStore } from '../../../renderer/stores/uiStore';
+import { useNotificationStore } from '../../../renderer/stores/notificationStore';
+import {
+	selectShowNowPlayingIndicator,
+	useMediaPlaybackStore,
+} from '../../../renderer/stores/mediaPlaybackStore';
 import type { FileExplorerIconTheme } from '../../../renderer/utils/fileExplorerIcons/shared';
-import { DEFAULT_SHORTCUTS, TAB_SHORTCUTS } from '../../../renderer/constants/shortcuts';
+import { FILE_EXPLORER_ICON_THEMES } from '../../../renderer/utils/fileExplorerIcons/shared';
+import {
+	DEFAULT_SHORTCUTS,
+	TAB_SHORTCUTS,
+	FIXED_SHORTCUTS,
+} from '../../../renderer/constants/shortcuts';
+import {
+	KEYBOARD_MASTERY_LEVELS,
+	collectBoundShortcuts,
+} from '../../../renderer/constants/keyboardMastery';
 import { DEFAULT_CUSTOM_THEME_COLORS } from '../../../renderer/constants/themes';
+import { TYPOGRAPHY_PRESETS } from '../../../shared/typographyPresets';
+
+// Pull defaults from a freshly-initialized store so tests don't need to re-import them.
+// Deep-cloned so test mutations can't affect the captured reference.
+// These constants match what the store uses internally (kept non-exported to prevent fan-out).
+const _INITIAL_STATE = useSettingsStore.getState();
+const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS = JSON.parse(
+	JSON.stringify(_INITIAL_STATE.contextManagementSettings)
+);
+const DEFAULT_AUTO_RUN_STATS = JSON.parse(JSON.stringify(_INITIAL_STATE.autoRunStats));
+const DEFAULT_USAGE_STATS = JSON.parse(JSON.stringify(_INITIAL_STATE.usageStats));
+const DEFAULT_KEYBOARD_MASTERY_STATS = JSON.parse(
+	JSON.stringify(_INITIAL_STATE.keyboardMasteryStats)
+);
+const DEFAULT_ONBOARDING_STATS = JSON.parse(JSON.stringify(_INITIAL_STATE.onboardingStats));
+const DEFAULT_AI_COMMANDS = JSON.parse(JSON.stringify(_INITIAL_STATE.customAICommands));
+
+// Inlined badge level calculator matching settingsStore's internal function.
+// Kept local so removing the export from the store doesn't break this test.
+function getBadgeLevelForTime(cumulativeTimeMs: number): number {
+	const MINUTE = 60 * 1000;
+	const HOUR = 60 * MINUTE;
+	const DAY = 24 * HOUR;
+	const WEEK = 7 * DAY;
+	const MONTH = 30 * DAY;
+	const thresholds = [
+		15 * MINUTE,
+		1 * HOUR,
+		8 * HOUR,
+		1 * DAY,
+		1 * WEEK,
+		1 * MONTH,
+		3 * MONTH,
+		6 * MONTH,
+		365 * DAY,
+		5 * 365 * DAY,
+		10 * 365 * DAY,
+	];
+	let level = 0;
+	for (let i = 0; i < thresholds.length; i++) {
+		if (cumulativeTimeMs >= thresholds[i]) {
+			level = i + 1;
+		} else {
+			break;
+		}
+	}
+	return level;
+}
 
 /**
  * Reset the Zustand store to initial state between tests.
@@ -26,36 +89,40 @@ function resetStore() {
 	useSettingsStore.setState({
 		settingsLoaded: false,
 		conductorProfile: '',
-		llmProvider: 'openrouter',
-		modelSlug: 'anthropic/claude-3.5-sonnet',
-		apiKey: '',
+		globalShowHotkey: [],
 		defaultShell: 'zsh',
 		customShellPath: '',
 		shellArgs: '',
 		shellEnvVars: {},
 		ghPath: '',
-		fontFamily: 'Roboto Mono, Menlo, "Courier New", monospace',
+		fontFamily: MAESTRO_FONT_STACK,
 		fontSize: 14,
 		activeThemeId: 'dracula',
 		customThemeColors: DEFAULT_CUSTOM_THEME_COLORS,
 		customThemeBaseId: 'dracula',
-		enterToSendAI: false,
+		enterToSendAI: true,
+		enterToSendAIExpanded: false,
 		defaultSaveToHistory: true,
 		defaultShowThinking: 'off',
+		showToolCalls: false,
 		leftSidebarWidth: 256,
 		rightPanelWidth: 384,
+		modalSizes: {},
 		markdownEditMode: false,
 		chatRawTextMode: false,
+		groupChatAutoScroll: true,
 		showHiddenFiles: true,
-		fileExplorerIconTheme: 'default',
+		fileExplorerIconTheme: 'rich',
 		terminalWidth: 100,
 		logLevel: 'info',
 		maxLogBuffer: 5000,
-		maxOutputLines: 25,
+		maxOutputLines: Infinity,
 		osNotificationsEnabled: true,
 		audioFeedbackEnabled: false,
 		audioFeedbackCommand: 'say',
 		toastDuration: 20,
+		idleNotificationEnabled: false,
+		idleNotificationCommand: 'say Maestro is idle',
 		checkForUpdatesOnStartup: true,
 		enableBetaUpdates: false,
 		crashReportingEnabled: true,
@@ -67,10 +134,12 @@ function resetStore() {
 		autoRunStats: DEFAULT_AUTO_RUN_STATS,
 		usageStats: DEFAULT_USAGE_STATS,
 		ungroupedCollapsed: false,
+		groupChatsExpanded: true,
 		tourCompleted: false,
 		firstAutoRunCompleted: false,
 		onboardingStats: DEFAULT_ONBOARDING_STATS,
 		leaderboardRegistration: null,
+		webInterfaceAutoStart: false,
 		webInterfaceUseCustomPort: false,
 		webInterfaceCustomPort: 8080,
 		contextManagementSettings: DEFAULT_CONTEXT_MANAGEMENT_SETTINGS,
@@ -79,10 +148,11 @@ function resetStore() {
 		documentGraphShowExternalLinks: false,
 		documentGraphMaxNodes: 50,
 		documentGraphPreviewCharLimit: 100,
-		documentGraphLayoutType: 'mindmap',
+		documentGraphLayoutType: 'hierarchical',
 		statsCollectionEnabled: true,
 		defaultStatsTimeRange: 'week',
 		preventSleepEnabled: false,
+		preventDisplaySleepEnabled: false,
 		disableGpuAcceleration: false,
 		disableConfetti: false,
 		sshRemoteIgnorePatterns: ['.git', '*cache*'],
@@ -91,10 +161,13 @@ function resetStore() {
 		fileTabAutoRefreshEnabled: false,
 		suppressWindowsWarning: false,
 		directorNotesSettings: { provider: 'claude-code', defaultLookbackDays: 7 },
+		cueHistoryRetentionDays: DEFAULT_CUE_HISTORY_RETENTION_DAYS,
+		groupCueEntries: true,
 		wakatimeApiKey: '',
 		wakatimeEnabled: false,
 		forcedParallelExecution: false,
 		forcedParallelAcknowledged: false,
+		forcedParallelAlways: false,
 	});
 }
 
@@ -106,8 +179,15 @@ describe('settingsStore', () => {
 		if (!window.maestro.power) {
 			(window.maestro as any).power = {
 				setEnabled: vi.fn().mockResolvedValue(undefined),
+				setKeepDisplayAwake: vi.fn().mockResolvedValue(undefined),
 			};
 		}
+
+		// Cue stats mock (not in global setup). loadAllSettings calls this for the
+		// one-time cueTimeMs backfill; default to "no retained history".
+		(window.maestro as any).cueStats = {
+			getHistoricalConductorCredit: vi.fn().mockResolvedValue(0),
+		};
 
 		vi.clearAllMocks();
 	});
@@ -121,37 +201,52 @@ describe('settingsStore', () => {
 	// ========================================================================
 
 	describe('initial state', () => {
-		it('has correct default values for all 68 fields', () => {
+		it('has correct default values for the initial settings fields', () => {
 			const state = useSettingsStore.getState();
 
 			expect(state.settingsLoaded).toBe(false);
 			expect(state.conductorProfile).toBe('');
-			expect(state.llmProvider).toBe('openrouter');
-			expect(state.modelSlug).toBe('anthropic/claude-3.5-sonnet');
-			expect(state.apiKey).toBe('');
 			expect(state.defaultShell).toBe('zsh');
 			expect(state.customShellPath).toBe('');
 			expect(state.shellArgs).toBe('');
 			expect(state.shellEnvVars).toEqual({});
+			expect(state.shellEnvVarsDisabled).toEqual({});
 			expect(state.ghPath).toBe('');
-			expect(state.fontFamily).toBe('Roboto Mono, Menlo, "Courier New", monospace');
+			expect(state.fontFamily).toBe(MAESTRO_FONT_STACK);
+			// Every surface font defaults to empty, meaning "inherit the interface
+			// font", so a fresh install pins no surface to a face of its own.
+			expect(state.terminalFontFamily).toBe('');
+			expect(state.chatFontFamily).toBe('');
+			expect(state.filePreviewFontFamily).toBe('');
+			expect(state.fileEditorFontFamily).toBe('');
+			// False on a fresh install AND on every install predating the chooser,
+			// which is what makes one gate serve new and existing users alike.
+			expect(state.typographyPromptSeen).toBe(false);
 			expect(state.fontSize).toBe(14);
 			expect(state.activeThemeId).toBe('dracula');
 			expect(state.customThemeColors).toEqual(DEFAULT_CUSTOM_THEME_COLORS);
 			expect(state.customThemeBaseId).toBe('dracula');
-			expect(state.enterToSendAI).toBe(false);
+			expect(state.enterToSendAI).toBe(true);
+			expect(state.enterToSendAIExpanded).toBe(false);
 			expect(state.defaultSaveToHistory).toBe(true);
 			expect(state.defaultShowThinking).toBe('off');
+			expect(state.showToolCalls).toBe(false);
 			expect(state.leftSidebarWidth).toBe(256);
 			expect(state.rightPanelWidth).toBe(384);
+			expect(state.modalSizes).toEqual({});
 			expect(state.markdownEditMode).toBe(false);
 			expect(state.chatRawTextMode).toBe(false);
+			expect(state.groupChatAutoScroll).toBe(true);
 			expect(state.showHiddenFiles).toBe(true);
-			expect(state.fileExplorerIconTheme).toBe('default');
+			expect(state.fileExplorerIconTheme).toBe('rich');
+			expect(state.fileExplorerMaxDepth).toBe(10);
+			expect(state.fileExplorerMaxEntries).toBe(100_000);
+			expect(state.sshReduceEntryCapEnabled).toBe(false);
+			expect(state.sshReduceEntryCapFraction).toBe(0.1);
 			expect(state.terminalWidth).toBe(100);
 			expect(state.logLevel).toBe('info');
 			expect(state.maxLogBuffer).toBe(5000);
-			expect(state.maxOutputLines).toBe(25);
+			expect(state.maxOutputLines).toBe(Infinity);
 			expect(state.osNotificationsEnabled).toBe(true);
 			expect(state.audioFeedbackEnabled).toBe(false);
 			expect(state.audioFeedbackCommand).toBe('say');
@@ -167,10 +262,14 @@ describe('settingsStore', () => {
 			expect(state.autoRunStats).toEqual(DEFAULT_AUTO_RUN_STATS);
 			expect(state.usageStats).toEqual(DEFAULT_USAGE_STATS);
 			expect(state.ungroupedCollapsed).toBe(false);
+			expect(state.groupChatsExpanded).toBe(true);
+			expect(state.groupChatSortAlphabetical).toBe(false);
+			expect(state.starredSessionsCollapsed).toBe(false);
 			expect(state.tourCompleted).toBe(false);
 			expect(state.firstAutoRunCompleted).toBe(false);
 			expect(state.onboardingStats).toEqual(DEFAULT_ONBOARDING_STATS);
 			expect(state.leaderboardRegistration).toBeNull();
+			expect(state.webInterfaceAutoStart).toBe(false);
 			expect(state.webInterfaceUseCustomPort).toBe(false);
 			expect(state.webInterfaceCustomPort).toBe(8080);
 			expect(state.contextManagementSettings).toEqual(DEFAULT_CONTEXT_MANAGEMENT_SETTINGS);
@@ -179,7 +278,7 @@ describe('settingsStore', () => {
 			expect(state.documentGraphShowExternalLinks).toBe(false);
 			expect(state.documentGraphMaxNodes).toBe(50);
 			expect(state.documentGraphPreviewCharLimit).toBe(100);
-			expect(state.documentGraphLayoutType).toBe('mindmap');
+			expect(state.documentGraphLayoutType).toBe('hierarchical');
 			expect(state.statsCollectionEnabled).toBe(true);
 			expect(state.defaultStatsTimeRange).toBe('week');
 			expect(state.preventSleepEnabled).toBe(false);
@@ -206,26 +305,6 @@ describe('settingsStore', () => {
 	// ========================================================================
 
 	describe('simple setters', () => {
-		describe('AI/LLM', () => {
-			it('setLlmProvider updates state and persists', () => {
-				useSettingsStore.getState().setLlmProvider('anthropic' as any);
-				expect(useSettingsStore.getState().llmProvider).toBe('anthropic');
-				expect(window.maestro.settings.set).toHaveBeenCalledWith('llmProvider', 'anthropic');
-			});
-
-			it('setModelSlug updates state and persists', () => {
-				useSettingsStore.getState().setModelSlug('gpt-4');
-				expect(useSettingsStore.getState().modelSlug).toBe('gpt-4');
-				expect(window.maestro.settings.set).toHaveBeenCalledWith('modelSlug', 'gpt-4');
-			});
-
-			it('setApiKey updates state and persists', () => {
-				useSettingsStore.getState().setApiKey('sk-test-key');
-				expect(useSettingsStore.getState().apiKey).toBe('sk-test-key');
-				expect(window.maestro.settings.set).toHaveBeenCalledWith('apiKey', 'sk-test-key');
-			});
-		});
-
 		describe('Shell', () => {
 			it('setDefaultShell updates state and persists', () => {
 				useSettingsStore.getState().setDefaultShell('bash');
@@ -255,6 +334,21 @@ describe('settingsStore', () => {
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('shellEnvVars', envVars);
 			});
 
+			it('setShellEnvVarsDisabled updates state and persists', () => {
+				const parked = { HTTP_PROXY: 'http://proxy:8080' };
+				useSettingsStore.getState().setShellEnvVarsDisabled(parked);
+				expect(useSettingsStore.getState().shellEnvVarsDisabled).toEqual(parked);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('shellEnvVarsDisabled', parked);
+			});
+
+			it('keeps parked variables out of the effective shell env', () => {
+				// The two records are separate on purpose: a spawner reads only
+				// shellEnvVars, so parking a variable is what stops it shipping.
+				useSettingsStore.getState().setShellEnvVars({ KEEP: 'yes' });
+				useSettingsStore.getState().setShellEnvVarsDisabled({ OFF: 'no' });
+				expect(useSettingsStore.getState().shellEnvVars).toEqual({ KEEP: 'yes' });
+			});
+
 			it('setGhPath updates state and persists', () => {
 				useSettingsStore.getState().setGhPath('/usr/local/bin/gh');
 				expect(useSettingsStore.getState().ghPath).toBe('/usr/local/bin/gh');
@@ -267,6 +361,95 @@ describe('settingsStore', () => {
 				useSettingsStore.getState().setFontFamily('Fira Code');
 				expect(useSettingsStore.getState().fontFamily).toBe('Fira Code');
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('fontFamily', 'Fira Code');
+			});
+
+			it.each([
+				['setTerminalFontFamily', 'terminalFontFamily'],
+				['setChatFontFamily', 'chatFontFamily'],
+				['setFilePreviewFontFamily', 'filePreviewFontFamily'],
+				['setFileEditorFontFamily', 'fileEditorFontFamily'],
+			] as const)('%s updates state and persists', (action, key) => {
+				const store = useSettingsStore.getState() as unknown as Record<
+					string,
+					(value: string) => void
+				>;
+				store[action]('Verdana');
+				expect((useSettingsStore.getState() as unknown as Record<string, string>)[key]).toBe(
+					'Verdana'
+				);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith(key, 'Verdana');
+			});
+
+			it('applyTypographyPreset writes every font field in one state update', () => {
+				useSettingsStore.getState().applyTypographyPreset('default');
+				const state = useSettingsStore.getState();
+				const preset = TYPOGRAPHY_PRESETS.default.fonts;
+
+				expect(state.fontFamily).toBe(preset.fontFamily);
+				expect(state.chatFontFamily).toBe(preset.chatFontFamily);
+				expect(state.terminalFontFamily).toBe(preset.terminalFontFamily);
+				expect(state.filePreviewFontFamily).toBe(preset.filePreviewFontFamily);
+				expect(state.fileEditorFontFamily).toBe(preset.fileEditorFontFamily);
+
+				for (const [key, value] of Object.entries(preset)) {
+					expect(window.maestro.settings.set).toHaveBeenCalledWith(key, value);
+				}
+			});
+
+			it('applyTypographyPreset round-trips between the two presets', () => {
+				// A preset that skipped a surface would leave the other preset's
+				// value there, so Default -> Hacker would not restore Hacker.
+				useSettingsStore.getState().applyTypographyPreset('default');
+				useSettingsStore.getState().applyTypographyPreset('hacker');
+				const state = useSettingsStore.getState();
+
+				expect(state.fontFamily).toBe(TYPOGRAPHY_PRESETS.hacker.fonts.fontFamily);
+				expect(state.terminalFontFamily).toBe('');
+				expect(state.filePreviewFontFamily).toBe('');
+				expect(state.fileEditorFontFamily).toBe('');
+			});
+
+			it('saveTypographySnapshot captures the live fonts and sizes and persists them', () => {
+				useSettingsStore.setState({
+					fontFamily: 'Verdana',
+					terminalFontFamily: 'Fira Code',
+					fontSize: 17,
+					chatFontSize: 0,
+				});
+				useSettingsStore.getState().saveTypographySnapshot();
+
+				const snapshot = useSettingsStore.getState().typographySnapshot;
+				expect(snapshot?.fonts.fontFamily).toBe('Verdana');
+				expect(snapshot?.fonts.terminalFontFamily).toBe('Fira Code');
+				expect(snapshot?.sizes.fontSize).toBe(17);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('typographySnapshot', snapshot);
+			});
+
+			it('restoreTypographySnapshot puts a saved setup back after a preset overwrote it', () => {
+				// The whole reason the snapshot exists: trying a preset must not
+				// be a one-way door out of a hand-tuned setup.
+				useSettingsStore.setState({ fontFamily: 'Verdana', fontSize: 17 });
+				useSettingsStore.getState().saveTypographySnapshot();
+				useSettingsStore.getState().resetTypography('hacker');
+				expect(useSettingsStore.getState().fontFamily).not.toBe('Verdana');
+
+				useSettingsStore.getState().restoreTypographySnapshot();
+				expect(useSettingsStore.getState().fontFamily).toBe('Verdana');
+				expect(useSettingsStore.getState().fontSize).toBe(17);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('fontFamily', 'Verdana');
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('fontSize', 17);
+			});
+
+			it('restoreTypographySnapshot is a no-op with nothing saved', () => {
+				useSettingsStore.setState({ typographySnapshot: null, fontFamily: 'Verdana' });
+				useSettingsStore.getState().restoreTypographySnapshot();
+				expect(useSettingsStore.getState().fontFamily).toBe('Verdana');
+			});
+
+			it('setTypographyPromptSeen updates state and persists', () => {
+				useSettingsStore.getState().setTypographyPromptSeen(true);
+				expect(useSettingsStore.getState().typographyPromptSeen).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('typographyPromptSeen', true);
 			});
 
 			it('setFontSize updates state and persists', () => {
@@ -316,6 +499,12 @@ describe('settingsStore', () => {
 				expect(useSettingsStore.getState().defaultShowThinking).toBe('on');
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('defaultShowThinking', 'on');
 			});
+
+			it('setShowToolCalls updates state and persists', () => {
+				useSettingsStore.getState().setShowToolCalls(true);
+				expect(useSettingsStore.getState().showToolCalls).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('showToolCalls', true);
+			});
 		});
 
 		describe('Layout', () => {
@@ -339,6 +528,12 @@ describe('settingsStore', () => {
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('chatRawTextMode', true);
 			});
 
+			it('setGroupChatAutoScroll updates state and persists', () => {
+				useSettingsStore.getState().setGroupChatAutoScroll(false);
+				expect(useSettingsStore.getState().groupChatAutoScroll).toBe(false);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('groupChatAutoScroll', false);
+			});
+
 			it('setShowHiddenFiles updates state and persists', () => {
 				useSettingsStore.getState().setShowHiddenFiles(false);
 				expect(useSettingsStore.getState().showHiddenFiles).toBe(false);
@@ -349,6 +544,51 @@ describe('settingsStore', () => {
 				useSettingsStore.getState().setFileExplorerIconTheme('rich');
 				expect(useSettingsStore.getState().fileExplorerIconTheme).toBe('rich');
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('fileExplorerIconTheme', 'rich');
+			});
+
+			describe('setToastWidth', () => {
+				beforeEach(() => {
+					useNotificationStore.setState({ toasts: [] });
+				});
+
+				it('updates state and persists', () => {
+					useSettingsStore.getState().setToastWidth('large');
+					expect(useSettingsStore.getState().toastWidth).toBe('large');
+					expect(window.maestro.settings.set).toHaveBeenCalledWith('toastWidth', 'large');
+				});
+
+				it('fires a preview toast naming the size that was picked', () => {
+					useSettingsStore.getState().setToastWidth('large');
+					const toasts = useNotificationStore.getState().toasts;
+					expect(toasts).toHaveLength(1);
+					expect(toasts[0].title).toBe('Toast Width: Large');
+					expect(toasts[0].message).toContain('480-720px');
+				});
+
+				it('quotes the live Right Bar width for the dynamic preset', () => {
+					useSettingsStore.setState({ rightPanelWidth: 500 });
+					useSettingsStore.getState().setToastWidth('dynamic');
+					const [toast] = useNotificationStore.getState().toasts;
+					expect(toast.title).toBe('Toast Width: Dynamic');
+					// 500 less the 16px gutter on each side.
+					expect(toast.message).toContain('468px');
+				});
+
+				it('replaces its own preview instead of stacking one per click', () => {
+					useSettingsStore.getState().setToastWidth('small');
+					useSettingsStore.getState().setToastWidth('medium');
+					useSettingsStore.getState().setToastWidth('large');
+					const toasts = useNotificationStore.getState().toasts;
+					expect(toasts).toHaveLength(1);
+					expect(toasts[0].title).toBe('Toast Width: Large');
+				});
+
+				it('keeps the preview in-app only (no TTS command, no OS notification)', () => {
+					useSettingsStore.getState().setToastWidth('medium');
+					const [toast] = useNotificationStore.getState().toasts;
+					expect(toast.skipCustomNotification).toBe(true);
+					expect(toast.skipOsNotification).toBe(true);
+				});
 			});
 		});
 
@@ -460,6 +700,24 @@ describe('settingsStore', () => {
 				expect(window.maestro.settings.set).toHaveBeenCalledWith('ungroupedCollapsed', true);
 			});
 
+			it('setGroupChatsExpanded updates state and persists', () => {
+				useSettingsStore.getState().setGroupChatsExpanded(false);
+				expect(useSettingsStore.getState().groupChatsExpanded).toBe(false);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('groupChatsExpanded', false);
+			});
+
+			it('setGroupChatSortAlphabetical updates state and persists', () => {
+				useSettingsStore.getState().setGroupChatSortAlphabetical(true);
+				expect(useSettingsStore.getState().groupChatSortAlphabetical).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('groupChatSortAlphabetical', true);
+			});
+
+			it('setStarredSessionsCollapsed updates state and persists', () => {
+				useSettingsStore.getState().setStarredSessionsCollapsed(true);
+				expect(useSettingsStore.getState().starredSessionsCollapsed).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('starredSessionsCollapsed', true);
+			});
+
 			it('setTourCompleted updates state and persists', () => {
 				useSettingsStore.getState().setTourCompleted(true);
 				expect(useSettingsStore.getState().tourCompleted).toBe(true);
@@ -481,6 +739,12 @@ describe('settingsStore', () => {
 		});
 
 		describe('Web', () => {
+			it('setWebInterfaceAutoStart updates state and persists', () => {
+				useSettingsStore.getState().setWebInterfaceAutoStart(true);
+				expect(useSettingsStore.getState().webInterfaceAutoStart).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('webInterfaceAutoStart', true);
+			});
+
 			it('setWebInterfaceUseCustomPort updates state and persists', () => {
 				useSettingsStore.getState().setWebInterfaceUseCustomPort(true);
 				expect(useSettingsStore.getState().webInterfaceUseCustomPort).toBe(true);
@@ -517,11 +781,40 @@ describe('settingsStore', () => {
 
 			it('setDocumentGraphLayoutType rejects invalid values and persists fallback', () => {
 				useSettingsStore.getState().setDocumentGraphLayoutType('invalid' as any);
-				expect(useSettingsStore.getState().documentGraphLayoutType).toBe('mindmap');
+				expect(useSettingsStore.getState().documentGraphLayoutType).toBe('hierarchical');
 				expect(window.maestro.settings.set).toHaveBeenCalledWith(
 					'documentGraphLayoutType',
-					'mindmap'
+					'hierarchical'
 				);
+			});
+		});
+
+		describe('Cue history retention', () => {
+			it('defaults to the shared retention constant', () => {
+				expect(useSettingsStore.getState().cueHistoryRetentionDays).toBe(
+					DEFAULT_CUE_HISTORY_RETENTION_DAYS
+				);
+			});
+
+			it('setCueHistoryRetentionDays updates state and persists', () => {
+				useSettingsStore.getState().setCueHistoryRetentionDays(30);
+				expect(useSettingsStore.getState().cueHistoryRetentionDays).toBe(30);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('cueHistoryRetentionDays', 30);
+			});
+		});
+
+		describe('Cue History grouping', () => {
+			// Default ON: the ungrouped view is what made the History panel
+			// unreadable on a machine running high-frequency triggers.
+			it('defaults to grouping Cue entries', () => {
+				expect(useSettingsStore.getState().groupCueEntries).toBe(true);
+				expect(SETTINGS_METADATA.groupCueEntries.default).toBe(true);
+			});
+
+			it('setGroupCueEntries updates state and persists', () => {
+				useSettingsStore.getState().setGroupCueEntries(false);
+				expect(useSettingsStore.getState().groupCueEntries).toBe(false);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('groupCueEntries', false);
 			});
 		});
 
@@ -639,6 +932,46 @@ describe('settingsStore', () => {
 			it('forcedParallelAcknowledged defaults to false', () => {
 				expect(useSettingsStore.getState().forcedParallelAcknowledged).toBe(false);
 			});
+
+			it('setForcedParallelAlways updates state and persists', () => {
+				useSettingsStore.getState().setForcedParallelAlways(true);
+				expect(useSettingsStore.getState().forcedParallelAlways).toBe(true);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('forcedParallelAlways', true);
+			});
+
+			it('forcedParallelAlways defaults to false', () => {
+				expect(useSettingsStore.getState().forcedParallelAlways).toBe(false);
+			});
+
+			describe('resolveForceParallel', () => {
+				it('never forces when the feature is off, regardless of option or always mode', () => {
+					useSettingsStore.setState({
+						forcedParallelExecution: false,
+						forcedParallelAlways: true,
+					});
+					expect(resolveForceParallel(true)).toBe(false);
+					expect(resolveForceParallel(false)).toBe(false);
+				});
+
+				it('modifier mode forces only when the caller passes the explicit override', () => {
+					useSettingsStore.setState({
+						forcedParallelExecution: true,
+						forcedParallelAlways: false,
+					});
+					expect(resolveForceParallel(true)).toBe(true);
+					expect(resolveForceParallel(false)).toBe(false);
+					expect(resolveForceParallel(undefined)).toBe(false);
+				});
+
+				it('always mode forces every send even without the override', () => {
+					useSettingsStore.setState({
+						forcedParallelExecution: true,
+						forcedParallelAlways: true,
+					});
+					expect(resolveForceParallel(undefined)).toBe(true);
+					expect(resolveForceParallel(false)).toBe(true);
+				});
+			});
 		});
 	});
 
@@ -647,13 +980,13 @@ describe('settingsStore', () => {
 	// ========================================================================
 
 	describe('setters with validation', () => {
-		it('setConductorProfile trims to 1000 characters', () => {
-			const longProfile = 'a'.repeat(1500);
+		it('setConductorProfile trims to 5000 characters', () => {
+			const longProfile = 'a'.repeat(6000);
 			useSettingsStore.getState().setConductorProfile(longProfile);
-			expect(useSettingsStore.getState().conductorProfile).toBe('a'.repeat(1000));
+			expect(useSettingsStore.getState().conductorProfile).toBe('a'.repeat(5000));
 			expect(window.maestro.settings.set).toHaveBeenCalledWith(
 				'conductorProfile',
-				'a'.repeat(1000)
+				'a'.repeat(5000)
 			);
 		});
 
@@ -676,6 +1009,56 @@ describe('settingsStore', () => {
 			useSettingsStore.getState().setLeftSidebarWidth(400);
 			expect(useSettingsStore.getState().leftSidebarWidth).toBe(400);
 			expect(window.maestro.settings.set).toHaveBeenCalledWith('leftSidebarWidth', 400);
+		});
+
+		it('setModalSize persists a normalized size by key', () => {
+			useSettingsStore.getState().setModalSize('settings', { width: 812.4, height: 620.6 });
+
+			expect(useSettingsStore.getState().modalSizes).toEqual({
+				settings: { width: 812, height: 621 },
+			});
+			expect(window.maestro.settings.set).toHaveBeenCalledWith('modalSizes', {
+				settings: { width: 812, height: 621 },
+			});
+		});
+
+		it('resetModalSizes clears persisted modal sizes', () => {
+			useSettingsStore.setState({
+				modalSizes: {
+					settings: { width: 812, height: 621 },
+				},
+			});
+
+			useSettingsStore.getState().resetModalSizes();
+
+			expect(useSettingsStore.getState().modalSizes).toEqual({});
+			expect(window.maestro.settings.set).toHaveBeenCalledWith('modalSizes', {});
+		});
+
+		it('resetModalSize drops one key and leaves the rest', () => {
+			useSettingsStore.setState({
+				modalSizes: {
+					settings: { width: 812, height: 621 },
+					about: { width: 560, height: 420 },
+				},
+			});
+
+			useSettingsStore.getState().resetModalSize('settings');
+
+			expect(useSettingsStore.getState().modalSizes).toEqual({
+				about: { width: 560, height: 420 },
+			});
+			expect(window.maestro.settings.set).toHaveBeenCalledWith('modalSizes', {
+				about: { width: 560, height: 420 },
+			});
+		});
+
+		it('resetModalSize does not persist for a modal that was never resized', () => {
+			useSettingsStore.setState({ modalSizes: {} });
+
+			useSettingsStore.getState().resetModalSize('never-resized');
+
+			expect(window.maestro.settings.set).not.toHaveBeenCalledWith('modalSizes', expect.anything());
 		});
 
 		it('setWebInterfaceCustomPort persists only valid 1024-65535', () => {
@@ -710,9 +1093,15 @@ describe('settingsStore', () => {
 			expect(useSettingsStore.getState().documentGraphMaxNodes).toBe(500);
 		});
 
-		it('setDocumentGraphPreviewCharLimit clamps to 50-500', () => {
-			useSettingsStore.getState().setDocumentGraphPreviewCharLimit(10);
-			expect(useSettingsStore.getState().documentGraphPreviewCharLimit).toBe(50);
+		it('setDocumentGraphPreviewCharLimit clamps to 0-500, keeping 0 as "previews off"', () => {
+			// 0 is a mode, not a floor violation: it draws each graph node as a
+			// filename pill. Clamping it up to 50 would make the setting
+			// unreachable and snap the graph back to full cards.
+			useSettingsStore.getState().setDocumentGraphPreviewCharLimit(0);
+			expect(useSettingsStore.getState().documentGraphPreviewCharLimit).toBe(0);
+
+			useSettingsStore.getState().setDocumentGraphPreviewCharLimit(-10);
+			expect(useSettingsStore.getState().documentGraphPreviewCharLimit).toBe(0);
 
 			useSettingsStore.getState().setDocumentGraphPreviewCharLimit(1000);
 			expect(useSettingsStore.getState().documentGraphPreviewCharLimit).toBe(500);
@@ -744,6 +1133,22 @@ describe('settingsStore', () => {
 			expect(useSettingsStore.getState().preventSleepEnabled).toBe(true);
 			expect(window.maestro.settings.set).toHaveBeenCalledWith('preventSleepEnabled', true);
 			expect(window.maestro.power.setEnabled).toHaveBeenCalledWith(true);
+		});
+
+		it('setPreventDisplaySleepEnabled updates state, persists, and calls power.setKeepDisplayAwake', async () => {
+			await useSettingsStore.getState().setPreventDisplaySleepEnabled(true);
+			expect(useSettingsStore.getState().preventDisplaySleepEnabled).toBe(true);
+			expect(window.maestro.settings.set).toHaveBeenCalledWith('preventDisplaySleepEnabled', true);
+			expect(window.maestro.power.setKeepDisplayAwake).toHaveBeenCalledWith(true);
+		});
+
+		it('setPreventDisplaySleepEnabled rolls back when the power call fails', async () => {
+			(window.maestro.power.setKeepDisplayAwake as any).mockRejectedValueOnce(new Error('boom'));
+
+			await expect(useSettingsStore.getState().setPreventDisplaySleepEnabled(true)).rejects.toThrow(
+				'boom'
+			);
+			expect(useSettingsStore.getState().preventDisplaySleepEnabled).toBe(false);
 		});
 	});
 
@@ -801,6 +1206,7 @@ describe('settingsStore', () => {
 					maxSimultaneousQueries: 4,
 					maxQueueDepth: 1,
 				},
+				settingsLoaded: true,
 			});
 			vi.clearAllMocks();
 
@@ -827,6 +1233,7 @@ describe('settingsStore', () => {
 					maxSimultaneousQueries: 4,
 					maxQueueDepth: 1,
 				},
+				settingsLoaded: true,
 			});
 			vi.clearAllMocks();
 
@@ -847,6 +1254,7 @@ describe('settingsStore', () => {
 					maxSimultaneousQueries: 4,
 					maxQueueDepth: 1,
 				},
+				settingsLoaded: true,
 			});
 			vi.clearAllMocks();
 
@@ -867,6 +1275,7 @@ describe('settingsStore', () => {
 					maxSimultaneousQueries: 4,
 					maxQueueDepth: 1,
 				},
+				settingsLoaded: true,
 			});
 			vi.clearAllMocks();
 
@@ -885,11 +1294,45 @@ describe('settingsStore', () => {
 					maxSimultaneousQueries: 4,
 					maxQueueDepth: 1,
 				},
+				settingsLoaded: true,
 			});
 			vi.clearAllMocks();
 
 			useSettingsStore.getState().updateUsageStats({});
 			expect(useSettingsStore.getState().usageStats.maxAgents).toBe(5);
+		});
+
+		// Regression: peaks are lifetime high-water marks, but before
+		// loadAllSettings resolves the store still holds the zeroed defaults.
+		// The sampling effect in useAutoRunAchievements fires on the first
+		// `sessions` ref flip, which routinely beats the settings load, so an
+		// unguarded write persisted a live snapshot AS the all-time peak. A real
+		// install lost maxSimultaneousQueries 6 -> 3 and maxQueueDepth 16 -> 10
+		// this way. Nothing may be written until the baseline is real.
+		it('updateUsageStats writes nothing before settings have loaded', () => {
+			useSettingsStore.setState({
+				usageStats: {
+					maxAgents: 0,
+					maxDefinedAgents: 0,
+					maxSimultaneousAutoRuns: 0,
+					maxSimultaneousQueries: 0,
+					maxQueueDepth: 0,
+				},
+				settingsLoaded: false,
+			});
+			vi.clearAllMocks();
+
+			// A live snapshot that would look like a new record for every counter.
+			useSettingsStore.getState().updateUsageStats({
+				maxAgents: 88,
+				maxDefinedAgents: 88,
+				maxSimultaneousAutoRuns: 1,
+				maxSimultaneousQueries: 2,
+				maxQueueDepth: 1,
+			});
+
+			expect(window.maestro.settings.set).not.toHaveBeenCalled();
+			expect(useSettingsStore.getState().usageStats.maxAgents).toBe(0);
 		});
 	});
 
@@ -976,6 +1419,49 @@ describe('settingsStore', () => {
 
 			useSettingsStore.getState().updateAutoRunProgress(10000);
 			expect(useSettingsStore.getState().autoRunStats.cumulativeTimeMs).toBe(60000);
+		});
+
+		it('updateAutoRunProgress keeps Auto Run time out of the Cue subtotal', () => {
+			useSettingsStore.setState({
+				autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 50000, cueTimeMs: 5000 },
+			});
+			vi.clearAllMocks();
+
+			useSettingsStore.getState().updateAutoRunProgress(10000);
+			expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(5000);
+		});
+
+		it('updateAutoRunProgress accrues Cue credit into both cumulative and Cue time', () => {
+			useSettingsStore.setState({
+				autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 50000, cueTimeMs: 5000 },
+			});
+			vi.clearAllMocks();
+
+			useSettingsStore.getState().updateAutoRunProgress(10000, 'cue');
+			const stats = useSettingsStore.getState().autoRunStats;
+			expect(stats.cumulativeTimeMs).toBe(60000);
+			expect(stats.cueTimeMs).toBe(15000);
+		});
+
+		it('updateAutoRunProgress treats legacy stats without cueTimeMs as all Auto Run', () => {
+			const { cueTimeMs: _dropped, ...legacy } = DEFAULT_AUTO_RUN_STATS;
+			useSettingsStore.setState({
+				autoRunStats: { ...legacy, cumulativeTimeMs: 50000 },
+			});
+			vi.clearAllMocks();
+
+			useSettingsStore.getState().updateAutoRunProgress(10000, 'cue');
+			expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(10000);
+		});
+
+		it('recordAutoRunComplete preserves the Cue subtotal', () => {
+			useSettingsStore.setState({
+				autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 60000, cueTimeMs: 15000 },
+			});
+			vi.clearAllMocks();
+
+			useSettingsStore.getState().recordAutoRunComplete(30000);
+			expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(15000);
 		});
 
 		it('updateAutoRunProgress detects new badge level', () => {
@@ -1235,39 +1721,69 @@ describe('settingsStore', () => {
 			]);
 		});
 
+		// The denominator is the shortcuts that actually have a chord bound, so the
+		// ids used here have to be real ones - made-up ids count for nothing.
+		const boundShortcutIds = () =>
+			collectBoundShortcuts(DEFAULT_SHORTCUTS, TAB_SHORTCUTS, FIXED_SHORTCUTS).map((s) => s.id);
+
 		it('recordShortcutUsage detects level-up', () => {
-			// To trigger level 1 (student), we need >= 25% of total shortcuts
-			// Total = DEFAULT_SHORTCUTS + TAB_SHORTCUTS + FIXED_SHORTCUTS keys
-			const totalShortcuts =
-				Object.keys(DEFAULT_SHORTCUTS).length + Object.keys(TAB_SHORTCUTS).length + 8; // FIXED_SHORTCUTS has 8 entries
+			const bound = boundShortcutIds();
+			// Level 1 (Student) starts at 25% of the bound shortcuts.
+			const needed = Math.ceil(bound.length * 0.25);
 
-			const needed = Math.ceil(totalShortcuts * 0.25);
-
-			// Pre-populate with enough shortcuts to be just below level 1
-			const fakeShortcuts: string[] = [];
-			for (let i = 0; i < needed - 1; i++) {
-				fakeShortcuts.push(`fake-shortcut-${i}`);
-			}
+			// Pre-populate to one short of the threshold.
 			useSettingsStore.setState({
 				keyboardMasteryStats: {
 					...DEFAULT_KEYBOARD_MASTERY_STATS,
-					usedShortcuts: fakeShortcuts,
+					usedShortcuts: bound.slice(0, needed - 1),
 					currentLevel: 0,
 				},
 			});
 
-			const result = useSettingsStore
-				.getState()
-				.recordShortcutUsage(`shortcut-that-triggers-level-up`);
+			const result = useSettingsStore.getState().recordShortcutUsage(bound[needed - 1]);
 
-			// The new shortcut should have been added
 			expect(useSettingsStore.getState().keyboardMasteryStats.usedShortcuts).toHaveLength(needed);
+			expect(result.newLevel).toBe(1);
+			expect(useSettingsStore.getState().keyboardMasteryStats.currentLevel).toBe(1);
+		});
 
-			// If this crossed the threshold, newLevel should be 1
-			if (result.newLevel !== null) {
-				expect(result.newLevel).toBeGreaterThan(0);
-				expect(useSettingsStore.getState().keyboardMasteryStats.currentLevel).toBeGreaterThan(0);
-			}
+		it('recordShortcutUsage ignores ids that have no chord bound', () => {
+			const bound = boundShortcutIds();
+			const needed = Math.ceil(bound.length * 0.25);
+
+			useSettingsStore.setState({
+				keyboardMasteryStats: {
+					...DEFAULT_KEYBOARD_MASTERY_STATS,
+					usedShortcuts: bound.slice(0, needed - 1),
+					currentLevel: 0,
+				},
+			});
+
+			// An unbound action can never be fired, so recording one must not move
+			// the level - otherwise the numerator outruns its own denominator.
+			const unbound = Object.values(DEFAULT_SHORTCUTS).find((s) => s.keys.length === 0);
+			expect(unbound).toBeDefined();
+			const result = useSettingsStore.getState().recordShortcutUsage(unbound!.id);
+
+			expect(result.newLevel).toBeNull();
+			expect(useSettingsStore.getState().keyboardMasteryStats.currentLevel).toBe(0);
+		});
+
+		it('reaches 100% once every bound shortcut has been used', () => {
+			const bound = boundShortcutIds();
+			useSettingsStore.setState({
+				keyboardMasteryStats: {
+					...DEFAULT_KEYBOARD_MASTERY_STATS,
+					usedShortcuts: bound.slice(0, -1),
+					currentLevel: 3,
+				},
+			});
+
+			const result = useSettingsStore.getState().recordShortcutUsage(bound[bound.length - 1]);
+
+			// Unbound shortcuts used to sit in the denominator, which made the top
+			// level unreachable no matter how many chords the user learned.
+			expect(result.newLevel).toBe(KEYBOARD_MASTERY_LEVELS.length - 1);
 		});
 
 		it('acknowledgeKeyboardMasteryLevel updates level', () => {
@@ -1348,8 +1864,12 @@ describe('settingsStore', () => {
 		it('loads all settings from getAll() on success', async () => {
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
 				fontFamily: 'JetBrains Mono',
+				chatFontFamily: 'Verdana',
+				filePreviewFontFamily: 'Georgia',
+				fileEditorFontFamily: 'Iosevka',
+				typographyPromptSeen: true,
 				fontSize: 16,
-				activeThemeId: 'one-dark-pro',
+				activeThemeId: 'nord',
 				enterToSendAI: true,
 			});
 
@@ -1358,9 +1878,150 @@ describe('settingsStore', () => {
 			const state = useSettingsStore.getState();
 			expect(state.settingsLoaded).toBe(true);
 			expect(state.fontFamily).toBe('JetBrains Mono');
+			expect(state.chatFontFamily).toBe('Verdana');
+			expect(state.filePreviewFontFamily).toBe('Georgia');
+			expect(state.fileEditorFontFamily).toBe('Iosevka');
+			expect(state.typographyPromptSeen).toBe(true);
 			expect(state.fontSize).toBe(16);
-			expect(state.activeThemeId).toBe('one-dark-pro');
+			expect(state.activeThemeId).toBe('nord');
 			expect(state.enterToSendAI).toBe(true);
+		});
+
+		it('restores a saved typography snapshot across a restart', async () => {
+			// The snapshot is the only way back to a hand-tuned setup after a
+			// Factory Reset, so a save that did not survive a restart would be
+			// worse than no save at all.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				typographySnapshot: {
+					savedAt: 1234,
+					fonts: { fontFamily: 'Verdana' },
+					sizes: { fontSize: 17 },
+				},
+			});
+
+			await loadAllSettings();
+
+			const snapshot = useSettingsStore.getState().typographySnapshot;
+			expect(snapshot?.savedAt).toBe(1234);
+			expect(snapshot?.fonts.fontFamily).toBe('Verdana');
+			expect(snapshot?.sizes.fontSize).toBe(17);
+		});
+
+		it('drops a malformed typographySnapshot rather than arming a destructive Restore', async () => {
+			// Restore overwrites live fonts, so a hand-edited settings file must
+			// not be able to produce a button that blanks them.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				typographySnapshot: 'hacker' as any,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().typographySnapshot).toBeNull();
+		});
+
+		// A user who picked a theme before it was retired still has that id on
+		// disk. App.tsx does a bare THEMES[activeThemeId] lookup, so letting the
+		// dead id through renders the whole app unstyled.
+		it('maps a retired theme id to its replacement on load', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				activeThemeId: 'inquest',
+				customThemeBaseId: 'inquest',
+			});
+
+			await loadAllSettings();
+
+			const state = useSettingsStore.getState();
+			expect(state.activeThemeId).toBe('dracula');
+			expect(state.customThemeBaseId).toBe('dracula');
+		});
+
+		it('falls back rather than storing a theme id that does not exist', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				activeThemeId: 'one-dark-pro',
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().activeThemeId).toBe('dracula');
+		});
+
+		// Opting out has to survive a restart: a user who turned grouping off
+		// did so because they need to see every run.
+		it('loads a persisted Cue grouping opt-out', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				groupCueEntries: false,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().groupCueEntries).toBe(false);
+		});
+
+		it('keeps Cue grouping on when nothing is stored', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().groupCueEntries).toBe(true);
+		});
+
+		it('loads a persisted Cue retention window', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				cueHistoryRetentionDays: 30,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().cueHistoryRetentionDays).toBe(30);
+		});
+
+		// A hand-edited settings file or a CLI write can store the number as
+		// text. The shared resolver parses it rather than discarding what the
+		// user asked for, so the store agrees with the engine's prune window.
+		it('parses a numeric string stored by a hand edit', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				cueHistoryRetentionDays: '30',
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().cueHistoryRetentionDays).toBe(30);
+		});
+
+		// The number shown in the UI is a promise about what the prune keeps, so
+		// an unusable stored value must read back as the default rather than as
+		// NaN or 0 - a 0-day window would mean "delete everything".
+		it.each([
+			['a non-numeric string', 'abc'],
+			['zero', 0],
+			['a negative count', -5],
+			['NaN', Number.NaN],
+			['null', null],
+		])('falls back to the default when the stored value is %s', async (_label, stored) => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				cueHistoryRetentionDays: stored,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().cueHistoryRetentionDays).toBe(
+				DEFAULT_CUE_HISTORY_RETENTION_DAYS
+			);
+		});
+
+		it('restores both halves of the environment editor', async () => {
+			// A parked variable that did not survive a restart would come back
+			// live, which is the opposite of what switching it off asked for.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shellEnvVars: { KEEP: 'yes' },
+				shellEnvVarsDisabled: { PARKED: 'later' },
+			});
+
+			await loadAllSettings();
+
+			const state = useSettingsStore.getState();
+			expect(state.shellEnvVars).toEqual({ KEEP: 'yes' });
+			expect(state.shellEnvVarsDisabled).toEqual({ PARKED: 'later' });
 		});
 
 		it('loads fileExplorerIconTheme when the persisted value is valid', async () => {
@@ -1373,15 +2034,191 @@ describe('settingsStore', () => {
 			expect(useSettingsStore.getState().fileExplorerIconTheme).toBe('rich');
 		});
 
-		it('falls back to default for invalid fileExplorerIconTheme values', async () => {
+		it('ignores a non-boolean persisted webInterfaceAutoStart value', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				webInterfaceAutoStart: 'false' as any,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().webInterfaceAutoStart).toBe(false);
+		});
+
+		it('migrates the pre-rename "default" icon theme id to flat', async () => {
 			useSettingsStore.setState({ fileExplorerIconTheme: 'rich' });
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				fileExplorerIconTheme: 'default' as unknown as FileExplorerIconTheme,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().fileExplorerIconTheme).toBe('flat');
+		});
+
+		it('falls back to rich for invalid fileExplorerIconTheme values', async () => {
+			useSettingsStore.setState({ fileExplorerIconTheme: 'flat' });
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
 				fileExplorerIconTheme: 'neon' as any,
 			});
 
 			await loadAllSettings();
 
-			expect(useSettingsStore.getState().fileExplorerIconTheme).toBe('default');
+			expect(useSettingsStore.getState().fileExplorerIconTheme).toBe('rich');
+		});
+
+		it('keeps edits made while a reload is in flight', async () => {
+			// A reload (system resume, or another window's write) takes several IPC
+			// round trips. Anything typed during that window must not be reverted to
+			// the older on-disk snapshot - that loses characters and, because the
+			// textarea is controlled, snaps the caret to the end of the field.
+			useSettingsStore.setState({ settingsLoaded: true, conductorProfile: 'abc' });
+			vi.mocked(window.maestro.settings.getAll).mockImplementation(async () => {
+				useSettingsStore.getState().setConductorProfile('abcdef');
+				return { conductorProfile: 'abc', fontSize: 16 };
+			});
+
+			await loadAllSettings();
+
+			const state = useSettingsStore.getState();
+			expect(state.conductorProfile).toBe('abcdef');
+			// Untouched keys still load normally.
+			expect(state.fontSize).toBe(16);
+		});
+
+		it('applies the disk value on the initial load even for touched keys', async () => {
+			useSettingsStore.setState({ settingsLoaded: false, conductorProfile: '' });
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				conductorProfile: 'from disk',
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().conductorProfile).toBe('from disk');
+		});
+
+		describe('media player geometry', () => {
+			it('restores the position and each kind width', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					mediaPlayerFloatRect: { top: 80, left: 90, widths: { audio: 420, video: 900 } },
+				});
+
+				await loadAllSettings();
+
+				const state = useMediaPlaybackStore.getState();
+				expect(state.floatPosition).toEqual({ top: 80, left: 90 });
+				expect(state.floatWidths).toEqual({ audio: 420, video: 900 });
+			});
+
+			it('keeps the position from the older full-rect shape and drops its width', async () => {
+				// Height is derived from the media now, and that width was saved
+				// without recording which kind it belonged to.
+				useMediaPlaybackStore.setState({ floatPosition: null, floatWidths: {} });
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					mediaPlayerFloatRect: { top: 10, left: 20, width: 480, height: 336 },
+				});
+
+				await loadAllSettings();
+
+				const state = useMediaPlaybackStore.getState();
+				expect(state.floatPosition).toEqual({ top: 10, left: 20 });
+				expect(state.floatWidths).toEqual({});
+			});
+		});
+
+		describe('media play queue', () => {
+			const stored = {
+				items: [
+					{
+						path: '/files/podcast.mp3',
+						name: 'podcast.mp3',
+						sessionId: 's1',
+						sessionName: 'Agent One',
+						kind: 'audio',
+					},
+					{ path: '/files/junk', name: 'junk', sessionId: 's1', kind: 'nonsense' },
+				],
+				activeItemId: 's1::/files/podcast.mp3',
+				resumeTimes: { 's1::/files/podcast.mp3': 42, 'gone::x': 9 },
+				durations: { 's1::/files/podcast.mp3': 266, 'gone::x': 30 },
+			};
+
+			it('restores the queue, the loaded item, and its position', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					mediaPlayerQueue: stored,
+				});
+
+				await loadAllSettings();
+
+				const state = useMediaPlaybackStore.getState();
+				// The malformed entry is dropped rather than handed to a media element.
+				expect(state.items.map((i) => i.name)).toEqual(['podcast.mp3']);
+				expect(state.activeItemId).toBe('s1::/files/podcast.mp3');
+				expect(state.resumeTimes).toEqual({ 's1::/files/podcast.mp3': 42 });
+				// Lengths come back too, so the queue list is not a column of `--:--`
+				// until every entry has been played.
+				expect(state.durations).toEqual({ 's1::/files/podcast.mp3': 266 });
+			});
+
+			it('comes back hidden and silent, so nothing plays at launch', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					mediaPlayerQueue: stored,
+				});
+
+				await loadAllSettings();
+
+				const state = useMediaPlaybackStore.getState();
+				expect(state.dismissed).toBe(true);
+				expect(state.playing).toBe(false);
+				expect(state.pendingAutoplay).toBe(false);
+				// Dormant as well as hidden: a restored queue must not put media
+				// controls in the Left Bar header at launch, when the user has not
+				// played anything yet.
+				expect(state.dormant).toBe(true);
+				expect(selectShowNowPlayingIndicator(state)).toBe(false);
+				// History is per-boot by design: a fresh session must not open onto a
+				// log of last week's files.
+				expect(state.history).toEqual([]);
+			});
+
+			it('leaves a player the user is already using alone', async () => {
+				// `loadAllSettings` is not a startup-only call: it re-runs on system
+				// resume, on an external settings edit (maestro-cli, a peer window),
+				// and on a remote set-setting. Re-applying the on-disk snapshot there
+				// hid the widget AND suppressed the Left Bar pill, so a player that
+				// was mid-track simply vanished with no way back.
+				useMediaPlaybackStore.getState().openMedia({
+					path: '/files/live.mp3',
+					name: 'live.mp3',
+					sessionId: 's9',
+					sessionName: 'Agent Nine',
+					kind: 'audio',
+				});
+				useMediaPlaybackStore.setState({ playing: true, dismissed: false, dormant: false });
+
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					mediaPlayerQueue: stored,
+				});
+				await loadAllSettings();
+
+				const state = useMediaPlaybackStore.getState();
+				// Still on screen, still playing, still the user's file.
+				expect(state.dismissed).toBe(false);
+				expect(state.dormant).toBe(false);
+				expect(state.playing).toBe(true);
+				expect(state.activeItemId).toBe('s9::/files/live.mp3');
+				expect(state.items.map((i) => i.name)).toContain('live.mp3');
+			});
+
+			it('ignores a stored queue with nothing usable left in it', async () => {
+				useMediaPlaybackStore.setState({ items: [], activeItemId: null });
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					mediaPlayerQueue: { items: [], activeItemId: 'gone', resumeTimes: {} },
+				});
+
+				await loadAllSettings();
+
+				expect(useMediaPlaybackStore.getState().activeItemId).toBeNull();
+			});
 		});
 
 		it('uses defaults when settings are empty/undefined', async () => {
@@ -1391,8 +2228,188 @@ describe('settingsStore', () => {
 
 			const state = useSettingsStore.getState();
 			expect(state.settingsLoaded).toBe(true);
-			expect(state.fontFamily).toBe('Roboto Mono, Menlo, "Courier New", monospace');
+			expect(state.fontFamily).toBe(MAESTRO_FONT_STACK);
 			expect(state.fontSize).toBe(14);
+		});
+
+		describe('cue time backfill', () => {
+			const HOUR = 60 * 60 * 1000;
+
+			/** Let the un-awaited backfill promise chain settle. */
+			const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+			it('re-attributes historical Cue credit into cueTimeMs', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					concurrentAutoRunTimeMigrationApplied: true,
+					autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 100 * HOUR },
+				});
+				(window.maestro as any).cueStats.getHistoricalConductorCredit.mockResolvedValue(25 * HOUR);
+
+				await loadAllSettings();
+				await flush();
+
+				const stats = useSettingsStore.getState().autoRunStats;
+				expect(stats.cueTimeMs).toBe(25 * HOUR);
+				// Re-attribution only - the total must not grow.
+				expect(stats.cumulativeTimeMs).toBe(100 * HOUR);
+				expect(window.maestro.settings.set).toHaveBeenCalledWith('cueTimeBackfillApplied', true);
+			});
+
+			it('never lets the Cue subtotal exceed the cumulative total', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					concurrentAutoRunTimeMigrationApplied: true,
+					autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 10 * HOUR },
+				});
+				(window.maestro as any).cueStats.getHistoricalConductorCredit.mockResolvedValue(50 * HOUR);
+
+				await loadAllSettings();
+				await flush();
+
+				expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(10 * HOUR);
+			});
+
+			it('keeps live-accrued credit when it already exceeds the historical total', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					autoRunStats: {
+						...DEFAULT_AUTO_RUN_STATS,
+						cumulativeTimeMs: 100 * HOUR,
+						cueTimeMs: 30 * HOUR,
+					},
+				});
+				(window.maestro as any).cueStats.getHistoricalConductorCredit.mockResolvedValue(25 * HOUR);
+
+				await loadAllSettings();
+				await flush();
+
+				expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(30 * HOUR);
+			});
+
+			it('does not run once the backfill flag is set', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					cueTimeBackfillApplied: true,
+					autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 100 * HOUR },
+				});
+
+				await loadAllSettings();
+				await flush();
+
+				expect(
+					(window.maestro as any).cueStats.getHistoricalConductorCredit
+				).not.toHaveBeenCalled();
+				expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(0);
+			});
+
+			it('leaves the flag unset when the Cue database read fails, so it retries', async () => {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					concurrentAutoRunTimeMigrationApplied: true,
+					autoRunStats: { ...DEFAULT_AUTO_RUN_STATS, cumulativeTimeMs: 100 * HOUR },
+				});
+				(window.maestro as any).cueStats.getHistoricalConductorCredit.mockRejectedValue(
+					new Error('cue.db unavailable')
+				);
+
+				await loadAllSettings();
+				await flush();
+
+				expect(window.maestro.settings.set).not.toHaveBeenCalledWith(
+					'cueTimeBackfillApplied',
+					true
+				);
+				expect(useSettingsStore.getState().autoRunStats.cueTimeMs).toBe(0);
+			});
+		});
+
+		it('loads persisted starredSessionsCollapsed into the settings store', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				starredSessionsCollapsed: true,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().starredSessionsCollapsed).toBe(true);
+		});
+
+		it('sanitizes a corrupt persisted autoRunMaxTaskDurationMin to the default (never disables the cap)', async () => {
+			// A non-finite/negative stored value must NOT silently disable the
+			// absolute watchdog (which would let a chatty-but-stuck task hang the run).
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				autoRunMaxTaskDurationMin: -1 as any,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().autoRunMaxTaskDurationMin).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+		});
+
+		it('preserves an explicit persisted 0 (unlimited) for autoRunMaxTaskDurationMin', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				autoRunMaxTaskDurationMin: 0,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().autoRunMaxTaskDurationMin).toBe(0);
+		});
+
+		it('clamps an out-of-range persisted autoRunMaxTaskDurationMin', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				autoRunMaxTaskDurationMin: 99999,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().autoRunMaxTaskDurationMin).toBe(1440);
+		});
+
+		it('migrates existing "Unlimited" inactivity installs (0) to an unlimited absolute cap', async () => {
+			// The user explicitly disabled the Auto Run watchdog by choosing Unlimited
+			// inactivity and never persisted the new cap. Defaulting to 480 would
+			// silently start killing their long tasks, so migrate the cap to 0 too.
+			// Seed the fresh-install default so the assertion proves the migration ran.
+			useSettingsStore.setState({
+				autoRunMaxTaskDurationMin: DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN,
+			});
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				autoRunInactivityTimeoutMin: 0,
+				// autoRunMaxTaskDurationMin intentionally absent (pre-feature install)
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().autoRunMaxTaskDurationMin).toBe(0);
+			// One-shot: the migrated value is persisted so this branch doesn't re-run
+			// on the next load (which would silently reset a cap the user set later).
+			expect(window.maestro.settings.set).toHaveBeenCalledWith('autoRunMaxTaskDurationMin', 0);
+		});
+
+		it('does NOT migrate when inactivity is a normal value and the cap is unset (keeps the default)', async () => {
+			// loadAllSettings only patches keys that are present, so seed the
+			// fresh-install default to model a normal (non-migrating) startup.
+			useSettingsStore.setState({
+				autoRunMaxTaskDurationMin: DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN,
+			});
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				autoRunInactivityTimeoutMin: 240,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().autoRunMaxTaskDurationMin).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+		});
+
+		it('hydrates persisted bookmarksCollapsed into the uiStore', async () => {
+			useUIStore.setState({ bookmarksCollapsed: false });
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				bookmarksCollapsed: true,
+			});
+
+			await loadAllSettings();
+
+			expect(useUIStore.getState().bookmarksCollapsed).toBe(true);
 		});
 
 		it('sets settingsLoaded = true on failure', async () => {
@@ -1433,6 +2450,22 @@ describe('settingsStore', () => {
 			expect(useSettingsStore.getState().leftSidebarWidth).toBe(256);
 		});
 
+		it('sanitizes modalSizes on load', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				modalSizes: {
+					settings: { width: 900.2, height: 700.8 },
+					broken: { width: -1, height: 400 },
+					alsoBroken: { width: 500 },
+				},
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().modalSizes).toEqual({
+				settings: { width: 900, height: 701 },
+			});
+		});
+
 		it('converts maxOutputLines null to Infinity', async () => {
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
 				maxOutputLines: null,
@@ -1441,6 +2474,60 @@ describe('settingsStore', () => {
 			await loadAllSettings();
 
 			expect(useSettingsStore.getState().maxOutputLines).toBe(Infinity);
+		});
+
+		// Legacy installs persisted colorBlindMode as a string ('none' |
+		// 'enabled' | 'deuteranopia' | …); a bare `as boolean` cast left
+		// 'none' as a truthy string and silently forced every Usage Dashboard
+		// chart onto the colorblind palette. These guard the coercion.
+		it('coerces legacy colorBlindMode string "none" to false', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				colorBlindMode: 'none' as unknown as boolean,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().colorBlindMode).toBe(false);
+		});
+
+		it('coerces legacy colorBlindMode string "enabled" to true', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				colorBlindMode: 'enabled' as unknown as boolean,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().colorBlindMode).toBe(true);
+		});
+
+		it('coerces mobile colorBlindMode string "deuteranopia" to true', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				colorBlindMode: 'deuteranopia' as unknown as boolean,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().colorBlindMode).toBe(true);
+		});
+
+		it('coerces legacy colorBlindMode string "false" to false', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				colorBlindMode: 'false' as unknown as boolean,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().colorBlindMode).toBe(false);
+		});
+
+		it('passes boolean colorBlindMode through unchanged', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				colorBlindMode: true,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().colorBlindMode).toBe(true);
 		});
 
 		it('migrates shortcut Alt-key macOS special characters', async () => {
@@ -1468,6 +2555,377 @@ describe('settingsStore', () => {
 					}),
 				})
 			);
+		});
+
+		it('persists the default-remap on migration so subsequent loads are stable', async () => {
+			// User still has the OLD default for moveToGroup (Cmd+Shift+M).
+			// The remap should (a) bump their binding to the new default, (b) persist
+			// the new binding to disk so the next load does not re-trigger migration.
+			// Regression test for the crash-and-relaunch loop caused by write
+			// amplification: old code set needsMigration=true but wrote back the
+			// unchanged keys, which the file watcher would pick up and re-trigger.
+			const savedWithOldMoveToGroup = {
+				moveToGroup: {
+					id: 'moveToGroup',
+					label: 'Move to Group',
+					keys: ['Meta', 'Shift', 'm'],
+				},
+			};
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: savedWithOldMoveToGroup,
+			});
+
+			await loadAllSettings();
+
+			const shortcuts = useSettingsStore.getState().shortcuts;
+			expect(shortcuts.moveToGroup.keys).toEqual(['Alt', 'Meta', 'm']);
+			// The persisted raw value must contain the NEW keys, otherwise the next
+			// load re-detects migration and we re-enter the loop.
+			expect(window.maestro.settings.set).toHaveBeenCalledWith(
+				'shortcuts',
+				expect.objectContaining({
+					moveToGroup: expect.objectContaining({
+						keys: ['Alt', 'Meta', 'm'],
+					}),
+				})
+			);
+
+			// Simulate the re-load that the settings file watcher would trigger.
+			// Feed back the value that was just persisted and confirm migration
+			// does not fire a second write.
+			const persistedCall = vi
+				.mocked(window.maestro.settings.set)
+				.mock.calls.find(([k]) => k === 'shortcuts');
+			const persistedShortcuts = persistedCall?.[1] as Record<string, unknown>;
+			vi.mocked(window.maestro.settings.set).mockClear();
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: persistedShortcuts,
+			});
+
+			await loadAllSettings();
+
+			expect(
+				vi.mocked(window.maestro.settings.set).mock.calls.some(([k]) => k === 'shortcuts')
+			).toBe(false);
+		});
+
+		it('moves focusActiveTab off Opt+Cmd+F so cross-tab search can claim it', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					focusActiveTab: {
+						id: 'focusActiveTab',
+						label: 'Focus Active Tab',
+						keys: ['Alt', 'Meta', 'f'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			const shortcuts = useSettingsStore.getState().shortcuts;
+			expect(shortcuts.focusActiveTab.keys).toEqual(['Alt', 'Meta', 'ArrowUp']);
+			// The freed combo now belongs to cross-tab message search.
+			expect(shortcuts.searchAllTabs.keys).toEqual(['Alt', 'Meta', 'f']);
+		});
+
+		it('strips a persisted Cmd+Shift+Down binding and restores the bundled default', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					nextUnreadTab: {
+						id: 'nextUnreadTab',
+						label: 'Next Unread / Draft Tab',
+						keys: ['Meta', 'Shift', 'ArrowDown'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			// Cmd+Shift+Down is select-to-end in every text field; Maestro must not
+			// shadow it, so the action falls back to its own default instead.
+			expect(useSettingsStore.getState().shortcuts.nextUnreadTab.keys).toEqual([
+				'Alt',
+				'Meta',
+				'ArrowDown',
+			]);
+			const persisted = vi
+				.mocked(window.maestro.settings.set)
+				.mock.calls.find(([k]) => k === 'shortcuts')?.[1] as Record<string, { keys: string[] }>;
+			expect(persisted.nextUnreadTab.keys).toEqual(['Alt', 'Meta', 'ArrowDown']);
+		});
+
+		it('strips the Windows Ctrl+Shift+Down spelling of the same reserved chord', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					nextUnreadTab: {
+						id: 'nextUnreadTab',
+						label: 'Next Unread / Draft Tab',
+						keys: ['Ctrl', 'Shift', 'ArrowDown'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().shortcuts.nextUnreadTab.keys).toEqual([
+				'Alt',
+				'Meta',
+				'ArrowDown',
+			]);
+		});
+
+		it('strips a reserved chord from tabShortcuts too, which is a separate persist key', async () => {
+			// tabShortcuts runs the same migration through a second call site with
+			// its own defaults table and its own settings key. A guard applied to
+			// only one of the two leaves half the bindings able to shadow the OS.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				tabShortcuts: {
+					closeAllTabs: {
+						id: 'closeAllTabs',
+						label: 'Close All Tabs',
+						keys: ['Meta', 'Shift', 'ArrowUp'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().tabShortcuts.closeAllTabs.keys).toEqual([
+				'Meta',
+				'Shift',
+				'w',
+			]);
+			const persisted = vi
+				.mocked(window.maestro.settings.set)
+				.mock.calls.find(([k]) => k === 'tabShortcuts')?.[1] as Record<string, { keys: string[] }>;
+			expect(persisted.closeAllTabs.keys).toEqual(['Meta', 'Shift', 'w']);
+		});
+
+		it('moves New Group Chat off Opt+Cmd+C and hands the combo to Concerto', async () => {
+			// Without this remap the two COLLIDE: anyone who has ever opened the
+			// Shortcuts tab has the whole map persisted, so New Group Chat would keep
+			// Opt+Cmd+C while Concerto's new default also claimed it, and whichever
+			// branch runs first in the keyboard handler would swallow the other.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					newGroupChat: {
+						id: 'newGroupChat',
+						label: 'New Group Chat',
+						keys: ['Alt', 'Meta', 'c'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			const shortcuts = useSettingsStore.getState().shortcuts;
+			expect(shortcuts.newGroupChat.keys).toEqual(['Alt', 'Meta', 'g']);
+			expect(shortcuts.toggleConcerto.keys).toEqual(['Alt', 'Meta', 'c']);
+		});
+
+		it('carries both retired Concerto bindings forward, including a skipped build', async () => {
+			// The stage went bare Opt+C -> Opt+Cmd+V -> Opt+Cmd+C. A user who skipped
+			// the middle build still carries the oldest default, so both are listed.
+			for (const oldKeys of [
+				['Alt', 'c'],
+				['Alt', 'Meta', 'v'],
+			]) {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					shortcuts: {
+						toggleConcerto: {
+							id: 'toggleConcerto',
+							label: 'Show/Hide Concerto Stage',
+							keys: oldKeys,
+						},
+					},
+				});
+
+				await loadAllSettings();
+
+				expect(useSettingsStore.getState().shortcuts.toggleConcerto.keys).toEqual([
+					'Alt',
+					'Meta',
+					'c',
+				]);
+			}
+		});
+
+		it('returns Jump to Bottom to Cmd+Shift+J from every interim binding', async () => {
+			// The action went Cmd+Shift+J -> Opt+J -> Opt+Cmd+Down -> Cmd+Shift+J.
+			// Both interim eras must land back on the original chord; a user who
+			// skipped a build carries whichever one they last received.
+			for (const oldKeys of [
+				['Alt', 'j'],
+				['Alt', 'Meta', 'ArrowDown'],
+			]) {
+				vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+					shortcuts: {
+						jumpToBottom: { id: 'jumpToBottom', label: 'Jump to Bottom', keys: oldKeys },
+					},
+				});
+
+				await loadAllSettings();
+
+				expect(useSettingsStore.getState().shortcuts.jumpToBottom.keys).toEqual([
+					'Meta',
+					'Shift',
+					'j',
+				]);
+			}
+		});
+
+		it('does not re-migrate Jump to Bottom once it is already on Cmd+Shift+J', async () => {
+			// Cmd+Shift+J is the destination, so it must NOT appear in fromKeys -
+			// remapping a chord onto itself sets needsMigration on every load and
+			// re-enters the persist/file-watcher loop.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					jumpToBottom: {
+						id: 'jumpToBottom',
+						label: 'Jump to Bottom',
+						keys: ['Meta', 'Shift', 'j'],
+					},
+				},
+			});
+
+			vi.mocked(window.maestro.settings.set).mockClear();
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().shortcuts.jumpToBottom.keys).toEqual([
+				'Meta',
+				'Shift',
+				'j',
+			]);
+			expect(
+				vi.mocked(window.maestro.settings.set).mock.calls.some(([k]) => k === 'shortcuts')
+			).toBe(false);
+		});
+
+		it('gives the tiling family its Ctrl+Cmd defaults over a persisted unbound map', async () => {
+			// The merge keeps a saved `keys` whenever it is PRESENT, and `[]` is
+			// present. Anyone who opened Settings -> Shortcuts while these shipped
+			// unbound has empty arrays on disk and would never see the new defaults.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					tileAiBelow: { id: 'tileAiBelow', label: 'Tile New AI Chat Below', keys: [] },
+					tileBrowserBelow: { id: 'tileBrowserBelow', label: 'Tile New Browser Below', keys: [] },
+					tileFileBelow: { id: 'tileFileBelow', label: 'Tile New File Below', keys: [] },
+					tileTerminalBelow: {
+						id: 'tileTerminalBelow',
+						label: 'Tile New Terminal Below',
+						keys: [],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			const shortcuts = useSettingsStore.getState().shortcuts;
+			expect(shortcuts.tileAiBelow.keys).toEqual(['Control', 'Meta', 't']);
+			expect(shortcuts.tileBrowserBelow.keys).toEqual(['Control', 'Meta', 'b']);
+			expect(shortcuts.tileFileBelow.keys).toEqual(['Control', 'Meta', 'f']);
+			expect(shortcuts.tileTerminalBelow.keys).toEqual(['Control', 'Meta', 'j']);
+		});
+
+		it('moves Tile New Terminal off Cmd+Shift+J so Jump to Bottom can hold it', async () => {
+			// The one binding that would otherwise put two live actions on one key.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					tileTerminalBelow: {
+						id: 'tileTerminalBelow',
+						label: 'Tile New Terminal Below',
+						keys: ['Meta', 'Shift', 'j'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			const shortcuts = useSettingsStore.getState().shortcuts;
+			expect(shortcuts.tileTerminalBelow.keys).toEqual(['Control', 'Meta', 'j']);
+			expect(shortcuts.jumpToBottom.keys).toEqual(['Meta', 'Shift', 'j']);
+		});
+
+		it('leaves a user-customized New Group Chat binding alone', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					newGroupChat: {
+						id: 'newGroupChat',
+						label: 'New Group Chat',
+						keys: ['Meta', 'Shift', 'q'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().shortcuts.newGroupChat.keys).toEqual([
+				'Meta',
+				'Shift',
+				'q',
+			]);
+		});
+
+		it('leaves a user-customized focusActiveTab binding alone', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					focusActiveTab: {
+						id: 'focusActiveTab',
+						label: 'Focus Active Tab',
+						keys: ['Meta', 'Shift', 'j'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().shortcuts.focusActiveTab.keys).toEqual([
+				'Meta',
+				'Shift',
+				'j',
+			]);
+		});
+
+		it.each([
+			['the original Cmd+Shift+2 default', ['Meta', 'Shift', '2']],
+			['the interim Cmd+Shift+E default', ['Meta', 'Shift', 'e']],
+		])('moves toggleAutoRunExpanded off %s onto Cmd+Shift+3', async (_label, fromKeys) => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					toggleAutoRunExpanded: {
+						id: 'toggleAutoRunExpanded',
+						label: 'Auto Run Expanded Preview',
+						keys: fromKeys,
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			const shortcuts = useSettingsStore.getState().shortcuts;
+			expect(shortcuts.toggleAutoRunExpanded.keys).toEqual(['Meta', 'Shift', '3']);
+			// The freed combo now belongs to the queued-message editor.
+			expect(shortcuts.editLastQueuedMessage.keys).toEqual(['Meta', 'Shift', 'e']);
+		});
+
+		it('leaves a user-customized toggleAutoRunExpanded binding alone', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				shortcuts: {
+					toggleAutoRunExpanded: {
+						id: 'toggleAutoRunExpanded',
+						label: 'Auto Run Expanded Preview',
+						keys: ['Meta', 'Shift', 'q'],
+					},
+				},
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().shortcuts.toggleAutoRunExpanded.keys).toEqual([
+				'Meta',
+				'Shift',
+				'q',
+			]);
 		});
 
 		it('merges shortcuts: preserves user keys but updates labels from defaults', async () => {
@@ -1532,26 +2990,93 @@ describe('settingsStore', () => {
 			expect(commitCmd!.isBuiltIn).toBe(true);
 		});
 
-		it('applies auto-run time migration for concurrent tallying bug', async () => {
-			const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+		// MAESTRO-YP/YQ/YR: settings.json is user/sync/legacy editable, so the
+		// persisted array is not guaranteed to be CustomAICommand[]. An entry with
+		// no id cannot be edited, saved, reset or deleted (all keyed by id) and was
+		// stored under the Map key `undefined`, then rendered anyway - which crashed
+		// the Settings modal. Drop it during hydration instead.
+		it('skips malformed customAICommands entries that have no id', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				customAICommands: [
+					{
+						command: '/legacy',
+						description: 'Persisted before ids existed',
+						prompt: 'legacy',
+					},
+					{ id: '', command: '/blank', description: 'Blank id', prompt: 'blank' },
+					null,
+					'not-an-object',
+					{
+						id: 'custom-cmd',
+						command: '/custom',
+						description: 'My custom command',
+						prompt: 'do something',
+						isBuiltIn: false,
+					},
+				],
+			});
+
+			await loadAllSettings();
+
+			const commands = useSettingsStore.getState().customAICommands;
+			// Every surviving entry is usable.
+			expect(commands.every((c) => c && typeof c.id === 'string' && c.id)).toBe(true);
+			expect(commands.find((c) => c?.command === '/legacy')).toBeUndefined();
+			expect(commands.find((c) => c?.command === '/blank')).toBeUndefined();
+			// Well-formed entries still come through, alongside the defaults.
+			expect(commands.find((c) => c.id === 'custom-cmd')).toBeDefined();
+			expect(commands.find((c) => c.id === 'commit')).toBeDefined();
+		});
+
+		// An id alone is not enough. The panel calls command.startsWith('/') and
+		// prompt.substring(...) directly, so an entry carrying an id but missing
+		// either one still crashes the Settings modal (MAESTRO-YP/YQ/YR).
+		it('skips customAICommands entries whose command or prompt is unusable', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				customAICommands: [
+					{ id: 'no-command', description: 'Lost its command', prompt: 'x' },
+					{ id: 'no-prompt', command: '/nope', description: 'Lost its prompt' },
+					{ id: 'wrong-types', command: 42, description: 'Not strings', prompt: [] },
+					{
+						id: 'no-description',
+						command: '/keep',
+						prompt: 'description is only rendered',
+					},
+				],
+			});
+
+			await loadAllSettings();
+
+			const commands = useSettingsStore.getState().customAICommands;
+			expect(commands.find((c) => c.id === 'no-command')).toBeUndefined();
+			expect(commands.find((c) => c.id === 'no-prompt')).toBeUndefined();
+			expect(commands.find((c) => c.id === 'wrong-types')).toBeUndefined();
+			// A missing description is cosmetic, so the command survives with ''.
+			expect(commands.find((c) => c.id === 'no-description')?.description).toBe('');
+			// Nothing that survives can crash the panel's string calls.
+			expect(
+				commands.every((c) => typeof c.command === 'string' && typeof c.prompt === 'string')
+			).toBe(true);
+		});
+
+		it('never grows cumulative auto-run time on load', async () => {
+			// The removed concurrent-tallying migration added 3 hours here. Loading
+			// settings must not invent time: any local growth that does not also
+			// submit a leaderboard delta pushes the local total above the server's,
+			// which the server can never reconcile.
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
 				autoRunStats: {
 					...DEFAULT_AUTO_RUN_STATS,
 					cumulativeTimeMs: 100000,
 				},
-				// Migration not yet applied
+				// Migration flag absent - the pre-fix code treated this as "apply it"
 			});
 
 			await loadAllSettings();
 
 			const stats = useSettingsStore.getState().autoRunStats;
-			expect(stats.cumulativeTimeMs).toBe(100000 + THREE_HOURS_MS);
-			// Should persist the migrated stats and the flag
-			expect(window.maestro.settings.set).toHaveBeenCalledWith(
-				'autoRunStats',
-				expect.objectContaining({ cumulativeTimeMs: 100000 + THREE_HOURS_MS })
-			);
-			expect(window.maestro.settings.set).toHaveBeenCalledWith(
+			expect(stats.cumulativeTimeMs).toBe(100000);
+			expect(window.maestro.settings.set).not.toHaveBeenCalledWith(
 				'concurrentAutoRunTimeMigrationApplied',
 				true
 			);
@@ -1635,6 +3160,19 @@ describe('settingsStore', () => {
 			expect(useSettingsStore.getState().documentGraphPreviewCharLimit).toBe(100);
 		});
 
+		it('keeps a saved documentGraphPreviewCharLimit of 0 on load', async () => {
+			// The "previews off" choice round-trips through settings on every
+			// launch. A floor of 50 in the load validator would discard it
+			// silently and the graph would come back as full cards each time.
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				documentGraphPreviewCharLimit: 0,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().documentGraphPreviewCharLimit).toBe(0);
+		});
+
 		it('validates documentGraphLayoutType on load (rejects invalid)', async () => {
 			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
 				documentGraphLayoutType: 'invalid-layout',
@@ -1643,7 +3181,7 @@ describe('settingsStore', () => {
 			await loadAllSettings();
 
 			// Invalid value rejected, keeps default
-			expect(useSettingsStore.getState().documentGraphLayoutType).toBe('mindmap');
+			expect(useSettingsStore.getState().documentGraphLayoutType).toBe('hierarchical');
 		});
 
 		it('loads valid documentGraphLayoutType from settings', async () => {
@@ -1826,19 +3364,125 @@ describe('settingsStore', () => {
 	// ========================================================================
 
 	describe('non-React access', () => {
-		it('getSettingsState returns current state', () => {
+		it('useSettingsStore.getState() returns current state', () => {
 			useSettingsStore.setState({ fontSize: 20 });
-			const state = getSettingsState();
+			const state = useSettingsStore.getState();
 			expect(state.fontSize).toBe(20);
 		});
 
-		it('getSettingsActions returns action functions that work', () => {
-			const actions = getSettingsActions();
-			expect(typeof actions.setFontSize).toBe('function');
+		it('useSettingsStore.getState() exposes action functions that work', () => {
+			expect(typeof useSettingsStore.getState().setFontSize).toBe('function');
 
-			actions.setFontSize(22);
+			useSettingsStore.getState().setFontSize(22);
 			expect(useSettingsStore.getState().fontSize).toBe(22);
 			expect(window.maestro.settings.set).toHaveBeenCalledWith('fontSize', 22);
+		});
+	});
+
+	describe('Auto Run max-task-duration helpers', () => {
+		it('clamps user input: 0 stays unlimited, positive values snap into [1, 1440]', () => {
+			expect(clampAutoRunMaxTaskDurationMin(0)).toBe(0);
+			expect(clampAutoRunMaxTaskDurationMin(-30)).toBe(0); // user cleared / typed negative => unlimited
+			expect(clampAutoRunMaxTaskDurationMin(0.4)).toBe(0); // rounds to 0
+			expect(clampAutoRunMaxTaskDurationMin(30)).toBe(30);
+			expect(clampAutoRunMaxTaskDurationMin(99999)).toBe(1440);
+			expect(clampAutoRunMaxTaskDurationMin(0.6)).toBe(1); // rounds up, then min 1
+		});
+
+		it('sanitizes persisted values: 0 stays unlimited, corrupt values fall back to the default', () => {
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(0)).toBe(0);
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(120)).toBe(120);
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(99999)).toBe(1440);
+			// Corrupt/untrustworthy: must NOT disable the cap, so fall back to default.
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(-1)).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(NaN)).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(Infinity)).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin('480' as any)).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+			expect(sanitizeLoadedAutoRunMaxTaskDurationMin(undefined as any)).toBe(
+				DEFAULT_AUTORUN_MAX_TASK_DURATION_MIN
+			);
+		});
+	});
+
+	// ========================================================================
+	// 15. File Preview Toolbar Metadata Parity
+	// ========================================================================
+
+	// The SETTINGS_METADATA default is a plain object literal, so TypeScript
+	// can't catch a key that drifts out of sync with the canonical key list the
+	// way it does for the Record<FilePreviewToolbarButton, ...> maps. `editImage`
+	// went missing here once already; `maestro-cli settings reset` writes this
+	// literal verbatim, so a gap ships an incomplete map to disk.
+	describe('filePreviewToolbarVisibility metadata parity', () => {
+		it('metadata default covers exactly the canonical toolbar button keys', () => {
+			const metaDefault = SETTINGS_METADATA.filePreviewToolbarVisibility.default as Record<
+				string,
+				boolean
+			>;
+
+			expect(Object.keys(metaDefault).sort()).toEqual([...FILE_PREVIEW_TOOLBAR_BUTTON_KEYS].sort());
+		});
+
+		it('metadata default and the store default agree on every button', () => {
+			const metaDefault = SETTINGS_METADATA.filePreviewToolbarVisibility.default as Record<
+				string,
+				boolean
+			>;
+
+			expect(metaDefault).toEqual(DEFAULT_FILE_PREVIEW_TOOLBAR_VISIBILITY);
+		});
+
+		it('metadata description lists every toolbar button key', () => {
+			const { description } = SETTINGS_METADATA.filePreviewToolbarVisibility;
+
+			for (const key of FILE_PREVIEW_TOOLBAR_BUTTON_KEYS) {
+				expect(description).toContain(key);
+			}
+		});
+	});
+	// ========================================================================
+	// 16. File Explorer Icon Theme Metadata Parity
+	// ========================================================================
+
+	// The shipped default lives in three places: the store's initial state, the
+	// invalid-value fallback in loadAllSettings, and SETTINGS_METADATA (which is
+	// what `maestro-cli settings` reports and what a reset writes to disk). The
+	// metadata description had already drifted far enough to advertise two theme
+	// values that never existed.
+	describe('fileExplorerIconTheme metadata parity', () => {
+		it('metadata default is a real icon theme', () => {
+			expect(FILE_EXPLORER_ICON_THEMES).toContain(
+				SETTINGS_METADATA.fileExplorerIconTheme.default as FileExplorerIconTheme
+			);
+		});
+
+		it('metadata default matches the value an invalid setting falls back to', async () => {
+			useSettingsStore.setState({ fileExplorerIconTheme: 'flat' });
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({
+				fileExplorerIconTheme: 'neon' as unknown as FileExplorerIconTheme,
+			});
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().fileExplorerIconTheme).toBe(
+				SETTINGS_METADATA.fileExplorerIconTheme.default
+			);
+		});
+
+		it('metadata description names every real icon theme', () => {
+			const { description } = SETTINGS_METADATA.fileExplorerIconTheme;
+
+			for (const value of FILE_EXPLORER_ICON_THEMES) {
+				expect(description).toContain(value);
+			}
 		});
 	});
 });

@@ -7,7 +7,8 @@
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { FileText, Target, ExternalLink, Copy } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { FileText, Target, ExternalLink, FolderOpen, Copy } from 'lucide-react';
 import type { Theme } from '../types';
 import { useContextMenuPosition } from '../hooks/ui/useContextMenuPosition';
 import { safeClipboardWrite } from '../utils/clipboard';
@@ -19,7 +20,7 @@ export interface FileContextMenuState {
 	y: number;
 	/** Absolute path to the file */
 	filePath: string;
-	/** File name (basename) — used for conditional options like Document Graph */
+	/** File name (basename) - used for conditional options like Document Graph */
 	fileName: string;
 }
 
@@ -29,7 +30,7 @@ interface FileContextMenuProps {
 	onDismiss: () => void;
 	/** Open file in preview tab */
 	onPreview?: (filePath: string) => void;
-	/** Project root absolute path — used to derive relative path for Document Graph */
+	/** Project root absolute path - used to derive relative path for Document Graph */
 	projectRoot?: string;
 	/** Whether the session is SSH remote (disables local-only actions) */
 	sshRemote?: boolean;
@@ -51,11 +52,16 @@ export function FileContextMenu({
 	const onDismissRef = useRef(onDismiss);
 	onDismissRef.current = onDismiss;
 
-	const { left, top, ready } = useContextMenuPosition(menuRef, menu.x, menu.y);
+	const { left, top, maxHeight, ready } = useContextMenuPosition(menuRef, menu.x, menu.y);
 
-	// Dismiss on click outside or Escape
+	// Dismiss on click outside or Escape. The menu is portaled to document.body,
+	// so a click inside it doesn't reach this listener via the React tree - guard
+	// with an explicit contains() check instead of relying on stopPropagation.
 	useEffect(() => {
-		const handleMouseDown = () => onDismissRef.current();
+		const handleMouseDown = (e: MouseEvent) => {
+			if (menuRef.current?.contains(e.target as Node)) return;
+			onDismissRef.current();
+		};
 		const handleKey = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') onDismissRef.current();
 		};
@@ -92,6 +98,11 @@ export function FileContextMenu({
 		onDismiss();
 	}, [menu.filePath, onDismiss]);
 
+	const handleCopyFileName = useCallback(() => {
+		safeClipboardWrite(menu.fileName);
+		onDismiss();
+	}, [menu.fileName, onDismiss]);
+
 	const handleRevealInFinder = useCallback(() => {
 		window.maestro?.shell?.showItemInFolder(menu.filePath);
 		onDismiss();
@@ -99,17 +110,22 @@ export function FileContextMenu({
 
 	const showDocGraph = isMarkdownFile(menu.fileName);
 
-	return (
+	return createPortal(
 		<div
 			ref={menuRef}
-			className="fixed z-[10000] rounded-lg shadow-xl border overflow-hidden"
+			className="fixed z-[10000] rounded-lg shadow-xl border overflow-hidden whitespace-nowrap"
 			style={{
 				left,
 				top,
+				// A menu taller than the viewport pins to the top edge and runs off
+				// the bottom; the container is overflow-hidden, so those items are
+				// simply unreachable. Scroll instead of clipping.
+				maxHeight,
+				overflowY: 'auto',
 				opacity: ready ? 1 : 0,
 				backgroundColor: theme.colors.bgSidebar,
 				borderColor: theme.colors.border,
-				minWidth: '180px',
+				minWidth: '11.25rem',
 			}}
 			onMouseDown={(e) => e.stopPropagation()}
 		>
@@ -126,7 +142,7 @@ export function FileContextMenu({
 					</button>
 				)}
 
-				{/* Document Graph — markdown files only */}
+				{/* Document Graph - markdown files only */}
 				{showDocGraph && (
 					<button
 						onClick={handleFocusInGraph}
@@ -138,7 +154,7 @@ export function FileContextMenu({
 					</button>
 				)}
 
-				{/* Open in Default App — not available over SSH */}
+				{/* Open in Default App - not available over SSH */}
 				{!sshRemote && (
 					<button
 						onClick={handleOpenInDefaultApp}
@@ -165,6 +181,16 @@ export function FileContextMenu({
 					<span>Copy Path</span>
 				</button>
 
+				{/* Copy File Name */}
+				<button
+					onClick={handleCopyFileName}
+					className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+					style={{ color: theme.colors.textMain }}
+				>
+					<Copy className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+					<span>Copy File Name</span>
+				</button>
+
 				{/* Reveal in Finder / Explorer */}
 				{!sshRemote && (
 					<button
@@ -172,11 +198,12 @@ export function FileContextMenu({
 						className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
 						style={{ color: theme.colors.textMain }}
 					>
-						<ExternalLink className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+						<FolderOpen className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						<span>{getRevealLabel(window.maestro?.platform ?? '')}</span>
 					</button>
 				)}
 			</div>
-		</div>
+		</div>,
+		document.body
 	);
 }

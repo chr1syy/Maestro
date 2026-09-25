@@ -30,7 +30,11 @@ export * from './types';
 // Store Initialization
 // ============================================================================
 
-export { initializeStores } from './instances';
+export {
+	initializeStores,
+	flushPendingSessionWrites,
+	flushPendingSessionWritesSync,
+} from './instances';
 export type { StoreInitOptions } from './instances';
 
 // ============================================================================
@@ -43,6 +47,7 @@ export {
 	getSessionsStore,
 	getGroupsStore,
 	getAgentConfigsStore,
+	getAgentCapabilitiesStore,
 	getWindowStateStore,
 	getClaudeSessionOriginsStore,
 	getAgentSessionOriginsStore,
@@ -66,6 +71,7 @@ export {
 	SESSIONS_DEFAULTS,
 	GROUPS_DEFAULTS,
 	AGENT_CONFIGS_DEFAULTS,
+	AGENT_CAPABILITIES_DEFAULTS,
 	WINDOW_STATE_DEFAULTS,
 	CLAUDE_SESSION_ORIGINS_DEFAULTS,
 	AGENT_SESSION_ORIGINS_DEFAULTS,

@@ -1,15 +1,12 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import type { Session, BatchRunConfig } from '../../types';
-import { useSessionStore } from '../../stores/sessionStore';
-import { useSettingsStore } from '../../stores/settingsStore';
-import { gitService } from '../../services/git';
+import { useSessionStore, selectActiveSession, selectSessionById } from '../../stores/sessionStore';
 import { notifyToast } from '../../stores/notificationStore';
-import { buildWorktreeSession } from '../../utils/worktreeSession';
-import {
-	markWorktreePathAsRecentlyCreated,
-	clearRecentlyCreatedWorktreePath,
-} from '../../utils/worktreeDedup';
-import { captureException } from '../../utils/sentry';
+import { spawnWorktreeAgentAndDispatch } from '../../utils/worktreeSpawn';
+import { countMarkdownTasks } from './batchUtils';
+import { logger } from '../../utils/logger';
+import { useBatchStore } from '../../stores/batchStore';
+import { readTaskCountsAndContent } from './useAutoRunDocumentLoader';
 
 /**
  * Tree node structure for Auto Run document tree
@@ -68,7 +65,7 @@ export interface UseAutoRunHandlersReturn {
 	/** Handle document selection */
 	handleAutoRunSelectDocument: (filename: string) => Promise<void>;
 	/** Refresh the document list */
-	handleAutoRunRefresh: () => Promise<void>;
+	handleAutoRunRefresh: (options?: { silent?: boolean }) => Promise<void>;
 	/** Open the Auto Run setup modal */
 	handleAutoRunOpenSetup: () => void;
 	/** Create a new document */
@@ -88,121 +85,19 @@ function getSshRemoteId(session: Session | null): string | undefined {
 }
 
 /**
- * Spawn a worktree agent session and prepare config for dispatch.
- * Handles both 'create-new' (creates worktree on disk first) and
- * 'existing-closed' (worktree already on disk, just needs a session).
- *
- * Returns the new session ID, or null if an error occurred (toast shown).
- */
-async function spawnWorktreeAgentAndDispatch(
-	parentSession: Session,
-	config: BatchRunConfig
-): Promise<string | null> {
-	const sshRemoteId = getSshRemoteId(parentSession);
-	const target = config.worktreeTarget!;
-	let worktreePath: string;
-	let branchName: string;
-
-	if (target.mode === 'create-new') {
-		// Step 1: Resolve worktree path
-		const basePath =
-			parentSession.worktreeConfig?.basePath ||
-			parentSession.cwd.replace(/\/[^/]+$/, '') + '/worktrees';
-		worktreePath = basePath + '/' + target.newBranchName;
-		branchName = target.newBranchName!;
-
-		// Mark path BEFORE creating on disk so the file watcher in useWorktreeHandlers
-		// skips this path and doesn't create a duplicate session.
-		markWorktreePathAsRecentlyCreated(worktreePath);
-
-		// Step 2: Create worktree on disk
-		let result;
-		try {
-			result = await window.maestro.git.worktreeSetup(
-				parentSession.cwd,
-				worktreePath,
-				branchName,
-				sshRemoteId
-			);
-		} catch (error) {
-			clearRecentlyCreatedWorktreePath(worktreePath);
-			throw error;
-		}
-		if (!result.success) {
-			clearRecentlyCreatedWorktreePath(worktreePath);
-			notifyToast({
-				type: 'error',
-				title: 'Failed to Create Worktree',
-				message: result.error || 'Unknown error',
-			});
-			return null;
-		}
-	} else {
-		// existing-closed: worktree already on disk
-		worktreePath = target.worktreePath!;
-		branchName = worktreePath.split('/').pop() || 'worktree';
-	}
-
-	// Step 3: Fetch git info for the worktree
-	let gitBranches: string[] | undefined;
-	try {
-		gitBranches = await gitService.getBranches(worktreePath, sshRemoteId);
-	} catch (err) {
-		// Non-fatal — git info is nice-to-have
-		captureException(err, { extra: { worktreePath, sshRemoteId } });
-	}
-
-	// Determine current branch from fetched branches or fallback
-	if (!branchName && gitBranches && gitBranches.length > 0) {
-		branchName = gitBranches[0];
-	}
-
-	// Step 4: Build the session
-	const { defaultSaveToHistory, defaultShowThinking } = useSettingsStore.getState();
-	const newSession = buildWorktreeSession({
-		parentSession,
-		path: worktreePath,
-		branch: branchName,
-		name: branchName,
-		gitBranches,
-		defaultSaveToHistory,
-		defaultShowThinking,
-	});
-
-	// Step 5: Add session to store and expand parent's worktrees
-	useSessionStore
-		.getState()
-		.setSessions((prev) => [
-			...prev.map((s) => (s.id === parentSession.id ? { ...s, worktreesExpanded: true } : s)),
-			newSession,
-		]);
-
-	// Step 6: Populate config.worktree for PR creation if requested
-	if (target.createPROnCompletion) {
-		config.worktree = {
-			enabled: true,
-			path: worktreePath,
-			branchName,
-			createPROnCompletion: true,
-			prTargetBranch: target.baseBranch || 'main',
-		};
-	}
-
-	return newSession.id;
-}
-
-/**
  * Hook that provides handlers for Auto Run operations.
  * Extracted from App.tsx to reduce file size and improve maintainability.
  *
- * @param activeSession - The currently active session (can be null)
+ * Each handler resolves the active session fresh from the store at call time
+ * (via `selectActiveSession(useSessionStore.getState())`) instead of closing
+ * over a prop, so handlers always see the latest session even if they were
+ * memoized before the active session changed.
+ *
  * @param deps - Dependencies including state setters and values
  * @returns Object containing all Auto Run handler functions
  */
-export function useAutoRunHandlers(
-	activeSession: Session | null,
-	deps: UseAutoRunHandlersDeps
-): UseAutoRunHandlersReturn {
+export function useAutoRunHandlers(deps: UseAutoRunHandlersDeps): UseAutoRunHandlersReturn {
+	const refreshSequenceRef = useRef(0);
 	const {
 		setSessions,
 		setAutoRunDocumentList,
@@ -221,6 +116,7 @@ export function useAutoRunHandlers(
 	// Handler for auto run folder selection from setup modal
 	const handleAutoRunFolderSelected = useCallback(
 		async (folderPath: string) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession) return;
 
 			const sshRemoteId = getSshRemoteId(activeSession);
@@ -288,7 +184,6 @@ export function useAutoRunHandlers(
 			setActiveFocus('right');
 		},
 		[
-			activeSession,
 			setSessions,
 			setAutoRunDocumentList,
 			setAutoRunDocumentTree,
@@ -302,6 +197,7 @@ export function useAutoRunHandlers(
 	// Handler to start batch run from modal with multi-document support
 	const handleStartBatchRun = useCallback(
 		async (config: BatchRunConfig) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			window.maestro.logger.log('info', 'handleStartBatchRun called', 'AutoRunHandlers', {
 				hasActiveSession: !!activeSession,
 				sessionId: activeSession?.id,
@@ -320,13 +216,13 @@ export function useAutoRunHandlers(
 				return;
 			}
 
-			// Determine target session ID — may differ from activeSession when running in a worktree
+			// Determine target session ID - may differ from activeSession when running in a worktree
 			let targetSessionId = activeSession.id;
 			if (config.worktreeTarget?.mode === 'existing-open' && config.worktreeTarget.sessionId) {
 				// Verify the target session still exists (could have been removed while modal was open)
-				const targetSession = useSessionStore
-					.getState()
-					.sessions.find((s) => s.id === config.worktreeTarget!.sessionId);
+				const targetSession = selectSessionById(config.worktreeTarget!.sessionId)(
+					useSessionStore.getState()
+				);
 				if (!targetSession) {
 					window.maestro.logger.log(
 						'warn',
@@ -375,9 +271,18 @@ export function useAutoRunHandlers(
 				config.worktreeTarget?.mode === 'create-new' ||
 				config.worktreeTarget?.mode === 'existing-closed'
 			) {
+				// If the active session is itself a worktree child, resolve to its parent so
+				// basePath/cwd used for worktree creation come from the main repo, not the child.
+				let parentForSpawn = activeSession;
+				if (activeSession.parentSessionId) {
+					const parent = selectSessionById(activeSession.parentSessionId)(
+						useSessionStore.getState()
+					);
+					if (parent) parentForSpawn = parent;
+				}
 				// Spawn a worktree agent and dispatch to it
 				try {
-					const newSessionId = await spawnWorktreeAgentAndDispatch(activeSession, config);
+					const newSessionId = await spawnWorktreeAgentAndDispatch(parentForSpawn, config);
 					if (!newSessionId) return; // Error already shown via toast
 					targetSessionId = newSessionId;
 				} catch (err) {
@@ -404,53 +309,46 @@ export function useAutoRunHandlers(
 			// Documents stay with the parent session's autoRunFolderPath; execution targets the worktree agent
 			startBatchRun(targetSessionId, config, activeSession.autoRunFolderPath);
 		},
-		[activeSession, startBatchRun, setBatchRunnerModalOpen]
+		[startBatchRun, setBatchRunnerModalOpen]
 	);
 
 	// Memoized function to get task count for a document (used by BatchRunnerModal)
-	const getDocumentTaskCount = useCallback(
-		async (filename: string) => {
-			if (!activeSession?.autoRunFolderPath) return 0;
-			const sshRemoteId = getSshRemoteId(activeSession);
-			const result = await window.maestro.autorun.readDoc(
-				activeSession.autoRunFolderPath,
-				filename + '.md',
-				sshRemoteId
-			);
-			if (!result.success || !result.content) return 0;
-			// Count unchecked tasks: - [ ] pattern
-			const matches = result.content.match(/^[\s]*-\s*\[\s*\]\s*.+$/gm);
-			return matches ? matches.length : 0;
-			// Note: Use primitive values (remoteId) not object refs (sessionSshRemoteConfig) to avoid infinite re-render loops
-		},
-		[
-			activeSession?.autoRunFolderPath,
-			activeSession?.sshRemoteId,
-			activeSession?.sessionSshRemoteConfig?.remoteId,
-		]
-	);
+	const getDocumentTaskCount = useCallback(async (filename: string) => {
+		const activeSession = selectActiveSession(useSessionStore.getState());
+		if (!activeSession?.autoRunFolderPath) return 0;
+		const sshRemoteId = getSshRemoteId(activeSession);
+		const result = await window.maestro.autorun.readDoc(
+			activeSession.autoRunFolderPath,
+			filename + '.md',
+			sshRemoteId
+		);
+		if (!result.success || !result.content) return 0;
+		return countMarkdownTasks(result.content).unchecked;
+	}, []);
 
 	// Auto Run document content change handler
 	// Updates content in the session state (per-session, not global)
 	const handleAutoRunContentChange = useCallback(
 		async (content: string) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession) return;
 			setSessions((prev) =>
 				prev.map((s) => (s.id === activeSession.id ? { ...s, autoRunContent: content } : s))
 			);
 		},
-		[activeSession, setSessions]
+		[setSessions]
 	);
 
 	// Auto Run mode change handler
 	const handleAutoRunModeChange = useCallback(
 		(mode: 'edit' | 'preview') => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession) return;
 			setSessions((prev) =>
 				prev.map((s) => (s.id === activeSession.id ? { ...s, autoRunMode: mode } : s))
 			);
 		},
-		[activeSession, setSessions]
+		[setSessions]
 	);
 
 	// Auto Run state change handler (scroll/cursor positions)
@@ -461,6 +359,7 @@ export function useAutoRunHandlers(
 			editScrollPos: number;
 			previewScrollPos: number;
 		}) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession) return;
 			setSessions((prev) =>
 				prev.map((s) =>
@@ -476,13 +375,14 @@ export function useAutoRunHandlers(
 				)
 			);
 		},
-		[activeSession, setSessions]
+		[setSessions]
 	);
 
 	// Auto Run document selection handler
 	// Updates both selectedFile AND content atomically in session state
 	const handleAutoRunSelectDocument = useCallback(
 		async (filename: string) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession?.autoRunFolderPath) return;
 
 			const sshRemoteId = getSshRemoteId(activeSession);
@@ -509,58 +409,87 @@ export function useAutoRunHandlers(
 				)
 			);
 		},
-		[activeSession, setSessions]
+		[setSessions]
 	);
 
 	// Auto Run refresh handler - reload document list and show flash notification
-	const handleAutoRunRefresh = useCallback(async () => {
-		if (!activeSession?.autoRunFolderPath) return;
-		const sshRemoteId = getSshRemoteId(activeSession);
-		const previousCount = autoRunDocumentList.length;
-		setAutoRunIsLoadingDocuments(true);
-		try {
-			const result = await window.maestro.autorun.listDocs(
-				activeSession.autoRunFolderPath,
-				sshRemoteId
-			);
-			if (result.success) {
-				const newFiles = result.files || [];
-				setAutoRunDocumentList(newFiles);
-				setAutoRunDocumentTree(result.tree || []);
+	// `options.silent` suppresses the flash. It is checked with `=== true` on
+	// purpose: this function is handed straight to `onAutoRunRefresh`, so a click
+	// handler can call it with a MouseEvent in the options slot, and anything
+	// looser would read that event as an opt-in and swallow the confirmation the
+	// user clicked for.
+	const handleAutoRunRefresh = useCallback(
+		async (options?: { silent?: boolean }) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
+			if (!activeSession?.autoRunFolderPath) return;
+			const silent = options?.silent === true;
+			const sessionId = activeSession.id;
+			const folderPath = activeSession.autoRunFolderPath;
+			const sshRemoteId = getSshRemoteId(activeSession);
+			const previousCount = autoRunDocumentList.length;
+			// The list and the task counts are written after awaits. A refresh
+			// that was overtaken by a newer one, or whose session is no longer
+			// active, must not write another session's data into the shared
+			// stores (same guard as loadSequenceRef in useAutoRunDocumentLoader).
+			const refreshSequence = ++refreshSequenceRef.current;
+			const isStale = () =>
+				refreshSequence !== refreshSequenceRef.current ||
+				useSessionStore.getState().activeSessionId !== sessionId;
+			setAutoRunIsLoadingDocuments(true);
+			try {
+				const result = await window.maestro.autorun.listDocs(folderPath, sshRemoteId);
+				if (isStale()) return;
+				if (result.success) {
+					const newFiles = result.files || [];
+					setAutoRunDocumentList(newFiles);
+					setAutoRunDocumentTree(result.tree || []);
+					// The per-document task counts are cached in the batch store and
+					// only (re)computed by the Batch Runner for documents missing from
+					// that cache, so a document edited on disk kept its stale count
+					// until a restart. A refresh re-reads the folder; re-read the
+					// counts from disk as well, the same way the document loader does.
+					const { counts } = await readTaskCountsAndContent(folderPath, newFiles, sshRemoteId);
+					if (isStale()) return;
+					useBatchStore.getState().setDocumentTaskCounts(counts);
 
-				// Show flash notification with result
-				const diff = newFiles.length - previousCount;
-				let message: string;
-				if (diff > 0) {
-					message = `Found ${diff} new document${diff === 1 ? '' : 's'}`;
-				} else if (diff < 0) {
-					message = `${Math.abs(diff)} document${Math.abs(diff) === 1 ? '' : 's'} removed`;
-				} else {
-					message = 'Refresh complete, no new documents';
+					// Show flash notification with result
+					const diff = newFiles.length - previousCount;
+					let message: string;
+					if (diff > 0) {
+						message = `Found ${diff} new document${diff === 1 ? '' : 's'}`;
+					} else if (diff < 0) {
+						message = `${Math.abs(diff)} document${Math.abs(diff) === 1 ? '' : 's'} removed`;
+					} else {
+						message = 'Refresh complete, no new documents';
+					}
+					if (!silent) {
+						setSuccessFlashNotification(message);
+						setTimeout(() => setSuccessFlashNotification(null), 2000);
+					}
+					return;
 				}
-				setSuccessFlashNotification(message);
-				setTimeout(() => setSuccessFlashNotification(null), 2000);
-				return;
+			} finally {
+				// A superseded refresh must not clear the loading flag the newer
+				// refresh still owns.
+				if (refreshSequence === refreshSequenceRef.current) {
+					setAutoRunIsLoadingDocuments(false);
+				}
 			}
-		} finally {
-			setAutoRunIsLoadingDocuments(false);
-		}
-		// Note: Use primitive values (remoteId) not object refs (sessionSshRemoteConfig) to avoid infinite re-render loops
-	}, [
-		activeSession?.autoRunFolderPath,
-		activeSession?.sshRemoteId,
-		activeSession?.sessionSshRemoteConfig?.remoteId,
-		autoRunDocumentList.length,
-		setAutoRunDocumentList,
-		setAutoRunDocumentTree,
-		setAutoRunIsLoadingDocuments,
-		setSuccessFlashNotification,
-	]);
+		},
+		[
+			autoRunDocumentList.length,
+			setAutoRunDocumentList,
+			setAutoRunDocumentTree,
+			setAutoRunIsLoadingDocuments,
+			setSuccessFlashNotification,
+		]
+	);
 
 	// Auto Run open setup handler
 	// If no folder is configured, directly open folder picker
 	// If folder exists, open modal to allow changing it
 	const handleAutoRunOpenSetup = useCallback(async () => {
+		const activeSession = selectActiveSession(useSessionStore.getState());
 		if (activeSession?.autoRunFolderPath) {
 			// Folder exists - open modal to change it
 			setAutoRunSetupModalOpen(true);
@@ -578,16 +507,12 @@ export function useAutoRunHandlers(
 				}
 			}
 		}
-	}, [
-		activeSession?.autoRunFolderPath,
-		activeSession,
-		setAutoRunSetupModalOpen,
-		handleAutoRunFolderSelected,
-	]);
+	}, [setAutoRunSetupModalOpen, handleAutoRunFolderSelected]);
 
 	// Auto Run create new document handler
 	const handleAutoRunCreateDocument = useCallback(
 		async (filename: string): Promise<boolean> => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
 			if (!activeSession?.autoRunFolderPath) return false;
 
 			const sshRemoteId = getSshRemoteId(activeSession);
@@ -630,11 +555,11 @@ export function useAutoRunHandlers(
 				}
 				return false;
 			} catch (error) {
-				console.error('Failed to create document:', error);
+				logger.error('Failed to create document:', undefined, error);
 				return false;
 			}
 		},
-		[activeSession, setSessions, setAutoRunDocumentList, setAutoRunDocumentTree]
+		[setSessions, setAutoRunDocumentList, setAutoRunDocumentTree]
 	);
 
 	return {

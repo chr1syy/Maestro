@@ -9,7 +9,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import fs from 'fs/promises';
 import { ClaudeSessionStorage } from '../../../main/storage/claude-session-storage';
+import { captureException } from '../../../main/utils/sentry';
 import type { SshRemoteConfig } from '../../../shared/types';
 import type Store from 'electron-store';
 import type { ClaudeSessionOriginsData } from '../../../main/storage/claude-session-storage';
@@ -40,22 +42,27 @@ vi.mock('../../../main/utils/logger', () => ({
 	},
 }));
 
-// Mock fs/promises
-vi.mock('fs/promises', () => ({
-	default: {
+// Mock fs/promises. Both shapes are needed: the storage imports the default
+// export, while the session-info cache it now lists through uses a namespace
+// import, which only sees the named ones.
+vi.mock('fs/promises', () => {
+	const fsMock = {
 		access: vi.fn(),
 		readdir: vi.fn(),
 		stat: vi.fn(),
 		readFile: vi.fn(),
 		writeFile: vi.fn(),
-	},
-}));
+		mkdir: vi.fn(),
+		rename: vi.fn(),
+		unlink: vi.fn(),
+	};
+	return { default: fsMock, ...fsMock };
+});
 
 // Mock remote-fs utilities
 vi.mock('../../../main/utils/remote-fs', () => ({
-	readDirRemote: vi.fn(),
 	readFileRemote: vi.fn(),
-	statRemote: vi.fn(),
+	listDirWithStatsRemote: vi.fn(),
 }));
 
 // Mock statsCache
@@ -69,6 +76,18 @@ vi.mock('../../../main/utils/statsCache', () => ({
 // Mock pricing
 vi.mock('../../../main/utils/pricing', () => ({
 	calculateClaudeCost: vi.fn(() => 0.05),
+}));
+
+// Mock Sentry so transcript-read noise assertions can inspect the reporter
+vi.mock('../../../main/utils/sentry', () => ({
+	captureException: vi.fn(),
+	captureMessage: vi.fn(),
+}));
+
+// Listing routes through the shared session-info parse cache, which resolves
+// its directory off `app.getPath` at construction time.
+vi.mock('electron', () => ({
+	app: { getPath: vi.fn().mockReturnValue('/tmp/maestro-test-userdata') },
 }));
 
 describe('ClaudeSessionStorage', () => {
@@ -411,6 +430,285 @@ describe('ClaudeSessionStorage', () => {
 			storage.registerSessionOrigin('/project', 'session-1', 'user');
 
 			expect(mockStore.set).toHaveBeenCalledWith('origins', expect.any(Object));
+		});
+	});
+
+	describe('readSessionMessages - image reconstruction', () => {
+		const jsonl = (entries: unknown[]): string => entries.map((e) => JSON.stringify(e)).join('\n');
+
+		it('reconstructs base64 data URLs from image content blocks', async () => {
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'u1',
+					message: {
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+							{ type: 'text', text: 'look at this' },
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages).toHaveLength(1);
+			expect(result.messages[0].images).toEqual(['data:image/png;base64,AAAA']);
+			expect(result.messages[0].content).toBe('look at this');
+		});
+
+		it('drops the synthetic [Image: ...] placeholder text when images are recovered', async () => {
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'u1',
+					message: {
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBB' } },
+							{
+								type: 'text',
+								text: '[Image: original 2808x1566, displayed at 2000x1115. Multiply coordinates by 1.40 to map to original image.]',
+							},
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages).toHaveLength(1);
+			expect(result.messages[0].images).toEqual(['data:image/jpeg;base64,BBBB']);
+			expect(result.messages[0].content).toBe('');
+		});
+
+		it('drops a standalone placeholder-only message that has no image block', async () => {
+			// The harness sometimes emits the [Image: ...] description as its own
+			// follow-up message (an echo of an image shown in a prior turn). With no
+			// real image to render, the whole message collapses to nothing.
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'real',
+					message: {
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+							{ type: 'text', text: 'Getting better but...' },
+						],
+					},
+				},
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:01.000Z',
+					uuid: 'echo',
+					message: {
+						role: 'user',
+						content: [
+							{
+								type: 'text',
+								text: '[Image: original 2808x1566, displayed at 2000x1115. Multiply coordinates by 1.40 to map to original image.]\n[Image: original 2828x1906, displayed at 2000x1348. Multiply coordinates by 1.41 to map to original image.]',
+							},
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages).toHaveLength(1);
+			expect(result.messages[0].uuid).toBe('real');
+			expect(result.messages[0].images).toEqual(['data:image/png;base64,AAAA']);
+			expect(result.messages[0].content).toBe('Getting better but...');
+		});
+
+		it('keeps real text while stripping a placeholder line in the same block', async () => {
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'u1',
+					message: {
+						role: 'user',
+						content: [
+							{
+								type: 'text',
+								text: 'before\n[Image: original 100x100, displayed at 50x50. Multiply coordinates by 2.00 to map to original image.]\nafter',
+							},
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages).toHaveLength(1);
+			expect(result.messages[0].content).toBe('before\nafter');
+		});
+
+		it('keeps a message that has only images and no text', async () => {
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'u1',
+					message: {
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCC' } },
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages).toHaveLength(1);
+			expect(result.messages[0].images).toEqual(['data:image/png;base64,CCCC']);
+		});
+
+		it('preserves multiple images in order', async () => {
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'u1',
+					message: {
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'one' } },
+							{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'two' } },
+							{ type: 'text', text: 'two shots' },
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages[0].images).toEqual([
+				'data:image/png;base64,one',
+				'data:image/png;base64,two',
+			]);
+		});
+
+		it('does not set images for text-only messages', async () => {
+			const transcript = jsonl([
+				{
+					type: 'assistant',
+					timestamp: '2026-06-02T02:42:00.000Z',
+					uuid: 'a1',
+					message: { role: 'assistant', content: [{ type: 'text', text: 'plain reply' }] },
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages[0].images).toBeUndefined();
+			expect(result.messages[0].content).toBe('plain reply');
+		});
+
+		it('ignores malformed image blocks lacking base64 data', async () => {
+			const transcript = jsonl([
+				{
+					type: 'user',
+					timestamp: '2026-06-02T02:41:00.000Z',
+					uuid: 'u1',
+					message: {
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'url', url: 'https://example.com/x.png' } },
+							{ type: 'text', text: 'with a url image' },
+						],
+					},
+				},
+			]);
+			vi.mocked(fs.readFile).mockResolvedValue(transcript as never);
+
+			const result = await storage.readSessionMessages('/project', 'session-1');
+
+			expect(result.messages[0].images).toBeUndefined();
+			expect(result.messages[0].content).toBe('with a url image');
+		});
+	});
+
+	// MAESTRO-YH: transcripts under ~/.claude/projects belong to the Claude CLI.
+	// A tree we can't read (restrictive umask, another user's home) paged one
+	// Sentry event per file per listing. Environmental, so it must stay local.
+	describe('unreadable transcripts are not reported to Sentry', () => {
+		const listOneSessionFile = () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as never);
+			vi.mocked(fs.readdir).mockResolvedValue(['session-1.jsonl'] as never);
+			vi.mocked(fs.stat).mockResolvedValue({
+				size: 1024,
+				mtime: new Date('2026-08-06T02:00:00.000Z'),
+				mtimeMs: Date.parse('2026-08-06T02:00:00.000Z'),
+			} as never);
+		};
+
+		it.each(['EACCES', 'EPERM', 'ENOENT'])(
+			'skips captureException when the read fails with %s',
+			async (code) => {
+				listOneSessionFile();
+				vi.mocked(fs.readFile).mockRejectedValue(
+					Object.assign(new Error(`${code}: permission denied, open 'session-1.jsonl'`), { code })
+				);
+
+				const result = await storage.listSessionsPaginated('/project/path');
+
+				expect(result.sessions).toEqual([]);
+				expect(vi.mocked(captureException)).not.toHaveBeenCalled();
+			}
+		);
+
+		it('still reports an unexpected read failure', async () => {
+			listOneSessionFile();
+			vi.mocked(fs.readFile).mockRejectedValue(
+				Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' })
+			);
+
+			const result = await storage.listSessionsPaginated('/project/path');
+
+			expect(result.sessions).toEqual([]);
+			expect(vi.mocked(captureException)).toHaveBeenCalledTimes(1);
+		});
+
+		// The directory read is the outermost half of the same boundary: a
+		// `~/.claude` tree owned by another user fails here, before any file is
+		// touched. It still throws (reporting it as "zero sessions" would hide
+		// the user's transcripts) but must not page.
+		it.each(['EACCES', 'EPERM'])(
+			'skips captureException when the project directory read fails with %s',
+			async (code) => {
+				vi.mocked(fs.access).mockResolvedValue(undefined as never);
+				vi.mocked(fs.readdir).mockRejectedValue(
+					Object.assign(new Error(`${code}: permission denied, scandir`), { code })
+				);
+
+				await expect(storage.listSessionsPaginated('/project/path')).rejects.toThrow();
+				expect(vi.mocked(captureException)).not.toHaveBeenCalled();
+			}
+		);
+
+		it('still reports an unexpected project directory failure', async () => {
+			vi.mocked(fs.access).mockResolvedValue(undefined as never);
+			vi.mocked(fs.readdir).mockRejectedValue(
+				Object.assign(new Error('EIO: i/o error, scandir'), { code: 'EIO' })
+			);
+
+			await expect(storage.listSessionsPaginated('/project/path')).rejects.toThrow();
+			expect(vi.mocked(captureException)).toHaveBeenCalledTimes(1);
 		});
 	});
 });

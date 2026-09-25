@@ -15,6 +15,9 @@ import { memo, useMemo } from 'react';
 import { Briefcase, Coffee } from 'lucide-react';
 import type { Theme } from '../../types';
 import type { StatsAggregation } from '../../hooks/stats/useStats';
+import { formatDurationHuman as formatDuration } from '../../../shared/formatters';
+import { formatTokensCompact } from '../../../shared/formatters';
+import { useTokenSeries } from './TokenSeriesContext';
 
 interface WeekdayComparisonChartProps {
 	/** Aggregated stats data from the API */
@@ -25,35 +28,20 @@ interface WeekdayComparisonChartProps {
 	colorBlindMode?: boolean;
 }
 
-/**
- * Format duration in milliseconds to human-readable string
- */
-function formatDuration(ms: number): string {
-	if (ms === 0) return '0s';
-
-	const totalSeconds = Math.floor(ms / 1000);
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-
-	if (hours > 0) {
-		return `${hours}h ${minutes}m`;
-	}
-	if (minutes > 0) {
-		return `${minutes}m ${seconds}s`;
-	}
-	return `${seconds}s`;
-}
-
 export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 	data,
 	theme,
 	colorBlindMode = false,
 }: WeekdayComparisonChartProps) {
+	// These tiles have no metric toggle, so they always want token totals. The
+	// derivation runs in the main process, so the row simply fills in when ready
+	// rather than blocking this tab's first render.
+	const { series: tokenSeries } = useTokenSeries(true);
+
 	// Calculate weekday vs weekend statistics
 	const comparisonData = useMemo(() => {
-		const weekdayStats = { count: 0, duration: 0, days: 0 };
-		const weekendStats = { count: 0, duration: 0, days: 0 };
+		const weekdayStats = { count: 0, duration: 0, days: 0, tokens: 0 };
+		const weekendStats = { count: 0, duration: 0, days: 0, tokens: 0 };
 
 		data.byDay.forEach((day) => {
 			const date = new Date(day.date);
@@ -63,10 +51,12 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 			if (isWeekend) {
 				weekendStats.count += day.count;
 				weekendStats.duration += day.duration;
+				weekendStats.tokens += tokenSeries?.byDay?.[day.date] ?? 0;
 				weekendStats.days++;
 			} else {
 				weekdayStats.count += day.count;
 				weekdayStats.duration += day.duration;
+				weekdayStats.tokens += tokenSeries?.byDay?.[day.date] ?? 0;
 				weekdayStats.days++;
 			}
 		});
@@ -90,6 +80,7 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 		return {
 			weekday: {
 				totalQueries: weekdayStats.count,
+				totalTokens: weekdayStats.tokens,
 				totalDuration: weekdayStats.duration,
 				avgQueriesPerDay: weekdayAvgQueriesPerDay,
 				avgDuration: weekdayAvgDuration,
@@ -98,6 +89,7 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 			},
 			weekend: {
 				totalQueries: weekendStats.count,
+				totalTokens: weekendStats.tokens,
 				totalDuration: weekendStats.duration,
 				avgQueriesPerDay: weekendAvgQueriesPerDay,
 				avgDuration: weekendAvgDuration,
@@ -106,7 +98,7 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 			},
 			totalQueries,
 		};
-	}, [data.byDay]);
+	}, [data.byDay, tokenSeries]);
 
 	const hasData = comparisonData.totalQueries > 0;
 
@@ -117,7 +109,10 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 	if (!hasData) {
 		return (
 			<div className="p-4 rounded-lg" style={{ backgroundColor: theme.colors.bgMain }}>
-				<h3 className="text-sm font-medium mb-4" style={{ color: theme.colors.textMain }}>
+				<h3
+					className="text-sm font-medium mb-4"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
 					Weekday vs Weekend
 				</h3>
 				<div
@@ -145,7 +140,7 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 				Weekday vs Weekend
 			</h3>
 
-			<div className="grid grid-cols-2 gap-6">
+			<div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
 				{/* Weekday Card */}
 				<div className="p-4 rounded-lg" style={{ backgroundColor: theme.colors.bgActivity }}>
 					<div className="flex items-center gap-2 mb-3">
@@ -193,6 +188,14 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 							<span style={{ color: theme.colors.textDim }}>Avg Duration</span>
 							<span className="font-medium" style={{ color: theme.colors.textMain }}>
 								{formatDuration(comparisonData.weekday.avgDuration)}
+							</span>
+						</div>
+						<div className="flex justify-between text-xs">
+							<span style={{ color: theme.colors.textDim }}>Tokens</span>
+							<span className="font-medium" style={{ color: theme.colors.textMain }}>
+								{comparisonData.weekday.totalTokens > 0
+									? formatTokensCompact(comparisonData.weekday.totalTokens)
+									: '—'}
 							</span>
 						</div>
 						<div className="flex justify-between text-xs">
@@ -251,6 +254,14 @@ export const WeekdayComparisonChart = memo(function WeekdayComparisonChart({
 							<span style={{ color: theme.colors.textDim }}>Avg Duration</span>
 							<span className="font-medium" style={{ color: theme.colors.textMain }}>
 								{formatDuration(comparisonData.weekend.avgDuration)}
+							</span>
+						</div>
+						<div className="flex justify-between text-xs">
+							<span style={{ color: theme.colors.textDim }}>Tokens</span>
+							<span className="font-medium" style={{ color: theme.colors.textMain }}>
+								{comparisonData.weekend.totalTokens > 0
+									? formatTokensCompact(comparisonData.weekend.totalTokens)
+									: '—'}
 							</span>
 						</div>
 						<div className="flex justify-between text-xs">

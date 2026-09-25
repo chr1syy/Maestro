@@ -7,36 +7,7 @@ import {
 } from '../../../renderer/hooks';
 import type { Session } from '../../../renderer/types';
 import type { FileNode } from '../../../renderer/types/fileTree';
-
-// Helper to create a minimal session for testing
-const createMockSession = (overrides: Partial<Session> = {}): Session =>
-	({
-		id: 'test-session',
-		name: 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		inputMode: 'ai',
-		cwd: '/project',
-		projectRoot: '/project',
-		aiPid: 0,
-		terminalPid: 0,
-		aiLogs: [],
-		shellLogs: [],
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		messageQueue: [],
-		isLive: false,
-		isNew: false,
-		scrollPosition: 0,
-		inputHistory: [],
-		inputHistoryIndex: -1,
-		shellCommandHistory: [],
-		shellCwd: '/project',
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	}) as Session;
+import { createMockSession } from '../../helpers/mockSession';
 
 // Helper to create a file tree
 const createFileTree = (): FileNode[] => [
@@ -1114,6 +1085,150 @@ describe('useTabCompletion', () => {
 			// and return at most 15 results
 			const suggestions = result.current.getSuggestions('file', 'file');
 			expect(suggestions.length).toBeLessThanOrEqual(15);
+		});
+	});
+
+	// ========================================================================
+	// Command mode (`!cmd` typed in the AI composer)
+	// ========================================================================
+
+	describe('command mode', () => {
+		// Command mode is passed as a flag, not sniffed from a `!` in the text -
+		// the gesture consumes the bang, so the input here is a bare command line.
+		const CMD = true;
+
+		const commandModeSession = (overrides: Partial<Session> = {}): Session =>
+			createMockSession({
+				cwd: '/project',
+				fileTree: createFileTree(),
+				...overrides,
+			});
+
+		it('completes files, with no bang added back', () => {
+			const { result } = renderHook(() => useTabCompletion(commandModeSession()));
+
+			const suggestions = result.current.getSuggestions('cat pack', 'file', CMD);
+
+			expect(suggestions.length).toBeGreaterThan(0);
+			expect(suggestions[0].value).toBe('cat package.json');
+			expect(suggestions[0].displayText).toBe('package.json');
+		});
+
+		it('completes directories with a trailing slash', () => {
+			const { result } = renderHook(() => useTabCompletion(commandModeSession()));
+
+			const suggestions = result.current.getSuggestions('ls sr', 'file', CMD);
+
+			expect(suggestions.some((s) => s.value === 'ls src/' && s.type === 'folder')).toBe(true);
+		});
+
+		it('completes nested paths', () => {
+			const { result } = renderHook(() => useTabCompletion(commandModeSession()));
+
+			const suggestions = result.current.getSuggestions('cat src/components/But', 'file', CMD);
+
+			expect(suggestions.some((s) => s.value === 'cat src/components/Button.tsx')).toBe(true);
+		});
+
+		it('completes git branches', () => {
+			const session = commandModeSession({
+				isGitRepo: true,
+				gitBranches: ['main', 'feature/command-mode'],
+			});
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			const suggestions = result.current.getSuggestions('git checkout fea', 'branch', CMD);
+
+			expect(suggestions.some((s) => s.value === 'git checkout feature/command-mode')).toBe(true);
+		});
+
+		it('completes git tags', () => {
+			const session = commandModeSession({ isGitRepo: true, gitTags: ['v1.0.0', 'v2.0.0'] });
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			const suggestions = result.current.getSuggestions('git checkout v2', 'tag', CMD);
+
+			expect(suggestions.some((s) => s.value === 'git checkout v2.0.0')).toBe(true);
+		});
+
+		it('draws history from the bang entries in aiCommandHistory, unprefixed', () => {
+			// aiCommandHistory mixes agent messages and shell commands; the stored
+			// `!` is what tells them apart, and it is stripped on the way out.
+			const session = commandModeSession({
+				aiCommandHistory: ['!git status', 'fix the login bug', '/history', '!npm test'],
+			});
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			const suggestions = result.current.getSuggestions('git', 'history', CMD);
+
+			expect(suggestions.map((s) => s.value)).toEqual(['git status']);
+		});
+
+		it('does not offer terminal shell history in command mode', () => {
+			const session = commandModeSession({
+				shellCommandHistory: ['terminal-only-command'],
+				aiCommandHistory: [],
+			});
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			expect(result.current.getSuggestions('terminal', 'history', CMD)).toEqual([]);
+		});
+
+		it('does not offer command-mode history to a terminal', () => {
+			const session = commandModeSession({
+				shellCommandHistory: [],
+				aiCommandHistory: ['!npm test'],
+			});
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			expect(result.current.getSuggestions('npm', 'history')).toEqual([]);
+		});
+
+		it('shows recent commands for an empty command line', () => {
+			const session = commandModeSession({
+				aiCommandHistory: ['!git status', '!npm test'],
+			});
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			const suggestions = result.current.getSuggestions('', 'all', CMD);
+
+			expect(suggestions.map((s) => s.value).sort()).toEqual(['git status', 'npm test']);
+			expect(suggestions.every((s) => s.type === 'history')).toBe(true);
+		});
+
+		it('does not spray branches or files onto an empty command line', () => {
+			const session = commandModeSession({
+				isGitRepo: true,
+				gitBranches: ['main'],
+				gitTags: ['v1.0.0'],
+				aiCommandHistory: [],
+			});
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			expect(result.current.getSuggestions('', 'all', CMD)).toEqual([]);
+		});
+
+		it('still returns nothing for an empty TERMINAL line', () => {
+			const session = commandModeSession({ shellCommandHistory: ['ls'] });
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			expect(result.current.getSuggestions('', 'all')).toEqual([]);
+		});
+
+		it('resolves from the project root, ignoring the terminal cwd', () => {
+			// Terminal mode has cd'd into src/hooks, but a command-mode command still
+			// runs at the agent's cwd, so completion must resolve from the root.
+			const session = commandModeSession({ shellCwd: '/project/src/hooks' });
+			const { result } = renderHook(() => useTabCompletion(session));
+
+			expect(
+				result.current
+					.getSuggestions('cat pack', 'file', CMD)
+					.some((s) => s.value === 'cat package.json')
+			).toBe(true);
+
+			// The same session in terminal mode sees only src/hooks.
+			expect(result.current.getSuggestions('cat pack', 'file')).toEqual([]);
 		});
 	});
 });

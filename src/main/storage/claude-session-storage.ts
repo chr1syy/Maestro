@@ -17,10 +17,14 @@ import fs from 'fs/promises';
 import Store from 'electron-store';
 import { logger } from '../utils/logger';
 import { captureException } from '../utils/sentry';
+import { isExpectedSessionReadError } from '../utils/session-read-errors';
 import { CLAUDE_SESSION_PARSE_LIMITS } from '../constants';
-import { calculateClaudeCost } from '../utils/pricing';
+import { computeClaudeUsageCost } from '../utils/pricing';
+import { claudeModelUsage } from '../../shared/modelUsage';
 import { encodeClaudeProjectPath } from '../utils/statsCache';
-import { readDirRemote, readFileRemote, statRemote } from '../utils/remote-fs';
+import { readFileRemote, listDirWithStatsRemote } from '../utils/remote-fs';
+import { mapWithConcurrency, REMOTE_SESSION_READ_CONCURRENCY } from '../utils/concurrency';
+import { getSessionInfoCache, fileFingerprint, type SessionFileRef } from './session-info-cache';
 import type {
 	AgentSessionInfo,
 	PaginatedSessionsResult,
@@ -32,26 +36,47 @@ import type {
 	SessionMessage,
 } from '../agents';
 import type { ToolType, SshRemoteConfig } from '../../shared/types';
+import type {
+	ClaudeSessionOrigin,
+	ClaudeSessionOriginInfo,
+	ClaudeSessionOriginsData,
+} from '../stores/types';
 import { BaseSessionStorage } from './base-session-storage';
+import { setClaudeSessionOrigin } from './claude-session-origins';
 import type { SearchableMessage } from './base-session-storage';
+export type { ClaudeSessionOriginsData } from '../stores/types';
+
+/**
+ * Origin data structure stored in electron-store
+ */
+type StoredOriginData = ClaudeSessionOrigin | ClaudeSessionOriginInfo;
 
 const LOG_CONTEXT = '[ClaudeSessionStorage]';
 const MAX_SESSION_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
 
 /**
- * Origin data structure stored in electron-store
+ * Matches the synthetic placeholder text the harness writes alongside an image
+ * content block, e.g. "[Image: original 2808x1566, displayed at 2000x1115.
+ * Multiply coordinates by 1.40 to map to original image.]". When we recover the
+ * real image we drop this text so the restored bubble isn't a duplicate.
  */
-type StoredOriginData =
-	| AgentSessionOrigin
-	| {
-			origin: AgentSessionOrigin;
-			sessionName?: string;
-			starred?: boolean;
-			contextUsage?: number;
-	  };
+const IMAGE_PLACEHOLDER_PATTERN = /^\s*\[Image:[^\]]*to map to original image\.?\]\s*$/;
 
-export interface ClaudeSessionOriginsData {
-	origins: Record<string, Record<string, StoredOriginData>>;
+function isImagePlaceholderText(text: string | undefined): boolean {
+	return typeof text === 'string' && IMAGE_PLACEHOLDER_PATTERN.test(text);
+}
+
+/**
+ * Remove any synthetic `[Image: ...]` placeholder lines from a text blob,
+ * returning the trimmed remainder. A message that is nothing but placeholder
+ * lines collapses to an empty string so callers can drop it entirely.
+ */
+function stripImagePlaceholderLines(text: string): string {
+	return text
+		.split('\n')
+		.filter((line) => !isImagePlaceholderText(line))
+		.join('\n')
+		.trim();
 }
 
 /**
@@ -128,30 +153,15 @@ function parseSessionContent(
 		// Use assistant response as preview if available, otherwise fall back to user message
 		const previewMessage = firstAssistantMessage || firstUserMessage;
 
-		// Fast regex-based token extraction
-		let totalInputTokens = 0;
-		let totalOutputTokens = 0;
-		let totalCacheReadTokens = 0;
-		let totalCacheCreationTokens = 0;
-
-		const inputMatches = content.matchAll(/"input_tokens"\s*:\s*(\d+)/g);
-		for (const m of inputMatches) totalInputTokens += parseInt(m[1], 10);
-
-		const outputMatches = content.matchAll(/"output_tokens"\s*:\s*(\d+)/g);
-		for (const m of outputMatches) totalOutputTokens += parseInt(m[1], 10);
-
-		const cacheReadMatches = content.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g);
-		for (const m of cacheReadMatches) totalCacheReadTokens += parseInt(m[1], 10);
-
-		const cacheCreationMatches = content.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g);
-		for (const m of cacheCreationMatches) totalCacheCreationTokens += parseInt(m[1], 10);
-
-		const costUsd = calculateClaudeCost(
-			totalInputTokens,
-			totalOutputTokens,
-			totalCacheReadTokens,
-			totalCacheCreationTokens
-		);
+		// Per-model token + cost extraction (a session may mix models).
+		const {
+			inputTokens: totalInputTokens,
+			outputTokens: totalOutputTokens,
+			cacheReadTokens: totalCacheReadTokens,
+			cacheCreationTokens: totalCacheCreationTokens,
+			costUsd,
+			byModel,
+		} = computeClaudeUsageCost(content);
 
 		// Extract last timestamp for duration
 		let lastTimestamp = timestamp;
@@ -191,6 +201,7 @@ function parseSessionContent(
 			outputTokens: totalOutputTokens,
 			cacheReadTokens: totalCacheReadTokens,
 			cacheCreationTokens: totalCacheCreationTokens,
+			byModel: claudeModelUsage(byModel),
 			durationSeconds,
 		};
 	} catch (error) {
@@ -222,6 +233,12 @@ async function parseSessionFile(
 	} catch (error) {
 		if (error instanceof RangeError) {
 			logger.warn('Session file too large to parse', LOG_CONTEXT, { filePath });
+			return null;
+		}
+		if (isExpectedSessionReadError(error)) {
+			// The transcript belongs to the Claude CLI, not to us - an unreadable
+			// or vanished file is environmental, not a Maestro fault (MAESTRO-YH).
+			logger.warn('Session file not readable', LOG_CONTEXT, { filePath, error });
 			return null;
 		}
 		logger.error(`Error reading session file: ${filePath}`, LOG_CONTEXT, error);
@@ -287,10 +304,15 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 	}
 
 	/**
-	 * Get the Claude projects directory path (local)
+	 * Get the Claude projects directory path (local).
+	 *
+	 * `configDir` selects which Anthropic account's transcripts to read: users
+	 * commonly run several accounts by pointing `CLAUDE_CONFIG_DIR` at separate
+	 * homes (`~/.claude`, `~/.claude-gmail`, ...), and each writes its own
+	 * `projects/` tree. Omit it for the default `~/.claude` account.
 	 */
-	private getProjectsDir(): string {
-		return path.join(os.homedir(), '.claude', 'projects');
+	private getProjectsDir(configDir?: string): string {
+		return path.join(configDir ?? path.join(os.homedir(), '.claude'), 'projects');
 	}
 
 	/**
@@ -302,11 +324,12 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 	}
 
 	/**
-	 * Get the encoded project directory path (local)
+	 * Get the encoded project directory path (local). `configDir` scopes the read
+	 * to one Anthropic account's transcript tree (see {@link getProjectsDir}).
 	 */
-	private getEncodedProjectDir(projectPath: string): string {
+	private getEncodedProjectDir(projectPath: string, configDir?: string): string {
 		const encodedPath = encodeClaudeProjectPath(projectPath);
-		return path.join(this.getProjectsDir(), encodedPath);
+		return path.join(this.getProjectsDir(configDir), encodedPath);
 	}
 
 	/**
@@ -345,71 +368,177 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		};
 	}
 
+	/**
+	 * Enumerate a project's transcript files with the cheap stats the parse cache
+	 * fingerprints on. Newest-first, 0-byte files (created but abandoned before
+	 * any content was written) dropped. Returns empty for a project that has no
+	 * transcript folder yet.
+	 */
+	private async statProjectSessionFiles(
+		projectDir: string
+	): Promise<{ sessionId: string; filePath: string; sizeBytes: number; mtimeMs: number }[]> {
+		let filenames: string[];
+		try {
+			filenames = await fs.readdir(projectDir);
+		} catch (error) {
+			// A project that has never been opened in Claude simply has no folder.
+			if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+				return [];
+			}
+			// Everything else still throws: reporting an unreadable tree as "zero
+			// sessions" would silently hide the user's transcripts. But the
+			// environmental half of that set (a `~/.claude` owned by another user,
+			// a restrictive umask) is the very condition this guard exists for, and
+			// it recurs on every listing - so it stays a local warn. Only a genuinely
+			// unexpected failure pages (MAESTRO-YH).
+			if (isExpectedSessionReadError(error)) {
+				logger.warn(`Session directory not readable: ${projectDir}`, LOG_CONTEXT, { error });
+				throw error;
+			}
+			logger.error(`Error listing session directory: ${projectDir}`, LOG_CONTEXT, error);
+			captureException(error, {
+				operation: 'claudeStorage:statProjectSessionFiles',
+				projectDir,
+			});
+			throw error;
+		}
+
+		const stats = await Promise.all(
+			filenames
+				.filter((f) => f.endsWith('.jsonl'))
+				.map(async (filename) => {
+					const filePath = path.join(projectDir, filename);
+					try {
+						const stat = await fs.stat(filePath);
+						return {
+							sessionId: filename.replace('.jsonl', ''),
+							filePath,
+							sizeBytes: stat.size,
+							mtimeMs: stat.mtimeMs,
+						};
+					} catch (error) {
+						// The `fs.stat` races the directory listing above, so the entry can
+						// already be gone or unreadable by the time we get here (MAESTRO-YH).
+						if (isExpectedSessionReadError(error)) {
+							logger.warn(`Session file not stattable: ${filename}`, LOG_CONTEXT, { error });
+							return null;
+						}
+						logger.error(`Error stating session file: ${filename}`, LOG_CONTEXT, error);
+						captureException(error, { operation: 'claudeStorage:statSessionFile', filename });
+						return null;
+					}
+				})
+		);
+
+		return stats
+			.filter((s): s is NonNullable<typeof s> => s !== null)
+			.filter((s) => s.sizeBytes > 0)
+			.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	}
+
+	/**
+	 * Parse the given transcript files, serving unchanged ones from the shared
+	 * {@link getSessionInfoCache} rather than re-reading them. Origin/starred/name
+	 * are attached afterwards on purpose: they live in `originsStore` and change
+	 * without the transcript changing, so they must never be cached.
+	 *
+	 * @param prune - Only when `files` covers the whole project folder; a
+	 *   paginated caller passing one page must leave it off.
+	 */
+	private async parseSessionFilesCached(
+		projectPath: string,
+		projectDir: string,
+		files: { sessionId: string; filePath: string; sizeBytes: number; mtimeMs: number }[],
+		prune: boolean
+	): Promise<AgentSessionInfo[]> {
+		const byPath = new Map(files.map((file) => [file.filePath, file]));
+		const refs: SessionFileRef[] = files.map((file) => ({
+			key: file.filePath,
+			fingerprint: fileFingerprint(file.sizeBytes, file.mtimeMs),
+		}));
+
+		const sessions = await getSessionInfoCache(this.agentId).resolve(
+			projectDir,
+			refs,
+			async (ref) => {
+				const file = byPath.get(ref.key);
+				if (!file) return null;
+				try {
+					return await parseSessionFile(file.filePath, file.sessionId, projectPath, {
+						size: file.sizeBytes,
+						mtimeMs: file.mtimeMs,
+					});
+				} catch (error) {
+					// Outer half of the same boundary `parseSessionFile` guards: the file
+					// can vanish or become unreadable between the stat and the read.
+					if (isExpectedSessionReadError(error)) {
+						logger.warn(`Session file not readable: ${file.filePath}`, LOG_CONTEXT, { error });
+						return null;
+					}
+					logger.error(`Error processing session file: ${file.filePath}`, LOG_CONTEXT, error);
+					captureException(error, {
+						operation: 'claudeStorage:processSessionFile',
+						filename: file.filePath,
+					});
+					return null;
+				}
+			},
+			{ prune }
+		);
+
+		const projectOrigins = this.getProjectOrigins(projectPath);
+		return sessions.map((session) => this.attachOriginInfo(session, projectOrigins));
+	}
+
+	/**
+	 * @param configDir - Optional `CLAUDE_CONFIG_DIR` selecting which Anthropic
+	 *   account's transcripts to list. Omitted (the default) reads `~/.claude`,
+	 *   preserving existing behavior for every caller that doesn't multi-account.
+	 *   The Cost & Tokens accessor passes each discovered account dir so tokens
+	 *   from every account are counted, not just the default one.
+	 */
 	async listSessions(
 		projectPath: string,
-		sshConfig?: SshRemoteConfig
+		sshConfig?: SshRemoteConfig,
+		configDir?: string
 	): Promise<AgentSessionInfo[]> {
 		// Use SSH remote access if config provided
 		if (sshConfig) {
 			return this.listSessionsRemote(projectPath, sshConfig);
 		}
 
-		const projectDir = this.getEncodedProjectDir(projectPath);
+		const projectDir = this.getEncodedProjectDir(projectPath, configDir);
+		const files = await this.statProjectSessionFiles(projectDir);
 
-		// Check if the directory exists
-		try {
-			await fs.access(projectDir);
-		} catch {
-			logger.info(`No Claude sessions directory found for project: ${projectPath}`, LOG_CONTEXT);
+		if (files.length === 0) {
+			// Still a full listing, so still prune: a project whose transcripts were
+			// all deleted must drop its cache entries too, or a recreated file at the
+			// same path with a matching fingerprint would serve stale metadata.
+			await this.parseSessionFilesCached(projectPath, projectDir, [], true);
+			logger.info(`No Claude sessions found for project: ${projectPath}`, LOG_CONTEXT);
 			return [];
 		}
 
-		// List all .jsonl files in the directory
-		const files = await fs.readdir(projectDir);
-		const sessionFiles = files.filter((f) => f.endsWith('.jsonl'));
-
-		// Get metadata for each session
-		const sessions = await Promise.all(
-			sessionFiles.map(async (filename) => {
-				const sessionId = filename.replace('.jsonl', '');
-				const filePath = path.join(projectDir, filename);
-
-				try {
-					const stats = await fs.stat(filePath);
-					return await parseSessionFile(filePath, sessionId, projectPath, {
-						size: stats.size,
-						mtimeMs: stats.mtimeMs,
-					});
-				} catch (error) {
-					logger.error(`Error processing session file: ${filename}`, LOG_CONTEXT, error);
-					captureException(error, { operation: 'claudeStorage:processSessionFile', filename });
-					return null;
-				}
-			})
-		);
-
-		// Filter out nulls, 0-byte sessions, and sort by modified date
-		const validSessions = sessions
-			.filter((s): s is NonNullable<typeof s> => s !== null)
-			// Filter out 0-byte sessions (created but abandoned before any content was written)
-			.filter((s) => s.sizeBytes > 0)
-			.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
-
-		// Attach origin info
-		const projectOrigins = this.getProjectOrigins(projectPath);
-		const sessionsWithOrigins = validSessions.map((session) =>
-			this.attachOriginInfo(session, projectOrigins)
+		const sessionsWithOrigins = await this.parseSessionFilesCached(
+			projectPath,
+			projectDir,
+			files,
+			true
 		);
 
 		logger.info(
-			`Found ${validSessions.length} Claude sessions for project: ${projectPath}`,
+			`Found ${sessionsWithOrigins.length} Claude sessions for project: ${projectPath}`,
 			LOG_CONTEXT
 		);
 		return sessionsWithOrigins;
 	}
 
 	/**
-	 * List sessions from remote host via SSH
+	 * List sessions from remote host via SSH.
+	 *
+	 * Uses one SSH round-trip to enumerate and stat every `.jsonl` in the
+	 * project's session directory, then reads per-session content with bounded
+	 * concurrency to stay under sshd's MaxStartups limit.
 	 */
 	private async listSessionsRemote(
 		projectPath: string,
@@ -417,43 +546,29 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 	): Promise<AgentSessionInfo[]> {
 		const projectDir = this.getRemoteEncodedProjectDir(projectPath);
 
-		// List directory via SSH
-		const dirResult = await readDirRemote(projectDir, sshConfig);
-		if (!dirResult.success || !dirResult.data) {
+		const dirResult = await listDirWithStatsRemote(projectDir, sshConfig, { nameSuffix: '.jsonl' });
+		if (!dirResult.success) {
 			logger.info(
-				`No Claude sessions directory found on remote for project: ${projectPath}`,
+				`No Claude sessions directory found on remote for project: ${projectPath} (${dirResult.error})`,
 				LOG_CONTEXT
 			);
 			return [];
 		}
 
-		// Filter for .jsonl files
-		const sessionFiles = dirResult.data.filter(
-			(entry) => !entry.isDirectory && entry.name.endsWith('.jsonl')
-		);
+		const sessionFiles = (dirResult.data || []).filter((entry) => entry.size > 0);
 
-		// Get metadata for each session
-		const sessions = await Promise.all(
-			sessionFiles.map(async (entry) => {
+		const sessions = await mapWithConcurrency(
+			sessionFiles,
+			REMOTE_SESSION_READ_CONCURRENCY,
+			async (entry) => {
 				const sessionId = entry.name.replace('.jsonl', '');
 				const filePath = `${projectDir}/${entry.name}`;
-
 				try {
-					// Get file stats via SSH
-					const statResult = await statRemote(filePath, sshConfig);
-					if (!statResult.success || !statResult.data) {
-						logger.error(`Failed to stat remote file: ${filePath}`, LOG_CONTEXT);
-						return null;
-					}
-
 					return await parseSessionFileRemote(
 						filePath,
 						sessionId,
 						projectPath,
-						{
-							size: statResult.data.size,
-							mtimeMs: statResult.data.mtime,
-						},
+						{ size: entry.size, mtimeMs: entry.mtime },
 						sshConfig
 					);
 				} catch (error) {
@@ -464,16 +579,13 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 					});
 					return null;
 				}
-			})
+			}
 		);
 
-		// Filter out nulls, 0-byte sessions, and sort by modified date
 		const validSessions = sessions
 			.filter((s): s is NonNullable<typeof s> => s !== null)
-			.filter((s) => s.sizeBytes > 0)
 			.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
 
-		// Attach origin info (origins are stored locally, not on remote)
 		const projectOrigins = this.getProjectOrigins(projectPath);
 		const sessionsWithOrigins = validSessions.map((session) =>
 			this.attachOriginInfo(session, projectOrigins)
@@ -499,43 +611,11 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		const { cursor, limit = 100 } = options || {};
 		const projectDir = this.getEncodedProjectDir(projectPath);
 
-		// Check if the directory exists
-		try {
-			await fs.access(projectDir);
-		} catch {
+		const sortedFiles = await this.statProjectSessionFiles(projectDir);
+		const totalCount = sortedFiles.length;
+		if (totalCount === 0) {
 			return { sessions: [], hasMore: false, totalCount: 0, nextCursor: null };
 		}
-
-		// List all .jsonl files and get their stats
-		const files = await fs.readdir(projectDir);
-		const sessionFiles = files.filter((f) => f.endsWith('.jsonl'));
-
-		const fileStats = await Promise.all(
-			sessionFiles.map(async (filename) => {
-				const sessionId = filename.replace('.jsonl', '');
-				const filePath = path.join(projectDir, filename);
-				try {
-					const stats = await fs.stat(filePath);
-					return {
-						sessionId,
-						filename,
-						filePath,
-						modifiedAt: stats.mtime.getTime(),
-						sizeBytes: stats.size,
-					};
-				} catch {
-					return null;
-				}
-			})
-		);
-
-		const sortedFiles = fileStats
-			.filter((s): s is NonNullable<typeof s> => s !== null)
-			// Filter out 0-byte sessions (created but abandoned before any content was written)
-			.filter((s) => s.sizeBytes > 0)
-			.sort((a, b) => b.modifiedAt - a.modifiedAt);
-
-		const totalCount = sortedFiles.length;
 
 		// Find cursor position
 		let startIndex = 0;
@@ -548,24 +628,14 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		const hasMore = startIndex + limit < totalCount;
 		const nextCursor = hasMore ? pageFiles[pageFiles.length - 1]?.sessionId : null;
 
-		// Get project origins
-		const projectOrigins = this.getProjectOrigins(projectPath);
-
-		// Read full content for sessions in this page
-		const sessions = await Promise.all(
-			pageFiles.map(async (fileInfo) => {
-				const session = await parseSessionFile(fileInfo.filePath, fileInfo.sessionId, projectPath, {
-					size: fileInfo.sizeBytes,
-					mtimeMs: fileInfo.modifiedAt,
-				});
-				if (session) {
-					return this.attachOriginInfo(session, projectOrigins);
-				}
-				return null;
-			})
+		// Read (or serve from cache) the sessions in this page only. Pruning is off:
+		// the page is a slice, not the whole folder.
+		const validSessions = await this.parseSessionFilesCached(
+			projectPath,
+			projectDir,
+			pageFiles,
+			false
 		);
-
-		const validSessions = sessions.filter((s): s is NonNullable<typeof s> => s !== null);
 
 		logger.info(
 			`Paginated Claude sessions - returned ${validSessions.length} of ${totalCount} total (cursor: ${cursor || 'null'}, startIndex: ${startIndex}, hasMore: ${hasMore}, nextCursor: ${nextCursor || 'null'})`,
@@ -581,7 +651,11 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 	}
 
 	/**
-	 * List sessions with pagination from remote host via SSH
+	 * List sessions with pagination from remote host via SSH.
+	 *
+	 * Uses one SSH round-trip to enumerate and stat every `.jsonl` in the
+	 * project's session directory, then reads the current page's contents with
+	 * bounded concurrency to stay under sshd's MaxStartups limit.
 	 */
 	private async listSessionsPaginatedRemote(
 		projectPath: string,
@@ -591,48 +665,24 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		const { cursor, limit = 100 } = options || {};
 		const projectDir = this.getRemoteEncodedProjectDir(projectPath);
 
-		// List directory via SSH
-		const dirResult = await readDirRemote(projectDir, sshConfig);
-		if (!dirResult.success || !dirResult.data) {
+		const dirResult = await listDirWithStatsRemote(projectDir, sshConfig, { nameSuffix: '.jsonl' });
+		if (!dirResult.success) {
 			return { sessions: [], hasMore: false, totalCount: 0, nextCursor: null };
 		}
 
-		// Filter for .jsonl files
-		const sessionFiles = dirResult.data.filter(
-			(entry) => !entry.isDirectory && entry.name.endsWith('.jsonl')
-		);
-
-		// Get file stats for all session files
-		const fileStats = await Promise.all(
-			sessionFiles.map(async (entry) => {
-				const sessionId = entry.name.replace('.jsonl', '');
-				const filePath = `${projectDir}/${entry.name}`;
-				try {
-					const statResult = await statRemote(filePath, sshConfig);
-					if (!statResult.success || !statResult.data) {
-						return null;
-					}
-					return {
-						sessionId,
-						filename: entry.name,
-						filePath,
-						modifiedAt: statResult.data.mtime,
-						sizeBytes: statResult.data.size,
-					};
-				} catch {
-					return null;
-				}
-			})
-		);
-
-		const sortedFiles = fileStats
-			.filter((s): s is NonNullable<typeof s> => s !== null)
-			.filter((s) => s.sizeBytes > 0)
+		const sortedFiles = (dirResult.data || [])
+			.filter((entry) => entry.size > 0)
+			.map((entry) => ({
+				sessionId: entry.name.replace('.jsonl', ''),
+				filename: entry.name,
+				filePath: `${projectDir}/${entry.name}`,
+				modifiedAt: entry.mtime,
+				sizeBytes: entry.size,
+			}))
 			.sort((a, b) => b.modifiedAt - a.modifiedAt);
 
 		const totalCount = sortedFiles.length;
 
-		// Find cursor position
 		let startIndex = 0;
 		if (cursor) {
 			const cursorIndex = sortedFiles.findIndex((f) => f.sessionId === cursor);
@@ -643,12 +693,12 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		const hasMore = startIndex + limit < totalCount;
 		const nextCursor = hasMore ? pageFiles[pageFiles.length - 1]?.sessionId : null;
 
-		// Get project origins (stored locally)
 		const projectOrigins = this.getProjectOrigins(projectPath);
 
-		// Read full content for sessions in this page
-		const sessions = await Promise.all(
-			pageFiles.map(async (fileInfo) => {
+		const sessions = await mapWithConcurrency(
+			pageFiles,
+			REMOTE_SESSION_READ_CONCURRENCY,
+			async (fileInfo) => {
 				const session = await parseSessionFileRemote(
 					fileInfo.filePath,
 					fileInfo.sessionId,
@@ -660,7 +710,7 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 					return this.attachOriginInfo(session, projectOrigins);
 				}
 				return null;
-			})
+			}
 		);
 
 		const validSessions = sessions.filter((s): s is NonNullable<typeof s> => s !== null);
@@ -715,6 +765,7 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 				if (entry.type === 'user' || entry.type === 'assistant') {
 					let msgContent = '';
 					let toolUse = undefined;
+					let images: string[] | undefined;
 
 					if (entry.message?.content) {
 						if (typeof entry.message.content === 'string') {
@@ -726,15 +777,45 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 							const toolBlocks = entry.message.content.filter(
 								(b: { type?: string }) => b.type === 'tool_use'
 							);
+							const imageBlocks = entry.message.content.filter(
+								(b: { type?: string }) => b.type === 'image'
+							);
 
-							msgContent = textBlocks.map((b: { text?: string }) => b.text).join('\n');
+							// Reconstruct base64 data URLs from image content blocks so a
+							// resumed tab re-renders the original images instead of falling
+							// back to the harness's synthetic `[Image: ...]` placeholder text.
+							if (imageBlocks.length > 0) {
+								const urls = imageBlocks
+									.map((b: { source?: { type?: string; media_type?: string; data?: string } }) => {
+										const src = b.source;
+										if (src?.type === 'base64' && src.media_type && src.data) {
+											return `data:${src.media_type};base64,${src.data}`;
+										}
+										return null;
+									})
+									.filter((url: string | null): url is string => url !== null);
+								if (urls.length > 0) {
+									images = urls;
+								}
+							}
+
+							// Always drop the synthetic `[Image: ... Multiply coordinates by
+							// ...]` placeholder lines. They are redundant either way: when the
+							// image is in this same message we render the recovered image, and
+							// when the placeholder arrives as its own follow-up message it is a
+							// text echo of an image already shown in a prior message. Filtering
+							// line-by-line lets a placeholder-only message collapse to empty so
+							// it is dropped entirely below.
+							msgContent = stripImagePlaceholderLines(
+								textBlocks.map((b: { text?: string }) => b.text || '').join('\n')
+							);
 							if (toolBlocks.length > 0) {
 								toolUse = toolBlocks;
 							}
 						}
 					}
 
-					if ((msgContent && msgContent.trim()) || toolUse) {
+					if ((msgContent && msgContent.trim()) || toolUse || images) {
 						messages.push({
 							type: entry.type,
 							role: entry.message?.role,
@@ -742,6 +823,7 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 							timestamp: entry.timestamp,
 							uuid: entry.uuid,
 							toolUse,
+							...(images && { images }),
 						});
 					}
 				}
@@ -1005,12 +1087,12 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		origin: AgentSessionOrigin,
 		sessionName?: string
 	): void {
-		const origins = this.originsStore.get('origins', {});
-		if (!origins[projectPath]) {
-			origins[projectPath] = {};
-		}
-		origins[projectPath][agentSessionId] = sessionName ? { origin, sessionName } : origin;
-		this.originsStore.set('origins', origins);
+		setClaudeSessionOrigin(
+			this.originsStore,
+			projectPath,
+			agentSessionId,
+			sessionName ? { origin, sessionName } : { origin }
+		);
 		logger.debug(
 			`Registered Claude session origin: ${agentSessionId} = ${origin}${sessionName ? ` (name: ${sessionName})` : ''}`,
 			LOG_CONTEXT
@@ -1021,19 +1103,7 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 	 * Update the name of a session
 	 */
 	updateSessionName(projectPath: string, agentSessionId: string, sessionName: string): void {
-		const origins = this.originsStore.get('origins', {});
-		if (!origins[projectPath]) {
-			origins[projectPath] = {};
-		}
-		const existing = origins[projectPath][agentSessionId];
-		if (typeof existing === 'string') {
-			origins[projectPath][agentSessionId] = { origin: existing, sessionName };
-		} else if (existing) {
-			origins[projectPath][agentSessionId] = { ...existing, sessionName };
-		} else {
-			origins[projectPath][agentSessionId] = { origin: 'user', sessionName };
-		}
-		this.originsStore.set('origins', origins);
+		setClaudeSessionOrigin(this.originsStore, projectPath, agentSessionId, { sessionName });
 		logger.debug(`Updated Claude session name: ${agentSessionId} = ${sessionName}`, LOG_CONTEXT);
 	}
 
@@ -1041,19 +1111,7 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 	 * Update the starred status of a session
 	 */
 	updateSessionStarred(projectPath: string, agentSessionId: string, starred: boolean): void {
-		const origins = this.originsStore.get('origins', {});
-		if (!origins[projectPath]) {
-			origins[projectPath] = {};
-		}
-		const existing = origins[projectPath][agentSessionId];
-		if (typeof existing === 'string') {
-			origins[projectPath][agentSessionId] = { origin: existing, starred };
-		} else if (existing) {
-			origins[projectPath][agentSessionId] = { ...existing, starred };
-		} else {
-			origins[projectPath][agentSessionId] = { origin: 'user', starred };
-		}
-		this.originsStore.set('origins', origins);
+		setClaudeSessionOrigin(this.originsStore, projectPath, agentSessionId, { starred });
 		logger.debug(`Updated Claude session starred: ${agentSessionId} = ${starred}`, LOG_CONTEXT);
 	}
 
@@ -1066,19 +1124,7 @@ export class ClaudeSessionStorage extends BaseSessionStorage {
 		agentSessionId: string,
 		contextUsage: number
 	): void {
-		const origins = this.originsStore.get('origins', {});
-		if (!origins[projectPath]) {
-			origins[projectPath] = {};
-		}
-		const existing = origins[projectPath][agentSessionId];
-		if (typeof existing === 'string') {
-			origins[projectPath][agentSessionId] = { origin: existing, contextUsage };
-		} else if (existing) {
-			origins[projectPath][agentSessionId] = { ...existing, contextUsage };
-		} else {
-			origins[projectPath][agentSessionId] = { origin: 'user', contextUsage };
-		}
-		this.originsStore.set('origins', origins);
+		setClaudeSessionOrigin(this.originsStore, projectPath, agentSessionId, { contextUsage });
 		// Don't log this - it updates frequently and would spam logs
 	}
 

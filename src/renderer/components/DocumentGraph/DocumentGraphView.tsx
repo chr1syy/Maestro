@@ -18,9 +18,9 @@ import {
 	X,
 	Network,
 	ExternalLink,
+	Unlink,
 	RefreshCw,
 	Search,
-	Loader2,
 	ChevronDown,
 	Sliders,
 	AlertCircle,
@@ -31,11 +31,30 @@ import {
 	Type,
 	ChevronLeft,
 	ChevronRight,
+	ZoomIn,
+	Move,
+	Camera,
+	Copy,
+	Download,
 } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
 import type { Theme } from '../../types';
 import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
+import { usePersistedPanelWidth } from '../../hooks/ui/usePersistedPanelWidth';
+import { useResizablePanel } from '../../hooks/ui/useResizablePanel';
+import { viewportModalSize } from '../../utils/modalSizing';
+import {
+	previewMaxWidthForContainer,
+	PREVIEW_DEFAULT_WIDTH,
+	PREVIEW_MIN_WIDTH,
+	PREVIEW_MAX_WIDTH,
+	PREVIEW_WIDTH_STORAGE_KEY,
+} from './previewPaneSizing';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { Modal, ModalFooter } from '../ui/Modal';
+import { ResizeHandles } from '../ui/ResizeHandles';
 import { useDebouncedCallback } from '../../hooks/utils';
 import {
 	buildGraphData,
@@ -45,6 +64,7 @@ import {
 	invalidateCacheForFiles,
 	BacklinkUpdateData,
 	GraphData,
+	PartialUpdate,
 } from './graphDataBuilder';
 import {
 	MindMap,
@@ -53,80 +73,69 @@ import {
 	convertToMindMapData,
 	NodePositionOverride,
 } from './MindMap';
-import { type MindMapLayoutType, LAYOUT_LABELS } from './mindMapLayouts';
+import {
+	type MindMapLayoutType,
+	LAYOUT_LABELS,
+	MIND_MAP_LAYOUT_TYPES,
+	nextMindMapLayout,
+	SPACING_SCALE_DEFAULT,
+	SPACING_SCALE_MIN,
+	SPACING_SCALE_MAX,
+	SPACING_SCALE_STEP,
+} from './mindMapLayouts';
+import {
+	formatNeighborDepth,
+	NEIGHBOR_DEPTH_ALL,
+	NEIGHBOR_DEPTH_MAX,
+	nextNeighborDepth,
+} from './neighborDepth';
+import {
+	clampPreviewCharLimit,
+	formatPreviewCharLimit,
+	isPreviewOff,
+	nextPreviewCharLimit,
+	PREVIEW_CHAR_LIMIT_MAX,
+	PREVIEW_CHAR_LIMIT_MIN,
+	PREVIEW_CHAR_LIMIT_STEP,
+} from './previewCharLimit';
 import { NodeContextMenu } from './NodeContextMenu';
 import { GraphLegend } from './GraphLegend';
+import {
+	DEFAULT_SCROLL_MODE,
+	SCROLL_MODE_LABELS,
+	SCROLL_MODE_STORAGE_KEY,
+	nextScrollMode,
+	scrollModeFromPans,
+	scrollModePans,
+	type GraphScrollMode,
+} from './scrollMode';
+import { usePersistedToggle } from '../../hooks/ui/usePersistedToggle';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { generateProseStyles } from '../../utils/markdownConfig';
-import { safeClipboardWrite } from '../../utils/clipboard';
-import type { FileNode } from '../../types/fileTree';
+import { safeClipboardWrite, safeClipboardWriteImage } from '../../utils/clipboard';
+import { saveImageDataUrlToDisk } from '../../utils/imageExport';
+import { notifyToast } from '../../stores/notificationStore';
+import { notifyCenterFlash } from '../../stores/centerFlashStore';
+import { fileTimestampSlug, getBasename } from '../../../shared/formatters';
+import { buildFileTreeFromPaths } from '../../utils/fileTree';
+import { countMarkdownTasks } from '../FilePreview/filePreviewUtils';
+import { logger } from '../../utils/logger';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 /** Debounce delay for graph rebuilds when settings change (ms) */
 const GRAPH_REBUILD_DEBOUNCE_DELAY = 300;
 
 /**
- * Build a file tree structure from graph node file paths.
- * This enables wiki-link resolution in the preview panel.
+ * Width of the toolbar's search box, in px.
+ *
+ * Wide enough for the full "Search documents..." placeholder at `text-sm` plus
+ * both icon gutters. It was 180, which clipped the hint mid-word.
  */
-function buildFileTreeFromPaths(filePaths: string[]): FileNode[] {
-	const root: FileNode[] = [];
-	const folderMap = new Map<string, FileNode>();
-
-	for (const filePath of filePaths) {
-		if (!filePath) continue;
-
-		const parts = filePath.split('/');
-		let currentLevel = root;
-		let currentPath = '';
-
-		for (let i = 0; i < parts.length; i++) {
-			const part = parts[i];
-			const isLastPart = i === parts.length - 1;
-			currentPath = currentPath ? `${currentPath}/${part}` : part;
-
-			if (isLastPart) {
-				// It's a file
-				currentLevel.push({
-					name: part,
-					type: 'file',
-					fullPath: filePath,
-				});
-			} else {
-				// It's a folder - check if it already exists
-				let folder = folderMap.get(currentPath);
-				if (!folder) {
-					folder = {
-						name: part,
-						type: 'folder',
-						isFolder: true,
-						children: [],
-					};
-					folderMap.set(currentPath, folder);
-					currentLevel.push(folder);
-				}
-				currentLevel = folder.children!;
-			}
-		}
-	}
-
-	return root;
-}
+export const SEARCH_BOX_WIDTH = 230;
 /** Default maximum number of nodes to load initially */
 const DEFAULT_MAX_NODES = 200;
 /** Number of additional nodes to load when clicking "Load more" */
 const LOAD_MORE_INCREMENT = 25;
-
-/**
- * Count markdown tasks (checkboxes) in content
- * Reuses pattern from FilePreview.tsx
- */
-const countMarkdownTasks = (content: string): { completed: number; total: number } => {
-	const openMatches = content.match(/^[\s]*[-*]\s*\[\s*\]/gm);
-	const closedMatches = content.match(/^[\s]*[-*]\s*\[[xX]\]/gm);
-	const open = openMatches?.length || 0;
-	const closed = closedMatches?.length || 0;
-	return { completed: closed, total: open + closed };
-};
 
 /**
  * Format date for display in footer
@@ -157,8 +166,26 @@ export interface DocumentGraphViewProps {
 	onExternalLinkOpen?: (url: string) => void;
 	/** Required file path (relative to rootPath) to focus on - the center of the mind map */
 	focusFilePath: string;
+	/**
+	 * Explicit set of files to graph (relative to rootPath). Switches the view
+	 * from FOCUS mode ("what does this document reach?") to SCOPE mode ("how do
+	 * these documents relate, and which of them relate to nothing?").
+	 */
+	scopeFiles?: string[];
+	/** Directory whose markdown files form the scope. Ignored when `scopeFiles` is set. */
+	scopeDirectory?: string;
 	/** Callback when focus file is consumed (cleared after focusing) */
 	onFocusFileConsumed?: () => void;
+	/**
+	 * Ask before closing. Defaults to true.
+	 *
+	 * The prompt exists because a graph is usually WORK: a layout picked, a
+	 * depth widened, nodes dragged into place, all of it thrown away by one
+	 * stray Escape. It is worth nothing when closing is cheap - a graph opened
+	 * from another surface goes straight back to it, and a user who has turned
+	 * the prompt off in Settings has said the trade is not worth it to them.
+	 */
+	confirmOnClose?: boolean;
 	/** Default setting for showing external links (from settings) */
 	defaultShowExternalLinks?: boolean;
 	/** Callback to persist external links toggle changes */
@@ -179,6 +206,13 @@ export interface DocumentGraphViewProps {
 	onLayoutTypeChange?: (type: MindMapLayoutType) => void;
 	/** Optional SSH remote ID - if provided, shows unavailable message (can't scan remote filesystem) */
 	sshRemoteId?: string;
+	/**
+	 * What to call this graph in the header, the dialog label, and the close
+	 * prompt. Same component either way - a graph over the agent's memory
+	 * directory is a "Memory Graph" to the user, and reading "Document Graph"
+	 * there makes it look like the wrong surface opened.
+	 */
+	title?: string;
 }
 
 /**
@@ -192,7 +226,10 @@ export function DocumentGraphView({
 	onDocumentOpen,
 	onExternalLinkOpen,
 	focusFilePath,
+	scopeFiles,
+	scopeDirectory,
 	onFocusFileConsumed: _onFocusFileConsumed,
+	confirmOnClose = true,
 	defaultShowExternalLinks = false,
 	onExternalLinksChange,
 	defaultMaxNodes = DEFAULT_MAX_NODES,
@@ -200,10 +237,12 @@ export function DocumentGraphView({
 	onNeighborDepthChange,
 	defaultPreviewCharLimit = 100,
 	onPreviewCharLimitChange,
-	defaultLayoutType = 'mindmap',
+	defaultLayoutType = 'hierarchical',
 	onLayoutTypeChange,
 	sshRemoteId,
+	title = 'Document Graph',
 }: DocumentGraphViewProps) {
+	const bionifyReadingMode = useSettingsStore((s) => s.bionifyReadingMode);
 	// Graph data state
 	const [nodes, setNodes] = useState<MindMapNode[]>([]);
 	const [links, setLinks] = useState<MindMapLink[]>([]);
@@ -212,14 +251,53 @@ export function DocumentGraphView({
 	const [error, setError] = useState<string | null>(null);
 	const [progress, setProgress] = useState<ProgressData | null>(null);
 
+	/**
+	 * Files in the scope that connect to nothing else in it. Reported by the
+	 * builder rather than re-derived here: it owns the edge list, and a second
+	 * opinion about what counts as connected is a second thing to get wrong.
+	 */
+	const [orphanFiles, setOrphanFiles] = useState<string[]>([]);
+
 	// Settings state
 	const [includeExternalLinks, setIncludeExternalLinks] = useState(defaultShowExternalLinks);
+	// Orphans start visible: the whole reason to graph a hand-picked scope is to
+	// see which of those documents stand alone, so hiding them by default would
+	// hide the answer.
+	const [showOrphans, setShowOrphans] = useState(true);
 	const [neighborDepth, setNeighborDepth] = useState(defaultNeighborDepth);
 	const [showDepthSlider, setShowDepthSlider] = useState(false);
 	const [previewCharLimit, setPreviewCharLimit] = useState(defaultPreviewCharLimit);
 	const [showPreviewSlider, setShowPreviewSlider] = useState(false);
+	// The toolbar pill reads "active" whenever previews are not at the shipped
+	// 100-character default - Off is as deliberate a choice as 500 is.
+	const previewNonDefault = previewCharLimit !== 100;
 	const [layoutType, setLayoutType] = useState<MindMapLayoutType>(defaultLayoutType);
 	const [showLayoutDropdown, setShowLayoutDropdown] = useState(false);
+	const [spacingScale, setSpacingScale] = useState<number>(SPACING_SCALE_DEFAULT);
+	// Bumped by `F` to re-frame the whole graph. A token rather than a callback
+	// because the transform lives inside the canvas component.
+	const [fitToken, setFitToken] = useState(0);
+	// What the scroll wheel does. Persisted because it is a working posture
+	// rather than a per-visit choice: a user reading a wide graph in Pan mode
+	// should not have to switch back every time the graph is reopened.
+	const { value: scrollPans, setValue: setScrollPans } = usePersistedToggle(
+		SCROLL_MODE_STORAGE_KEY,
+		scrollModePans(DEFAULT_SCROLL_MODE)
+	);
+	const scrollMode = scrollModeFromPans(scrollPans);
+	// The Help panel's segmented control names a destination while `S` and the
+	// pill flip, so clicking the mode you are already in is a no-op rather than
+	// a toggle that undoes itself. Both go through the same setter, and the flip
+	// goes through `nextScrollMode` for the same reason `L` goes through
+	// `nextMindMapLayout`: one place decides what comes next.
+	const setScrollMode = useCallback(
+		(mode: GraphScrollMode) => setScrollPans(scrollModePans(mode)),
+		[setScrollPans]
+	);
+	const toggleScrollMode = useCallback(
+		() => setScrollMode(nextScrollMode(scrollMode)),
+		[setScrollMode, scrollMode]
+	);
 
 	// Close all other dropdowns when opening one
 	const openDropdown = (which: 'depth' | 'preview' | 'layout') => {
@@ -291,6 +369,10 @@ export function DocumentGraphView({
 	const [showCloseConfirmation, setShowCloseConfirmation] = useState(false);
 	const confirmCloseButtonRef = useRef<HTMLButtonElement>(null);
 
+	// Screenshot modal state
+	const [showScreenshotModal, setShowScreenshotModal] = useState(false);
+	const screenshotCopyButtonRef = useRef<HTMLButtonElement>(null);
+
 	// Container refs
 	const containerRef = useRef<HTMLDivElement>(null);
 	const graphContainerRef = useRef<HTMLDivElement>(null);
@@ -343,29 +425,48 @@ export function DocumentGraphView({
 	const abortBacklinkScanRef = useRef<(() => void) | null>(null);
 	const currentGraphDataRef = useRef<GraphData | null>(null);
 
+	// Progressive expansion state - true while BFS is still walking outward after
+	// the focus node has been rendered. Drives the non-blocking "expanding graph"
+	// badge in the bottom-left corner.
+	const [expandingGraph, setExpandingGraph] = useState(false);
+	const [expandProgress, setExpandProgress] = useState<{
+		depth: number;
+		loaded: number;
+	} | null>(null);
+	// Tracks whether the streaming flow has emitted at least the focus node.
+	// Once true, the final state-replacement at the end of loadGraphData becomes
+	// a no-op overlay rather than a fresh setNodes() that would visibly flash.
+	const streamingActiveRef = useRef(false);
+
 	/**
-	 * Handle escape - show confirmation modal
+	 * Handle escape.
+	 *
+	 * The body lives in `escapeLadderRef`, assigned during render further down
+	 * where the search query, the node list, and `handleNodeSelect` are all in
+	 * scope. Registering this stable wrapper instead keeps the layer
+	 * registration from re-running on every keystroke in the search box.
 	 */
+	const escapeLadderRef = useRef<() => void>(() => {});
 	const handleEscapeRequest = useCallback(() => {
-		setShowCloseConfirmation(true);
+		escapeLadderRef.current();
 	}, []);
+
+	/** The bottom rung: confirm first, unless closing is cheap enough not to. */
+	const requestClose = useCallback(() => {
+		if (!confirmOnClose) {
+			onCloseRef.current();
+			return;
+		}
+		setShowCloseConfirmation(true);
+	}, [confirmOnClose]);
 
 	/**
 	 * Register with layer stack for Escape handling
 	 */
-	useEffect(() => {
-		if (isOpen) {
-			const id = registerLayer({
-				type: 'modal',
-				priority: MODAL_PRIORITIES.DOCUMENT_GRAPH,
-				blocksLowerLayers: true,
-				capturesFocus: true,
-				focusTrap: 'lenient',
-				onEscape: handleEscapeRequest,
-			});
-			return () => unregisterLayer(id);
-		}
-	}, [isOpen, registerLayer, unregisterLayer, handleEscapeRequest]);
+	useModalLayer(MODAL_PRIORITIES.DOCUMENT_GRAPH, undefined, handleEscapeRequest, {
+		focusTrap: 'lenient',
+		enabled: isOpen,
+	});
 
 	/**
 	 * Register depth slider dropdown with layer stack when open
@@ -495,7 +596,7 @@ export function DocumentGraphView({
 				setAllLinksWithExternal((prev) => [...prev, ...newMindMapLinks]);
 				setLoadedDocuments((prev) => prev + updateData.newNodes.length);
 
-				console.log('[DocumentGraph] Added backlinks:', {
+				logger.info('[DocumentGraph] Added backlinks:', undefined, {
 					newNodes: updateData.newNodes.length,
 					newEdges: updateData.newEdges.length,
 					progress: `${updateData.filesScanned}/${updateData.totalFiles}`,
@@ -512,8 +613,56 @@ export function DocumentGraphView({
 		setBacklinksLoading(false);
 		setBacklinkProgress(null);
 		abortBacklinkScanRef.current = null;
-		console.log('[DocumentGraph] Backlink scan complete');
+		logger.info('[DocumentGraph] Backlink scan complete');
 	}, []);
+
+	/**
+	 * Handle streaming partial updates from buildGraphData. The focus node
+	 * arrives first (so the user sees the graph instantly), then each BFS depth
+	 * arrives as it completes. This is what makes the modal feel responsive
+	 * over SSH.
+	 */
+	const handlePartialUpdate = useCallback(
+		(update: PartialUpdate) => {
+			const { nodes: newMindMapNodes, links: newMindMapLinks } = convertToMindMapData(
+				update.newNodes.map((n) => ({ id: n.id, data: n.data })),
+				update.newEdges.map((e) => ({ source: e.source, target: e.target, type: e.type })),
+				previewCharLimit
+			);
+
+			if (update.phase === 'focus') {
+				// First update - replace any stale state from a previous build with
+				// just the focus node, dismiss the spinner, and flag the BFS
+				// expansion as in-flight.
+				streamingActiveRef.current = true;
+				setNodes(newMindMapNodes);
+				setLinks(newMindMapLinks);
+				setDocumentOnlyNodes(newMindMapNodes);
+				setDocumentOnlyLinks(newMindMapLinks);
+				setAllNodesWithExternal(newMindMapNodes);
+				setAllLinksWithExternal(newMindMapLinks);
+				setLoadedDocuments(update.loadedDocuments);
+				setActiveFocusFile(focusFilePath);
+				setLoading(false);
+				setExpandingGraph(true);
+				setExpandProgress({ depth: 0, loaded: update.loadedDocuments });
+				return;
+			}
+
+			// depth-complete: append to every list. We append in both the
+			// document-only and "with external" lists so the toggle stays in sync;
+			// external-domain nodes get folded in at the end of the build.
+			setNodes((prev) => [...prev, ...newMindMapNodes]);
+			setLinks((prev) => [...prev, ...newMindMapLinks]);
+			setDocumentOnlyNodes((prev) => [...prev, ...newMindMapNodes]);
+			setDocumentOnlyLinks((prev) => [...prev, ...newMindMapLinks]);
+			setAllNodesWithExternal((prev) => [...prev, ...newMindMapNodes]);
+			setAllLinksWithExternal((prev) => [...prev, ...newMindMapLinks]);
+			setLoadedDocuments(update.loadedDocuments);
+			setExpandProgress({ depth: update.currentDepth, loaded: update.loadedDocuments });
+		},
+		[previewCharLimit, focusFilePath]
+	);
 
 	/**
 	 * Load and build graph data
@@ -531,13 +680,16 @@ export function DocumentGraphView({
 			setProgress(null);
 			setBacklinksLoading(false);
 			setBacklinkProgress(null);
+			streamingActiveRef.current = false;
+			setExpandingGraph(false);
+			setExpandProgress(null);
 
 			if (resetPagination) {
 				setMaxNodes(defaultMaxNodes);
 			}
 
 			try {
-				console.log('[DocumentGraph] Building graph data:', {
+				logger.info('[DocumentGraph] Building graph data:', undefined, {
 					rootPath,
 					focusFilePath,
 					includeExternalLinks,
@@ -547,16 +699,19 @@ export function DocumentGraphView({
 				const graphData = await buildGraphData({
 					rootPath,
 					focusFile: focusFilePath,
+					scopeFiles,
+					scopeDirectory,
 					maxDepth: neighborDepth > 0 ? neighborDepth : 10, // Use large depth for "all"
 					maxNodes: resetPagination ? defaultMaxNodes : maxNodes,
 					onProgress: handleProgress,
+					onPartialUpdate: handlePartialUpdate,
 					sshRemoteId,
 				});
 
 				// Store reference to current graph data for backlink scanning
 				currentGraphDataRef.current = graphData;
 
-				console.log('[DocumentGraph] Graph data built (outgoing links only):', {
+				logger.info('[DocumentGraph] Graph data built (outgoing links only):', undefined, {
 					totalDocuments: graphData.totalDocuments,
 					loadedDocuments: graphData.loadedDocuments,
 					nodeCount: graphData.nodes.length,
@@ -605,7 +760,7 @@ export function DocumentGraphView({
 				const mindMapNodes = includeExternalLinks ? allMindMapNodes : docMindMapNodes;
 				const mindMapLinks = includeExternalLinks ? allMindMapLinks : docMindMapLinks;
 
-				console.log('[DocumentGraph] Converted to mind map format:', {
+				logger.info('[DocumentGraph] Converted to mind map format:', undefined, {
 					nodeCount: mindMapNodes.length,
 					linkCount: mindMapLinks.length,
 					docOnlyCount: docMindMapNodes.length,
@@ -617,11 +772,30 @@ export function DocumentGraphView({
 					focusFilePath,
 				});
 
-				setNodes(mindMapNodes);
-				setLinks(mindMapLinks);
+				// If the streaming flow has already populated nodes/links, only
+				// flip the visible list when toggling state requires it (e.g. the
+				// user has external-links enabled and externals just arrived).
+				// Otherwise replace state - the streaming path may have been a
+				// no-op (e.g. focus file failed to parse and we got the empty
+				// fallback return).
+				if (!streamingActiveRef.current) {
+					setNodes(mindMapNodes);
+					setLinks(mindMapLinks);
+				} else if (includeExternalLinks) {
+					setNodes(allMindMapNodes);
+					setLinks(allMindMapLinks);
+				}
 
-				// Set active focus file from the required focusFilePath prop
-				setActiveFocusFile(focusFilePath);
+				// Take the center the builder actually used. In scope mode it may
+				// have auto-picked the highest-degree file, and keeping the
+				// requested (possibly empty) path here renders an empty graph on
+				// top of a perfectly good node set.
+				setActiveFocusFile(graphData.centerFile || focusFilePath);
+				setOrphanFiles(graphData.orphanFiles);
+
+				// Streaming BFS is done - clear the in-flight badge.
+				setExpandingGraph(false);
+				setExpandProgress(null);
 
 				// Start background backlink scan after initial graph is displayed
 				if (graphData.startBacklinkScan) {
@@ -632,8 +806,10 @@ export function DocumentGraphView({
 					);
 				}
 			} catch (err) {
-				console.error('Failed to build graph data:', err);
+				logger.error('Failed to build graph data:', undefined, err);
 				setError(err instanceof Error ? err.message : 'Failed to load document graph');
+				setExpandingGraph(false);
+				setExpandProgress(null);
 			} finally {
 				setLoading(false);
 			}
@@ -644,12 +820,15 @@ export function DocumentGraphView({
 			maxNodes,
 			defaultMaxNodes,
 			handleProgress,
+			handlePartialUpdate,
 			focusFilePath,
 			neighborDepth,
 			previewCharLimit,
 			handleBacklinkUpdate,
 			handleBacklinkComplete,
 			sshRemoteId,
+			scopeFiles,
+			scopeDirectory,
 		]
 	);
 
@@ -688,17 +867,21 @@ export function DocumentGraphView({
 		if (includeExternalLinks) {
 			setNodes(allNodesWithExternal);
 			setLinks(allLinksWithExternal);
-			console.log('[DocumentGraph] Added external links from cache:', {
+			logger.info('[DocumentGraph] Added external links from cache:', undefined, {
 				totalNodes: allNodesWithExternal.length,
 				totalLinks: allLinksWithExternal.length,
 			});
 		} else {
 			setNodes(documentOnlyNodes);
 			setLinks(documentOnlyLinks);
-			console.log('[DocumentGraph] Removed external links (using cached document-only data):', {
-				totalNodes: documentOnlyNodes.length,
-				totalLinks: documentOnlyLinks.length,
-			});
+			logger.info(
+				'[DocumentGraph] Removed external links (using cached document-only data):',
+				undefined,
+				{
+					totalNodes: documentOnlyNodes.length,
+					totalLinks: documentOnlyLinks.length,
+				}
+			);
 		}
 	}, [
 		includeExternalLinks,
@@ -739,7 +922,7 @@ export function DocumentGraphView({
 		if (!isOpen || !rootPath) return;
 
 		window.maestro.documentGraph.watchFolder(rootPath).catch((err) => {
-			console.error('Failed to start document graph file watcher:', err);
+			logger.error('Failed to start document graph file watcher:', undefined, err);
 		});
 
 		const unsubscribe = window.maestro.documentGraph.onFilesChanged((data) => {
@@ -754,7 +937,7 @@ export function DocumentGraphView({
 		return () => {
 			unsubscribe();
 			window.maestro.documentGraph.unwatchFolder(rootPath).catch((err) => {
-				console.error('Failed to stop document graph file watcher:', err);
+				logger.error('Failed to stop document graph file watcher:', undefined, err);
 			});
 		};
 	}, [isOpen, rootPath, debouncedLoadGraphData]);
@@ -784,6 +967,12 @@ export function DocumentGraphView({
 		window.maestro.fs
 			.stat(fullPath, sshRemoteId)
 			.then((stats) => {
+				// stat returns null for a phantom target (e.g. an unresolved [[wiki]]
+				// link that points nowhere) - treat it as "no stats" like the catch.
+				if (!stats) {
+					setSelectedNodeStats(null);
+					return;
+				}
 				setSelectedNodeStats({
 					createdAt: stats.createdAt ? new Date(stats.createdAt) : null,
 					modifiedAt: stats.modifiedAt ? new Date(stats.modifiedAt) : null,
@@ -798,8 +987,9 @@ export function DocumentGraphView({
 			.readFile(fullPath, sshRemoteId)
 			.then((content) => {
 				if (!content) return;
-				const tasks = countMarkdownTasks(content);
-				setSelectedNodeTasks(tasks.total > 0 ? tasks : null);
+				const { open, closed } = countMarkdownTasks(content);
+				const total = open + closed;
+				setSelectedNodeTasks(total > 0 ? { completed: closed, total } : null);
 			})
 			.catch(() => {
 				setSelectedNodeTasks(null);
@@ -818,7 +1008,7 @@ export function DocumentGraphView({
 		// Set this node as the new center - triggers re-layout in MindMap
 		setActiveFocusFile(node.filePath);
 
-		console.log('[DocumentGraph] Re-centering graph on:', node.filePath);
+		logger.info('[DocumentGraph] Re-centering graph on:', undefined, node.filePath);
 	}, []);
 
 	/**
@@ -864,29 +1054,42 @@ export function DocumentGraphView({
 	/**
 	 * Handle neighbor depth change
 	 */
-	const handleNeighborDepthChange = useCallback(
-		(e: React.ChangeEvent<HTMLInputElement>) => {
-			const newDepth = parseInt(e.target.value, 10);
+	const applyNeighborDepth = useCallback(
+		(newDepth: number) => {
 			setNeighborDepth(newDepth);
 			onNeighborDepthChange?.(newDepth);
 		},
 		[onNeighborDepthChange]
 	);
 
+	const handleNeighborDepthChange = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) => {
+			applyNeighborDepth(parseInt(e.target.value, 10));
+		},
+		[applyNeighborDepth]
+	);
+
 	/**
 	 * Handle preview character limit change
 	 */
-	const handlePreviewCharLimitChange = useCallback(
-		(e: React.ChangeEvent<HTMLInputElement>) => {
-			const newLimit = parseInt(e.target.value, 10);
-			setPreviewCharLimit(newLimit);
-			onPreviewCharLimitChange?.(newLimit);
+	const applyPreviewCharLimit = useCallback(
+		(newLimit: number) => {
+			const clamped = clampPreviewCharLimit(newLimit);
+			setPreviewCharLimit(clamped);
+			onPreviewCharLimitChange?.(clamped);
 		},
 		[onPreviewCharLimitChange]
 	);
 
+	const handlePreviewCharLimitChange = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) => {
+			applyPreviewCharLimit(parseInt(e.target.value, 10));
+		},
+		[applyPreviewCharLimit]
+	);
+
 	/**
-	 * Handle layout type change — clears drag overrides since they're layout-specific
+	 * Handle layout type change - clears drag overrides since they're layout-specific
 	 */
 	const handleLayoutTypeChange = useCallback(
 		(type: MindMapLayoutType) => {
@@ -899,6 +1102,91 @@ export function DocumentGraphView({
 		},
 		[onLayoutTypeChange]
 	);
+
+	/**
+	 * Screenshot the graph area exactly as it is painted, preview pane included.
+	 *
+	 * Goes through Electron's page capture rather than serializing the canvas:
+	 * the graph, the markdown preview and the legend are three different render
+	 * paths, and only the compositor knows what the user is actually looking at.
+	 *
+	 * The screenshot modal is dismissed by the caller first; this waits two
+	 * frames so the shot is taken from a frame that no longer has the modal (or
+	 * its backdrop) sitting on top of the graph.
+	 */
+	const captureGraphImage = useCallback(async (): Promise<string | null> => {
+		const el = graphContainerRef.current;
+		const capturePage = window.maestro?.shell?.capturePage;
+		if (!el || !capturePage) return null;
+
+		await new Promise<void>((resolve) =>
+			requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+		);
+
+		const rect = el.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0) return null;
+		return await capturePage({
+			x: rect.left,
+			y: rect.top,
+			width: rect.width,
+			height: rect.height,
+		});
+	}, []);
+
+	const handleScreenshotCopy = useCallback(async () => {
+		setShowScreenshotModal(false);
+		try {
+			const dataUrl = await captureGraphImage();
+			if (dataUrl && (await safeClipboardWriteImage(dataUrl))) {
+				notifyCenterFlash({ message: 'Graph Copied', color: 'green' });
+				return;
+			}
+			notifyToast({
+				color: 'red',
+				title: 'Copy Failed',
+				message: 'Could not capture the graph view.',
+			});
+		} catch (err) {
+			logger.error('Failed to copy graph screenshot:', undefined, err);
+			notifyToast({
+				color: 'red',
+				title: 'Copy Failed',
+				message: err instanceof Error ? err.message : 'Could not capture the graph view.',
+			});
+		}
+	}, [captureGraphImage]);
+
+	const handleScreenshotSave = useCallback(async () => {
+		setShowScreenshotModal(false);
+		try {
+			const dataUrl = await captureGraphImage();
+			if (!dataUrl) {
+				notifyToast({
+					color: 'red',
+					title: 'Save Failed',
+					message: 'Could not capture the graph view.',
+				});
+				return;
+			}
+			const result = await saveImageDataUrlToDisk(dataUrl, `graph-${fileTimestampSlug()}.png`);
+			if (result.saved) {
+				notifyCenterFlash({
+					message: 'Graph Saved',
+					detail: result.path ? getBasename(result.path) : undefined,
+					color: 'green',
+				});
+			} else if (result.error) {
+				notifyToast({ color: 'red', title: 'Save Failed', message: result.error });
+			}
+		} catch (err) {
+			logger.error('Failed to save graph screenshot:', undefined, err);
+			notifyToast({
+				color: 'red',
+				title: 'Save Failed',
+				message: err instanceof Error ? err.message : 'Could not capture the graph view.',
+			});
+		}
+	}, [captureGraphImage]);
 
 	/**
 	 * Handle load more
@@ -932,7 +1220,7 @@ export function DocumentGraphView({
 			setNodes(mindMapNodes);
 			setLinks(mindMapLinks);
 		} catch (err) {
-			console.error('Failed to load more documents:', err);
+			logger.error('Failed to load more documents:', undefined, err);
 		} finally {
 			setLoadingMore(false);
 		}
@@ -1205,46 +1493,191 @@ export function DocumentGraphView({
 	 * First Escape: clear search if there's content
 	 * Second Escape (or first if empty): blur search, return focus to graph, select center node
 	 */
-	const handleSearchKeyDown = useCallback(
-		(e: React.KeyboardEvent<HTMLInputElement>) => {
-			if (e.key === 'Escape') {
-				e.stopPropagation(); // Prevent layer stack from handling
-				if (searchQuery) {
-					// First Escape: clear search query
-					setSearchQuery('');
-				} else {
-					// Second Escape (or first if empty): blur search, select center node, focus graph
-					searchInputRef.current?.blur();
+	/**
+	 * Escape is a LADDER, climbed one rung per press, never skipping to close.
+	 *
+	 *   1. caret in the search box -> hand focus back to the graph, query intact
+	 *   2. search still has text    -> clear it
+	 *   3. otherwise                -> close (confirming per `confirmOnClose`)
+	 *
+	 * Rung 1 is what makes "search, then arrow to a hit" work: the query has to
+	 * survive the key that gets you out of the text box, or the highlighted
+	 * nodes you were about to walk to go dim as you reach for them.
+	 *
+	 * This is assigned during render rather than bound to the input's own
+	 * `onKeyDown`, because the layer stack handles Escape at CAPTURE on
+	 * `window` (see `LayerStackProvider`) - so a handler on the input never
+	 * sees the key, and `stopPropagation` there cannot stop a listener that has
+	 * already run. An `onKeyDown` version of this ladder was in place and dead:
+	 * every Escape went straight to the close confirmation.
+	 */
+	escapeLadderRef.current = () => {
+		if (document.activeElement === searchInputRef.current) {
+			searchInputRef.current?.blur();
 
-					// Select the center node (the focus file) first
-					if (activeFocusFile) {
-						const centerNode = nodes.find((n) => n.filePath === activeFocusFile);
-						if (centerNode) {
-							handleNodeSelect(centerNode);
-						}
-					}
-
-					// Focus the mind map container after state update
-					requestAnimationFrame(() => {
-						mindMapContainerRef.current?.focus();
-					});
+			// Select the center node (the focus file) first, so the arrow keys
+			// have somewhere to start from.
+			if (activeFocusFile) {
+				const centerNode = nodes.find((n) => n.filePath === activeFocusFile);
+				if (centerNode) {
+					handleNodeSelect(centerNode);
 				}
 			}
-		},
-		[searchQuery, activeFocusFile, nodes, handleNodeSelect]
-	);
+
+			// Focus the mind map container after state update
+			requestAnimationFrame(() => {
+				mindMapContainerRef.current?.focus();
+			});
+			return;
+		}
+		if (searchQuery) {
+			setSearchQuery('');
+			return;
+		}
+		requestClose();
+	};
 
 	/**
-	 * Handle container keyboard shortcuts (Cmd+F for search)
+	 * Handle container keyboard shortcuts (Cmd+F search; L layout; D depth;
+	 * P preview length; F fit to view; C screenshot; +/- node spacing)
 	 */
-	const handleContainerKeyDown = useCallback((e: React.KeyboardEvent) => {
-		// Cmd+F or Ctrl+F to focus search
-		if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+	const handleContainerKeyDown = useCallback(
+		(e: React.KeyboardEvent) => {
+			// Cmd+F or Ctrl+F to focus search
+			if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+				e.preventDefault();
+				searchInputRef.current?.focus();
+				searchInputRef.current?.select();
+				return;
+			}
+
+			// Everything below is an unmodified single key, so skip when a modifier
+			// is held (browser zoom on Cmd/Ctrl +/-, OS chords) and when the user is
+			// typing into an input (the search box, the sliders).
+			if (e.metaKey || e.ctrlKey || e.altKey) return;
+			const target = e.target as HTMLElement | null;
+			const tag = target?.tagName;
+			if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+
+			// L cycles the layout; D widens the neighbor depth. Both go through the
+			// same handlers the toolbar controls use, so a key press persists the
+			// choice and clears layout-specific drag overrides exactly like a click.
+			if (e.key === 'l' || e.key === 'L') {
+				e.preventDefault();
+				handleLayoutTypeChange(nextMindMapLayout(layoutType));
+				return;
+			}
+			if (e.key === 'd' || e.key === 'D') {
+				e.preventDefault();
+				applyNeighborDepth(nextNeighborDepth(neighborDepth));
+				return;
+			}
+			// P cycles preview length, ending at Off (filename pills). It used to
+			// be a second spelling of Enter's in-graph preview, which spent a key
+			// on a duplicate of a binding the user already has.
+			if (e.key === 'p' || e.key === 'P') {
+				e.preventDefault();
+				applyPreviewCharLimit(nextPreviewCharLimit(previewCharLimit));
+				return;
+			}
+
+			// F re-frames the entire graph. Zooming out by hand cannot always get
+			// there, so this is the only reliable way back to the whole picture.
+			if (e.key === 'f' || e.key === 'F') {
+				e.preventDefault();
+				setFitToken((prev) => prev + 1);
+				return;
+			}
+
+			// S swaps what the scroll wheel does. Reachable without leaving the
+			// canvas, because the moment you want it is mid-gesture: the framing
+			// is right and the next scroll just threw it away.
+			if (e.key === 's' || e.key === 'S') {
+				e.preventDefault();
+				toggleScrollMode();
+				return;
+			}
+
+			// C opens the screenshot chooser, matching the camera button in the
+			// footer. Gated on the same capability the button is, so the key is
+			// inert rather than opening a dialog whose actions would both fail.
+			if ((e.key === 'c' || e.key === 'C') && !!window.maestro?.shell?.capturePage) {
+				e.preventDefault();
+				setShowScreenshotModal(true);
+				return;
+			}
+
+			// '=' is the unshifted '+' key on US layouts; accept both for ergonomics.
+			const isIncrease = e.key === '+' || e.key === '=';
+			const isDecrease = e.key === '-' || e.key === '_';
+			if (!isIncrease && !isDecrease) return;
+
 			e.preventDefault();
-			searchInputRef.current?.focus();
-			searchInputRef.current?.select();
-		}
-	}, []);
+			setSpacingScale((prev) => {
+				const next = isIncrease ? prev + SPACING_SCALE_STEP : prev - SPACING_SCALE_STEP;
+				const clamped = Math.min(SPACING_SCALE_MAX, Math.max(SPACING_SCALE_MIN, next));
+				// Round to one decimal to avoid floating-point drift.
+				return Math.round(clamped * 10) / 10;
+			});
+		},
+		[
+			applyNeighborDepth,
+			applyPreviewCharLimit,
+			handleLayoutTypeChange,
+			layoutType,
+			neighborDepth,
+			previewCharLimit,
+			toggleScrollMode,
+		]
+	);
+	// The graph is a canvas the user pans around in, so its useful default is
+	// "as much of the screen as a modal may take" rather than a fixed box - the
+	// old 1200x760 default was a postage stamp on a large display. clampModalSize
+	// caps this at the shared 90% viewport ratio.
+	const defaultModalSize = useMemo(
+		() => viewportModalSize({ width: 0.95, height: 0.95 }),
+		// Recomputing per render would fight the resize listener inside the hook,
+		// which already re-clamps the live size when the viewport changes.
+		[]
+	);
+	const resizableModal = useResizableModal({
+		resizeKey: 'document-graph',
+		defaultSize: defaultModalSize,
+		minSize: { width: 760, height: 500 },
+		enabled: isOpen,
+		externalRef: containerRef,
+	});
+
+	// Preview pane width: dragged by its left edge, remembered across opens.
+	const {
+		width: previewWidth,
+		setWidth: setPreviewWidth,
+		reset: resetPreviewWidth,
+	} = usePersistedPanelWidth(PREVIEW_WIDTH_STORAGE_KEY, {
+		defaultWidth: PREVIEW_DEFAULT_WIDTH,
+		minWidth: PREVIEW_MIN_WIDTH,
+		maxWidth: PREVIEW_MAX_WIDTH,
+	});
+	// Leave a strip of graph visible no matter how wide the pane is dragged. The
+	// container can be narrower than the stored width (a small modal, a resized
+	// window), so the live clamp is separate from the stored bounds.
+	const previewMaxWidth = previewMaxWidthForContainer(graphDimensions.width);
+	// The drag must start from the width actually on screen, not the stored one:
+	// when the container is narrower than the remembered width the pane renders
+	// clamped, and starting the delta from the larger value snaps it wider on the
+	// first mousemove.
+	const renderedPreviewWidth = Math.min(previewWidth, previewMaxWidth);
+	const {
+		panelRef: previewPanelRef,
+		isResizing: isPreviewResizing,
+		onResizeStart: onPreviewResizeStart,
+	} = useResizablePanel({
+		width: renderedPreviewWidth,
+		minWidth: PREVIEW_MIN_WIDTH,
+		maxWidth: previewMaxWidth,
+		setWidth: setPreviewWidth,
+		side: 'right',
+	});
 
 	if (!isOpen) return null;
 
@@ -1277,29 +1710,40 @@ export function DocumentGraphView({
 				tabIndex={-1}
 				role="dialog"
 				aria-modal="true"
-				aria-label="Document Graph"
-				className="rounded-xl shadow-2xl border overflow-hidden flex flex-col outline-none"
+				aria-label={title}
+				className="relative rounded-xl shadow-2xl border overflow-hidden flex flex-col outline-none"
 				style={{
+					...resizableModal.style,
 					backgroundColor: theme.colors.bgActivity,
 					borderColor: theme.colors.border,
-					width: '90vw',
-					height: '90vh',
 				}}
+				data-modal-resize-key="document-graph"
 				onClick={(e) => e.stopPropagation()}
 				onKeyDown={handleContainerKeyDown}
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div
 					className="px-6 py-4 border-b flex items-center justify-between flex-shrink-0"
 					style={{ borderColor: theme.colors.border }}
 				>
-					<div className="flex items-center gap-3">
-						<Network className="w-5 h-5" style={{ color: theme.colors.accent }} />
-						<h2 className="text-lg font-semibold" style={{ color: theme.colors.textMain }}>
-							Document Graph
+					{/* The title yields first. This row neither wraps nor scrolls, and
+					    the modal clips at its right edge, so something has to give when
+					    it gets tight - and a truncated heading costs the user nothing
+					    next to a close button pushed out of the window. */}
+					<div className="flex items-center gap-3 min-w-0 shrink">
+						<Network className="w-5 h-5 shrink-0" style={{ color: theme.colors.accent }} />
+						<h2 className="text-lg font-semibold truncate" style={{ color: theme.colors.textMain }}>
+							{title}
 						</h2>
 						<span
-							className="text-xs px-2 py-0.5 rounded"
+							className="text-xs px-2 py-0.5 rounded truncate"
 							style={{
 								backgroundColor: `${theme.colors.accent}20`,
 								color: theme.colors.textDim,
@@ -1309,9 +1753,9 @@ export function DocumentGraphView({
 						</span>
 					</div>
 
-					<div className="flex items-center gap-3">
+					<div className="flex items-center gap-3 shrink-0">
 						{/* Search Input */}
-						<div className="relative">
+						<div className="relative shrink-0">
 							<Search
 								className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none"
 								style={{ color: theme.colors.textDim }}
@@ -1321,14 +1765,20 @@ export function DocumentGraphView({
 								type="text"
 								value={searchQuery}
 								onChange={(e) => setSearchQuery(e.target.value)}
-								onKeyDown={handleSearchKeyDown}
 								placeholder="Search documents..."
-								className="pl-8 pr-3 py-1.5 rounded text-sm outline-none transition-colors"
+								// `pr-8` keeps a permanent slot for the clear button rather
+								// than adding one when a query appears: a padding that
+								// changes with the value reflows the text under the caret on
+								// the first keystroke.
+								className="pl-8 pr-8 py-1.5 rounded text-sm outline-none transition-colors"
 								style={{
 									backgroundColor: `${theme.colors.accent}10`,
 									color: theme.colors.textMain,
 									border: `1px solid ${searchQuery ? theme.colors.accent : 'transparent'}`,
-									width: 180,
+									// Sized to hold the whole placeholder. A box that clips its
+									// own hint to "Search docume" reads as a broken control,
+									// and the hint is the only thing naming what it searches.
+									width: SEARCH_BOX_WIDTH,
 								}}
 								onFocus={(e) => (e.currentTarget.style.borderColor = theme.colors.accent)}
 								onBlur={(e) =>
@@ -1371,7 +1821,7 @@ export function DocumentGraphView({
 								onMouseLeave={(e) =>
 									(e.currentTarget.style.backgroundColor = `${theme.colors.accent}10`)
 								}
-								title={`Layout: ${LAYOUT_LABELS[layoutType].name}`}
+								title={`Layout: ${LAYOUT_LABELS[layoutType].name} (L to cycle)`}
 							>
 								<Network className="w-4 h-4" />
 								{LAYOUT_LABELS[layoutType].name}
@@ -1387,11 +1837,11 @@ export function DocumentGraphView({
 										minWidth: 200,
 									}}
 								>
-									{(['mindmap', 'radial', 'force'] as MindMapLayoutType[]).map((type) => (
+									{MIND_MAP_LAYOUT_TYPES.map((type) => (
 										<button
 											key={type}
 											onClick={() => handleLayoutTypeChange(type)}
-											className="w-full px-3 py-2 text-left text-sm transition-colors flex items-center justify-between"
+											className="w-full px-3 py-2 text-left text-sm transition-colors flex items-center justify-between gap-3"
 											style={{
 												backgroundColor:
 													layoutType === type ? `${theme.colors.accent}15` : 'transparent',
@@ -1405,8 +1855,11 @@ export function DocumentGraphView({
 													layoutType === type ? `${theme.colors.accent}15` : 'transparent')
 											}
 										>
-											<span>{LAYOUT_LABELS[type].name}</span>
-											<span className="text-xs" style={{ color: theme.colors.textDim }}>
+											<span className="whitespace-nowrap">{LAYOUT_LABELS[type].name}</span>
+											<span
+												className="text-xs whitespace-nowrap shrink-0"
+												style={{ color: theme.colors.textDim }}
+											>
 												{LAYOUT_LABELS[type].description}
 											</span>
 										</button>
@@ -1434,17 +1887,17 @@ export function DocumentGraphView({
 								}
 								title={
 									neighborDepth > 0
-										? `Showing ${neighborDepth} level${neighborDepth > 1 ? 's' : ''} of neighbors`
-										: 'Show all nodes'
+										? `Showing ${neighborDepth} level${neighborDepth > 1 ? 's' : ''} of neighbors (D to widen)`
+										: 'Showing all nodes (D to cycle)'
 								}
 							>
 								<Sliders className="w-4 h-4" />
-								Depth: {neighborDepth === 0 ? 'All' : neighborDepth}
+								Depth: {formatNeighborDepth(neighborDepth)}
 							</button>
 
 							{showDepthSlider && (
 								<div
-									className="absolute top-full right-0 mt-2 p-3 rounded-lg shadow-lg z-50"
+									className="absolute top-full right-0 mt-2 p-3 rounded-lg shadow-lg z-[60]"
 									style={{
 										backgroundColor: theme.colors.bgActivity,
 										border: `1px solid ${theme.colors.border}`,
@@ -1456,13 +1909,13 @@ export function DocumentGraphView({
 											Neighbor Depth
 										</span>
 										<span className="text-xs font-mono" style={{ color: theme.colors.textMain }}>
-											{neighborDepth === 0 ? 'All' : neighborDepth}
+											{formatNeighborDepth(neighborDepth)}
 										</span>
 									</div>
 									<input
 										type="range"
-										min="0"
-										max="5"
+										min={NEIGHBOR_DEPTH_ALL}
+										max={NEIGHBOR_DEPTH_MAX}
 										value={neighborDepth}
 										onChange={handleNeighborDepthChange}
 										className="w-full"
@@ -1494,30 +1947,32 @@ export function DocumentGraphView({
 								onClick={() => openDropdown('preview')}
 								className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm transition-colors"
 								style={{
-									backgroundColor:
-										previewCharLimit > 100
-											? `${theme.colors.accent}25`
-											: `${theme.colors.accent}10`,
-									color: previewCharLimit > 100 ? theme.colors.accent : theme.colors.textDim,
+									backgroundColor: previewNonDefault
+										? `${theme.colors.accent}25`
+										: `${theme.colors.accent}10`,
+									color: previewNonDefault ? theme.colors.accent : theme.colors.textDim,
 								}}
 								onMouseEnter={(e) =>
 									(e.currentTarget.style.backgroundColor = `${theme.colors.accent}30`)
 								}
 								onMouseLeave={(e) =>
-									(e.currentTarget.style.backgroundColor =
-										previewCharLimit > 100
-											? `${theme.colors.accent}25`
-											: `${theme.colors.accent}10`)
+									(e.currentTarget.style.backgroundColor = previewNonDefault
+										? `${theme.colors.accent}25`
+										: `${theme.colors.accent}10`)
 								}
-								title={`Preview text limit: ${previewCharLimit} characters`}
+								title={
+									isPreviewOff(previewCharLimit)
+										? 'Previews off - nodes are filename pills (P to cycle)'
+										: `Preview text limit: ${previewCharLimit} characters (P to cycle)`
+								}
 							>
 								<Type className="w-4 h-4" />
-								Preview: {previewCharLimit}
+								Preview: {formatPreviewCharLimit(previewCharLimit)}
 							</button>
 
 							{showPreviewSlider && (
 								<div
-									className="absolute top-full right-0 mt-2 p-3 rounded-lg shadow-lg z-50"
+									className="absolute top-full right-0 mt-2 p-3 rounded-lg shadow-lg z-[60]"
 									style={{
 										backgroundColor: theme.colors.bgActivity,
 										border: `1px solid ${theme.colors.border}`,
@@ -1529,14 +1984,14 @@ export function DocumentGraphView({
 											Preview Characters
 										</span>
 										<span className="text-xs font-mono" style={{ color: theme.colors.textMain }}>
-											{previewCharLimit}
+											{formatPreviewCharLimit(previewCharLimit)}
 										</span>
 									</div>
 									<input
 										type="range"
-										min="50"
-										max="500"
-										step="50"
+										min={PREVIEW_CHAR_LIMIT_MIN}
+										max={PREVIEW_CHAR_LIMIT_MAX}
+										step={PREVIEW_CHAR_LIMIT_STEP}
 										value={previewCharLimit}
 										onChange={handlePreviewCharLimitChange}
 										className="w-full"
@@ -1546,17 +2001,48 @@ export function DocumentGraphView({
 										className="flex justify-between text-xs mt-1"
 										style={{ color: theme.colors.textDim }}
 									>
-										<span>50</span>
+										<span>Off</span>
+										<span>100</span>
 										<span>200</span>
-										<span>350</span>
+										<span>300</span>
+										<span>400</span>
 										<span>500</span>
 									</div>
 									<p className="text-xs mt-2" style={{ color: theme.colors.textDim }}>
-										Characters shown in document previews
+										{isPreviewOff(previewCharLimit)
+											? 'Nodes render as filename pills, with no preview text'
+											: 'Characters shown in document previews'}
 									</p>
 								</div>
 							)}
 						</div>
+
+						{/* Scroll mode indicator. Reads as ACTIVE in Pan, because Zoom
+						    is the shipped default and a permanently-lit pill stops
+						    meaning anything. The label names what the wheel does
+						    right now, not what clicking would change it to. */}
+						<button
+							onClick={toggleScrollMode}
+							className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm transition-colors"
+							style={{
+								backgroundColor:
+									scrollMode === 'pan' ? `${theme.colors.accent}25` : `${theme.colors.accent}10`,
+								color: scrollMode === 'pan' ? theme.colors.accent : theme.colors.textDim,
+							}}
+							onMouseEnter={(e) =>
+								(e.currentTarget.style.backgroundColor = `${theme.colors.accent}30`)
+							}
+							onMouseLeave={(e) =>
+								(e.currentTarget.style.backgroundColor =
+									scrollMode === 'pan' ? `${theme.colors.accent}25` : `${theme.colors.accent}10`)
+							}
+							title={`Scroll wheel: ${SCROLL_MODE_LABELS[scrollMode].wheelAction}. Shift+scroll: ${SCROLL_MODE_LABELS[scrollMode].modifierAction}. (S to switch)`}
+							aria-pressed={scrollMode === 'pan'}
+							data-testid="document-graph-scroll-mode-toggle"
+						>
+							{scrollMode === 'pan' ? <Move className="w-4 h-4" /> : <ZoomIn className="w-4 h-4" />}
+							Scroll: {SCROLL_MODE_LABELS[scrollMode].name}
+						</button>
 
 						{/* External Links Toggle */}
 						<button
@@ -1581,6 +2067,31 @@ export function DocumentGraphView({
 							<ExternalLink className="w-4 h-4" />
 							External
 						</button>
+
+						{/* Unlinked (orphan) toggle. Only scope mode can produce orphans,
+						    so the control stays hidden in focus mode rather than
+						    offering a toggle that can never change anything. */}
+						{orphanFiles.length > 0 && (
+							<button
+								onClick={() => setShowOrphans((v) => !v)}
+								className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm transition-colors"
+								style={{
+									backgroundColor: showOrphans
+										? `${theme.colors.warning}25`
+										: `${theme.colors.warning}10`,
+									color: showOrphans ? theme.colors.warning : theme.colors.textDim,
+								}}
+								title={
+									showOrphans
+										? `Hide the ${orphanFiles.length} document${orphanFiles.length === 1 ? '' : 's'} nothing links to`
+										: `Show the ${orphanFiles.length} document${orphanFiles.length === 1 ? '' : 's'} nothing links to`
+								}
+								data-testid="document-graph-orphan-toggle"
+							>
+								<Unlink className="w-4 h-4" />
+								Unlinked {orphanFiles.length}
+							</button>
+						)}
 
 						{/* Reset Layout Button - only show when positions have been modified */}
 						{nodePositions.size > 0 && (
@@ -1686,7 +2197,7 @@ export function DocumentGraphView({
 				>
 					{loading ? (
 						<div className="h-full flex flex-col items-center justify-center gap-8">
-							<Loader2 className="w-8 h-8 animate-spin" style={{ color: theme.colors.accent }} />
+							<Spinner size={32} color={theme.colors.accent} />
 							<div className="flex flex-col items-center gap-4">
 								<p className="text-sm" style={{ color: theme.colors.textDim }}>
 									{progress
@@ -1767,6 +2278,7 @@ export function DocumentGraphView({
 							height={graphDimensions.height}
 							maxDepth={neighborDepth || 2}
 							showExternalLinks={includeExternalLinks}
+							showOrphans={showOrphans}
 							selectedNodeId={selectedNodeId}
 							onNodeSelect={handleNodeSelect}
 							onNodeDoubleClick={handleNodeDoubleClick}
@@ -1780,9 +2292,13 @@ export function DocumentGraphView({
 							searchQuery={searchQuery}
 							previewCharLimit={previewCharLimit}
 							layoutType={layoutType}
+							spacingScale={spacingScale}
 							nodePositions={nodePositions}
 							onNodePositionChange={handleNodePositionChange}
 							containerRef={mindMapContainerRef}
+							legendExpanded={legendExpanded}
+							fitToken={fitToken}
+							scrollMode={scrollMode}
 						/>
 					) : (
 						<div
@@ -1800,6 +2316,8 @@ export function DocumentGraphView({
 						<GraphLegend
 							theme={theme}
 							showExternalLinks={includeExternalLinks}
+							scrollMode={scrollMode}
+							onScrollModeChange={setScrollMode}
 							onClose={() => setLegendExpanded(false)}
 						/>
 					)}
@@ -1822,15 +2340,35 @@ export function DocumentGraphView({
 					{/* Markdown Preview Panel */}
 					{(previewFile || previewLoading || previewError) && (
 						<div
+							ref={previewPanelRef}
 							className="absolute top-4 right-4 bottom-4 rounded-lg shadow-2xl border flex flex-col z-50 outline-none"
 							style={{
 								backgroundColor: theme.colors.bgActivity,
 								borderColor: theme.colors.border,
-								width: 'min(560px, 42vw)',
+								width: renderedPreviewWidth,
 								maxWidth: '90%',
 							}}
 							onKeyDown={handlePreviewKeyDown}
 						>
+							{/* Drag the left edge to widen/narrow; double-click restores the default. */}
+							<div
+								className={`absolute top-0 left-0 w-3 h-full cursor-col-resize border-l-4 border-transparent z-20 ${
+									isPreviewResizing ? '' : 'transition-colors'
+								}`}
+								style={{ borderLeftColor: isPreviewResizing ? theme.colors.accent : undefined }}
+								onPointerDown={onPreviewResizeStart}
+								onDoubleClick={resetPreviewWidth}
+								onMouseEnter={(e) => (e.currentTarget.style.borderLeftColor = theme.colors.accent)}
+								onMouseLeave={(e) =>
+									(e.currentTarget.style.borderLeftColor = isPreviewResizing
+										? theme.colors.accent
+										: 'transparent')
+								}
+								role="separator"
+								aria-orientation="vertical"
+								aria-label="Resize document preview"
+								title="Drag to resize (double-click to reset)"
+							/>
 							<style>{generateProseStyles({ theme, scopeSelector: '.graph-preview' })}</style>
 							<div
 								className="px-4 py-3 border-b flex items-center justify-between gap-3"
@@ -1925,7 +2463,7 @@ export function DocumentGraphView({
 										className="flex items-center gap-2 text-xs"
 										style={{ color: theme.colors.textDim }}
 									>
-										<Loader2 className="w-4 h-4 animate-spin" />
+										<Spinner size={16} />
 										Loading preview...
 									</div>
 								) : previewError ? (
@@ -1944,6 +2482,7 @@ export function DocumentGraphView({
 										cwd={previewFile.relativePath.split('/').slice(0, -1).join('/')}
 										onFileClick={handlePreviewFile}
 										sshRemoteId={sshRemoteId}
+										enableBionifyReadingMode={bionifyReadingMode}
 									/>
 								) : null}
 							</div>
@@ -1951,16 +2490,18 @@ export function DocumentGraphView({
 					)}
 				</div>
 
-				{/* Footer */}
+				{/* Footer. A three-column grid, not justify-between: the two side
+				    tracks are always equal, so the Snapshot button sits at the
+				    true center whether or not a selected node fills the right. */}
 				<div
-					className="px-6 py-4 border-t flex items-center justify-between text-xs flex-shrink-0"
+					className="px-6 py-4 border-t grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 text-xs flex-shrink-0"
 					style={{
 						borderColor: theme.colors.border,
 						color: theme.colors.textDim,
 						minHeight: 52,
 					}}
 				>
-					<div className="flex items-center gap-3">
+					<div className="flex items-center gap-3 min-w-0">
 						{/* Help Button */}
 						<button
 							onClick={() => setLegendExpanded(!legendExpanded)}
@@ -2015,15 +2556,32 @@ export function DocumentGraphView({
 								onMouseLeave={(e) => !loadingMore && (e.currentTarget.style.opacity = '1')}
 								title={`Load ${Math.min(LOAD_MORE_INCREMENT, totalDocuments - loadedDocuments)} more documents`}
 							>
-								{loadingMore ? (
-									<Loader2 className="w-3 h-3 animate-spin" />
-								) : (
-									<ChevronDown className="w-3 h-3" />
-								)}
+								{loadingMore ? <Spinner size={12} /> : <ChevronDown className="w-3 h-3" />}
 								{loadingMore
 									? 'Loading...'
 									: `Load more (${totalDocuments - loadedDocuments} remaining)`}
 							</button>
+						)}
+						{/* BFS expansion indicator - visible after the focus node has
+						    rendered while we're still walking outward */}
+						{expandingGraph && (
+							<span
+								className="flex items-center gap-1.5 px-2 py-1 rounded text-xs"
+								style={{
+									backgroundColor: `${theme.colors.accent}15`,
+									color: theme.colors.textDim,
+								}}
+								title="Fanning out from the focus document"
+							>
+								<Spinner size={12} color={theme.colors.accent} />
+								<span>
+									Expanding graph
+									{expandProgress && expandProgress.depth > 0
+										? ` (depth ${expandProgress.depth}, ${expandProgress.loaded} docs)`
+										: ''}
+									...
+								</span>
+							</span>
 						)}
 						{/* Backlink loading indicator */}
 						{backlinksLoading && (
@@ -2035,7 +2593,7 @@ export function DocumentGraphView({
 								}}
 								title="Scanning for documents that link to the current graph"
 							>
-								<Loader2 className="w-3 h-3 animate-spin" style={{ color: theme.colors.accent }} />
+								<Spinner size={12} color={theme.colors.accent} />
 								<span>
 									Scanning backlinks
 									{backlinkProgress && ` (${backlinkProgress.scanned}/${backlinkProgress.total})`}
@@ -2045,47 +2603,150 @@ export function DocumentGraphView({
 						)}
 					</div>
 
-					{/* Center: Selected node stats */}
-					{selectedNode?.nodeType === 'document' && (selectedNodeStats || selectedNodeTasks) && (
-						<div className="flex items-center gap-4" style={{ color: theme.colors.textDim }}>
-							{/* Task counts */}
-							{selectedNodeTasks && (
-								<div className="flex items-center gap-1.5" title="Markdown tasks">
-									<CheckSquare className="w-3.5 h-3.5" style={{ color: theme.colors.accent }} />
-									<span>
-										<span style={{ color: theme.colors.success }}>
-											{selectedNodeTasks.completed}
+					{/* Center: Snapshot. The column always renders so the grid keeps
+					    its middle track; the button inside hides when the bridge
+					    cannot capture the page, so it never offers a shot it can't take. */}
+					<div className="flex items-center justify-center">
+						{!!window.maestro?.shell?.capturePage && (
+							<button
+								onClick={() => setShowScreenshotModal(true)}
+								className="flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors whitespace-nowrap"
+								style={{
+									backgroundColor: showScreenshotModal
+										? `${theme.colors.accent}25`
+										: `${theme.colors.accent}10`,
+									color: showScreenshotModal ? theme.colors.accent : theme.colors.textMain,
+								}}
+								onMouseEnter={(e) =>
+									(e.currentTarget.style.backgroundColor = `${theme.colors.accent}30`)
+								}
+								onMouseLeave={(e) =>
+									(e.currentTarget.style.backgroundColor = showScreenshotModal
+										? `${theme.colors.accent}25`
+										: `${theme.colors.accent}10`)
+								}
+								title="Snapshot the graph view (C)"
+								aria-label="Snapshot the graph view"
+								data-testid="graph-screenshot-button"
+							>
+								<Camera className="w-3.5 h-3.5" />
+								Snapshot
+							</button>
+						)}
+					</div>
+
+					{/* Right: Selected node stats. The wrapper always renders so the
+					    right track exists even with nothing selected. */}
+					<div className="flex items-center justify-end min-w-0">
+						{selectedNode?.nodeType === 'document' && (selectedNodeStats || selectedNodeTasks) && (
+							<div className="flex items-center gap-4" style={{ color: theme.colors.textDim }}>
+								{/* Task counts */}
+								{selectedNodeTasks && (
+									<div className="flex items-center gap-1.5" title="Markdown tasks">
+										<CheckSquare className="w-3.5 h-3.5" style={{ color: theme.colors.accent }} />
+										<span>
+											<span style={{ color: theme.colors.success }}>
+												{selectedNodeTasks.completed}
+											</span>
+											<span> of </span>
+											<span style={{ color: theme.colors.textMain }}>
+												{selectedNodeTasks.total}
+											</span>
+											<span> tasks</span>
 										</span>
-										<span> of </span>
-										<span style={{ color: theme.colors.textMain }}>{selectedNodeTasks.total}</span>
-										<span> tasks</span>
-									</span>
-								</div>
-							)}
-							{/* Created date */}
-							{selectedNodeStats?.createdAt && (
-								<div className="flex items-center gap-1.5" title="Created date">
-									<Calendar className="w-3.5 h-3.5" />
-									<span>Created {formatDate(selectedNodeStats.createdAt)}</span>
-								</div>
-							)}
-							{/* Modified date */}
-							{selectedNodeStats?.modifiedAt && (
-								<div className="flex items-center gap-1.5" title="Modified date">
-									<Calendar className="w-3.5 h-3.5" />
-									<span>Modified {formatDate(selectedNodeStats.modifiedAt)}</span>
-								</div>
-							)}
-						</div>
-					)}
+									</div>
+								)}
+								{/* Created date */}
+								{selectedNodeStats?.createdAt && (
+									<div className="flex items-center gap-1.5" title="Created date">
+										<Calendar className="w-3.5 h-3.5" />
+										<span>Created {formatDate(selectedNodeStats.createdAt)}</span>
+									</div>
+								)}
+								{/* Modified date */}
+								{selectedNodeStats?.modifiedAt && (
+									<div className="flex items-center gap-1.5" title="Modified date">
+										<Calendar className="w-3.5 h-3.5" />
+										<span>Modified {formatDate(selectedNodeStats.modifiedAt)}</span>
+									</div>
+								)}
+							</div>
+						)}
+					</div>
 				</div>
 			</div>
+
+			{/* Screenshot Modal */}
+			{showScreenshotModal && (
+				<Modal
+					theme={theme}
+					title="Screenshot Graph"
+					headerIcon={<Camera className="w-4 h-4" style={{ color: theme.colors.accent }} />}
+					priority={MODAL_PRIORITIES.DOCUMENT_GRAPH + 1}
+					onClose={() => setShowScreenshotModal(false)}
+					width={420}
+					closeOnBackdropClick
+					initialFocusRef={screenshotCopyButtonRef}
+				>
+					<div className="flex flex-col gap-2 select-none">
+						<p className="text-xs mb-1" style={{ color: theme.colors.textDim }}>
+							Captures the graph exactly as it is on screen, including the preview pane when it is
+							open.
+						</p>
+						<button
+							ref={screenshotCopyButtonRef}
+							onClick={handleScreenshotCopy}
+							className="w-full flex items-center gap-3 px-3 py-2.5 rounded text-sm text-left transition-colors"
+							style={{
+								backgroundColor: `${theme.colors.accent}10`,
+								color: theme.colors.textMain,
+							}}
+							onMouseEnter={(e) =>
+								(e.currentTarget.style.backgroundColor = `${theme.colors.accent}25`)
+							}
+							onMouseLeave={(e) =>
+								(e.currentTarget.style.backgroundColor = `${theme.colors.accent}10`)
+							}
+						>
+							<Copy className="w-4 h-4 shrink-0" style={{ color: theme.colors.accent }} />
+							<span>
+								Copy to Clipboard
+								<span className="block text-xs" style={{ color: theme.colors.textDim }}>
+									Paste the image straight into another app
+								</span>
+							</span>
+						</button>
+						<button
+							onClick={handleScreenshotSave}
+							className="w-full flex items-center gap-3 px-3 py-2.5 rounded text-sm text-left transition-colors"
+							style={{
+								backgroundColor: `${theme.colors.accent}10`,
+								color: theme.colors.textMain,
+							}}
+							onMouseEnter={(e) =>
+								(e.currentTarget.style.backgroundColor = `${theme.colors.accent}25`)
+							}
+							onMouseLeave={(e) =>
+								(e.currentTarget.style.backgroundColor = `${theme.colors.accent}10`)
+							}
+						>
+							<Download className="w-4 h-4 shrink-0" style={{ color: theme.colors.accent }} />
+							<span>
+								Save to Disk
+								<span className="block text-xs" style={{ color: theme.colors.textDim }}>
+									Write a PNG wherever you choose
+								</span>
+							</span>
+						</button>
+					</div>
+				</Modal>
+			)}
 
 			{/* Close Confirmation Modal */}
 			{showCloseConfirmation && (
 				<Modal
 					theme={theme}
-					title="Close Document Graph?"
+					title={`Close ${title}?`}
 					priority={MODAL_PRIORITIES.DOCUMENT_GRAPH + 1}
 					onClose={() => setShowCloseConfirmation(false)}
 					width={400}
@@ -2104,9 +2765,7 @@ export function DocumentGraphView({
 					}
 					initialFocusRef={confirmCloseButtonRef}
 				>
-					<p style={{ color: theme.colors.textDim }}>
-						Are you sure you want to close the Document Graph?
-					</p>
+					<p style={{ color: theme.colors.textDim }}>Are you sure you want to close the {title}?</p>
 				</Modal>
 			)}
 

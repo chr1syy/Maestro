@@ -21,6 +21,8 @@ import {
 import type { Theme } from '../types';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { Modal, ModalFooter } from './ui/Modal';
+import { openUrl } from '../utils/openUrl';
+import { logger } from '../utils/logger';
 
 interface WindowsWarningModalProps {
 	theme: Theme;
@@ -156,9 +158,7 @@ export function WindowsWarningModal({
 					{/* Report issues */}
 					<button
 						type="button"
-						onClick={() =>
-							window.maestro.shell.openExternal('https://github.com/RunMaestro/Maestro/issues')
-						}
+						onClick={() => openUrl('https://github.com/RunMaestro/Maestro/issues')}
 						className="w-full flex items-start gap-3 p-3 rounded-lg border hover:bg-white/5 transition-colors text-left"
 						style={{ borderColor: theme.colors.border }}
 					>
@@ -180,7 +180,7 @@ export function WindowsWarningModal({
 					{/* Join Discord */}
 					<button
 						type="button"
-						onClick={() => window.maestro.shell.openExternal('https://discord.gg/FCAh4EWzfD')}
+						onClick={() => openUrl('https://discord.gg/FCAh4EWzfD')}
 						className="w-full flex items-start gap-3 p-3 rounded-lg border hover:bg-white/5 transition-colors text-left"
 						style={{ borderColor: theme.colors.border }}
 					>
@@ -217,7 +217,7 @@ export function WindowsWarningModal({
 							<p className="text-xs mt-0.5" style={{ color: theme.colors.textDim }}>
 								Accessible anytime via{' '}
 								<kbd
-									className="px-1 py-0.5 rounded text-[10px]"
+									className="px-1 py-0.5 rounded text-2xs"
 									style={{ backgroundColor: theme.colors.bgMain }}
 								>
 									Ctrl+K
@@ -280,7 +280,7 @@ export function exposeWindowsWarningModalDebug(
 ): void {
 	(window as any).__showWindowsWarningModal = () => {
 		setShowWindowsWarning(true);
-		console.log('[WindowsWarningModal] Modal triggered via console command');
+		logger.info('[WindowsWarningModal] Modal triggered via console command');
 	};
 }
 

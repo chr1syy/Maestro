@@ -6,9 +6,19 @@
  */
 
 import type Database from 'better-sqlite3';
-import type { StatsTimeRange, StatsAggregation } from '../../shared/stats-types';
+import type {
+	StatsTimeRange,
+	StatsAggregation,
+	SessionTokenTotals,
+} from '../../shared/stats-types';
+import {
+	percentilesFromSorted,
+	emptyPercentiles,
+	type DurationPercentiles,
+} from '../../shared/percentiles';
 import { PERFORMANCE_THRESHOLDS } from '../../shared/performance-metrics';
 import { getTimeRangeStart, perfMetrics, LOG_CONTEXT } from './utils';
+import { countImageAnnotationsSince } from './image-annotations';
 import { logger } from '../utils/logger';
 
 // ============================================================================
@@ -76,6 +86,53 @@ function queryBySource(db: Database.Database, startTime: number): { user: number
 	}
 	perfMetrics.end(perfStart, 'getAggregatedStats:bySource');
 	return result;
+}
+
+function queryByWorktreeStatus(
+	db: Database.Database,
+	startTime: number
+): {
+	worktreeQueries: number;
+	parentQueries: number;
+	byWorktreeStatus: {
+		worktree: { count: number; duration: number };
+		parent: { count: number; duration: number };
+	};
+} {
+	const perfStart = perfMetrics.start();
+	const rows = db
+		.prepare(
+			`
+      SELECT COALESCE(is_worktree, 0) as is_worktree,
+             COUNT(*) as count,
+             COALESCE(SUM(duration), 0) as duration
+      FROM query_events
+      WHERE start_time >= ?
+      GROUP BY COALESCE(is_worktree, 0)
+    `
+		)
+		.all(startTime) as Array<{ is_worktree: number; count: number; duration: number }>;
+
+	const byWorktreeStatus = {
+		worktree: { count: 0, duration: 0 },
+		parent: { count: 0, duration: 0 },
+	};
+	for (const row of rows) {
+		if (row.is_worktree === 1) {
+			byWorktreeStatus.worktree.count += row.count;
+			byWorktreeStatus.worktree.duration += row.duration;
+		} else {
+			// Treat NULL (legacy data) and 0 as parent
+			byWorktreeStatus.parent.count += row.count;
+			byWorktreeStatus.parent.duration += row.duration;
+		}
+	}
+	perfMetrics.end(perfStart, 'getAggregatedStats:byWorktreeStatus');
+	return {
+		worktreeQueries: byWorktreeStatus.worktree.count,
+		parentQueries: byWorktreeStatus.parent.count,
+		byWorktreeStatus,
+	};
 }
 
 function queryByLocation(
@@ -299,6 +356,194 @@ function queryBySessionByDay(
 	return result;
 }
 
+function queryBySessionSource(
+	db: Database.Database,
+	startTime: number
+): Record<string, { user: number; auto: number }> {
+	const perfStart = perfMetrics.start();
+	const rows = db
+		.prepare(
+			`
+      SELECT session_id, source, COUNT(*) as count
+      FROM query_events
+      WHERE start_time >= ?
+      GROUP BY session_id, source
+    `
+		)
+		.all(startTime) as Array<{
+		session_id: string;
+		source: 'user' | 'auto';
+		count: number;
+	}>;
+
+	const result: Record<string, { user: number; auto: number }> = {};
+	for (const row of rows) {
+		if (!result[row.session_id]) {
+			result[row.session_id] = { user: 0, auto: 0 };
+		}
+		result[row.session_id][row.source] = row.count;
+	}
+	perfMetrics.end(perfStart, 'getAggregatedStats:bySessionSource');
+	return result;
+}
+
+function queryBySessionLastQuery(db: Database.Database, startTime: number): Record<string, number> {
+	const perfStart = perfMetrics.start();
+	const rows = db
+		.prepare(
+			`
+      SELECT session_id, MAX(start_time) as last_query
+      FROM query_events
+      WHERE start_time >= ?
+      GROUP BY session_id
+    `
+		)
+		.all(startTime) as Array<{ session_id: string; last_query: number }>;
+
+	const result: Record<string, number> = {};
+	for (const row of rows) {
+		result[row.session_id] = row.last_query;
+	}
+	perfMetrics.end(perfStart, 'getAggregatedStats:bySessionLastQuery');
+	return result;
+}
+
+/**
+ * Token and cost totals per session.
+ */
+function queryBySessionTokens(
+	db: Database.Database,
+	startTime: number
+): Record<string, SessionTokenTotals> {
+	const perfStart = perfMetrics.start();
+	// COALESCE inside the SUMs so a mix of NULL and real rows totals the real
+	// ones instead of returning NULL for the whole group. `priced_queries`
+	// counts rows that reported ANY usage, which is how the dashboard can say
+	// "cost covers 40 of 900 queries" rather than implying the total is
+	// complete - every row written before migration v8 reports nothing.
+	const rows = db
+		.prepare(
+			`
+      SELECT session_id,
+             SUM(COALESCE(input_tokens, 0)) as input_tokens,
+             SUM(COALESCE(output_tokens, 0)) as output_tokens,
+             SUM(COALESCE(cache_read_tokens, 0)) as cache_read_tokens,
+             SUM(COALESCE(cache_creation_tokens, 0)) as cache_creation_tokens,
+             SUM(COALESCE(cost_usd, 0)) as cost_usd,
+             SUM(
+               CASE WHEN input_tokens IS NOT NULL
+                      OR output_tokens IS NOT NULL
+                      OR cache_read_tokens IS NOT NULL
+                      OR cache_creation_tokens IS NOT NULL
+                      OR cost_usd IS NOT NULL
+                    THEN 1 ELSE 0 END
+             ) as priced_queries
+      FROM query_events
+      WHERE start_time >= ?
+      GROUP BY session_id
+    `
+		)
+		.all(startTime) as Array<{
+		session_id: string;
+		input_tokens: number;
+		output_tokens: number;
+		cache_read_tokens: number;
+		cache_creation_tokens: number;
+		cost_usd: number;
+		priced_queries: number;
+	}>;
+
+	const result: Record<string, SessionTokenTotals> = {};
+	for (const row of rows) {
+		// Sessions that never reported usage are omitted entirely, so consumers
+		// can tell "no data" from "zero" without inspecting the numbers.
+		if (row.priced_queries === 0) continue;
+		result[row.session_id] = {
+			inputTokens: row.input_tokens,
+			outputTokens: row.output_tokens,
+			cacheReadTokens: row.cache_read_tokens,
+			cacheCreationTokens: row.cache_creation_tokens,
+			costUsd: row.cost_usd,
+			pricedQueries: row.priced_queries,
+		};
+	}
+	perfMetrics.end(perfStart, 'getAggregatedStats:bySessionTokens');
+	return result;
+}
+
+/**
+ * Query duration distribution overall and per agent type.
+ *
+ * SQLite (better-sqlite3) has no `PERCENTILE_CONT`, so we pull the `duration`
+ * column sorted ascending and slice in JS. One ordered scan feeds both the
+ * overall distribution and every per-agent distribution (rows arrive grouped by
+ * agent because the sort is `agent_type, duration`), so each group's slice is
+ * already sorted.
+ */
+function queryDurationPercentiles(
+	db: Database.Database,
+	startTime: number
+): {
+	overall: DurationPercentiles;
+	byAgent: Record<string, DurationPercentiles>;
+} {
+	const perfStart = perfMetrics.start();
+	const rows = db
+		.prepare(
+			`
+      SELECT agent_type, duration
+      FROM query_events
+      WHERE start_time >= ?
+      ORDER BY duration ASC
+    `
+		)
+		.all(startTime) as Array<{ agent_type: string; duration: number }>;
+
+	// Overall: rows are globally sorted by duration already.
+	const overall = percentilesFromSorted(rows.map((r) => r.duration));
+
+	// Per agent: collect each agent's durations preserving ascending order.
+	const perAgentSorted: Record<string, number[]> = {};
+	for (const row of rows) {
+		(perAgentSorted[row.agent_type] ??= []).push(row.duration);
+	}
+	const byAgent: Record<string, DurationPercentiles> = {};
+	for (const [agent, durations] of Object.entries(perAgentSorted)) {
+		byAgent[agent] = percentilesFromSorted(durations);
+	}
+
+	perfMetrics.end(perfStart, 'getAggregatedStats:durationPercentiles', {
+		sampleCount: rows.length,
+	});
+	return { overall, byAgent };
+}
+
+/**
+ * Auto Run task duration distribution (per individual task, which is the
+ * closest analog to a single "run" and yields far more samples than the
+ * batch-level `auto_run_sessions`).
+ */
+function queryAutoRunTaskPercentiles(
+	db: Database.Database,
+	startTime: number
+): DurationPercentiles {
+	const perfStart = perfMetrics.start();
+	const rows = db
+		.prepare(
+			`
+      SELECT duration
+      FROM auto_run_tasks
+      WHERE start_time >= ?
+      ORDER BY duration ASC
+    `
+		)
+		.all(startTime) as Array<{ duration: number }>;
+	perfMetrics.end(perfStart, 'getAggregatedStats:autoRunTaskPercentiles', {
+		sampleCount: rows.length,
+	});
+	return rows.length > 0 ? percentilesFromSorted(rows.map((r) => r.duration)) : emptyPercentiles();
+}
+
 // ============================================================================
 // Orchestrator
 // ============================================================================
@@ -322,6 +567,13 @@ export function getAggregatedStats(db: Database.Database, range: StatsTimeRange)
 	const byHour = queryByHour(db, startTime);
 	const sessionStats = querySessionStats(db, startTime);
 	const bySessionByDay = queryBySessionByDay(db, startTime);
+	const bySessionSource = queryBySessionSource(db, startTime);
+	const bySessionLastQuery = queryBySessionLastQuery(db, startTime);
+	const bySessionTokens = queryBySessionTokens(db, startTime);
+	const worktreeStatus = queryByWorktreeStatus(db, startTime);
+	const durationPercentiles = queryDurationPercentiles(db, startTime);
+	const autoRunTaskDurationPercentiles = queryAutoRunTaskPercentiles(db, startTime);
+	const imageAnnotations = countImageAnnotationsSince(db, startTime);
 
 	const totalDuration = perfMetrics.end(perfStart, 'getAggregatedStats:total', {
 		range,
@@ -341,6 +593,9 @@ export function getAggregatedStats(db: Database.Database, range: StatsTimeRange)
 		totalQueries: totals.count,
 		totalDuration: totals.total_duration,
 		avgDuration: totals.count > 0 ? Math.round(totals.total_duration / totals.count) : 0,
+		queryDurationPercentiles: durationPercentiles.overall,
+		queryDurationPercentilesByAgent: durationPercentiles.byAgent,
+		autoRunTaskDurationPercentiles,
 		byAgent,
 		bySource,
 		byDay,
@@ -349,5 +604,12 @@ export function getAggregatedStats(db: Database.Database, range: StatsTimeRange)
 		...sessionStats,
 		byAgentByDay,
 		bySessionByDay,
+		bySessionSource,
+		bySessionLastQuery,
+		bySessionTokens,
+		worktreeQueries: worktreeStatus.worktreeQueries,
+		parentQueries: worktreeStatus.parentQueries,
+		byWorktreeStatus: worktreeStatus.byWorktreeStatus,
+		imageAnnotations,
 	};
 }

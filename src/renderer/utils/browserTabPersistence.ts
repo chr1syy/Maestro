@@ -1,7 +1,11 @@
 import type { BrowserTab } from '../types';
+import { PERSISTENT_BROWSER_TAB_PARTITION_PATTERN } from '../../shared/browserTabPartition';
 
 const BROWSER_TAB_PARTITION_PREFIX = 'persist:maestro-browser-session-';
-const BROWSER_TAB_PARTITION_PATTERN = /^persist:maestro-browser-session-[a-zA-Z0-9_-]+$/;
+// Ephemeral (incognito) browser tabs use a partition WITHOUT the `persist:`
+// prefix, so Electron keeps their session data purely in memory and discards
+// it when the app quits.
+export const EPHEMERAL_BROWSER_TAB_PARTITION_PREFIX = 'maestro-ephemeral-';
 export const DEFAULT_BROWSER_TAB_URL = 'about:blank';
 export const DEFAULT_BROWSER_TAB_TITLE = 'New Tab';
 
@@ -18,11 +22,43 @@ export function getBrowserTabPartition(sessionId: string): string {
 	return `${BROWSER_TAB_PARTITION_PREFIX}${sanitizeBrowserPartitionKey(sessionId)}`;
 }
 
+// 8 lowercase alphanumerics. Uniqueness (not unguessability) is the goal: each
+// ephemeral tab gets its own partition so no state is shared between incognito
+// tabs, mirroring one-off private windows.
+function randomEphemeralSuffix(): string {
+	const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+	let suffix = '';
+	for (let i = 0; i < 8; i++) {
+		suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
+	}
+	return suffix;
+}
+
+export function getEphemeralBrowserTabPartition(sessionId: string): string {
+	return `${EPHEMERAL_BROWSER_TAB_PARTITION_PREFIX}${sanitizeBrowserPartitionKey(sessionId)}-${randomEphemeralSuffix()}`;
+}
+
+/**
+ * True when a tab is an ephemeral (incognito) browser tab. Checks the flag and
+ * the partition prefix so a tab that carries only one of the two markers is
+ * still recognized and excluded from persistence.
+ */
+export function isEphemeralBrowserTab(tab: BrowserTab): boolean {
+	return (
+		tab.ephemeral === true ||
+		(typeof tab.partition === 'string' &&
+			tab.partition.startsWith(EPHEMERAL_BROWSER_TAB_PARTITION_PREFIX))
+	);
+}
+
 export function getSafeBrowserTabPartition(
 	partition: string | null | undefined,
 	sessionId: string
 ): string {
-	if (typeof partition === 'string' && BROWSER_TAB_PARTITION_PATTERN.test(partition.trim())) {
+	if (
+		typeof partition === 'string' &&
+		PERSISTENT_BROWSER_TAB_PARTITION_PATTERN.test(partition.trim())
+	) {
 		return partition.trim();
 	}
 
@@ -53,12 +89,15 @@ export function resolveBrowserTabNavigationTarget(value: string): BrowserTabNavi
 	const trimmed = value.trim();
 	if (!trimmed) return { kind: 'url', url: DEFAULT_BROWSER_TAB_URL };
 	if (trimmed === DEFAULT_BROWSER_TAB_URL) return { kind: 'url', url: DEFAULT_BROWSER_TAB_URL };
-	if (looksLikeLocalAddress(trimmed)) {
-		return { kind: 'url', url: new URL(`http://${trimmed}`).toString() };
-	}
-
 	const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed);
 	const candidate = (() => {
+		// `looksLikeLocalAddress` only pattern-matches the shape of a loopback
+		// host, so it also accepts values the URL parser rejects outright
+		// ("localhost:99999", "127.999.999.999"). Feed the result through the
+		// shared try/catch below instead of parsing it here, or the throw escapes
+		// a function whose whole contract is to report bad input as
+		// `{ kind: 'error' }`.
+		if (looksLikeLocalAddress(trimmed)) return `http://${trimmed}`;
 		if (hasScheme) return trimmed;
 		if (looksLikeSchemeLessUrl(trimmed)) return `https://${trimmed}`;
 		if (looksLikeSearchQuery(trimmed)) return buildSearchUrl(trimmed);
@@ -70,7 +109,7 @@ export function resolveBrowserTabNavigationTarget(value: string): BrowserTabNavi
 		if (url.protocol === 'about:' && url.href === DEFAULT_BROWSER_TAB_URL) {
 			return { kind: 'url', url: DEFAULT_BROWSER_TAB_URL };
 		}
-		if (url.protocol === 'http:' || url.protocol === 'https:') {
+		if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'file:') {
 			return { kind: 'url', url: url.toString() };
 		}
 
@@ -91,6 +130,55 @@ export function normalizeBrowserTabUrl(value: string): string {
 	return result.kind === 'url' ? result.url : DEFAULT_BROWSER_TAB_URL;
 }
 
+/**
+ * True only when the URL is safe to expose as an outbound `<a href>` link - i.e.
+ * an http(s) scheme. Guards against `javascript:` / `data:` hrefs that would run
+ * script in the app origin when clicked (XSS), which could otherwise reach a tab
+ * via persisted or imported browser-tab state. `about:blank` and `file:` return
+ * false because they are not meaningful outbound links from a browser context.
+ */
+export function isHttpBrowserTabUrl(url: string | null | undefined): boolean {
+	if (!url) return false;
+	try {
+		const { protocol } = new URL(url);
+		return protocol === 'http:' || protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The value that is safe to hand an Electron `<webview>` as its `src`.
+ *
+ * Electron resolves the `src` attribute with `new URL(src, location.href)` from
+ * inside `WebViewElement.connectedCallback`, so an unparseable URL throws
+ * "Failed to construct 'URL': Invalid URL" synchronously during React's commit
+ * phase and takes the whole renderer tree down (MAESTRO-QX/QY/QZ).
+ *
+ * `tab.url` is NOT guaranteed parseable: the webview's own navigation events
+ * write it back, and `did-fail-load` reports the raw target as `validatedURL` -
+ * which for an `ERR_INVALID_URL` failure is exactly the malformed string that
+ * could not be parsed (`"http://"`, `"https://[bad"`). That value is fine to
+ * keep in state and show in the address bar so the user sees what failed, but it
+ * must never reach the element. Persistence sanitizes on save, so only remounts
+ * inside the same run (tab switch with keep-alive off, agent switch) are exposed.
+ *
+ * Parsed WITHOUT a base, unlike Electron, so a relative path also falls back to
+ * about:blank. Relative is never what a browser tab wants: the base is
+ * `app://app/index.html`, so it would load Maestro's own bundle into the tab.
+ */
+export function toWebviewSrc(url: string | null | undefined): string {
+	const trimmed = typeof url === 'string' ? url.trim() : '';
+	if (!trimmed) return DEFAULT_BROWSER_TAB_URL;
+
+	try {
+		new URL(trimmed);
+		return trimmed;
+	} catch {
+		return DEFAULT_BROWSER_TAB_URL;
+	}
+}
+
 export function getBrowserTabTitle(url: string, title?: string | null): string {
 	const normalizedTitle = typeof title === 'string' ? title.trim() : '';
 	if (normalizedTitle) return normalizedTitle;
@@ -98,9 +186,35 @@ export function getBrowserTabTitle(url: string, title?: string | null): string {
 
 	try {
 		const parsed = new URL(url);
+		if (parsed.protocol === 'file:') {
+			const basename = decodeURIComponent(parsed.pathname.split('/').pop() || '');
+			return basename || parsed.href;
+		}
 		return parsed.host || parsed.href;
 	} catch {
 		return url || DEFAULT_BROWSER_TAB_TITLE;
+	}
+}
+
+/**
+ * The user-visible label for a browser tab. A user-assigned `customTitle` takes
+ * precedence and locks the label across navigation; otherwise we fall back to the
+ * page-set title, then the URL host, then "New Tab". Shared by the tab bar, tab
+ * switcher, and anywhere a browser tab needs a display name.
+ */
+export function getBrowserTabLabel(tab: BrowserTab): string {
+	const custom = tab.customTitle?.trim();
+	if (custom) return custom;
+	const title = tab.title?.trim();
+	if (title) return title;
+	const url = tab.url?.trim();
+	if (!url || url === DEFAULT_BROWSER_TAB_URL) return DEFAULT_BROWSER_TAB_TITLE;
+
+	try {
+		const parsed = new URL(url);
+		return parsed.host || parsed.href;
+	} catch {
+		return url;
 	}
 }
 

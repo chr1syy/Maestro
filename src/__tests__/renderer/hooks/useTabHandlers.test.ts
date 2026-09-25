@@ -7,16 +7,33 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/react';
-import { useTabHandlers } from '../../../renderer/hooks/tabs/useTabHandlers';
+import {
+	useTabHandlers,
+	useTerminalTabHandlers,
+} from '../../../renderer/hooks/tabs/useTabHandlers';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { useModalStore } from '../../../renderer/stores/modalStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import type { Session, AITab, BrowserTab, FilePreviewTab } from '../../../renderer/types';
+import {
+	createMockAITab as createBaseMockAITab,
+	createMockFileTab as createBaseMockFileTab,
+} from '../../helpers/mockTab';
+import { createMockSession } from '../../helpers/mockSession';
+import { setLiveDraft, clearLiveDraft, getLiveDraft } from '../../../renderer/utils/liveDraftStore';
 
 // ============================================================================
 // window.maestro is mocked globally in src/__tests__/setup.ts
 // We just override specific return values needed by our tests in beforeEach.
 // ============================================================================
+
+// Mock InlineWizardContext so useTabHandlers can call useInlineWizardContext()
+// outside of an InlineWizardProvider. Only `endWizard` is consumed by the hook.
+vi.mock('../../../renderer/contexts/InlineWizardContext', () => ({
+	useInlineWizardContext: () => ({
+		endWizard: vi.fn(async () => null),
+	}),
+}));
 
 // ============================================================================
 // Test Helpers
@@ -24,39 +41,23 @@ import type { Session, AITab, BrowserTab, FilePreviewTab } from '../../../render
 
 function createMockAITab(overrides: Partial<AITab> = {}): AITab {
 	const id = overrides.id ?? `tab-${Math.random().toString(36).slice(2, 8)}`;
-	return {
+	return createBaseMockAITab({
 		id,
-		agentSessionId: null,
-		name: overrides.name ?? null,
-		starred: false,
-		logs: [],
-		inputValue: '',
-		stagedImages: [],
-		createdAt: Date.now(),
-		state: 'idle',
 		hasUnread: false,
 		isAtBottom: true,
 		...overrides,
-	} as AITab;
+	});
 }
 
 function createMockFileTab(overrides: Partial<FilePreviewTab> = {}): FilePreviewTab {
 	const id = overrides.id ?? `file-${Math.random().toString(36).slice(2, 8)}`;
-	return {
+	return createBaseMockFileTab({
 		id,
 		path: overrides.path ?? `/test/${id}.ts`,
 		name: overrides.name ?? id,
-		extension: overrides.extension ?? '.ts',
-		content: overrides.content ?? 'test content',
-		scrollTop: 0,
-		searchQuery: '',
-		editMode: false,
-		editContent: undefined,
-		createdAt: Date.now(),
-		lastModified: Date.now(),
 		isLoading: false,
 		...overrides,
-	} as FilePreviewTab;
+	});
 }
 
 function createMockBrowserTab(overrides: Partial<BrowserTab> = {}): BrowserTab {
@@ -72,46 +73,6 @@ function createMockBrowserTab(overrides: Partial<BrowserTab> = {}): BrowserTab {
 		favicon: null,
 		...overrides,
 	};
-}
-
-function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: overrides.id ?? `session-${Math.random().toString(36).slice(2, 8)}`,
-		name: overrides.name ?? 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test',
-		fullPath: '/test',
-		projectRoot: '/test',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
-		executionQueue: [],
-		activeTimeMs: 0,
-		aiTabs: [],
-		activeTabId: '',
-		closedTabHistory: [],
-		filePreviewTabs: [],
-		activeFileTabId: null,
-		browserTabs: [],
-		activeBrowserTabId: null,
-		unifiedTabOrder: [],
-		unifiedClosedTabHistory: [],
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	} as Session;
 }
 
 function setupSessionWithTabs(
@@ -186,6 +147,7 @@ describe('useTabHandlers', () => {
 			defaultSaveToHistory: true,
 			defaultShowThinking: undefined,
 			fileTabAutoRefreshEnabled: false,
+			browserHomeUrl: '',
 		} as any);
 
 		vi.clearAllMocks();
@@ -204,6 +166,11 @@ describe('useTabHandlers', () => {
 				.fn()
 				.mockResolvedValue(undefined);
 		}
+
+		// Live draft store is module-level; reset known test entries.
+		clearLiveDraft('tab-1');
+		clearLiveDraft('tab-2');
+		clearLiveDraft('draft-1');
 	});
 
 	afterEach(() => {
@@ -211,89 +178,17 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// Derived State
+	// Derived state lives in useTabDerivedState / getTabDerivedState (MainPanel)
 	// ========================================================================
 
-	describe('derived state', () => {
-		it('returns undefined activeTab when no session exists', () => {
+	describe('handlers-only return', () => {
+		it('does not expose derived paint fields (moved to MainPanel)', () => {
 			const { result } = renderHook(() => useTabHandlers());
-			expect(result.current.activeTab).toBeUndefined();
-		});
-
-		it('returns empty arrays when no session exists', () => {
-			const { result } = renderHook(() => useTabHandlers());
-			expect(result.current.unifiedTabs).toEqual([]);
-			expect(result.current.fileTabBackHistory).toEqual([]);
-			expect(result.current.fileTabForwardHistory).toEqual([]);
-		});
-
-		it('computes activeTab from active session', () => {
-			const tab = createMockAITab({ id: 'tab-1', name: 'Tab 1' });
-			const { result } = renderWithSession([tab]);
-			expect(result.current.activeTab?.id).toBe('tab-1');
-		});
-
-		it('computes unifiedTabs in correct order', () => {
-			const aiTab = createMockAITab({ id: 'ai-1' });
-			const fileTab = createMockFileTab({ id: 'file-1' });
-			setupSessionWithTabs([aiTab], [fileTab]);
-
-			const { result } = renderHook(() => useTabHandlers());
-			expect(result.current.unifiedTabs).toHaveLength(2);
-			expect(result.current.unifiedTabs[0].type).toBe('ai');
-			expect(result.current.unifiedTabs[0].id).toBe('ai-1');
-			expect(result.current.unifiedTabs[1].type).toBe('file');
-			expect(result.current.unifiedTabs[1].id).toBe('file-1');
-		});
-
-		it('returns activeFileTab when file tab is active', () => {
-			const aiTab = createMockAITab({ id: 'ai-1' });
-			const fileTab = createMockFileTab({ id: 'file-1', name: 'myFile' });
-			setupSessionWithTabs([aiTab], [fileTab], 'ai-1', 'file-1');
-
-			const { result } = renderHook(() => useTabHandlers());
-			expect(result.current.activeFileTab?.id).toBe('file-1');
-		});
-
-		it('returns null activeFileTab when no file tab is active', () => {
-			const aiTab = createMockAITab({ id: 'ai-1' });
-			setupSessionWithTabs([aiTab]);
-
-			const { result } = renderHook(() => useTabHandlers());
-			expect(result.current.activeFileTab).toBeNull();
-		});
-
-		it('computes isResumingSession based on agentSessionId', () => {
-			const tab = createMockAITab({ id: 'tab-1', agentSessionId: 'agent-123' });
-			const { result } = renderWithSession([tab]);
-			expect(result.current.isResumingSession).toBe(true);
-		});
-
-		it('isResumingSession is false when no agentSessionId', () => {
-			const tab = createMockAITab({ id: 'tab-1', agentSessionId: null });
-			const { result } = renderWithSession([tab]);
-			expect(result.current.isResumingSession).toBe(false);
-		});
-
-		it('computes file tab navigation history', () => {
-			const fileTab = createMockFileTab({
-				id: 'file-1',
-				navigationHistory: [
-					{ path: '/a.ts', name: 'a', scrollTop: 0 },
-					{ path: '/b.ts', name: 'b', scrollTop: 0 },
-					{ path: '/c.ts', name: 'c', scrollTop: 0 },
-				],
-				navigationIndex: 1,
-			});
-			const aiTab = createMockAITab({ id: 'ai-1' });
-			setupSessionWithTabs([aiTab], [fileTab], 'ai-1', 'file-1');
-
-			const { result } = renderHook(() => useTabHandlers());
-			expect(result.current.fileTabCanGoBack).toBe(true);
-			expect(result.current.fileTabCanGoForward).toBe(true);
-			expect(result.current.fileTabBackHistory).toHaveLength(1);
-			expect(result.current.fileTabForwardHistory).toHaveLength(1);
-			expect(result.current.activeFileTabNavIndex).toBe(1);
+			expect(result.current).not.toHaveProperty('activeTab');
+			expect(result.current).not.toHaveProperty('unifiedTabs');
+			expect(result.current).not.toHaveProperty('isResumingSession');
+			expect(typeof result.current.handleNewTab).toBe('function');
+			expect(typeof result.current.handleTabSelect).toBe('function');
 		});
 	});
 
@@ -539,6 +434,32 @@ describe('useTabHandlers', () => {
 			expect(session.filePreviewTabs[0].content).toBe('saved content');
 		});
 
+		it('handleFileTabEditContentChange stamps the saved mtime so the save is not seen as external', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const fileTab = createMockFileTab({ id: 'file-1', content: 'old', lastModified: 1000 });
+			setupSessionWithTabs([aiTab], [fileTab]);
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleFileTabEditContentChange('file-1', undefined, 'saved content', 2000);
+			});
+
+			expect(getSession().filePreviewTabs[0].lastModified).toBe(2000);
+		});
+
+		it('handleFileTabEditContentChange keeps the existing mtime when none is supplied', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const fileTab = createMockFileTab({ id: 'file-1', content: 'old', lastModified: 1000 });
+			setupSessionWithTabs([aiTab], [fileTab]);
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleFileTabEditContentChange('file-1', undefined, 'saved content');
+			});
+
+			expect(getSession().filePreviewTabs[0].lastModified).toBe(1000);
+		});
+
 		it('handleFileTabSearchQueryChange updates search query', () => {
 			const aiTab = createMockAITab({ id: 'ai-1' });
 			const fileTab = createMockFileTab({ id: 'file-1' });
@@ -633,6 +554,36 @@ describe('useTabHandlers', () => {
 			expect(session.aiTabs[0].id).toBe('tab-2');
 		});
 
+		it('handleCloseOtherTabs kills terminal processes for closed terminal tabs', () => {
+			const sessionId = 'test-session';
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const session = createMockSession({
+				id: sessionId,
+				aiTabs: [aiTab],
+				activeTabId: 'ai-1',
+				terminalTabs: [
+					{ id: 'term-1', name: null, shellType: 'zsh', pid: 1 } as any,
+					{ id: 'term-2', name: null, shellType: 'zsh', pid: 2 } as any,
+				],
+				activeTerminalTabId: null,
+				unifiedTabOrder: [
+					{ type: 'ai', id: 'ai-1' },
+					{ type: 'terminal', id: 'term-1' },
+					{ type: 'terminal', id: 'term-2' },
+				],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: sessionId });
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleCloseOtherTabs();
+			});
+
+			expect(window.maestro.process.kill).toHaveBeenCalledWith(`${sessionId}-terminal-term-1`);
+			expect(window.maestro.process.kill).toHaveBeenCalledWith(`${sessionId}-terminal-term-2`);
+			expect(window.maestro.process.kill).toHaveBeenCalledTimes(2);
+		});
+
 		it('handleCloseTabsLeft closes tabs left of active', () => {
 			const tab1 = createMockAITab({ id: 'tab-1' });
 			const tab2 = createMockAITab({ id: 'tab-2' });
@@ -647,6 +598,31 @@ describe('useTabHandlers', () => {
 			const session = getSession();
 			expect(session.aiTabs).toHaveLength(2);
 			expect(session.aiTabs.map((t) => t.id)).toEqual(['tab-2', 'tab-3']);
+		});
+
+		it('handleCloseTabsLeft kills terminal processes for closed terminal tabs', () => {
+			const sessionId = 'test-session';
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const session = createMockSession({
+				id: sessionId,
+				aiTabs: [aiTab],
+				activeTabId: 'ai-1',
+				terminalTabs: [{ id: 'term-1', name: null, shellType: 'zsh', pid: 1 } as any],
+				activeTerminalTabId: null,
+				unifiedTabOrder: [
+					{ type: 'terminal', id: 'term-1' },
+					{ type: 'ai', id: 'ai-1' },
+				],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: sessionId });
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleCloseTabsLeft();
+			});
+
+			expect(window.maestro.process.kill).toHaveBeenCalledWith(`${sessionId}-terminal-term-1`);
+			expect(window.maestro.process.kill).toHaveBeenCalledTimes(1);
 		});
 
 		it('handleCloseTabsRight closes tabs right of active', () => {
@@ -665,6 +641,31 @@ describe('useTabHandlers', () => {
 			expect(session.aiTabs.map((t) => t.id)).toEqual(['tab-1', 'tab-2']);
 		});
 
+		it('handleCloseTabsRight kills terminal processes for closed terminal tabs', () => {
+			const sessionId = 'test-session';
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const session = createMockSession({
+				id: sessionId,
+				aiTabs: [aiTab],
+				activeTabId: 'ai-1',
+				terminalTabs: [{ id: 'term-1', name: null, shellType: 'zsh', pid: 1 } as any],
+				activeTerminalTabId: null,
+				unifiedTabOrder: [
+					{ type: 'ai', id: 'ai-1' },
+					{ type: 'terminal', id: 'term-1' },
+				],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: sessionId });
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleCloseTabsRight();
+			});
+
+			expect(window.maestro.process.kill).toHaveBeenCalledWith(`${sessionId}-terminal-term-1`);
+			expect(window.maestro.process.kill).toHaveBeenCalledTimes(1);
+		});
+
 		it('handleCloseCurrentTab returns file type for active file tab', () => {
 			const aiTab = createMockAITab({ id: 'ai-1' });
 			const fileTab = createMockFileTab({ id: 'file-1' });
@@ -678,6 +679,27 @@ describe('useTabHandlers', () => {
 
 			expect(closeResult.type).toBe('file');
 			expect(closeResult.tabId).toBe('file-1');
+		});
+
+		it('handleCloseCurrentTab shows confirmation for unsaved file tab', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const fileTab = createMockFileTab({
+				id: 'file-1',
+				editContent: 'unsaved draft',
+				name: 'Untitled',
+				extension: '',
+			});
+			setupSessionWithTabs([aiTab], [fileTab], 'ai-1', 'file-1');
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleCloseCurrentTab();
+			});
+
+			expect(useModalStore.getState().isOpen('confirm')).toBe(true);
+			// File should NOT be removed yet (pending user confirmation)
+			const session = useSessionStore.getState().sessions[0];
+			expect(session.filePreviewTabs).toHaveLength(1);
 		});
 
 		it('handleCloseCurrentTab returns browser type for active browser tab', () => {
@@ -860,6 +882,44 @@ describe('useTabHandlers', () => {
 			});
 		});
 
+		it('handleOpenBrowserTabAt opens a browser tab at a specific URL', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			setupSessionWithTabs([aiTab], [], 'ai-1', null);
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleOpenBrowserTabAt('file:///tmp/dashboard.html', {
+					title: 'dashboard.html',
+				});
+			});
+
+			const session = getSession();
+			expect(session.browserTabs).toHaveLength(1);
+			expect(session.browserTabs[0]).toMatchObject({
+				url: 'file:///tmp/dashboard.html',
+				title: 'dashboard.html',
+				isLoading: true,
+				favicon: null,
+				partition: 'persist:maestro-browser-session-test-session',
+			});
+			expect(session.activeBrowserTabId).toBe(session.browserTabs[0].id);
+			expect(session.activeFileTabId).toBeNull();
+			expect(session.inputMode).toBe('ai');
+		});
+
+		it('handleOpenBrowserTabAt no-ops on empty URL', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			setupSessionWithTabs([aiTab], [], 'ai-1', null);
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleOpenBrowserTabAt('');
+			});
+
+			const session = getSession();
+			expect(session.browserTabs ?? []).toHaveLength(0);
+		});
+
 		it('handleSelectBrowserTab activates an existing browser tab and repairs unified order', () => {
 			const aiTab = createMockAITab({ id: 'ai-1' });
 			const browserTab = createMockBrowserTab({ id: 'browser-1' });
@@ -938,6 +998,88 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
+	// New File Tab Handler
+	// ========================================================================
+
+	describe('new file tab handler', () => {
+		it('handleNewFileTab creates an untitled file tab in edit mode', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			setupSessionWithTabs([aiTab]);
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleNewFileTab();
+			});
+
+			const session = getSession();
+			expect(session.filePreviewTabs).toHaveLength(1);
+			expect(session.filePreviewTabs[0]).toMatchObject({
+				path: '',
+				name: 'Untitled',
+				extension: '',
+				content: '',
+				editMode: true,
+				editContent: '',
+			});
+			expect(session.activeFileTabId).toBe(session.filePreviewTabs[0].id);
+			expect(session.activeBrowserTabId).toBeNull();
+			expect(session.activeTerminalTabId).toBeNull();
+			expect(session.unifiedTabOrder).toContainEqual({
+				type: 'file',
+				id: session.filePreviewTabs[0].id,
+			});
+		});
+
+		it('handleNewFileTab inserts adjacent to active file tab', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const fileTab = createMockFileTab({ id: 'file-1' });
+			setupSessionWithTabs([aiTab], [fileTab], 'ai-1', 'file-1');
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleNewFileTab();
+			});
+
+			const session = getSession();
+			expect(session.filePreviewTabs).toHaveLength(2);
+			// New tab should be right after the existing file tab in unified order
+			const fileIndices = session.unifiedTabOrder
+				.map((ref, i) => (ref.type === 'file' ? i : -1))
+				.filter((i) => i >= 0);
+			expect(fileIndices[1] - fileIndices[0]).toBe(1);
+		});
+
+		it('handleNewFileTab clears terminal and browser selection', () => {
+			const aiTab = createMockAITab({ id: 'ai-1' });
+			const sessionId = setupSessionWithTabs([aiTab]);
+
+			useSessionStore.setState((state) => ({
+				...state,
+				sessions: state.sessions.map((session) =>
+					session.id === sessionId
+						? {
+								...session,
+								inputMode: 'terminal',
+								activeTerminalTabId: 'term-1',
+								activeBrowserTabId: 'browser-1',
+							}
+						: session
+				),
+			}));
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleNewFileTab();
+			});
+
+			const session = getSession();
+			expect(session.activeTerminalTabId).toBeNull();
+			expect(session.activeBrowserTabId).toBeNull();
+			expect(session.inputMode).toBe('ai');
+		});
+	});
+
+	// ========================================================================
 	// Tab Property Handlers
 	// ========================================================================
 
@@ -964,7 +1106,7 @@ describe('useTabHandlers', () => {
 
 			const { result } = renderHook(() => useTabHandlers());
 			act(() => {
-				result.current.handleUnifiedTabReorder(0, 1);
+				result.current.handleUnifiedTabReorder('ai-1', 'file-1');
 			});
 
 			const session = getSession();
@@ -972,13 +1114,13 @@ describe('useTabHandlers', () => {
 			expect(session.unifiedTabOrder[1]).toEqual({ type: 'ai', id: 'ai-1' });
 		});
 
-		it('handleUnifiedTabReorder is no-op for invalid indices', () => {
+		it('handleUnifiedTabReorder is no-op for unknown tab ids', () => {
 			const aiTab = createMockAITab({ id: 'ai-1' });
 			setupSessionWithTabs([aiTab]);
 
 			const { result } = renderHook(() => useTabHandlers());
 			act(() => {
-				result.current.handleUnifiedTabReorder(-1, 0);
+				result.current.handleUnifiedTabReorder('gone', 'ai-1');
 			});
 
 			const session = getSession();
@@ -1060,6 +1202,51 @@ describe('useTabHandlers', () => {
 				result.current.handleToggleTabShowThinking();
 			});
 			expect(getSession().aiTabs[0].showThinking).toBe('off');
+		});
+
+		it('handleToggleTabEnterToSend flips the effective value into a per-tab override', () => {
+			// Global default is true (enterToSendAI)
+			useSettingsStore.setState({ enterToSendAI: true } as any);
+			const tab = createMockAITab({ id: 'tab-1' });
+			const { result } = renderWithSession([tab]);
+
+			// undefined override + global true => first toggle stores false
+			act(() => {
+				result.current.handleToggleTabEnterToSend();
+			});
+			expect(getSession().aiTabs[0].enterToSend).toBe(false);
+
+			// flipping again stores true
+			act(() => {
+				result.current.handleToggleTabEnterToSend();
+			});
+			expect(getSession().aiTabs[0].enterToSend).toBe(true);
+		});
+
+		it('handleToggleTabEnterToSend respects current global default on first toggle', () => {
+			// Global default is false now
+			useSettingsStore.setState({ enterToSendAI: false } as any);
+			const tab = createMockAITab({ id: 'tab-1' });
+			const { result } = renderWithSession([tab]);
+
+			act(() => {
+				result.current.handleToggleTabEnterToSend();
+			});
+			// Effective was false (global), so toggling stores true
+			expect(getSession().aiTabs[0].enterToSend).toBe(true);
+		});
+
+		it('handleToggleTabEnterToSend leaves other tabs untouched', () => {
+			useSettingsStore.setState({ enterToSendAI: true } as any);
+			const tabA = createMockAITab({ id: 'tab-a' });
+			const tabB = createMockAITab({ id: 'tab-b' });
+			const { result } = renderWithSession([tabA, tabB], [], 'tab-a');
+
+			act(() => {
+				result.current.handleToggleTabEnterToSend();
+			});
+			expect(getSession().aiTabs[0].enterToSend).toBe(false);
+			expect(getSession().aiTabs[1].enterToSend).toBeUndefined();
 		});
 
 		it('handleUpdateTabByClaudeSessionId updates tab by agent session id', () => {
@@ -1346,7 +1533,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleSelectFileTab — auto-refresh
+	// handleSelectFileTab - auto-refresh
 	// ========================================================================
 
 	describe('handleSelectFileTab auto-refresh', () => {
@@ -1431,14 +1618,21 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleTabClose — wizard tab
+	// handleTabClose - wizard tab
 	// ========================================================================
 
 	describe('handleTabClose wizard tab', () => {
-		it('shows confirmation modal for wizard tab', () => {
+		it('shows confirmation modal for wizard tab with user interaction', () => {
 			const wizardTab = createMockAITab({
 				id: 'wizard-1',
-				wizardState: { isActive: true, currentStep: 0, steps: ['step1'] },
+				wizardState: {
+					isActive: true,
+					currentStep: 0,
+					steps: ['step1'],
+					conversationHistory: [
+						{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: Date.now() },
+					],
+				},
 			} as any);
 			const tab2 = createMockAITab({ id: 'tab-2' });
 			setupSessionWithTabs([wizardTab, tab2], [], 'wizard-1');
@@ -1452,6 +1646,25 @@ describe('useTabHandlers', () => {
 			expect(useModalStore.getState().isOpen('confirm')).toBe(true);
 			const modal = useModalStore.getState().modals.get('confirm');
 			expect((modal?.data as any)?.message).toContain('wizard');
+		});
+
+		it('closes wizard tab directly when no user interaction', () => {
+			const wizardTab = createMockAITab({
+				id: 'wizard-1',
+				wizardState: { isActive: true, currentStep: 0, steps: ['step1'], conversationHistory: [] },
+			} as any);
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([wizardTab, tab2], [], 'wizard-1');
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleTabClose('wizard-1');
+			});
+
+			// Should close directly without modal
+			const session = getSession();
+			expect(session.aiTabs).toHaveLength(1);
+			expect(useModalStore.getState().isOpen('confirm')).toBe(false);
 		});
 
 		it('closes directly for non-wizard tab', () => {
@@ -1471,7 +1684,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleTabClose — draft confirmation
+	// handleTabClose - draft confirmation
 	// ========================================================================
 
 	describe('handleTabClose draft confirmation', () => {
@@ -1542,10 +1755,63 @@ describe('useTabHandlers', () => {
 			expect(session.aiTabs).toHaveLength(1);
 			expect(session.aiTabs[0].id).toBe('tab-2');
 		});
+
+		it('uses live draft store when tab.inputValue is stale empty', () => {
+			// Simulates a fresh tab where the user has typed text but not yet
+			// blurred - tab.inputValue is empty but liveDraftStore has the live value.
+			const tab1 = createMockAITab({ id: 'tab-1', inputValue: '' });
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([tab1, tab2], [], 'tab-1');
+			setLiveDraft('tab-1', 'live typed text');
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleTabClose('tab-1');
+			});
+
+			expect(useModalStore.getState().isOpen('confirm')).toBe(true);
+			clearLiveDraft('tab-1');
+		});
+
+		it('skips draft modal when live draft is empty even if tab.inputValue is stale', () => {
+			// Simulates a tab whose user typed and then cleared the textarea -
+			// tab.inputValue still has the old text, but liveDraftStore reflects empty.
+			const tab1 = createMockAITab({ id: 'tab-1', inputValue: 'stale persisted text' });
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([tab1, tab2], [], 'tab-1');
+			setLiveDraft('tab-1', '');
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				result.current.handleTabClose('tab-1');
+			});
+
+			expect(useModalStore.getState().isOpen('confirm')).toBe(false);
+			const session = getSession();
+			expect(session.aiTabs).toHaveLength(1);
+			clearLiveDraft('tab-1');
+		});
+
+		it('clears the live draft entry when a tab is closed', () => {
+			const tab1 = createMockAITab({ id: 'tab-1' });
+			const tab2 = createMockAITab({ id: 'tab-2' });
+			setupSessionWithTabs([tab1, tab2], [], 'tab-1');
+			setLiveDraft('tab-1', 'some text');
+
+			const { result } = renderHook(() => useTabHandlers());
+			act(() => {
+				// Confirm the modal that pops up
+				result.current.handleTabClose('tab-1');
+				const modal = useModalStore.getState().modals.get('confirm');
+				(modal?.data as any)?.onConfirm();
+			});
+
+			expect(getLiveDraft('tab-1')).toBeUndefined();
+		});
 	});
 
 	// ========================================================================
-	// handleCloseAllTabs — draft confirmation
+	// handleCloseAllTabs - draft confirmation
 	// ========================================================================
 
 	describe('handleCloseAllTabs draft confirmation', () => {
@@ -1582,11 +1848,11 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleCloseOtherTabs — draft confirmation
+	// handleCloseOtherTabs - draft confirmation
 	// ========================================================================
 
-	describe('handleCloseOtherTabs draft confirmation', () => {
-		it('shows confirmation modal when other tabs have drafts', () => {
+	describe('handleCloseOtherTabs draft handling', () => {
+		it('preserves other tabs with unsent drafts instead of prompting', () => {
 			const tab1 = createMockAITab({ id: 'tab-1' });
 			const tab2 = createMockAITab({ id: 'tab-2', inputValue: 'draft text' });
 			setupSessionWithTabs([tab1, tab2], [], 'tab-1');
@@ -1596,7 +1862,10 @@ describe('useTabHandlers', () => {
 				result.current.handleCloseOtherTabs();
 			});
 
-			expect(useModalStore.getState().isOpen('confirm')).toBe(true);
+			// Bulk close never destroys a draft tab and never prompts: the draft
+			// tab is filtered out of the close set and survives alongside the active tab.
+			expect(useModalStore.getState().isOpen('confirm')).toBe(false);
+			expect(getSession().aiTabs.map((t) => t.id)).toEqual(['tab-1', 'tab-2']);
 		});
 
 		it('does not show modal when active tab has draft but others do not', () => {
@@ -1609,7 +1878,7 @@ describe('useTabHandlers', () => {
 				result.current.handleCloseOtherTabs();
 			});
 
-			// Active tab's draft doesn't matter — it's not being closed
+			// Active tab's draft doesn't matter - it's not being closed
 			expect(useModalStore.getState().isOpen('confirm')).toBe(false);
 			const session = getSession();
 			expect(session.aiTabs).toHaveLength(1);
@@ -1618,11 +1887,11 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleCloseTabsLeft/Right — draft confirmation
+	// handleCloseTabsLeft/Right - draft confirmation
 	// ========================================================================
 
-	describe('handleCloseTabsLeft draft confirmation', () => {
-		it('shows confirmation modal when left tabs have drafts', () => {
+	describe('handleCloseTabsLeft draft handling', () => {
+		it('preserves left tabs with unsent drafts instead of prompting', () => {
 			const tab1 = createMockAITab({ id: 'tab-1', inputValue: 'draft' });
 			const tab2 = createMockAITab({ id: 'tab-2' });
 			const tab3 = createMockAITab({ id: 'tab-3' });
@@ -1633,12 +1902,15 @@ describe('useTabHandlers', () => {
 				result.current.handleCloseTabsLeft();
 			});
 
-			expect(useModalStore.getState().isOpen('confirm')).toBe(true);
+			// The draft tab to the left is preserved (filtered from the close set);
+			// no confirmation modal is shown.
+			expect(useModalStore.getState().isOpen('confirm')).toBe(false);
+			expect(getSession().aiTabs.some((t) => t.id === 'tab-1')).toBe(true);
 		});
 	});
 
-	describe('handleCloseTabsRight draft confirmation', () => {
-		it('shows confirmation modal when right tabs have drafts', () => {
+	describe('handleCloseTabsRight draft handling', () => {
+		it('preserves right tabs with unsent drafts instead of prompting', () => {
 			const tab1 = createMockAITab({ id: 'tab-1' });
 			const tab2 = createMockAITab({ id: 'tab-2' });
 			const tab3 = createMockAITab({ id: 'tab-3', inputValue: 'draft' });
@@ -1649,16 +1921,19 @@ describe('useTabHandlers', () => {
 				result.current.handleCloseTabsRight();
 			});
 
-			expect(useModalStore.getState().isOpen('confirm')).toBe(true);
+			// The draft tab to the right is preserved (filtered from the close set);
+			// no confirmation modal is shown.
+			expect(useModalStore.getState().isOpen('confirm')).toBe(false);
+			expect(getSession().aiTabs.some((t) => t.id === 'tab-3')).toBe(true);
 		});
 	});
 
 	// ========================================================================
-	// handleToggleTabShowThinking — clears logs on off
+	// handleToggleTabShowThinking - clears logs on off
 	// ========================================================================
 
 	describe('handleToggleTabShowThinking log clearing', () => {
-		it('clears thinking and tool logs when cycling to off', () => {
+		it('clears thinking logs but keeps tool logs when cycling to off', () => {
 			const tab = createMockAITab({
 				id: 'tab-1',
 				showThinking: 'sticky',
@@ -1678,17 +1953,18 @@ describe('useTabHandlers', () => {
 
 			const session = getSession();
 			expect(session.aiTabs[0].showThinking).toBe('off');
-			// thinking and tool logs should be filtered out
+			// Thinking logs are removed; tool logs are always recorded and render-gated,
+			// so they survive a thinking-off toggle.
 			const logSources = session.aiTabs[0].logs.map((l) => l.source);
 			expect(logSources).not.toContain('thinking');
-			expect(logSources).not.toContain('tool');
+			expect(logSources).toContain('tool');
 			expect(logSources).toContain('user');
 			expect(logSources).toContain('ai');
 		});
 	});
 
 	// ========================================================================
-	// handleDeleteLog — additional coverage
+	// handleDeleteLog - additional coverage
 	// ========================================================================
 
 	describe('handleDeleteLog additional coverage', () => {
@@ -1812,7 +2088,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleAtBottomChange — edge cases
+	// handleAtBottomChange - edge cases
 	// ========================================================================
 
 	describe('handleAtBottomChange edge cases', () => {
@@ -1834,7 +2110,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleCloseOtherTabs — with file tabs
+	// handleCloseOtherTabs - with file tabs
 	// ========================================================================
 
 	describe('handleCloseOtherTabs with file tabs', () => {
@@ -1911,7 +2187,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleCloseTabsLeft/Right — with file tabs
+	// handleCloseTabsLeft/Right - with file tabs
 	// ========================================================================
 
 	describe('handleCloseTabsLeft with file tabs', () => {
@@ -1982,10 +2258,17 @@ describe('useTabHandlers', () => {
 
 			const updated = getSession();
 			expect(updated.browserTabs).toHaveLength(0);
-			expect(updated.unifiedClosedTabHistory[0]).toMatchObject({
-				type: 'browser',
-				tab: expect.objectContaining({ id: 'browser-1', title: 'Docs' }),
-			});
+			// Bulk close now records AI tabs into the unified history too (so they
+			// are restorable via Cmd+Shift+T), so the browser entry is no longer
+			// guaranteed to be first. Assert the history contains it regardless of order.
+			expect(updated.unifiedClosedTabHistory).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						type: 'browser',
+						tab: expect.objectContaining({ id: 'browser-1', title: 'Docs' }),
+					}),
+				])
+			);
 		});
 	});
 
@@ -2065,7 +2348,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleOpenFileTab — adjacent insertion
+	// handleOpenFileTab - adjacent insertion
 	// ========================================================================
 
 	describe('handleOpenFileTab adjacent insertion', () => {
@@ -2139,7 +2422,7 @@ describe('useTabHandlers', () => {
 	});
 
 	// ========================================================================
-	// handleNewAgentSession — settings defaults
+	// handleNewAgentSession - settings defaults
 	// ========================================================================
 
 	describe('handleNewAgentSession settings', () => {
@@ -2203,7 +2486,7 @@ describe('useTabHandlers', () => {
 				result.current.handleAtBottomChange(true);
 			});
 
-			// No crash — state unchanged
+			// No crash - state unchanged
 			expect(useSessionStore.getState().sessions).toEqual([]);
 		});
 
@@ -2234,5 +2517,97 @@ describe('useTabHandlers', () => {
 			expect(session.filePreviewTabs[0].path).toBe('/test/new.ts');
 			expect(session.filePreviewTabs[0].content).toBe('new content');
 		});
+	});
+});
+
+describe('useTerminalTabHandlers - handleCloseTerminalTab', () => {
+	beforeEach(() => {
+		useSessionStore.setState({ sessions: [], activeSessionId: '', groups: [] });
+		useModalStore.setState({ modals: new Map() });
+	});
+
+	afterEach(() => {
+		cleanup();
+	});
+
+	function setupTerminalSession() {
+		const session = createMockSession({
+			id: 'test-session',
+			terminalTabs: [{ id: 'term-1', name: 'Terminal 1', shellType: 'zsh', pid: 1, cwd: '/' }],
+			activeTerminalTabId: 'term-1',
+			inputMode: 'terminal',
+			unifiedTabOrder: [{ type: 'terminal' as const, id: 'term-1' }],
+		});
+		useSessionStore.setState({ sessions: [session], activeSessionId: 'test-session' });
+	}
+
+	it('closes the terminal tab immediately when the PTY is idle', async () => {
+		setupTerminalSession();
+		(window as any).maestro.process.isTerminalBusy = vi.fn().mockResolvedValue(false);
+		const killSpy = vi.fn().mockResolvedValue(undefined);
+		(window as any).maestro.process.kill = killSpy;
+
+		const { result } = renderHook(() => useTerminalTabHandlers());
+		await act(async () => {
+			result.current.handleCloseTerminalTab('term-1');
+			await Promise.resolve();
+		});
+
+		expect((window as any).maestro.process.isTerminalBusy).toHaveBeenCalledWith(
+			'test-session-terminal-term-1'
+		);
+		const session = useSessionStore
+			.getState()
+			.sessions.find((s) => s.id === 'test-session') as Session;
+		expect(session.terminalTabs).toHaveLength(0);
+		expect(killSpy).toHaveBeenCalledWith('test-session-terminal-term-1');
+	});
+
+	it('opens a destructive confirm modal and only closes on confirm when the PTY is busy', async () => {
+		setupTerminalSession();
+		(window as any).maestro.process.isTerminalBusy = vi.fn().mockResolvedValue(true);
+		const openModal = vi.spyOn(useModalStore.getState(), 'openModal');
+
+		const { result } = renderHook(() => useTerminalTabHandlers());
+		await act(async () => {
+			result.current.handleCloseTerminalTab('term-1');
+			await Promise.resolve();
+		});
+
+		expect(openModal).toHaveBeenCalledWith(
+			'confirm',
+			expect.objectContaining({ destructive: true })
+		);
+		// Tab still present until the user confirms.
+		let session = useSessionStore
+			.getState()
+			.sessions.find((s) => s.id === 'test-session') as Session;
+		expect(session.terminalTabs).toHaveLength(1);
+
+		// Invoke onConfirm to perform the close.
+		const [, modalData] = openModal.mock.calls[0];
+		act(() => {
+			(modalData as { onConfirm: () => void }).onConfirm();
+		});
+		session = useSessionStore.getState().sessions.find((s) => s.id === 'test-session') as Session;
+		expect(session.terminalTabs).toHaveLength(0);
+		openModal.mockRestore();
+	});
+
+	it('closes the tab if the busy IPC throws (defensive fallback)', async () => {
+		setupTerminalSession();
+		(window as any).maestro.process.isTerminalBusy = vi.fn().mockRejectedValue(new Error('boom'));
+
+		const { result } = renderHook(() => useTerminalTabHandlers());
+		await act(async () => {
+			result.current.handleCloseTerminalTab('term-1');
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		const session = useSessionStore
+			.getState()
+			.sessions.find((s) => s.id === 'test-session') as Session;
+		expect(session.terminalTabs).toHaveLength(0);
 	});
 });

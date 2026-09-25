@@ -5,6 +5,7 @@
 
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { gitService } from '../../../renderer/services/git';
+import { logger } from '../../../renderer/utils/logger';
 
 // Mock the window.maestro.git object
 const mockGit = {
@@ -16,6 +17,10 @@ const mockGit = {
 	remote: vi.fn(),
 	branches: vi.fn(),
 	tags: vi.fn(),
+	runCommand: vi.fn(),
+	cancelCommand: vi.fn(),
+	onCommandOutput: vi.fn(),
+	checkoutBranch: vi.fn(),
 };
 
 // Setup mock before each test
@@ -28,8 +33,8 @@ beforeEach(() => {
 		git: mockGit,
 	};
 
-	// Mock console.error to prevent noise in test output
-	vi.spyOn(console, 'error').mockImplementation(() => {});
+	// Mock logger.error to prevent noise and allow assertions
+	vi.spyOn(logger, 'error').mockImplementation(() => {});
 });
 
 describe('gitService', () => {
@@ -67,7 +72,7 @@ describe('gitService', () => {
 			const result = await gitService.isRepo('/path/to/repo');
 
 			expect(result).toBe(false);
-			expect(console.error).toHaveBeenCalledWith('Git isRepo error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith('Git isRepo error:', undefined, expect.any(Error));
 		});
 	});
 
@@ -140,6 +145,31 @@ D  deleted.ts
 			expect(result.branch).toBeUndefined();
 		});
 
+		test('flags notARepo when git says the directory is not a repository', async () => {
+			mockGit.status.mockResolvedValue({
+				stdout: '',
+				stderr: 'fatal: not a git repository (or any of the parent directories): .git\n',
+			});
+			mockGit.branch.mockResolvedValue({ stdout: '' });
+
+			const result = await gitService.getStatus('/path/to/plain-dir');
+
+			expect(result.notARepo).toBe(true);
+			expect(result.files).toEqual([]);
+		});
+
+		test('does not flag notARepo for other failures', async () => {
+			mockGit.status.mockResolvedValue({
+				stdout: '',
+				stderr: 'ssh: connect to host example port 22: Connection refused',
+			});
+			mockGit.branch.mockResolvedValue({ stdout: '' });
+
+			const result = await gitService.getStatus('/path/to/repo');
+
+			expect(result.notARepo).toBeUndefined();
+		});
+
 		test('returns empty files array on error', async () => {
 			mockGit.status.mockRejectedValue(new Error('Git error'));
 			mockGit.branch.mockRejectedValue(new Error('Git error'));
@@ -147,7 +177,7 @@ D  deleted.ts
 			const result = await gitService.getStatus('/path/to/repo');
 
 			expect(result.files).toEqual([]);
-			expect(console.error).toHaveBeenCalledWith('Git status error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith('Git status error:', undefined, expect.any(Error));
 		});
 
 		test('handles porcelain status codes correctly', async () => {
@@ -221,7 +251,7 @@ UU both-changed-in-merge.ts`;
 			const result = await gitService.getDiff('/path/to/repo');
 
 			expect(result.diff).toBe('');
-			expect(console.error).toHaveBeenCalledWith('Git diff error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith('Git diff error:', undefined, expect.any(Error));
 		});
 	});
 
@@ -266,7 +296,7 @@ UU both-changed-in-merge.ts`;
 			const result = await gitService.getNumstat('/path/to/repo');
 
 			expect(result.files).toEqual([]);
-			expect(console.error).toHaveBeenCalledWith('Git numstat error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith('Git numstat error:', undefined, expect.any(Error));
 		});
 
 		test('skips lines with fewer than 3 parts', async () => {
@@ -343,7 +373,7 @@ invalid_line`;
 			const result = await gitService.getRemoteBrowserUrl('/path/to/repo');
 
 			expect(result).toBeNull();
-			expect(console.error).toHaveBeenCalledWith('Git remote error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith('Git remote error:', undefined, expect.any(Error));
 		});
 
 		test('returns null for unparseable URL formats', async () => {
@@ -420,7 +450,11 @@ invalid_line`;
 			const result = await gitService.getBranches('/path/to/repo');
 
 			expect(result).toEqual([]);
-			expect(console.error).toHaveBeenCalledWith('Git branches error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith(
+				'Git branches error:',
+				undefined,
+				expect.any(Error)
+			);
 		});
 	});
 
@@ -457,7 +491,98 @@ invalid_line`;
 			const result = await gitService.getTags('/path/to/repo');
 
 			expect(result).toEqual([]);
-			expect(console.error).toHaveBeenCalledWith('Git tags error:', expect.any(Error));
+			expect(logger.error).toHaveBeenCalledWith('Git tags error:', undefined, expect.any(Error));
+		});
+	});
+
+	describe('runCommand', () => {
+		test('forwards the run options to the preload bridge', async () => {
+			const success = { success: true, exitCode: 0, cancelled: false };
+			mockGit.runCommand.mockResolvedValue(success);
+
+			const result = await gitService.runCommand({
+				runId: 'run-1',
+				operation: 'push',
+				cwd: '/path/to/repo',
+				sshRemoteId: 'ssh-1',
+				setUpstream: true,
+			});
+
+			expect(result).toEqual(success);
+			expect(mockGit.runCommand).toHaveBeenCalledWith({
+				runId: 'run-1',
+				operation: 'push',
+				cwd: '/path/to/repo',
+				sshRemoteId: 'ssh-1',
+				setUpstream: true,
+			});
+		});
+
+		test('returns a failed result when the IPC call throws', async () => {
+			mockGit.runCommand.mockRejectedValue(new Error('IPC error'));
+
+			const result = await gitService.runCommand({
+				runId: 'run-2',
+				operation: 'pull',
+				cwd: '/path/to/repo',
+			});
+
+			expect(result).toEqual({
+				success: false,
+				exitCode: 1,
+				cancelled: false,
+				error: 'git pull failed',
+			});
+		});
+	});
+
+	describe('onCommandOutput', () => {
+		test('returns the unsubscribe handed back by the bridge', () => {
+			const unsubscribe = vi.fn();
+			mockGit.onCommandOutput.mockReturnValue(unsubscribe);
+			const callback = vi.fn();
+
+			const result = gitService.onCommandOutput(callback);
+
+			expect(mockGit.onCommandOutput).toHaveBeenCalledWith(callback);
+			expect(result).toBe(unsubscribe);
+		});
+	});
+
+	describe('checkoutBranch', () => {
+		test('checks out a branch and returns the result', async () => {
+			mockGit.checkoutBranch.mockResolvedValue({ success: true, output: "Switched to branch 'x'" });
+
+			const result = await gitService.checkoutBranch('/path/to/repo', 'x');
+
+			expect(result.success).toBe(true);
+			expect(mockGit.checkoutBranch).toHaveBeenCalledWith(
+				'/path/to/repo',
+				'x',
+				undefined,
+				undefined
+			);
+		});
+
+		test('passes createTracking and sshRemoteId through', async () => {
+			mockGit.checkoutBranch.mockResolvedValue({ success: true });
+
+			await gitService.checkoutBranch('/remote/path', 'feature/y', true, 'ssh-1');
+
+			expect(mockGit.checkoutBranch).toHaveBeenCalledWith(
+				'/remote/path',
+				'feature/y',
+				true,
+				'ssh-1'
+			);
+		});
+
+		test('returns a failure result when the IPC call throws', async () => {
+			mockGit.checkoutBranch.mockRejectedValue(new Error('IPC error'));
+
+			const result = await gitService.checkoutBranch('/path/to/repo', 'x');
+
+			expect(result).toEqual({ success: false, error: 'git checkout failed' });
 		});
 	});
 });

@@ -4,12 +4,21 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { BrowserWindow, WebContents } from 'electron';
+import { ipcMain, type BrowserWindow, type WebContents } from 'electron';
 
 // Mock electron
 vi.mock('electron', () => ({
 	ipcMain: {
 		once: vi.fn(),
+		removeListener: vi.fn(),
+	},
+	app: {
+		getPath: vi.fn().mockReturnValue('/tmp/userData'),
+		getVersion: vi.fn().mockReturnValue('0.16.17'),
+		on: vi.fn(),
+	},
+	BrowserWindow: {
+		getAllWindows: vi.fn().mockReturnValue([]),
 	},
 }));
 
@@ -23,6 +32,7 @@ vi.mock('../../../main/web-server/WebServer', () => {
 			setGetSessionsCallback = vi.fn();
 			setGetSessionDetailCallback = vi.fn();
 			setGetThemeCallback = vi.fn();
+			setGetBionifyReadingModeCallback = vi.fn();
 			setGetCustomCommandsCallback = vi.fn();
 			setGetHistoryCallback = vi.fn();
 			setWriteToSessionCallback = vi.fn();
@@ -35,28 +45,69 @@ vi.mock('../../../main/web-server/WebServer', () => {
 			setCloseTabCallback = vi.fn();
 			setRenameTabCallback = vi.fn();
 			setStarTabCallback = vi.fn();
+			setSnoozeCommandCallback = vi.fn();
 			setReorderTabCallback = vi.fn();
 			setToggleBookmarkCallback = vi.fn();
 			setOpenFileTabCallback = vi.fn();
+			setOpenBrowserTabCallback = vi.fn();
+			setCloseBrowserTabCallback = vi.fn();
+			setOpenTerminalTabCallback = vi.fn();
+			setWriteTerminalTabCallback = vi.fn();
+			setListTerminalTabsCallback = vi.fn();
+			setReadTerminalTabCallback = vi.fn();
+			setNewAITabWithPromptCallback = vi.fn();
+			setConsultAgentCallback = vi.fn();
+			setNoteAgentDelegationCallback = vi.fn();
+			setEnqueueCommandCallback = vi.fn();
+			setListQueueCallback = vi.fn();
+			setRemoveQueueItemCallback = vi.fn();
 			setRefreshFileTreeCallback = vi.fn();
 			setRefreshAutoRunDocsCallback = vi.fn();
 			setConfigureAutoRunCallback = vi.fn();
+			setLaunchGoalRunCallback = vi.fn();
+			setSessionAutoRunFolderCallback = vi.fn();
 			setGetAutoRunDocsCallback = vi.fn();
 			setGetAutoRunDocContentCallback = vi.fn();
 			setSaveAutoRunDocCallback = vi.fn();
 			setStopAutoRunCallback = vi.fn();
+			// Auto Run parity additions - task reset, error recovery, playbook CRUD.
+			// The factory wires these during createWebServer; without the stubs
+			// the module-under-test throws TypeError on startup.
+			setResetAutoRunDocTasksCallback = vi.fn();
+			setResumeAutoRunErrorCallback = vi.fn();
+			setSkipAutoRunDocumentCallback = vi.fn();
+			setAbortAutoRunErrorCallback = vi.fn();
+			setListPlaybooksCallback = vi.fn();
+			setCreatePlaybookCallback = vi.fn();
+			setUpdatePlaybookCallback = vi.fn();
+			setDeletePlaybookCallback = vi.fn();
 			setGetSettingsCallback = vi.fn();
 			setSetSettingCallback = vi.fn();
+			// Added with `maestro-cli open`: the factory wires this on every build,
+			// so omitting it makes every test in this file throw.
+			setOpenModalCallback = vi.fn();
+			// Network-roam handling: the factory subscribes so it can push the new
+			// LAN URL to every window when the machine changes networks.
+			setOnLocalAddressChanged = vi.fn();
+			setOpenDocumentGraphCallback = vi.fn();
 			setGetGroupsCallback = vi.fn();
+			broadcastSettingsChanged = vi.fn();
 			setCreateGroupCallback = vi.fn();
 			setRenameGroupCallback = vi.fn();
+			setUpdateGroupCallback = vi.fn();
 			setDeleteGroupCallback = vi.fn();
 			setMoveSessionToGroupCallback = vi.fn();
 			setCreateSessionCallback = vi.fn();
+			setCreateWorktreeSessionCallback = vi.fn();
 			setDeleteSessionCallback = vi.fn();
 			setRenameSessionCallback = vi.fn();
+			setUpdateSessionCwdCallback = vi.fn();
+			setUpdateSessionSshCallback = vi.fn();
+			setUpdateSessionConfigCallback = vi.fn();
 			setGetGitStatusCallback = vi.fn();
 			setGetGitDiffCallback = vi.fn();
+			setGetGitBranchesForSessionCallback = vi.fn();
+			setListWorktreesForSessionCallback = vi.fn();
 			setGetGroupChatsCallback = vi.fn();
 			setStartGroupChatCallback = vi.fn();
 			setGetGroupChatStateCallback = vi.fn();
@@ -65,15 +116,34 @@ vi.mock('../../../main/web-server/WebServer', () => {
 			setMergeContextCallback = vi.fn();
 			setTransferContextCallback = vi.fn();
 			setSummarizeContextCallback = vi.fn();
+			setCreateGistCallback = vi.fn();
 			setGetCueSubscriptionsCallback = vi.fn();
 			setToggleCueSubscriptionCallback = vi.fn();
 			setGetCueActivityCallback = vi.fn();
+			setTriggerCueSubscriptionCallback = vi.fn();
 			setGetUsageDashboardCallback = vi.fn();
 			setGetAchievementsCallback = vi.fn();
+			setGenerateDirectorNotesSynopsisCallback = vi.fn();
 			setWriteToTerminalCallback = vi.fn();
 			setResizeTerminalCallback = vi.fn();
 			setSpawnTerminalForWebCallback = vi.fn();
 			setKillTerminalForWebCallback = vi.fn();
+			setNotifyToastCallback = vi.fn();
+			setNotifyCenterFlashCallback = vi.fn();
+			setGetMarketplaceManifestCallback = vi.fn();
+			setGetMarketplaceDocumentCallback = vi.fn();
+			setGetMarketplaceReadmeCallback = vi.fn();
+			setImportMarketplacePlaybookCallback = vi.fn();
+			setListDesktopSessionsCallback = vi.fn();
+			setGetSessionHistoryCallback = vi.fn();
+			// Concerto: Movement (in-app panels) + Cadenza (HUD cards) bridge callbacks.
+			// The factory wires these during createWebServer; without the stubs the
+			// module-under-test throws TypeError on startup.
+			setCadenzaViewCallback = vi.fn();
+			setMovementViewCallback = vi.fn();
+			setGetMovementStateCallback = vi.fn();
+			setGetMovementDesignerInspectionCallback = vi.fn();
+			setInteractMovementDesignerCallback = vi.fn();
 
 			constructor(port: number, securityToken?: string) {
 				this.port = port;
@@ -107,14 +177,44 @@ vi.mock('../../../main/utils/logger', () => ({
 	},
 }));
 
+// Mock marketplace-service so the import callback path is testable without
+// hitting GitHub / the local cache. Each test that exercises the callback
+// can override the per-fn return values.
+vi.mock('../../../main/services/marketplace-service', () => ({
+	getMarketplaceManifest: vi.fn(),
+	refreshMarketplaceManifest: vi.fn(),
+	getMarketplaceDocument: vi.fn(),
+	getMarketplaceReadme: vi.fn(),
+	importMarketplacePlaybook: vi.fn(),
+}));
+
+// Mock Sentry - captureException is called from the import callback's
+// failure branch.
+vi.mock('../../../main/utils/sentry', () => ({
+	captureException: vi.fn(),
+}));
+
+vi.mock('../../../shared/cli-activity', () => ({
+	isSessionBusyWithCli: vi.fn().mockReturnValue(false),
+	getSessionIdsBusyWithCli: vi.fn(() => new Set<string>()),
+}));
+
 import {
 	createWebServerFactory,
 	type WebServerFactoryDependencies,
 } from '../../../main/web-server/web-server-factory';
 import { WebServer } from '../../../main/web-server/WebServer';
+import { buildWebSettingsSnapshot } from '../../../main/web-server/web-settings-snapshot';
 import { getThemeById } from '../../../main/themes';
 import { getHistoryManager } from '../../../main/history-manager';
 import { logger } from '../../../main/utils/logger';
+import { importMarketplacePlaybook } from '../../../main/services/marketplace-service';
+import {
+	applyMovementHtmlPayload,
+	clearConcertoHtmlDocumentsForTests,
+	getConcertoHtmlDocumentRevision,
+} from '../../../main/concerto-html';
+import { getSessionIdsBusyWithCli } from '../../../shared/cli-activity';
 
 describe('web-server/web-server-factory', () => {
 	let mockSettingsStore: WebServerFactoryDependencies['settingsStore'];
@@ -122,11 +222,16 @@ describe('web-server/web-server-factory', () => {
 	let mockGroupsStore: WebServerFactoryDependencies['groupsStore'];
 	let mockMainWindow: Partial<BrowserWindow>;
 	let mockWebContents: Partial<WebContents>;
-	let mockProcessManager: { write: ReturnType<typeof vi.fn> };
+	let mockProcessManager: {
+		write: ReturnType<typeof vi.fn>;
+		get: ReturnType<typeof vi.fn>;
+	};
 	let deps: WebServerFactoryDependencies;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		clearConcertoHtmlDocumentsForTests();
+		vi.mocked(getSessionIdsBusyWithCli).mockReturnValue(new Set<string>());
 
 		mockSettingsStore = {
 			get: vi.fn((key: string, defaultValue?: any) => {
@@ -189,6 +294,7 @@ describe('web-server/web-server-factory', () => {
 
 		mockProcessManager = {
 			write: vi.fn().mockReturnValue(true),
+			get: vi.fn().mockReturnValue(undefined),
 		};
 
 		deps = {
@@ -212,6 +318,21 @@ describe('web-server/web-server-factory', () => {
 
 			expect(server).toBeDefined();
 			expect(server).toBeInstanceOf(WebServer);
+		});
+
+		it('should register a bionify reading mode callback sourced from settings', () => {
+			vi.mocked(mockSettingsStore.get).mockImplementation((key: string, defaultValue?: any) => {
+				if (key === 'bionifyReadingMode') return true;
+				return defaultValue;
+			});
+
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+
+			expect(server.setGetBionifyReadingModeCallback).toHaveBeenCalledTimes(1);
+			const callback = server.setGetBionifyReadingModeCallback.mock.calls[0][0];
+			expect(callback()).toBe(true);
+			expect(mockSettingsStore.get).toHaveBeenCalledWith('bionifyReadingMode', false);
 		});
 
 		it('should use random port (0) when custom port is disabled', () => {
@@ -377,9 +498,177 @@ describe('web-server/web-server-factory', () => {
 
 		it('should register file and auto-run callbacks', () => {
 			expect(server.setOpenFileTabCallback).toHaveBeenCalled();
+			expect(server.setOpenDocumentGraphCallback).toHaveBeenCalled();
 			expect(server.setRefreshFileTreeCallback).toHaveBeenCalled();
 			expect(server.setRefreshAutoRunDocsCallback).toHaveBeenCalled();
 			expect(server.setConfigureAutoRunCallback).toHaveBeenCalled();
+		});
+	});
+
+	describe('Concerto movement callback behavior', () => {
+		beforeEach(() => {
+			mockSettingsStore.get = vi.fn((key: string, defaultValue?: unknown) => {
+				if (key === 'encoreFeatures') return { concerto: true };
+				return defaultValue;
+			}) as WebServerFactoryDependencies['settingsStore']['get'];
+		});
+
+		it('routes the main-process HTML revision to the renderer', async () => {
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setMovementViewCallback.mock.calls[0][0];
+
+			const resultPromise = callback({
+				op: 'add',
+				id: 'mockup',
+				viewType: 'html',
+				body: '<button>Continue</button>',
+			});
+			const request = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.find(
+				(call) => call[0] === 'remote:movement'
+			);
+			expect(request).toEqual([
+				'remote:movement',
+				expect.objectContaining({ id: 'mockup', revision: 1 }),
+				expect.any(String),
+			]);
+			const responseChannel = request?.[2] as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, true);
+
+			await expect(resultPromise).resolves.toBe(true);
+		});
+
+		it('routes a bodyless begin shell without creating an HTML revision', async () => {
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setMovementViewCallback.mock.calls[0][0];
+			const resultPromise = callback({
+				op: 'begin',
+				id: 'mockup',
+				viewType: 'html',
+				title: 'Checkout mockup',
+			});
+			const request = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.find(
+				(call) => call[0] === 'remote:movement'
+			);
+			expect(request).toEqual([
+				'remote:movement',
+				expect.objectContaining({
+					op: 'begin',
+					id: 'mockup',
+					viewType: 'html',
+				}),
+				expect.any(String),
+			]);
+			expect(request?.[1]).not.toHaveProperty('revision');
+			const responseChannel = request?.[2] as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, true);
+
+			await expect(resultPromise).resolves.toBe(true);
+			expect(getConcertoHtmlDocumentRevision('movement', 'mockup')).toBeNull();
+		});
+
+		it('rejects a bodyless transition to HTML when no document exists', async () => {
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setMovementViewCallback.mock.calls[0][0];
+
+			await expect(callback({ op: 'update', id: 'native-panel', viewType: 'html' })).resolves.toBe(
+				false
+			);
+
+			expect(
+				(mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.some(
+					([channel]) => channel === 'remote:movement'
+				)
+			).toBe(false);
+		});
+
+		it('passes the current HTML revision into inspection requests', async () => {
+			applyMovementHtmlPayload({
+				op: 'add',
+				id: 'mockup',
+				viewType: 'html',
+				body: '<button>Continue</button>',
+			});
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setGetMovementDesignerInspectionCallback.mock.calls[0][0];
+
+			const resultPromise = callback('mockup');
+			const request = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.find(
+				(call) => call[0] === 'remote:getMovementDesignerInspection'
+			);
+			expect(request).toEqual([
+				'remote:getMovementDesignerInspection',
+				'mockup',
+				1,
+				expect.any(String),
+			]);
+			const responseChannel = request?.[3] as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, null);
+
+			await expect(resultPromise).resolves.toBeNull();
+		});
+
+		it('defers concurrent HTML updates until the active inspection completes', async () => {
+			applyMovementHtmlPayload({
+				op: 'add',
+				id: 'mockup',
+				viewType: 'html',
+				body: '<button>Original</button>',
+			});
+			const server = createWebServerFactory(deps)() as any;
+			const inspectionCallback = server.setGetMovementDesignerInspectionCallback.mock.calls[0][0];
+			const movementCallback = server.setMovementViewCallback.mock.calls[0][0];
+
+			const inspectionPromise = inspectionCallback('mockup');
+			const inspectionRequest = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.find(
+				(call) => call[0] === 'remote:getMovementDesignerInspection'
+			);
+			expect(inspectionRequest).toEqual([
+				'remote:getMovementDesignerInspection',
+				'mockup',
+				1,
+				expect.any(String),
+			]);
+
+			const updatePromise = movementCallback({
+				op: 'update',
+				id: 'mockup',
+				viewType: 'html',
+				body: '<button>Updated</button>',
+			});
+			expect(getConcertoHtmlDocumentRevision('movement', 'mockup')).toBe(1);
+			expect(
+				(mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.some(
+					([channel]) => channel === 'remote:movement'
+				)
+			).toBe(false);
+
+			(mockWebContents.send as ReturnType<typeof vi.fn>).mockImplementation(
+				(channel: string, ...args: unknown[]) => {
+					if (channel !== 'remote:movement') return;
+					const responseChannel = args[1] as string;
+					const responseListener = vi
+						.mocked(ipcMain.once)
+						.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+					queueMicrotask(() => responseListener?.({} as never, true));
+				}
+			);
+			const inspectionResponseChannel = inspectionRequest?.[3] as string;
+			const inspectionResponseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === inspectionResponseChannel)?.[1];
+			inspectionResponseListener?.({} as never, null);
+
+			await expect(Promise.all([inspectionPromise, updatePromise])).resolves.toEqual([null, true]);
+			expect(getConcertoHtmlDocumentRevision('movement', 'mockup')).toBe(2);
 		});
 	});
 
@@ -399,6 +688,222 @@ describe('web-server/web-server-factory', () => {
 			expect(sessions[0]).toHaveProperty('id');
 			expect(sessions[0]).toHaveProperty('name');
 			expect(sessions[0]).toHaveProperty('toolType');
+		});
+	});
+
+	describe('listDesktopSessionsCallback behavior', () => {
+		const getCallback = () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+			const setter = server.setListDesktopSessionsCallback as ReturnType<typeof vi.fn>;
+			return setter.mock.calls[0][0];
+		};
+
+		it('reports a persisted busy tab as busy without a managed process', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue([
+				{
+					id: 'agent-a',
+					name: 'Backend',
+					toolType: 'claude-code',
+					activeTabId: 'tab-a',
+					aiTabs: [{ id: 'tab-a', state: 'busy' }],
+				},
+			]);
+
+			expect(getCallback()()[0].state).toBe('busy');
+		});
+
+		it('overrides stale idle when the tab has a live managed process', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue([
+				{
+					id: 'agent-a',
+					name: 'Backend',
+					toolType: 'claude-code',
+					activeTabId: 'tab-a',
+					aiTabs: [{ id: 'tab-a', state: 'idle' }],
+				},
+			]);
+			mockProcessManager.get.mockImplementation((id: string) =>
+				id === 'agent-a-ai-tab-a' ? { pid: 123 } : undefined
+			);
+
+			expect(getCallback()()[0].state).toBe('busy');
+		});
+
+		it('keeps an inactive sibling idle when only the active tab is running', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue([
+				{
+					id: 'agent-a',
+					name: 'Backend',
+					toolType: 'claude-code',
+					activeTabId: 'tab-a',
+					aiTabs: [
+						{ id: 'tab-a', state: 'idle' },
+						{ id: 'tab-b', state: 'idle' },
+					],
+				},
+			]);
+			mockProcessManager.get.mockImplementation((id: string) =>
+				id === 'agent-a-ai-tab-a' ? { pid: 123 } : undefined
+			);
+
+			const entries = getCallback()();
+			expect(entries.map((entry: { state: string }) => entry.state)).toEqual(['busy', 'idle']);
+		});
+
+		it('uses active CLI activity and preserves unknown state when evidence is absent', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue([
+				{
+					id: 'agent-a',
+					name: 'Backend',
+					toolType: 'claude-code',
+					activeTabId: 'tab-a',
+					aiTabs: [{ id: 'tab-a' }, { id: 'tab-b' }],
+				},
+			]);
+			vi.mocked(getSessionIdsBusyWithCli).mockReturnValue(new Set(['agent-a']));
+
+			const entries = getCallback()();
+			expect(entries.map((entry: { state: string }) => entry.state)).toEqual(['busy', 'unknown']);
+		});
+	});
+
+	// PR2 of the CLI surface refactor: read-only conversation-state inspection
+	// surfaced via `maestro-cli session show <tabId>`. The callback wired here
+	// is the desktop-side half of the contract; the CLI half is tested in
+	// `src/__tests__/cli/commands/session.test.ts`.
+	describe('getSessionHistoryCallback behavior', () => {
+		// Session shape with three logs at known timestamps so --since / --tail
+		// boundaries are unambiguous. Stored on `mockSessionsStore` per-test so
+		// we can vary the ordering / source mix without churning the outer
+		// fixture.
+		const stockSession = (logs: Array<Record<string, unknown>>) => [
+			{
+				id: 'agent-a',
+				name: 'Backend',
+				toolType: 'claude-code',
+				state: 'idle',
+				inputMode: 'ai',
+				cwd: '/test/path',
+				aiTabs: [
+					{
+						id: 'tab-1',
+						agentSessionId: 'claude-uuid-1',
+						logs,
+					},
+				],
+				activeTabId: 'tab-1',
+			},
+		];
+
+		const getCallback = () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+			const setGetSessionHistoryCallback = server.setGetSessionHistoryCallback as ReturnType<
+				typeof vi.fn
+			>;
+			return setGetSessionHistoryCallback.mock.calls[0][0];
+		};
+
+		it('returns null when the tab id does not match any open tab', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue(
+				stockSession([{ id: 'log-1', source: 'user', text: 'hi', timestamp: 100 }])
+			);
+
+			const callback = getCallback();
+			expect(callback('tab-bogus')).toBeNull();
+		});
+
+		it('returns the full transcript with derived roles when no filters are passed', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue(
+				stockSession([
+					{ id: 'log-1', source: 'user', text: 'hi', timestamp: 100 },
+					{ id: 'log-2', source: 'ai', text: 'hello', timestamp: 200 },
+					{ id: 'log-3', source: 'stdout', text: 'legacy reply', timestamp: 300 },
+				])
+			);
+
+			const callback = getCallback();
+			const result = callback('tab-1');
+
+			expect(result).not.toBeNull();
+			expect(result.tabId).toBe('tab-1');
+			expect(result.agentId).toBe('agent-a');
+			expect(result.agentSessionId).toBe('claude-uuid-1');
+			expect(result.messages).toHaveLength(3);
+			expect(result.messages.map((m: { role: string }) => m.role)).toEqual([
+				'user',
+				'assistant',
+				// `stdout` collapses to `assistant` because legacy / non-AI agent
+				// flows store assistant replies under that source.
+				'assistant',
+			]);
+		});
+
+		it('drops messages at or before --sinceMs (cursor is exclusive)', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue(
+				stockSession([
+					{ id: 'log-1', source: 'user', text: 'a', timestamp: 100 },
+					{ id: 'log-2', source: 'ai', text: 'b', timestamp: 200 },
+					{ id: 'log-3', source: 'user', text: 'c', timestamp: 300 },
+				])
+			);
+
+			const callback = getCallback();
+			const result = callback('tab-1', { sinceMs: 200 });
+
+			// `> sinceMs` (not `>=`) keeps the cursor exclusive so a Discord
+			// bot can reuse the last received timestamp without seeing the
+			// same message twice on the next poll.
+			expect(result.messages).toHaveLength(1);
+			expect(result.messages[0].id).toBe('log-3');
+		});
+
+		it('returns an empty array for --tail 0 (the slice(-0) foot-gun)', () => {
+			// Regression guard for the original `slice(-options.tail)` bug:
+			// `-0 === 0`, so `slice(-0)` returned the full array and `--tail 0`
+			// silently shipped the entire transcript instead of nothing.
+			vi.mocked(mockSessionsStore.get).mockReturnValue(
+				stockSession([
+					{ id: 'log-1', source: 'user', text: 'a', timestamp: 100 },
+					{ id: 'log-2', source: 'ai', text: 'b', timestamp: 200 },
+				])
+			);
+
+			const callback = getCallback();
+			const result = callback('tab-1', { tail: 0 });
+
+			expect(result.messages).toEqual([]);
+		});
+
+		it('returns the last N messages when --tail is positive', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue(
+				stockSession([
+					{ id: 'log-1', source: 'user', text: 'a', timestamp: 100 },
+					{ id: 'log-2', source: 'ai', text: 'b', timestamp: 200 },
+					{ id: 'log-3', source: 'user', text: 'c', timestamp: 300 },
+				])
+			);
+
+			const callback = getCallback();
+			const result = callback('tab-1', { tail: 2 });
+
+			expect(result.messages).toHaveLength(2);
+			expect(result.messages.map((m: { id: string }) => m.id)).toEqual(['log-2', 'log-3']);
+		});
+
+		it('clamps --tail above the transcript length to the full transcript', () => {
+			vi.mocked(mockSessionsStore.get).mockReturnValue(
+				stockSession([
+					{ id: 'log-1', source: 'user', text: 'a', timestamp: 100 },
+					{ id: 'log-2', source: 'ai', text: 'b', timestamp: 200 },
+				])
+			);
+
+			const callback = getCallback();
+			const result = callback('tab-1', { tail: 99 });
+
+			expect(result.messages).toHaveLength(2);
 		});
 	});
 
@@ -444,6 +949,24 @@ describe('web-server/web-server-factory', () => {
 	});
 
 	describe('executeCommandCallback behavior', () => {
+		/**
+		 * Answer the delivery-receipt channel the factory minted for the most
+		 * recent `remote:executeCommand` send, standing in for the renderer.
+		 * Returns the send args with the receipt channel stripped, so tests can
+		 * assert the forwarded payload exactly as before receipts existed.
+		 */
+		const answerReceipt = (accepted: boolean, reason?: string): unknown[] => {
+			const send = mockWebContents.send as ReturnType<typeof vi.fn>;
+			const call = [...send.mock.calls]
+				.reverse()
+				.find((c: unknown[]) => c[0] === 'remote:executeCommand');
+			if (!call) throw new Error('no remote:executeCommand send was issued');
+			const receiptChannel = call[call.length - 1] as string;
+			const listener = vi.mocked(ipcMain.once).mock.calls.find((c) => c[0] === receiptChannel)?.[1];
+			listener?.({} as never, { accepted, reason });
+			return call.slice(0, -1);
+		};
+
 		it('should return false when mainWindow is null', async () => {
 			deps.getMainWindow = vi.fn().mockReturnValue(null);
 			const createWebServer = createWebServerFactory(deps);
@@ -458,21 +981,256 @@ describe('web-server/web-server-factory', () => {
 			expect(logger.warn).toHaveBeenCalled();
 		});
 
-		it('should send command to renderer', async () => {
+		it('should send command to renderer (omitting tabId routes to active tab)', async () => {
 			const createWebServer = createWebServerFactory(deps);
 			const server = createWebServer();
 
 			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
 			const callback = setExecuteCallback.mock.calls[0][0];
 
-			const result = await callback('session-1', 'test command', 'ai');
+			const resultPromise = callback('session-1', 'test command', 'ai');
 
-			expect(result).toBe(true);
-			expect(mockWebContents.send).toHaveBeenCalledWith(
+			expect(answerReceipt(true)).toEqual([
 				'remote:executeCommand',
 				'session-1',
 				'test command',
-				'ai'
+				'ai',
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+			]);
+			await expect(resultPromise).resolves.toBe(true);
+		});
+
+		it('forwards tabId to the renderer so `dispatch --session <tabId>` writes into the requested tab', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+
+			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+			const callback = setExecuteCallback.mock.calls[0][0];
+
+			const resultPromise = callback('session-1', 'follow up', 'ai', 'tab-7');
+
+			expect(answerReceipt(true)).toEqual([
+				'remote:executeCommand',
+				'session-1',
+				'follow up',
+				'ai',
+				'tab-7',
+				undefined,
+				undefined,
+				undefined,
+			]);
+			await expect(resultPromise).resolves.toBe(true);
+		});
+
+		it('forwards force=true to the renderer so `dispatch --force` bypasses the renderer busy guard', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+
+			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+			const callback = setExecuteCallback.mock.calls[0][0];
+
+			const resultPromise = callback('session-1', 'concurrent write', 'ai', undefined, true);
+
+			expect(answerReceipt(true)).toEqual([
+				'remote:executeCommand',
+				'session-1',
+				'concurrent write',
+				'ai',
+				undefined,
+				true,
+				undefined,
+				undefined,
+			]);
+			await expect(resultPromise).resolves.toBe(true);
+		});
+
+		it('forwards images so pasted attachments reach the renderer alongside the prompt', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+
+			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+			const callback = setExecuteCallback.mock.calls[0][0];
+
+			const images = ['data:image/png;base64,abc', 'data:image/png;base64,def'];
+			const resultPromise = callback(
+				'session-1',
+				'look at this',
+				'ai',
+				undefined,
+				undefined,
+				images
+			);
+
+			expect(answerReceipt(true)).toEqual([
+				'remote:executeCommand',
+				'session-1',
+				'look at this',
+				'ai',
+				undefined,
+				undefined,
+				images,
+				undefined,
+			]);
+			await expect(resultPromise).resolves.toBe(true);
+		});
+
+		// V1 secondary defect: `success` used to mean "an IPC send was issued", so
+		// a dispatch to a tab that does not exist was acknowledged as success.
+		// `success` now means the renderer accepted the command for execution.
+		it('resolves false when the renderer rejects the command (nonexistent target)', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+
+			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+			const callback = setExecuteCallback.mock.calls[0][0];
+
+			const resultPromise = callback('session-1', 'test command', 'ai', 'no-such-tab');
+			answerReceipt(false, 'tab-not-found:no-such-tab');
+
+			await expect(resultPromise).resolves.toBe(false);
+			// Only the reason CODE is logged. The detail half is dropped because
+			// this line is persisted at warn level and a reason can carry remote
+			// input or a path-bearing error string (CWE-532, review of PR #1357).
+			expect(logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining('tab-not-found'),
+				'WebServer'
+			);
+			expect(logger.warn).not.toHaveBeenCalledWith(
+				expect.stringContaining('no-such-tab'),
+				'WebServer'
+			);
+		});
+
+		it('resolves false when no receipt arrives within the window', async () => {
+			vi.useFakeTimers();
+			try {
+				const createWebServer = createWebServerFactory(deps);
+				const server = createWebServer();
+
+				const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+				const callback = setExecuteCallback.mock.calls[0][0];
+
+				const resultPromise = callback('session-1', 'test command', 'ai');
+				// No renderer answer at all - an old build that ignores the receipt
+				// channel, or a wedged one. Must not hang the CLI, must not lie.
+				await vi.advanceTimersByTimeAsync(3000);
+
+				await expect(resultPromise).resolves.toBe(false);
+				expect(logger.warn).toHaveBeenCalledWith(
+					expect.stringContaining('No delivery receipt'),
+					'WebServer'
+				);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('resolves false when the renderer answers with a malformed receipt', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+
+			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+			const callback = setExecuteCallback.mock.calls[0][0];
+
+			const resultPromise = callback('session-1', 'test command', 'ai');
+			const send = mockWebContents.send as ReturnType<typeof vi.fn>;
+			const call = [...send.mock.calls]
+				.reverse()
+				.find((c: unknown[]) => c[0] === 'remote:executeCommand');
+			const receiptChannel = call?.[call.length - 1] as string;
+			vi.mocked(ipcMain.once).mock.calls.find((c) => c[0] === receiptChannel)?.[1]?.(
+				{} as never,
+				'sure thing'
+			);
+
+			await expect(resultPromise).resolves.toBe(false);
+		});
+
+		it('does not log raw command text at info level (info shows length only)', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+
+			const setExecuteCallback = server.setExecuteCommandCallback as ReturnType<typeof vi.fn>;
+			const callback = setExecuteCallback.mock.calls[0][0];
+
+			const resultPromise = callback('session-1', 'super-secret-token-do-not-leak', 'ai');
+			answerReceipt(true);
+			await resultPromise;
+
+			const infoCalls = (logger.info as ReturnType<typeof vi.fn>).mock.calls;
+			const forwardingInfoCall = infoCalls.find(
+				(c: unknown[]) => typeof c[0] === 'string' && c[0].includes('[Web → Renderer]')
+			);
+			expect(forwardingInfoCall).toBeDefined();
+			expect(forwardingInfoCall?.[0]).not.toContain('super-secret-token-do-not-leak');
+			expect(forwardingInfoCall?.[0]).toContain('CommandLength: 30');
+		});
+	});
+
+	describe('enqueueCommandCallback behavior', () => {
+		/**
+		 * Reply to the response channel the factory minted for the most recent
+		 * `remote:enqueueCommand` send, standing in for the renderer.
+		 */
+		const answerEnqueue = (result: unknown): void => {
+			const send = mockWebContents.send as ReturnType<typeof vi.fn>;
+			const call = [...send.mock.calls]
+				.reverse()
+				.find((c: unknown[]) => c[0] === 'remote:enqueueCommand');
+			if (!call) throw new Error('no remote:enqueueCommand send was issued');
+			// Send args: (channel, sessionId, command, responseChannel, ...)
+			const responseChannel = call[3] as string;
+			const listener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((c) => c[0] === responseChannel)?.[1];
+			listener?.({} as never, result);
+		};
+
+		const invokeEnqueue = (server: ReturnType<ReturnType<typeof createWebServerFactory>>) => {
+			const setEnqueue = server.setEnqueueCommandCallback as ReturnType<typeof vi.fn>;
+			return setEnqueue.mock.calls[0][0]('session-1', 'wake up', 'ai', 'ghost-tab');
+		};
+
+		// Task 7b: the reason is what lets a dispatch callback tell "the caller's
+		// --callback-tab is gone" apart from every other failure, so it has to
+		// survive the renderer -> main hop rather than being parsed away.
+		it('forwards a machine-readable failure reason from the renderer', async () => {
+			const server = createWebServerFactory(deps)();
+			const resultPromise = invokeEnqueue(server);
+
+			answerEnqueue({ success: false, error: 'Tab not found: ghost-tab', reason: 'tab-not-found' });
+
+			await expect(resultPromise).resolves.toEqual(
+				expect.objectContaining({
+					success: false,
+					error: 'Tab not found: ghost-tab',
+					reason: 'tab-not-found',
+				})
+			);
+		});
+
+		it('drops an unrecognised reason instead of passing it through', async () => {
+			const server = createWebServerFactory(deps)();
+			const resultPromise = invokeEnqueue(server);
+
+			answerEnqueue({ success: false, error: 'boom', reason: 'something-new' });
+
+			await expect(resultPromise).resolves.toEqual(
+				expect.objectContaining({ success: false, reason: undefined })
+			);
+		});
+
+		it('leaves the reason undefined on a successful enqueue', async () => {
+			const server = createWebServerFactory(deps)();
+			const resultPromise = invokeEnqueue(server);
+
+			answerEnqueue({ success: true, tabId: 'tab-1', queued: true, queuePosition: 2 });
+
+			await expect(resultPromise).resolves.toEqual(
+				expect.objectContaining({ success: true, tabId: 'tab-1', queued: true, reason: undefined })
 			);
 		});
 	});
@@ -519,7 +1277,11 @@ describe('web-server/web-server-factory', () => {
 			expect(mockWebContents.send).toHaveBeenCalledWith(
 				'remote:switchMode',
 				'session-1',
-				'terminal'
+				'terminal',
+				// Placement rides along on the IPC hop. switch_mode defaults to
+				// foreground because background would make the verb a no-op against
+				// the agent on screen.
+				false
 			);
 		});
 	});
@@ -595,6 +1357,1236 @@ describe('web-server/web-server-factory', () => {
 			callback();
 
 			expect(mockHistoryManager.getAllEntries).toHaveBeenCalled();
+		});
+	});
+
+	describe('importMarketplacePlaybookCallback behavior', () => {
+		// Helper that wires deps to a sessions array + sshRemotes array, builds
+		// the factory, and returns the registered import callback.
+		const setupImportCallback = (
+			sessions: Array<Record<string, unknown>>,
+			sshRemotes: Array<Record<string, unknown>>
+		) => {
+			mockSessionsStore.get = vi.fn((key: string, defaultValue?: any) => {
+				if (key === 'sessions') return sessions;
+				return defaultValue;
+			}) as any;
+			const originalSettingsGet = mockSettingsStore.get as ReturnType<typeof vi.fn>;
+			mockSettingsStore.get = vi.fn((key: string, defaultValue?: any) => {
+				if (key === 'sshRemotes') return sshRemotes;
+				return originalSettingsGet(key, defaultValue);
+			}) as any;
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer();
+			const setImport = server.setImportMarketplacePlaybookCallback as ReturnType<typeof vi.fn>;
+			return setImport.mock.calls[0][0] as (
+				sessionId: string,
+				playbookId: string,
+				targetFolderName: string
+			) => Promise<{ success: boolean; error?: string }>;
+		};
+
+		it('should fail loudly when sessionSshRemoteConfig.enabled but remoteId points at no entry', async () => {
+			// Mirrors the desktop IPC test: a session with SSH explicitly
+			// enabled but an unresolvable remoteId must NOT silently land the
+			// playbook on the local filesystem.
+			const callback = setupImportCallback(
+				[
+					{
+						id: 'session-1',
+						autoRunFolderPath: '/auto-run',
+						sessionSshRemoteConfig: {
+							enabled: true,
+							remoteId: 'non-existent-remote',
+						},
+					},
+				],
+				[]
+			);
+
+			const result = await callback('session-1', 'pb', 'dest');
+
+			expect(result.success).toBe(false);
+			expect(result.error).toContain('SSH remote not found or disabled');
+			expect(importMarketplacePlaybook).not.toHaveBeenCalled();
+		});
+
+		it('should fail loudly when the matching SSH remote entry is disabled', async () => {
+			const callback = setupImportCallback(
+				[
+					{
+						id: 'session-1',
+						autoRunFolderPath: '/auto-run',
+						sessionSshRemoteConfig: { enabled: true, remoteId: 'remote-1' },
+					},
+				],
+				[{ id: 'remote-1', enabled: false }]
+			);
+
+			const result = await callback('session-1', 'pb', 'dest');
+
+			expect(result.success).toBe(false);
+			expect(result.error).toContain('SSH remote not found or disabled');
+			expect(importMarketplacePlaybook).not.toHaveBeenCalled();
+		});
+
+		it('should fail loudly when sessionSshRemoteConfig.enabled but remoteId is null', async () => {
+			const callback = setupImportCallback(
+				[
+					{
+						id: 'session-1',
+						autoRunFolderPath: '/auto-run',
+						sessionSshRemoteConfig: { enabled: true, remoteId: null },
+					},
+				],
+				[]
+			);
+
+			const result = await callback('session-1', 'pb', 'dest');
+
+			expect(result.success).toBe(false);
+			expect(result.error).toContain('SSH remote not found or disabled');
+			expect(importMarketplacePlaybook).not.toHaveBeenCalled();
+		});
+
+		it('should treat sessionSshRemoteConfig.enabled === false as no SSH and import locally', async () => {
+			// A session with `enabled: false` and a populated remoteId must
+			// NOT be treated as remote - `enabled` is the source of truth.
+			// We assert the resolver returned `undefined` for sshConfig (i.e.
+			// no remote was looked up); whether the downstream import call
+			// succeeds is irrelevant - we only care that the SSH gate let it
+			// through as a local import.
+			vi.mocked(importMarketplacePlaybook).mockResolvedValueOnce({
+				playbook: { id: 'pb-1', name: 'pb', createdAt: 0, updatedAt: 0, documents: [] } as any,
+				importedDocs: [],
+				importedAssets: [],
+			});
+			const callback = setupImportCallback(
+				[
+					{
+						id: 'session-1',
+						autoRunFolderPath: '/auto-run',
+						sessionSshRemoteConfig: { enabled: false, remoteId: 'remote-1' },
+					},
+				],
+				[{ id: 'remote-1', enabled: true }]
+			);
+
+			await callback('session-1', 'pb', 'dest');
+
+			expect(importMarketplacePlaybook).toHaveBeenCalledTimes(1);
+			expect(importMarketplacePlaybook).toHaveBeenCalledWith(
+				expect.objectContaining({ sshConfig: undefined })
+			);
+		});
+	});
+
+	describe('Cue subscription callbacks', () => {
+		// Regression: previously this callback forwarded the request to the
+		// renderer via `remote:getCueSubscriptions` and waited 30 s for a
+		// response, but no renderer handler existed. Every `maestro-cli cue
+		// list` call timed out. Now it must call the injected graph-data
+		// dependency directly and flatten the result.
+		it('flattens engine graph data into CueSubscriptionInfo[] without any IPC bounce', async () => {
+			const getCueGraphData = vi.fn().mockReturnValue([
+				{
+					sessionId: 'agent-1',
+					sessionName: 'Obsidian Digest',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'Digest Script',
+							event: 'time.scheduled',
+							enabled: true,
+							prompt: '',
+							schedule_times: ['07:00'],
+							action: 'command',
+							pipeline_name: 'Obsidian Daily Pipe',
+						},
+						{
+							name: 'Obsidian Daily Pipe-chain-1',
+							event: 'agent.completed',
+							enabled: true,
+							prompt: 'follow up',
+							source_session: 'Obsidian Digest',
+							source_sub: 'Digest Script',
+							pipeline_name: 'Obsidian Daily Pipe',
+						},
+					],
+				},
+				{
+					sessionId: 'agent-2',
+					sessionName: 'Obsidian Git',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'Git Script',
+							event: 'time.scheduled',
+							enabled: false,
+							prompt: '',
+							schedule_times: ['07:00'],
+							action: 'command',
+							pipeline_name: 'Obsidian Daily Pipe',
+						},
+					],
+				},
+			]);
+
+			const createWebServer = createWebServerFactory({ ...deps, getCueGraphData });
+			const server = createWebServer() as any;
+
+			expect(server.setGetCueSubscriptionsCallback).toHaveBeenCalledTimes(1);
+			const callback = server.setGetCueSubscriptionsCallback.mock.calls[0][0];
+
+			const all = await callback();
+			expect(getCueGraphData).toHaveBeenCalledTimes(1);
+			expect(all).toHaveLength(3);
+			expect(all[0]).toMatchObject({
+				// `sessionId::pipeline::name` - the pipeline discriminator
+				// prevents collisions when two pipelines in the same session
+				// each define a sub with the same name.
+				id: 'agent-1::Obsidian Daily Pipe::Digest Script',
+				name: 'Digest Script',
+				eventType: 'time.scheduled',
+				sessionId: 'agent-1',
+				sessionName: 'Obsidian Digest',
+				enabled: true,
+				schedule: '07:00',
+				triggerCount: 0,
+			});
+			expect(all[2]).toMatchObject({
+				id: 'agent-2::Obsidian Daily Pipe::Git Script',
+				name: 'Git Script',
+				sessionId: 'agent-2',
+				enabled: false,
+			});
+		});
+
+		it('disambiguates ids when two pipelines in the same session share a sub name', async () => {
+			// CodeRabbit #983 (major): without the pipeline discriminator,
+			// both rows would emit id `agent-1::Foo` and a downstream toggle
+			// would mutate the wrong subscription. Lock in distinct ids.
+			const getCueGraphData = vi.fn().mockReturnValue([
+				{
+					sessionId: 'agent-1',
+					sessionName: 'Worker',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'Foo',
+							event: 'time.heartbeat',
+							enabled: true,
+							prompt: '',
+							interval_minutes: 5,
+							pipeline_name: 'Pipeline A',
+						},
+						{
+							name: 'Foo',
+							event: 'time.heartbeat',
+							enabled: true,
+							prompt: '',
+							interval_minutes: 5,
+							pipeline_name: 'Pipeline B',
+						},
+					],
+				},
+			]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueGraphData });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueSubscriptionsCallback.mock.calls[0][0];
+			const all = await callback();
+			expect(all).toHaveLength(2);
+			expect(all[0].id).toBe('agent-1::Pipeline A::Foo');
+			expect(all[1].id).toBe('agent-1::Pipeline B::Foo');
+			expect(new Set(all.map((s: { id: string }) => s.id)).size).toBe(2);
+		});
+
+		it('falls back to the -chain-N stripped base name when pipeline_name is absent (legacy YAML)', async () => {
+			const getCueGraphData = vi.fn().mockReturnValue([
+				{
+					sessionId: 'agent-1',
+					sessionName: 'Worker',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'LegacyPipe-chain-2',
+							event: 'agent.completed',
+							enabled: true,
+							prompt: '',
+							source_session: 'Worker',
+						},
+					],
+				},
+			]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueGraphData });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueSubscriptionsCallback.mock.calls[0][0];
+			const [entry] = await callback();
+			expect(entry.id).toBe('agent-1::LegacyPipe::LegacyPipe-chain-2');
+		});
+
+		it('renders schedule_days alongside schedule_times in the CLI schedule string', async () => {
+			// Greptile #982 + Pedram: previously `schedule_days` was silently
+			// dropped from the flattened output, so day-pinned schedules
+			// looked indistinguishable from every-day schedules in `cue list`.
+			const getCueGraphData = vi.fn().mockReturnValue([
+				{
+					sessionId: 'agent-1',
+					sessionName: 'Worker',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'WeekdayMorning',
+							event: 'time.scheduled',
+							enabled: true,
+							prompt: '',
+							schedule_times: ['07:00'],
+							schedule_days: ['mon', 'wed', 'fri'],
+							pipeline_name: 'Sched',
+						},
+						{
+							name: 'DaysOnly',
+							event: 'time.scheduled',
+							enabled: true,
+							prompt: '',
+							schedule_days: ['sat', 'sun'],
+							pipeline_name: 'Sched',
+						},
+					],
+				},
+			]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueGraphData });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueSubscriptionsCallback.mock.calls[0][0];
+			const all = await callback();
+			expect(all[0].schedule).toBe('07:00 (Mon, Wed, Fri)');
+			expect(all[1].schedule).toBe('days: Sat, Sun');
+		});
+
+		it('filters by sessionId when one is supplied', async () => {
+			const getCueGraphData = vi.fn().mockReturnValue([
+				{
+					sessionId: 'agent-1',
+					sessionName: 'Obsidian Digest',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'Digest Script',
+							event: 'time.scheduled',
+							enabled: true,
+							prompt: '',
+							schedule_times: ['07:00'],
+						},
+					],
+				},
+				{
+					sessionId: 'agent-2',
+					sessionName: 'Obsidian Git',
+					toolType: 'claude-code',
+					subscriptions: [
+						{
+							name: 'Git Script',
+							event: 'time.scheduled',
+							enabled: true,
+							prompt: '',
+							schedule_times: ['07:00'],
+						},
+					],
+				},
+			]);
+
+			const createWebServer = createWebServerFactory({ ...deps, getCueGraphData });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueSubscriptionsCallback.mock.calls[0][0];
+
+			const filtered = await callback('agent-2');
+			expect(filtered).toHaveLength(1);
+			expect(filtered[0].sessionId).toBe('agent-2');
+		});
+
+		it('returns [] and warns when the engine dependency is missing', async () => {
+			const createWebServer = createWebServerFactory({ ...deps, getCueGraphData: undefined });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueSubscriptionsCallback.mock.calls[0][0];
+
+			const result = await callback();
+			expect(result).toEqual([]);
+			expect(logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining('getCueGraphData dependency not available'),
+				'WebServer'
+			);
+		});
+	});
+
+	describe('Cue toggle callback', () => {
+		// Regression: previously this callback forwarded the request to the
+		// renderer via `remote:toggleCueSubscription` and waited 10 s for a
+		// response, but no renderer handler existed. Every web-UI toggle
+		// silently no-op'd. Now it must call the injected dep directly.
+		// Subscription ids follow `${sessionId}::${pipeline}::${name}` so
+		// two pipelines under one session that share a sub name don't
+		// collide (CodeRabbit #983 major).
+		it('delegates straight to setCueSubscriptionEnabled without any IPC bounce', async () => {
+			const setCueSubscriptionEnabled = vi.fn().mockResolvedValue(true);
+			const createWebServer = createWebServerFactory({ ...deps, setCueSubscriptionEnabled });
+			const server = createWebServer() as any;
+
+			expect(server.setToggleCueSubscriptionCallback).toHaveBeenCalledTimes(1);
+			const callback = server.setToggleCueSubscriptionCallback.mock.calls[0][0];
+
+			const ok = await callback('agent-1::Obsidian Daily Pipe::Digest Script', false);
+			expect(setCueSubscriptionEnabled).toHaveBeenCalledWith(
+				'agent-1::Obsidian Daily Pipe::Digest Script',
+				false
+			);
+			expect(ok).toBe(true);
+		});
+
+		it('propagates a false return when the engine cannot find the subscription', async () => {
+			const setCueSubscriptionEnabled = vi.fn().mockResolvedValue(false);
+			const createWebServer = createWebServerFactory({ ...deps, setCueSubscriptionEnabled });
+			const server = createWebServer() as any;
+			const callback = server.setToggleCueSubscriptionCallback.mock.calls[0][0];
+
+			const ok = await callback('agent-1::P::Missing', true);
+			expect(ok).toBe(false);
+		});
+
+		it('returns false and warns when the dep is missing', async () => {
+			const createWebServer = createWebServerFactory({
+				...deps,
+				setCueSubscriptionEnabled: undefined,
+			});
+			const server = createWebServer() as any;
+			const callback = server.setToggleCueSubscriptionCallback.mock.calls[0][0];
+
+			const ok = await callback('agent-1::P::Digest Script', false);
+			expect(ok).toBe(false);
+			expect(logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining('setCueSubscriptionEnabled dependency not available'),
+				'WebServer'
+			);
+		});
+	});
+
+	describe('Cue activity callback', () => {
+		// Same dead-bridge fix as the subscriptions callback: previously this
+		// forwarded `remote:getCueActivity` to the renderer with no listener,
+		// so the web UI activity tab always rendered empty after a 30 s stall.
+		const sampleRun = {
+			runId: 'run-1',
+			sessionId: 'agent-1',
+			sessionName: 'Obsidian Digest',
+			subscriptionName: 'Digest Script',
+			pipelineName: 'Obsidian Daily Pipe',
+			event: { type: 'time.scheduled' } as any,
+			status: 'completed' as const,
+			stdout: 'all good',
+			stderr: '',
+			exitCode: 0,
+			durationMs: 1234,
+			startedAt: '2026-05-11T07:00:00.000Z',
+			endedAt: '2026-05-11T07:00:01.234Z',
+		};
+
+		it('maps engine CueRunResult[] into CueActivityEntry[] without IPC', async () => {
+			const getCueActivityLog = vi.fn().mockReturnValue([sampleRun]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueActivityLog });
+			const server = createWebServer() as any;
+
+			expect(server.setGetCueActivityCallback).toHaveBeenCalledTimes(1);
+			const callback = server.setGetCueActivityCallback.mock.calls[0][0];
+
+			const entries = await callback();
+			expect(getCueActivityLog).toHaveBeenCalledTimes(1);
+			expect(entries).toHaveLength(1);
+			expect(entries[0]).toMatchObject({
+				id: 'run-1',
+				// Same identity contract as the subscriptions list, so a
+				// web UI could navigate from an activity row to the toggle
+				// callback without re-deriving the id.
+				subscriptionId: 'agent-1::Obsidian Daily Pipe::Digest Script',
+				subscriptionName: 'Digest Script',
+				eventType: 'time.scheduled',
+				sessionId: 'agent-1',
+				status: 'completed',
+				duration: 1234,
+				result: 'all good',
+			});
+			expect(entries[0].timestamp).toBe(Date.parse('2026-05-11T07:00:00.000Z'));
+		});
+
+		it('falls back to base-name stripping for the subscriptionId when pipelineName is absent', async () => {
+			const getCueActivityLog = vi.fn().mockReturnValue([
+				{
+					...sampleRun,
+					pipelineName: undefined,
+					subscriptionName: 'LegacyPipe-chain-2',
+				},
+			]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueActivityLog });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueActivityCallback.mock.calls[0][0];
+
+			const [entry] = await callback();
+			expect(entry.subscriptionId).toBe('agent-1::LegacyPipe::LegacyPipe-chain-2');
+		});
+
+		it('filters by sessionId before applying limit', async () => {
+			const getCueActivityLog = vi.fn().mockReturnValue([
+				{ ...sampleRun, runId: 'run-a', sessionId: 'agent-1' },
+				{ ...sampleRun, runId: 'run-b', sessionId: 'agent-2' },
+				{ ...sampleRun, runId: 'run-c', sessionId: 'agent-1' },
+			]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueActivityLog });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueActivityCallback.mock.calls[0][0];
+
+			const filtered = await callback('agent-1', 1);
+			expect(filtered).toHaveLength(1);
+			expect(filtered[0].id).toBe('run-a');
+		});
+
+		it('collapses timeout / stopped engine statuses into the web "failed" enum', async () => {
+			const getCueActivityLog = vi.fn().mockReturnValue([
+				{ ...sampleRun, runId: 'r1', status: 'timeout', stderr: 'took too long' },
+				{ ...sampleRun, runId: 'r2', status: 'stopped', stderr: 'user kill' },
+				{ ...sampleRun, runId: 'r3', status: 'failed', stderr: 'oops' },
+			]);
+			const createWebServer = createWebServerFactory({ ...deps, getCueActivityLog });
+			const server = createWebServer() as any;
+			const callback = server.setGetCueActivityCallback.mock.calls[0][0];
+
+			const entries = await callback();
+			expect(entries.map((e: any) => e.status)).toEqual(['failed', 'failed', 'failed']);
+			// stderr should surface as `result` for non-completed runs so the
+			// dashboard can show why it failed without re-fetching stdout.
+			expect(entries[0].result).toBe('took too long');
+		});
+
+		it('returns [] and warns when the dep is missing', async () => {
+			const createWebServer = createWebServerFactory({
+				...deps,
+				getCueActivityLog: undefined,
+			});
+			const server = createWebServer() as any;
+			const callback = server.setGetCueActivityCallback.mock.calls[0][0];
+
+			const entries = await callback();
+			expect(entries).toEqual([]);
+			expect(logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining('getCueActivityLog dependency not available'),
+				'WebServer'
+			);
+		});
+	});
+
+	// Smoke tests added during the web-server-factory.ts -> callbacks/*.ts
+	// decomposition (Phase 6 refactoring). These domains had zero behavior
+	// coverage before the split - only the vi.fn() mock stub above kept
+	// createWebServer() from throwing. Each test proves the registered
+	// callback is the REAL implementation (calls webContents.send with the
+	// right channel), not a silently-dropped no-op - the one failure mode
+	// tsc and the completeness diff can't catch on their own.
+	describe('queueCallbacks smoke', () => {
+		it('setEnqueueCommandCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setEnqueueCommandCallback.mock.calls[0][0];
+
+			void callback('session-1', 'do the thing', 'ai', 'tab-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:enqueueCommand',
+				'session-1',
+				'do the thing',
+				expect.any(String),
+				'ai',
+				'tab-1',
+				undefined,
+				undefined
+			);
+		});
+
+		it('setListQueueCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setListQueueCallback.mock.calls[0][0];
+
+			void callback('session-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:listQueue',
+				'session-1',
+				expect.any(String)
+			);
+		});
+
+		it('setRemoveQueueItemCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setRemoveQueueItemCallback.mock.calls[0][0];
+
+			void callback('session-1', 'item-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:removeQueueItem',
+				'session-1',
+				'item-1',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('gistCallbacks smoke', () => {
+		it('setCreateGistCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setCreateGistCallback.mock.calls[0][0];
+
+			void callback('session-1', 'a description', true);
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:createGist',
+				'session-1',
+				'a description',
+				true,
+				undefined,
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('contextOpsCallbacks smoke', () => {
+		it('setMergeContextCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setMergeContextCallback.mock.calls[0][0];
+
+			void callback('source-1', 'target-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:mergeContext',
+				'source-1',
+				'target-1',
+				expect.any(String)
+			);
+		});
+
+		it('setTransferContextCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setTransferContextCallback.mock.calls[0][0];
+
+			void callback('source-1', 'target-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:transferContext',
+				'source-1',
+				'target-1',
+				expect.any(String)
+			);
+		});
+
+		it('setSummarizeContextCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setSummarizeContextCallback.mock.calls[0][0];
+
+			void callback('session-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:summarizeContext',
+				'session-1',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('usageAchievementsCallbacks smoke', () => {
+		it('setGetUsageDashboardCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetUsageDashboardCallback.mock.calls[0][0];
+
+			void callback('week');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:getUsageDashboard',
+				'week',
+				expect.any(String)
+			);
+		});
+
+		it('setGetAchievementsCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetAchievementsCallback.mock.calls[0][0];
+
+			void callback();
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:getAchievements',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('autoRunConfigCallbacks smoke', () => {
+		it('setConfigureAutoRunCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setConfigureAutoRunCallback.mock.calls[0][0];
+
+			void callback('session-1', { enabled: true });
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:configureAutoRun',
+				'session-1',
+				{ enabled: true },
+				expect.any(String)
+			);
+		});
+
+		it('setGetAutoRunDocsCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetAutoRunDocsCallback.mock.calls[0][0];
+
+			void callback('session-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:getAutoRunDocs',
+				'session-1',
+				expect.any(String)
+			);
+		});
+
+		it('setSaveAutoRunDocCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setSaveAutoRunDocCallback.mock.calls[0][0];
+
+			void callback('session-1', 'doc.md', 'content');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:saveAutoRunDoc',
+				'session-1',
+				'doc.md',
+				'content',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('sessionCrudCallbacks smoke', () => {
+		it('setCreateSessionCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setCreateSessionCallback.mock.calls[0][0];
+
+			void callback('name', 'claude-code', '/cwd', null, {});
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:createSession',
+				'name',
+				'claude-code',
+				'/cwd',
+				null,
+				{},
+				expect.any(String),
+				false
+			);
+		});
+
+		// Issue #1496: the renderer gates its Left Bar switch on this last
+		// argument. Dropping it here reads as a foreground create, so
+		// `create-agent --background` took the window from whoever was working.
+		it('setCreateSessionCallback forwards the background flag', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setCreateSessionCallback.mock.calls[0][0];
+
+			void callback('name', 'claude-code', '/cwd', null, {}, true);
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:createSession',
+				'name',
+				'claude-code',
+				'/cwd',
+				null,
+				{},
+				expect.any(String),
+				true
+			);
+		});
+
+		it('setUpdateSessionConfigCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setUpdateSessionConfigCallback.mock.calls[0][0];
+
+			void callback('session-1', { nudge: 'be careful' });
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:updateSessionConfig',
+				'session-1',
+				{ nudge: 'be careful' },
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('groupCrudCallbacks smoke', () => {
+		it('setCreateGroupCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setCreateGroupCallback.mock.calls[0][0];
+
+			void callback('My Group', '🚀', null, { emoji: '🚀', color: '#EF4444' });
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:createGroup',
+				'My Group',
+				'🚀',
+				null,
+				{ emoji: '🚀', color: '#EF4444' },
+				expect.any(String)
+			);
+		});
+
+		it('setCreateGroupCallback sends an empty appearance when none was requested', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setCreateGroupCallback.mock.calls[0][0];
+
+			void callback('My Group', undefined, undefined);
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:createGroup',
+				'My Group',
+				undefined,
+				undefined,
+				{},
+				expect.any(String)
+			);
+		});
+
+		it('setUpdateGroupCallback forwards the update to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setUpdateGroupCallback.mock.calls[0][0];
+
+			void callback('group-1', { icon: 'rocket', clear: ['color'] });
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:updateGroup',
+				'group-1',
+				{ icon: 'rocket', clear: ['color'] },
+				expect.any(String)
+			);
+		});
+
+		it('setMoveSessionToGroupCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setMoveSessionToGroupCallback.mock.calls[0][0];
+
+			void callback('session-1', 'group-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:moveSessionToGroup',
+				'session-1',
+				'group-1',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('gitCallbacks smoke', () => {
+		it('setGetGitStatusCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetGitStatusCallback.mock.calls[0][0];
+
+			void callback('session-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:getGitStatus',
+				'session-1',
+				expect.any(String)
+			);
+		});
+
+		it('setGetGitDiffCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetGitDiffCallback.mock.calls[0][0];
+
+			void callback('session-1', 'file.ts');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:getGitDiff',
+				'session-1',
+				'file.ts',
+				expect.any(String)
+			);
+		});
+
+		it('setGetGitBranchesForSessionCallback throws when the session is not found', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetGitBranchesForSessionCallback.mock.calls[0][0];
+
+			// Proves the real (not silently-dropped) implementation runs: the
+			// registered callback does a real sessionsStore lookup and throws
+			// its own specific error, rather than the CallbackRegistry's
+			// generic empty-default fallback.
+			await expect(callback('no-such-session')).rejects.toThrow('Session not found');
+		});
+	});
+
+	describe('groupChatCallbacks smoke', () => {
+		it('setStartGroupChatCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setStartGroupChatCallback.mock.calls[0][0];
+
+			void callback('topic', ['agent-1', 'agent-2']);
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:startGroupChat',
+				'topic',
+				['agent-1', 'agent-2'],
+				expect.any(String)
+			);
+		});
+
+		it('setSendGroupChatMessageCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setSendGroupChatMessageCallback.mock.calls[0][0];
+
+			void callback('chat-1', 'hello');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:sendGroupChatMessage',
+				'chat-1',
+				'hello',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('directorNotesCallbacks smoke', () => {
+		it('setGenerateDirectorNotesSynopsisCallback runs the real implementation', async () => {
+			const createWebServer = createWebServerFactory({ ...deps, getProcessManager: () => null });
+			const server = createWebServer() as any;
+			const callback = server.setGenerateDirectorNotesSynopsisCallback.mock.calls[0][0];
+
+			// Proves the real implementation runs (checks processManager and
+			// returns its own specific error shape) rather than silently
+			// never having been registered at all.
+			const result = await callback(7, 'claude-code');
+
+			expect(result).toEqual({
+				success: false,
+				synopsis: '',
+				error: 'Process manager not available',
+			});
+		});
+	});
+
+	describe('autoRunControlCallbacks smoke', () => {
+		it('setStopAutoRunCallback forwards to the renderer', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setStopAutoRunCallback.mock.calls[0][0];
+
+			void callback('session-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith('remote:stopAutoRun', 'session-1');
+		});
+
+		it('setResetAutoRunDocTasksCallback forwards to the renderer via the shared remoteRequest', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setResetAutoRunDocTasksCallback.mock.calls[0][0];
+
+			void callback('session-1', 'doc.md');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:resetAutoRunDocTasks',
+				'session-1',
+				'doc.md',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('playbookCallbacks smoke', () => {
+		it('setListPlaybooksCallback forwards to the renderer via the shared remoteRequest', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setListPlaybooksCallback.mock.calls[0][0];
+
+			void callback('session-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:listPlaybooks',
+				'session-1',
+				expect.any(String)
+			);
+		});
+
+		it('setDeletePlaybookCallback forwards to the renderer via the shared remoteRequest', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setDeletePlaybookCallback.mock.calls[0][0];
+
+			void callback('session-1', 'playbook-1');
+
+			expect(mockWebContents.send).toHaveBeenCalledWith(
+				'remote:deletePlaybook',
+				'session-1',
+				'playbook-1',
+				expect.any(String)
+			);
+		});
+	});
+
+	describe('settingsCallbacks smoke', () => {
+		it('setGetSettingsCallback returns exactly buildWebSettingsSnapshot(settingsStore), so the read and broadcast paths can never silently drift apart', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetSettingsCallback.mock.calls[0][0];
+
+			const settings = callback();
+
+			expect(settings).toEqual(buildWebSettingsSnapshot(mockSettingsStore));
+		});
+
+		it('setSetSettingCallback broadcasts via the live server instance on success - the one callback in this file that closes over `server` at call time, not just registration time', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setSetSettingCallback.mock.calls[0][0];
+
+			const resultPromise = callback('fontSize', 16);
+
+			const request = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.find(
+				(call) => call[0] === 'remote:setSetting'
+			);
+			expect(request).toEqual(['remote:setSetting', 'fontSize', 16, expect.any(String)]);
+			const responseChannel = request?.[3] as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, true);
+
+			await expect(resultPromise).resolves.toBe(true);
+			expect(server.broadcastSettingsChanged).toHaveBeenCalledWith(
+				expect.objectContaining({ theme: 'dracula' })
+			);
+		});
+
+		it('setSetSettingCallback does NOT broadcast when the renderer reports failure', async () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setSetSettingCallback.mock.calls[0][0];
+
+			const resultPromise = callback('fontSize', 16);
+			const request = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.find(
+				(call) => call[0] === 'remote:setSetting'
+			);
+			const responseChannel = request?.[3] as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, false);
+
+			await expect(resultPromise).resolves.toBe(false);
+			expect(server.broadcastSettingsChanged).not.toHaveBeenCalled();
+		});
+
+		it('setGetGroupsCallback derives sessionIds from the sessions store', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setGetGroupsCallback.mock.calls[0][0];
+
+			const groups = callback();
+
+			expect(groups).toEqual([expect.objectContaining({ id: 'group-1', name: 'Test Group' })]);
+			expect(Array.isArray(groups[0].sessionIds)).toBe(true);
+		});
+	});
+
+	describe('tabCallbacks smoke', () => {
+		it('does not focus a destroyed session window', async () => {
+			const show = vi.fn();
+			const focus = vi.fn();
+			const secondaryWebContents = {
+				send: vi.fn(),
+				isDestroyed: vi.fn().mockReturnValue(true),
+			};
+			const secondaryWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: secondaryWebContents,
+				show,
+				focus,
+			};
+			deps.getWindowForSession = vi
+				.fn()
+				.mockReturnValue(secondaryWindow as unknown as BrowserWindow);
+
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setSelectSessionCallback.mock.calls[0][0];
+
+			await expect(callback('session-in-secondary-window', undefined, true)).resolves.toBe(false);
+			expect(show).not.toHaveBeenCalled();
+			expect(focus).not.toHaveBeenCalled();
+			expect(secondaryWebContents.send).not.toHaveBeenCalled();
+		});
+
+		it('routes command requests only to the window that owns the session', async () => {
+			const secondaryWebContents = {
+				send: vi.fn(),
+				isDestroyed: vi.fn().mockReturnValue(false),
+			};
+			const secondaryWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: secondaryWebContents,
+			};
+			deps.getWindowForSession = vi.fn().mockReturnValue(secondaryWindow as BrowserWindow);
+
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setExecuteCommandCallback.mock.calls[0][0];
+			const resultPromise = callback('session-in-secondary-window', 'hello owner', 'ai', 'tab-1');
+
+			expect(mockWebContents.send).not.toHaveBeenCalledWith(
+				'remote:executeCommand',
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything()
+			);
+			const request = secondaryWebContents.send.mock.calls.find(
+				(call) => call[0] === 'remote:executeCommand'
+			);
+			expect(request).toEqual([
+				'remote:executeCommand',
+				'session-in-secondary-window',
+				'hello owner',
+				'ai',
+				'tab-1',
+				undefined,
+				undefined,
+				undefined,
+				expect.any(String),
+			]);
+
+			const responseChannel = request?.at(-1) as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, { accepted: true });
+
+			await expect(resultPromise).resolves.toBe(true);
+		});
+
+		it('routes tab requests only to the window that owns the session', async () => {
+			const secondaryWebContents = {
+				send: vi.fn(),
+				isDestroyed: vi.fn().mockReturnValue(false),
+			};
+			const secondaryWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: secondaryWebContents,
+			};
+			deps.getWindowForSession = vi.fn().mockReturnValue(secondaryWindow as BrowserWindow);
+
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setNewTabCallback.mock.calls[0][0];
+			const resultPromise = callback('session-in-secondary-window');
+
+			expect(mockWebContents.send).not.toHaveBeenCalledWith(
+				'remote:newTab',
+				expect.anything(),
+				expect.anything(),
+				expect.anything()
+			);
+			expect(secondaryWebContents.send).toHaveBeenCalledWith(
+				'remote:newTab',
+				'session-in-secondary-window',
+				expect.any(String),
+				false
+			);
+
+			const responseChannel = vi
+				.mocked(secondaryWebContents.send)
+				.mock.calls.find((call) => call[0] === 'remote:newTab')?.[2] as string;
+			const responseListener = vi
+				.mocked(ipcMain.once)
+				.mock.calls.find((call) => call[0] === responseChannel)?.[1];
+			responseListener?.({} as never, { tabId: 'new-tab' });
+
+			await expect(resultPromise).resolves.toEqual({ tabId: 'new-tab' });
+
+			const closeCallback = server.setCloseTabCallback.mock.calls[0][0];
+			await expect(closeCallback('session-in-secondary-window', 'new-tab')).resolves.toBe(true);
+			expect(secondaryWebContents.send).toHaveBeenCalledWith(
+				'remote:closeTab',
+				'session-in-secondary-window',
+				'new-tab'
+			);
+			expect(mockWebContents.send).not.toHaveBeenCalledWith(
+				'remote:closeTab',
+				expect.anything(),
+				expect.anything()
+			);
+		});
+
+		it('setNewTabCallback mints a distinct response channel per call, so overlapping requests cannot collide', () => {
+			const createWebServer = createWebServerFactory(deps);
+			const server = createWebServer() as any;
+			const callback = server.setNewTabCallback.mock.calls[0][0];
+
+			void callback('session-1');
+			void callback('session-1');
+
+			const newTabSends = (mockWebContents.send as ReturnType<typeof vi.fn>).mock.calls.filter(
+				(call) => call[0] === 'remote:newTab'
+			);
+			expect(newTabSends).toHaveLength(2);
+			const [firstChannel, secondChannel] = newTabSends.map((call) => call[2] as string);
+			expect(firstChannel).not.toBe(secondChannel);
+		});
+
+		it('routes document graph requests to the window that owns the session', async () => {
+			const secondaryWebContents = {
+				send: vi.fn(),
+				isDestroyed: vi.fn().mockReturnValue(false),
+			};
+			const secondaryWindow = {
+				isDestroyed: vi.fn().mockReturnValue(false),
+				webContents: secondaryWebContents,
+			};
+			deps.getWindowForSession = vi.fn().mockReturnValue(secondaryWindow as BrowserWindow);
+
+			const server = createWebServerFactory(deps)() as any;
+			const callback = server.setOpenDocumentGraphCallback.mock.calls[0][0];
+			const params = {
+				sessionId: 'session-in-secondary-window',
+				files: ['/repo/README.md'],
+			};
+
+			await expect(callback(params)).resolves.toBe(true);
+			expect(secondaryWebContents.send).toHaveBeenCalledWith('remote:openDocumentGraph', params);
+			expect(mockWebContents.send).not.toHaveBeenCalledWith('remote:openDocumentGraph', params);
 		});
 	});
 });

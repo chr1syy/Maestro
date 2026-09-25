@@ -10,6 +10,11 @@
 import { marked } from 'marked';
 import type { AITab, LogEntry, Theme, UsageStats } from '../types';
 import { getTabDisplayName } from './tabHelpers';
+import { formatTimestamp as formatTimestampShared } from '../../shared/formatters';
+import {
+	computeTabConversationStats,
+	formatConversationDuration,
+} from '../../shared/tabConversationStats';
 
 // Configure marked for GFM (tables, strikethrough, etc.)
 marked.setOptions({
@@ -33,23 +38,7 @@ function escapeHtml(text: string): string {
  * Format a timestamp for display
  */
 function formatTimestamp(timestamp: number): string {
-	const date = new Date(timestamp);
-	return date.toLocaleString();
-}
-
-/**
- * Format duration from milliseconds
- */
-function formatDuration(logs: LogEntry[]): string {
-	if (logs.length < 2) return '0m';
-
-	const firstTimestamp = logs[0].timestamp;
-	const lastTimestamp = logs[logs.length - 1].timestamp;
-	const durationMs = lastTimestamp - firstTimestamp;
-	const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
-	const durationMins = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
-
-	return durationHours > 0 ? `${durationHours}h ${durationMins}m` : `${durationMins}m`;
+	return formatTimestampShared(timestamp, 'full');
 }
 
 /**
@@ -131,20 +120,16 @@ export function generateTabExportHtml(
 	session: { name: string; cwd: string; toolType: string },
 	theme: Theme
 ): string {
-	// Filter to only include relevant log entries (user and AI messages)
-	const relevantLogs = tab.logs.filter((log) =>
-		['user', 'ai', 'stdout', 'error', 'stderr', 'system', 'thinking', 'tool'].includes(log.source)
-	);
-
-	// Calculate stats
-	const userMessages = relevantLogs.filter((l) => l.source === 'user').length;
-	const aiMessages = relevantLogs.filter((l) => l.source === 'ai' || l.source === 'stdout').length;
+	// Counts and span come from the shared helper, so the figures printed here
+	// are the same ones the Context Details popover shows live in the app.
+	const conversation = computeTabConversationStats(tab.logs);
+	const relevantLogs = conversation.logs;
 
 	const stats = {
-		totalMessages: relevantLogs.length,
-		userMessages,
-		aiMessages,
-		duration: formatDuration(relevantLogs),
+		totalMessages: conversation.totalMessages,
+		userMessages: conversation.userMessages,
+		aiMessages: conversation.aiMessages,
+		duration: formatConversationDuration(conversation.durationMs),
 	};
 
 	// Generate messages HTML

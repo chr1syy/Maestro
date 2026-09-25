@@ -1,9 +1,15 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { FilePreview } from '../../../renderer/components/FilePreview';
 import { formatShortcutKeys } from '../../../renderer/utils/shortcutFormatter';
+import { useSettingsStore } from '../../../renderer/stores/settingsStore';
+import { useImageAnnotatorStore } from '../../../renderer/components/ImageAnnotator/imageAnnotatorStore';
+import { isWebDesktop } from '../../../renderer/utils/runtimeContext';
 
+import { installLocalStorageMock } from '../../helpers/mockLocalStorage';
+import { mockTheme } from '../../helpers/mockTheme';
+import { requestHeadingPalette } from '../../../renderer/services/headingPalette';
 // Mock lucide-react icons
 vi.mock('lucide-react', () => ({
 	FileCode: () => <span data-testid="file-code-icon">FileCode</span>,
@@ -17,6 +23,7 @@ vi.mock('lucide-react', () => ({
 	Loader2: () => <span data-testid="loader-icon">Loader2</span>,
 	Image: () => <span data-testid="image-icon">Image</span>,
 	Globe: () => <span data-testid="globe-icon">Globe</span>,
+	Wand2: () => <span data-testid="wand-icon">Wand2</span>,
 	Save: () => <span data-testid="save-icon">Save</span>,
 	Edit: () => <span data-testid="edit-icon">Edit</span>,
 	AlertTriangle: () => <span data-testid="alert-icon">AlertTriangle</span>,
@@ -24,11 +31,30 @@ vi.mock('lucide-react', () => ({
 	GitGraph: () => <span data-testid="gitgraph-icon">GitGraph</span>,
 	List: () => <span data-testid="list-icon">List</span>,
 	ExternalLink: () => <span data-testid="external-link-icon">ExternalLink</span>,
+	FolderOpen: () => <span data-testid="folder-open-icon">FolderOpen</span>,
 	RefreshCw: () => <span data-testid="refresh-icon">RefreshCw</span>,
 	X: () => <span data-testid="x-icon">X</span>,
 	ZoomIn: () => <span data-testid="zoom-in-icon">ZoomIn</span>,
 	ZoomOut: () => <span data-testid="zoom-out-icon">ZoomOut</span>,
 	Maximize2: () => <span data-testid="maximize-icon">Maximize2</span>,
+	// Icons added by PreviewTierChip in Phase 2.
+	Sparkles: () => <span data-testid="sparkles-icon">Sparkles</span>,
+	Zap: () => <span data-testid="zap-icon">Zap</span>,
+	Database: () => <span data-testid="database-icon">Database</span>,
+	WrapText: () => <span data-testid="wraptext-icon">WrapText</span>,
+	// Icon for the toolbar's delete-file button.
+	Trash2: () => <span data-testid="trash-icon">Trash2</span>,
+	AppWindow: () => <span data-testid="appwindow-icon">AppWindow</span>,
+	// Icons added by the search-kind toggle (text/regex/literal).
+	Filter: () => <span data-testid="filter-icon">Filter</span>,
+	Type: () => <span data-testid="type-icon">Type</span>,
+	Regex: () => <span data-testid="regex-icon">Regex</span>,
+	Hash: () => <span data-testid="hash-icon">Hash</span>,
+	// Icons added by the floating font-zoom control.
+	AArrowUp: () => <span data-testid="a-arrow-up-icon">AArrowUp</span>,
+	AArrowDown: () => <span data-testid="a-arrow-down-icon">AArrowDown</span>,
+	// Resting-circle icon for the collapsible variant of that control.
+	ALargeSmall: () => <span data-testid="a-large-small-icon">ALargeSmall</span>,
 }));
 
 // Mock react-markdown
@@ -167,18 +193,28 @@ vi.mock('../../../shared/gitUtils', () => ({
 	isImageFile: (filename: string) => /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(filename),
 }));
 
-const mockTheme = {
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgActivity: '#16213e',
-		textMain: '#eee',
-		textDim: '#888',
-		border: '#333',
-		accent: '#4a9eff',
-		success: '#22c55e',
-	},
-};
+// Mock runtimeContext so tests can flip the web-desktop build on per-test.
+// Defaults to the Electron desktop (isWebDesktop === false), matching the
+// pre-existing behavior every other test assumes.
+vi.mock('../../../renderer/utils/runtimeContext', () => {
+	const isWebDesktop = vi.fn(() => false);
+	return {
+		isWebDesktop,
+		isElectronDesktop: () => !isWebDesktop(),
+	};
+});
+
+// Mock MarkdownEditor. The real editor wraps CodeMirror, which jsdom can't
+// satisfy `getByRole('textbox')` against. A bare `<textarea>` lets us keep
+// the FilePreview wiring tests (controlled vs. internal editContent, onChange
+// fan-out) without coupling to CodeMirror internals.
+vi.mock('../../../renderer/components/FilePreview/markdownEditor', () => ({
+	MarkdownEditor: React.forwardRef<unknown, { value: string; onChange: (v: string) => void }>(
+		({ value, onChange }, _ref) => (
+			<textarea value={value} onChange={(e) => onChange(e.target.value)} />
+		)
+	),
+}));
 
 const defaultProps = {
 	file: { name: 'test.md', content: '# Hello World', path: '/test/test.md' },
@@ -192,6 +228,14 @@ const defaultProps = {
 describe('FilePreview', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// Default every test to the Electron desktop build; the web-desktop tests
+		// opt in explicitly. (clearAllMocks resets call history, not the return
+		// value, so pin it back to false here.)
+		vi.mocked(isWebDesktop).mockReturnValue(false);
+		// `useFontScale` persists the pane's zoom to localStorage, so a test that
+		// zooms hands its scale to the next test. A fresh mock per test is the reset.
+		installLocalStorageMock();
+		useSettingsStore.setState({ bionifyReadingMode: false });
 		// Reset useClickOutside call counter so each test starts fresh
 		useClickOutsideCallCount = 0;
 		mockContainerClickOutside.callback = null;
@@ -200,7 +244,48 @@ describe('FilePreview', () => {
 		mockTocClickOutside.enabled = false;
 	});
 
+	// Reset settings store after every test so mid-test `setState({ bionifyReadingMode: true })`
+	// calls can't leak into sibling tests (including other suites) when a test throws mid-flight.
+	afterEach(() => {
+		useSettingsStore.setState({ bionifyReadingMode: false });
+	});
+
 	describe('Document Graph button', () => {
+		it('leaves Cmd+Shift+G alone so View Git Log still gets it', () => {
+			// The graph used to claim Cmd+Shift+G here, in a hardcoded branch that
+			// called stopPropagation(). That chord belongs to View Git Log, so the
+			// graph silently won it whenever a markdown preview had focus - and
+			// because it was in no shortcut registry, it could not be seen in
+			// Settings or rebound out of the way. The button is the way in now.
+			const onOpenInGraph = vi.fn();
+			const onOpenFuzzySearch = vi.fn();
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'readme.md', content: '# Readme', path: '/test/readme.md' }}
+					onOpenInGraph={onOpenInGraph}
+					onOpenFuzzySearch={onOpenFuzzySearch}
+					shortcuts={{
+						fuzzyFileSearch: {
+							id: 'fuzzyFileSearch',
+							label: 'Fuzzy File Search',
+							keys: ['Meta', 'g'],
+						},
+					}}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			expect(previewContainer).not.toBeNull();
+
+			fireEvent.keyDown(previewContainer!, { key: 'g', metaKey: true, shiftKey: true });
+
+			expect(onOpenInGraph).not.toHaveBeenCalled();
+			// Cmd+G's own handler must not catch the shifted chord on the way past.
+			// Modifier matching is exact, so this is the guard on that staying true.
+			expect(onOpenFuzzySearch).not.toHaveBeenCalled();
+		});
+
 		it('shows Document Graph button for markdown files when onOpenInGraph is provided', () => {
 			const onOpenInGraph = vi.fn();
 			render(
@@ -211,11 +296,9 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			const graphButton = screen.getByTitle(
-				`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
-			);
-			expect(graphButton).toBeInTheDocument();
-			expect(screen.getByTestId('gitgraph-icon')).toBeInTheDocument();
+			const graphIcon = screen.getByTestId('gitgraph-icon');
+			expect(graphIcon).toBeInTheDocument();
+			expect(graphIcon.closest('button')).toBeInTheDocument();
 		});
 
 		it('calls onOpenInGraph when Document Graph button is clicked', () => {
@@ -228,9 +311,7 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			const graphButton = screen.getByTitle(
-				`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
-			);
+			const graphButton = screen.getByTestId('gitgraph-icon').closest('button')!;
 			fireEvent.click(graphButton);
 
 			expect(onOpenInGraph).toHaveBeenCalledOnce();
@@ -244,11 +325,7 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(
-				screen.queryByTitle(
-					`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
-				)
-			).not.toBeInTheDocument();
+			expect(screen.queryByTestId('gitgraph-icon')).not.toBeInTheDocument();
 		});
 
 		it('does not show Document Graph button for non-markdown files', () => {
@@ -261,11 +338,7 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(
-				screen.queryByTitle(
-					`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`
-				)
-			).not.toBeInTheDocument();
+			expect(screen.queryByTestId('gitgraph-icon')).not.toBeInTheDocument();
 		});
 
 		it('shows Document Graph button for uppercase .MD extension', () => {
@@ -278,9 +351,7 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(
-				screen.getByTitle(`View in Document Graph (${formatShortcutKeys(['Meta', 'Shift', 'g'])})`)
-			).toBeInTheDocument();
+			expect(screen.getByTestId('gitgraph-icon')).toBeInTheDocument();
 		});
 	});
 
@@ -288,9 +359,9 @@ describe('FilePreview', () => {
 		it('shows Open in Default App button with ExternalLink icon', () => {
 			render(<FilePreview {...defaultProps} />);
 
-			const button = screen.getByTitle('Open in Default App');
-			expect(button).toBeInTheDocument();
-			expect(screen.getByTestId('external-link-icon')).toBeInTheDocument();
+			const icon = screen.getByTestId('external-link-icon');
+			expect(icon).toBeInTheDocument();
+			expect(icon.closest('button')).toBeInTheDocument();
 		});
 
 		it('calls shell.openPath with file path when clicked', () => {
@@ -301,7 +372,7 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			const button = screen.getByTitle('Open in Default App');
+			const button = screen.getByTestId('external-link-icon').closest('button')!;
 			fireEvent.click(button);
 
 			expect(window.maestro?.shell?.openPath).toHaveBeenCalledWith('/test/readme.md');
@@ -310,7 +381,248 @@ describe('FilePreview', () => {
 		it('hides Open in Default App button for SSH remote sessions', () => {
 			render(<FilePreview {...defaultProps} sshRemoteId="remote-host-1" />);
 
-			expect(screen.queryByTitle('Open in Default App')).not.toBeInTheDocument();
+			expect(screen.queryByTestId('external-link-icon')).not.toBeInTheDocument();
+		});
+
+		it('hides the header Open in Default App button in the web-desktop build', () => {
+			// openPath hands the file to the HOST OS opener, which is not the browser
+			// user's device, so the affordance must be gone in web-desktop.
+			vi.mocked(isWebDesktop).mockReturnValue(true);
+			render(<FilePreview {...defaultProps} />);
+
+			expect(screen.queryByTestId('external-link-icon')).not.toBeInTheDocument();
+		});
+
+		it('disables the binary-file Open in Default App button in the web-desktop build', () => {
+			vi.mocked(isWebDesktop).mockReturnValue(true);
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'lib.dll', content: 'MZ binary', path: '/test/lib.dll' }}
+				/>
+			);
+
+			const button = screen.getByRole('button', { name: 'Open in Default App' });
+			expect(button).toBeDisabled();
+			expect(button).toHaveAttribute('title', 'Available in the desktop app');
+			fireEvent.click(button);
+			expect(window.maestro?.shell?.openPath).not.toHaveBeenCalled();
+		});
+
+		it('keeps the binary-file Open in Default App button active on the desktop', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'lib.dll', content: 'MZ binary', path: '/test/lib.dll' }}
+				/>
+			);
+
+			const button = screen.getByRole('button', { name: 'Open in Default App' });
+			expect(button).toBeEnabled();
+			fireEvent.click(button);
+			expect(window.maestro?.shell?.openPath).toHaveBeenCalledWith('/test/lib.dll');
+		});
+	});
+
+	describe('Reveal in file manager button', () => {
+		it('shows the reveal button with its own FolderOpen icon', () => {
+			render(<FilePreview {...defaultProps} />);
+
+			const icon = screen.getByTestId('folder-open-icon');
+			expect(icon).toBeInTheDocument();
+			// Distinct icon from Open in Default App so the two actions read differently
+			expect(icon.closest('button')).not.toBe(
+				screen.getByTestId('external-link-icon').closest('button')
+			);
+		});
+
+		it('calls shell.showItemInFolder with the file path when clicked', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'readme.md', content: '# Readme', path: '/test/readme.md' }}
+				/>
+			);
+
+			const button = screen.getByTestId('folder-open-icon').closest('button')!;
+			fireEvent.click(button);
+
+			expect(window.maestro?.shell?.showItemInFolder).toHaveBeenCalledWith('/test/readme.md');
+		});
+
+		it('hides the reveal button for SSH remote sessions', () => {
+			render(<FilePreview {...defaultProps} sshRemoteId="remote-host-1" />);
+
+			expect(screen.queryByTestId('folder-open-icon')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('Mermaid (.mmd) preview', () => {
+		const mermaidFile = {
+			name: 'diagram.mmd',
+			content: 'flowchart TB\n  A[Start] --> B[End]',
+			path: '/test/diagram.mmd',
+		};
+
+		it('renders .mmd files as a diagram instead of raw text', () => {
+			render(<FilePreview {...defaultProps} file={mermaidFile} />);
+
+			expect(screen.getByTestId('mermaid-renderer')).toBeInTheDocument();
+			expect(screen.queryByTestId('syntax-highlighter')).not.toBeInTheDocument();
+		});
+
+		it('also renders the uppercase .MERMAID extension as a diagram', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ ...mermaidFile, name: 'diagram.MERMAID', path: '/test/diagram.MERMAID' }}
+				/>
+			);
+
+			expect(screen.getByTestId('mermaid-renderer')).toBeInTheDocument();
+		});
+
+		it('shows the raw source instead of the diagram in edit mode', () => {
+			render(<FilePreview {...defaultProps} file={mermaidFile} markdownEditMode={true} />);
+
+			expect(screen.queryByTestId('mermaid-renderer')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('readable text preview', () => {
+		it('applies Bionify spans to .txt previews when reading mode is enabled', () => {
+			useSettingsStore.setState({ bionifyReadingMode: true });
+
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'notes.txt',
+						content: 'Readable text preview content',
+						path: '/test/notes.txt',
+					}}
+				/>
+			);
+
+			expect(document.querySelectorAll('.bionify-word').length).toBeGreaterThan(0);
+			expect(container.textContent).toContain('Readable text preview content');
+			expect(screen.queryByTestId('syntax-highlighter')).not.toBeInTheDocument();
+		});
+
+		it('keeps readable .txt previews plain when reading mode is disabled', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'notes.txt',
+						content: 'Readable text preview content',
+						path: '/test/notes.txt',
+					}}
+				/>
+			);
+
+			expect(screen.getByText('Readable text preview content')).toBeInTheDocument();
+			expect(document.querySelector('.bionify-word')).not.toBeInTheDocument();
+		});
+
+		it('disables Bionify spans while search is active so readable text remains searchable', async () => {
+			useSettingsStore.setState({ bionifyReadingMode: true });
+
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'notes.txt',
+						content: 'reading mode keeps reading searchable',
+						path: '/test/notes.txt',
+					}}
+					initialSearchQuery="reading"
+				/>
+			);
+
+			await waitFor(() => expect(screen.getByText('1/2')).toBeInTheDocument());
+			expect(document.querySelector('.bionify-word')).not.toBeInTheDocument();
+		});
+
+		it('shows the truncation banner for large readable text previews and can load the full file', () => {
+			// Multi-line content sized to trigger the legacy 100KB truncation banner
+			// (Rich tier) without crossing the long-line threshold that would
+			// escalate to Giant tier.
+			const largeContent = 'Readable paragraph with plenty of words for truncation.\n'.repeat(4000);
+
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'large.txt', content: largeContent, path: '/test/large.txt' }}
+				/>
+			);
+
+			expect(screen.getByText(/Large file preview truncated/)).toBeInTheDocument();
+			expect(screen.queryByTestId('syntax-highlighter')).not.toBeInTheDocument();
+
+			fireEvent.click(screen.getByText('Load full file'));
+
+			expect(screen.queryByText(/Large file preview truncated/)).not.toBeInTheDocument();
+		});
+
+		it('does not render a per-preview Bionify toggle button (Bionify is controlled globally)', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'notes.txt',
+						content: 'Readable text preview content',
+						path: '/test/notes.txt',
+					}}
+				/>
+			);
+
+			expect(screen.queryByTitle('Enable Bionify for this preview')).not.toBeInTheDocument();
+			expect(screen.queryByTitle('Disable Bionify for this preview')).not.toBeInTheDocument();
+		});
+
+		it('routes .mdx files through markdown preview instead of readable text preview', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'notes.mdx',
+						content: '# MDX heading',
+						path: '/test/notes.mdx',
+					}}
+				/>
+			);
+
+			expect(screen.getByTestId('markdown-content')).toBeInTheDocument();
+			expect(screen.queryByTestId('syntax-highlighter')).not.toBeInTheDocument();
+		});
+
+		it('does not treat files with code extensions as readable-text basenames', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'README.ts',
+						content: 'const value = true;',
+						path: '/test/README.ts',
+					}}
+				/>
+			);
+
+			expect(screen.getByTestId('syntax-highlighter')).toBeInTheDocument();
+		});
+
+		it('does not treat other basename-style code files as readable text', () => {
+			const files = [
+				{ name: 'LICENSE.py', content: 'print("license")', path: '/test/LICENSE.py' },
+				{ name: 'TODO.js', content: 'console.log("todo")', path: '/test/TODO.js' },
+			];
+
+			for (const file of files) {
+				const { unmount } = render(<FilePreview {...defaultProps} file={file} />);
+				expect(screen.getByTestId('syntax-highlighter')).toBeInTheDocument();
+				unmount();
+			}
 		});
 	});
 
@@ -446,12 +758,57 @@ describe('FilePreview', () => {
 
 			const callsAfterMount = mockStat.mock.calls.length;
 
-			// Advance timers past multiple poll intervals — no additional calls should happen
+			// Advance timers past multiple poll intervals - no additional calls should happen
 			await act(async () => {
 				vi.advanceTimersByTime(6000);
 			});
 
 			expect(mockStat).toHaveBeenCalledTimes(callsAfterMount);
+
+			vi.useRealTimers();
+		});
+
+		it('shows the missing-on-disk banner when polling stat throws (file gone)', async () => {
+			vi.useFakeTimers();
+
+			// stat rejects: the file no longer resolves at its cached path.
+			window.maestro.fs.stat = vi.fn().mockRejectedValue(new Error('ENOENT'));
+
+			render(<FilePreview {...defaultProps} lastModified={1000} onReloadFile={vi.fn()} />);
+
+			expect(
+				screen.queryByText(/no longer exists at its original location/)
+			).not.toBeInTheDocument();
+
+			await act(async () => {
+				vi.advanceTimersByTime(3000);
+			});
+
+			expect(screen.getByText(/no longer exists at its original location/)).toBeInTheDocument();
+			// There is nothing to reload, so no Reload button is offered.
+			expect(screen.queryByText('Reload')).not.toBeInTheDocument();
+
+			vi.useRealTimers();
+		});
+
+		it('dismisses the missing-on-disk banner when Dismiss is clicked', async () => {
+			vi.useFakeTimers();
+
+			window.maestro.fs.stat = vi.fn().mockRejectedValue(new Error('ENOENT'));
+
+			render(<FilePreview {...defaultProps} lastModified={1000} onReloadFile={vi.fn()} />);
+
+			await act(async () => {
+				vi.advanceTimersByTime(3000);
+			});
+
+			expect(screen.getByText(/no longer exists at its original location/)).toBeInTheDocument();
+
+			fireEvent.click(screen.getByText('Dismiss'));
+
+			expect(
+				screen.queryByText(/no longer exists at its original location/)
+			).not.toBeInTheDocument();
 
 			vi.useRealTimers();
 		});
@@ -497,7 +854,7 @@ describe('FilePreview', () => {
 			expect(screen.getByTestId('edit-icon')).toBeInTheDocument();
 		});
 
-		it('does not show edit button for image files', () => {
+		it('does not show the text edit toggle for image files', () => {
 			render(
 				<FilePreview
 					{...defaultProps}
@@ -509,7 +866,39 @@ describe('FilePreview', () => {
 				/>
 			);
 
-			expect(screen.queryByTestId('edit-icon')).not.toBeInTheDocument();
+			// Images can be opened in the annotator ("Edit image"), but never get
+			// the text/markdown edit-mode toggle.
+			expect(screen.queryByTestId('edit-text-toggle')).not.toBeInTheDocument();
+		});
+
+		it('opens the image annotator on the toggleMarkdownMode shortcut (Cmd+E)', () => {
+			const openAnnotator = vi.fn();
+			useImageAnnotatorStore.setState({ openAnnotator });
+
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'image.png',
+						content: 'data:image/png;base64,abc',
+						path: '/test/image.png',
+					}}
+					shortcuts={{
+						toggleMarkdownMode: {
+							id: 'toggleMarkdownMode',
+							label: 'Toggle Edit/Preview',
+							keys: ['Meta', 'e'],
+						},
+					}}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			expect(previewContainer).not.toBeNull();
+
+			fireEvent.keyDown(previewContainer!, { key: 'e', metaKey: true });
+
+			expect(openAnnotator).toHaveBeenCalledWith('data:image/png;base64,abc', expect.any(Function));
 		});
 
 		it('toggles to edit mode when edit button is clicked', () => {
@@ -543,83 +932,12 @@ describe('FilePreview', () => {
 		});
 	});
 
-	describe('edit mode keyboard navigation', () => {
-		const multiLineContent = 'Line 1\nLine 2\nLine 3\nLine 4\nLine 5';
-
-		it('Cmd+Shift+Up selects from cursor to beginning of document', () => {
-			render(
-				<FilePreview
-					{...defaultProps}
-					file={{ name: 'test.txt', content: multiLineContent, path: '/test/test.txt' }}
-					markdownEditMode={true}
-				/>
-			);
-
-			const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
-			// Place cursor at position 14 (start of Line 3)
-			textarea.setSelectionRange(14, 14);
-
-			fireEvent.keyDown(textarea, { key: 'ArrowUp', metaKey: true, shiftKey: true });
-
-			expect(textarea.selectionStart).toBe(0);
-			expect(textarea.selectionEnd).toBe(14);
-		});
-
-		it('Cmd+Shift+Down selects from cursor to end of document', () => {
-			render(
-				<FilePreview
-					{...defaultProps}
-					file={{ name: 'test.txt', content: multiLineContent, path: '/test/test.txt' }}
-					markdownEditMode={true}
-				/>
-			);
-
-			const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
-			// Place cursor at position 14 (start of Line 3)
-			textarea.setSelectionRange(14, 14);
-
-			fireEvent.keyDown(textarea, { key: 'ArrowDown', metaKey: true, shiftKey: true });
-
-			expect(textarea.selectionStart).toBe(14);
-			expect(textarea.selectionEnd).toBe(multiLineContent.length);
-		});
-
-		it('Cmd+Up moves cursor to beginning without selection', () => {
-			render(
-				<FilePreview
-					{...defaultProps}
-					file={{ name: 'test.txt', content: multiLineContent, path: '/test/test.txt' }}
-					markdownEditMode={true}
-				/>
-			);
-
-			const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
-			textarea.setSelectionRange(14, 14);
-
-			fireEvent.keyDown(textarea, { key: 'ArrowUp', metaKey: true });
-
-			expect(textarea.selectionStart).toBe(0);
-			expect(textarea.selectionEnd).toBe(0);
-		});
-
-		it('Cmd+Down moves cursor to end without selection', () => {
-			render(
-				<FilePreview
-					{...defaultProps}
-					file={{ name: 'test.txt', content: multiLineContent, path: '/test/test.txt' }}
-					markdownEditMode={true}
-				/>
-			);
-
-			const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
-			textarea.setSelectionRange(14, 14);
-
-			fireEvent.keyDown(textarea, { key: 'ArrowDown', metaKey: true });
-
-			expect(textarea.selectionStart).toBe(multiLineContent.length);
-			expect(textarea.selectionEnd).toBe(multiLineContent.length);
-		});
-	});
+	// `edit mode keyboard navigation` tests were removed when FilePreview's edit
+	// surface was swapped from a raw <textarea> to CodeMirror. Cmd+Up/Down and
+	// Cmd+Shift+Up/Down are now provided by CodeMirror's `defaultKeymap`
+	// (cursorDocStart / cursorDocEnd / selectDocStart / selectDocEnd) - there's
+	// no FilePreview-level handler to test, so the old tests would have only
+	// exercised our mock.
 
 	describe('basic rendering', () => {
 		it('renders file preview with file name', () => {
@@ -641,7 +959,9 @@ describe('FilePreview', () => {
 	describe('large file handling', () => {
 		it('shows truncation banner for files larger than 100KB', () => {
 			// Create content larger than LARGE_FILE_PREVIEW_LIMIT (100KB)
-			const largeContent = 'x'.repeat(150 * 1024); // 150KB
+			// Multi-line content to trigger the legacy Rich-tier truncation
+			// banner without escalating to Giant via the long-line signal.
+			const largeContent = ('x'.repeat(99) + '\n').repeat(1536); // ~150KB / ~1.5k lines
 			render(
 				<FilePreview
 					{...defaultProps}
@@ -680,7 +1000,8 @@ describe('FilePreview', () => {
 		});
 
 		it('truncates displayed content to 100KB for syntax highlighting', () => {
-			const largeContent = 'y'.repeat(200 * 1024); // 200KB
+			// Multi-line, no single line above the 10k long-line threshold.
+			const largeContent = ('y'.repeat(99) + '\n').repeat(2048); // ~200KB / ~2k lines
 			render(
 				<FilePreview
 					{...defaultProps}
@@ -695,7 +1016,8 @@ describe('FilePreview', () => {
 		});
 
 		it('loads full file content when "Load full file" button is clicked', () => {
-			const largeContent = 'y'.repeat(200 * 1024); // 200KB
+			// Multi-line, no single line above the 10k long-line threshold.
+			const largeContent = ('y'.repeat(99) + '\n').repeat(2048); // ~200KB / ~2k lines
 			render(
 				<FilePreview
 					{...defaultProps}
@@ -999,6 +1321,192 @@ print("world")
 			expect(screen.getByText('Heading 1')).toBeInTheDocument();
 			expect(screen.getByText('Heading 2')).toBeInTheDocument();
 			expect(screen.getByText('Heading 3')).toBeInTheDocument();
+		});
+
+		it('toggles TOC overlay with the toggleFilePreviewToc shortcut and reports usage', () => {
+			const onShortcutUsed = vi.fn();
+			const markdownWithHeadings = '# Heading 1\n## Heading 2\n### Heading 3';
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: markdownWithHeadings, path: '/test/doc.md' }}
+					markdownEditMode={false}
+					isTabMode={true}
+					shortcuts={{
+						toggleFilePreviewToc: {
+							id: 'toggleFilePreviewToc',
+							label: 'Toggle Table of Contents (Markdown Preview)',
+							keys: ['Meta', '\\'],
+						},
+					}}
+					onShortcutUsed={onShortcutUsed}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			expect(previewContainer).not.toBeNull();
+
+			// First firing opens the overlay and reports usage
+			fireEvent.keyDown(previewContainer!, { key: '\\', metaKey: true });
+			expect(screen.getByText('Contents')).toBeInTheDocument();
+			expect(onShortcutUsed).toHaveBeenCalledWith('toggleFilePreviewToc');
+
+			// Second firing closes it
+			fireEvent.keyDown(previewContainer!, { key: '\\', metaKey: true });
+			expect(screen.queryByText('Contents')).not.toBeInTheDocument();
+			expect(onShortcutUsed).toHaveBeenCalledTimes(2);
+		});
+
+		it('ignores toggleFilePreviewToc shortcut in edit mode (no TOC available)', () => {
+			const onShortcutUsed = vi.fn();
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: '# Heading 1', path: '/test/doc.md' }}
+					markdownEditMode={true}
+					isTabMode={true}
+					shortcuts={{
+						toggleFilePreviewToc: {
+							id: 'toggleFilePreviewToc',
+							label: 'Toggle Table of Contents (Markdown Preview)',
+							keys: ['Meta', '\\'],
+						},
+					}}
+					onShortcutUsed={onShortcutUsed}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			expect(previewContainer).not.toBeNull();
+
+			fireEvent.keyDown(previewContainer!, { key: '\\', metaKey: true });
+			expect(screen.queryByText('Contents')).not.toBeInTheDocument();
+			expect(onShortcutUsed).not.toHaveBeenCalled();
+		});
+
+		it('opens the heading palette on a bare # and lists every heading', () => {
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{
+						name: 'doc.md',
+						content: '# Heading 1\n## Heading 2\n### Heading 3',
+						path: '/test/doc.md',
+					}}
+					markdownEditMode={false}
+					isTabMode={true}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			fireEvent.keyDown(previewContainer!, { key: '#' });
+
+			expect(screen.getByTestId('heading-palette-input')).toBeInTheDocument();
+			const rows = container.querySelectorAll('[data-testid="heading-palette-row"]');
+			expect(Array.from(rows).map((el) => (el as HTMLElement).title)).toEqual([
+				'Heading 1',
+				'Heading 2',
+				'Heading 3',
+			]);
+		});
+
+		it('Escape closes the heading palette before the TOC overlay', () => {
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: '# Heading 1\n## Heading 2', path: '/test/doc.md' }}
+					markdownEditMode={false}
+					isTabMode={true}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			fireEvent.click(screen.getByTitle('Table of Contents'));
+			fireEvent.keyDown(previewContainer!, { key: '#' });
+
+			// The palette supersedes the overlay rather than stacking on it.
+			expect(screen.getByTestId('heading-palette-input')).toBeInTheDocument();
+			expect(screen.queryByText('Contents')).not.toBeInTheDocument();
+
+			fireEvent.keyDown(previewContainer!, { key: 'Escape' });
+			expect(screen.queryByTestId('heading-palette-input')).not.toBeInTheDocument();
+		});
+
+		it('ignores # in markdown edit mode, where it is just a character', () => {
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: '# Heading 1', path: '/test/doc.md' }}
+					markdownEditMode={true}
+					isTabMode={true}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			fireEvent.keyDown(previewContainer!, { key: '#' });
+			expect(screen.queryByTestId('heading-palette-input')).not.toBeInTheDocument();
+		});
+
+		it('ignores # on a file with no headings', () => {
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: 'Just prose, no headings.', path: '/test/doc.md' }}
+					markdownEditMode={false}
+					isTabMode={true}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			fireEvent.keyDown(previewContainer!, { key: '#' });
+			expect(screen.queryByTestId('heading-palette-input')).not.toBeInTheDocument();
+		});
+
+		it('opens the heading palette when the command palette asks over the event', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: '# Heading 1\n## Heading 2', path: '/test/doc.md' }}
+					markdownEditMode={false}
+					isTabMode={true}
+				/>
+			);
+
+			act(() => {
+				requestHeadingPalette();
+			});
+			expect(screen.getByTestId('heading-palette-input')).toBeInTheDocument();
+		});
+
+		it('drops a heading-palette request on a file with no headings', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: 'Just prose.', path: '/test/doc.md' }}
+					markdownEditMode={false}
+					isTabMode={true}
+				/>
+			);
+
+			act(() => {
+				requestHeadingPalette();
+			});
+			expect(screen.queryByTestId('heading-palette-input')).not.toBeInTheDocument();
+		});
+
+		it('ignores Cmd+# so a modified chord still reaches the global handler', () => {
+			const { container } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'doc.md', content: '# Heading 1', path: '/test/doc.md' }}
+					markdownEditMode={false}
+					isTabMode={true}
+				/>
+			);
+
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			fireEvent.keyDown(previewContainer!, { key: '#', metaKey: true });
+			expect(screen.queryByTestId('heading-palette-input')).not.toBeInTheDocument();
 		});
 
 		it('keeps TOC overlay open when clicking a heading entry', () => {
@@ -1351,6 +1859,117 @@ print("world")
 
 			vi.useRealTimers();
 		});
+
+		it('keeps the stats bar visible when overflow is too small to hide safely', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'test.md', content: 'Some content\n'.repeat(20), path: '/test/test.md' }}
+				/>
+			);
+
+			expect(screen.getByText('Lines:')).toBeInTheDocument();
+
+			const container = document.querySelector('.overflow-y-auto') as HTMLElement;
+			expect(container).not.toBeNull();
+
+			// Barely overflowing - hiding the stats chrome would clamp scrollTop to 0
+			// and re-show the bar (the jitter loop). Stay visible instead.
+			Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 520 });
+			Object.defineProperty(container, 'clientHeight', { configurable: true, value: 500 });
+			Object.defineProperty(container, 'scrollTop', {
+				configurable: true,
+				writable: true,
+				value: 15,
+			});
+			fireEvent.scroll(container);
+
+			expect(screen.getByText('Lines:')).toBeInTheDocument();
+		});
+
+		it('hides the stats bar when scrolled past the chrome height with enough overflow', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'test.md', content: 'Some content\n'.repeat(20), path: '/test/test.md' }}
+				/>
+			);
+
+			expect(screen.getByText('Lines:')).toBeInTheDocument();
+
+			const container = document.querySelector('.overflow-y-auto') as HTMLElement;
+			expect(container).not.toBeNull();
+
+			Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 800 });
+			Object.defineProperty(container, 'clientHeight', { configurable: true, value: 500 });
+			Object.defineProperty(container, 'scrollTop', {
+				configurable: true,
+				writable: true,
+				value: 100,
+			});
+			fireEvent.scroll(container);
+
+			expect(screen.queryByText('Lines:')).not.toBeInTheDocument();
+		});
+
+		it('does not hide the stats bar on a shallow scroll that would bounce after collapse', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'test.md', content: 'Some content\n'.repeat(20), path: '/test/test.md' }}
+				/>
+			);
+
+			expect(screen.getByText('Lines:')).toBeInTheDocument();
+
+			const container = document.querySelector('.overflow-y-auto') as HTMLElement;
+			expect(container).not.toBeNull();
+
+			// Large overflow, but scrollTop is still inside the chrome band. Hiding
+			// here would collapse the header and clamp scrollTop back to "at top".
+			Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 800 });
+			Object.defineProperty(container, 'clientHeight', { configurable: true, value: 500 });
+			Object.defineProperty(container, 'scrollTop', {
+				configurable: true,
+				writable: true,
+				value: 40,
+			});
+			fireEvent.scroll(container);
+
+			expect(screen.getByText('Lines:')).toBeInTheDocument();
+		});
+
+		it('resets the stats bar visible when switching to a new file at the top', () => {
+			const { rerender } = render(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'tall.md', content: 'Some content\n'.repeat(20), path: '/test/tall.md' }}
+				/>
+			);
+
+			const container = document.querySelector('.overflow-y-auto') as HTMLElement;
+			expect(container).not.toBeNull();
+
+			Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 800 });
+			Object.defineProperty(container, 'clientHeight', { configurable: true, value: 500 });
+			Object.defineProperty(container, 'scrollTop', {
+				configurable: true,
+				writable: true,
+				value: 100,
+			});
+			fireEvent.scroll(container);
+			expect(screen.queryByText('Lines:')).not.toBeInTheDocument();
+
+			rerender(
+				<FilePreview
+					{...defaultProps}
+					file={{ name: 'small.md', content: 'Short\n', path: '/test/small.md' }}
+					initialScrollTop={0}
+				/>
+			);
+
+			expect(screen.getByText('Lines:')).toBeInTheDocument();
+		});
 	});
 
 	describe('CSV file rendering', () => {
@@ -1415,6 +2034,158 @@ print("world")
 			);
 
 			expect(screen.queryByTestId('csv-table-renderer')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('HTML render mode', () => {
+		const htmlFile = {
+			name: 'page.html',
+			content: '<!doctype html><body><h1>hello</h1></body>',
+			path: '/test/page.html',
+		};
+
+		it('shows the HTML render toggle for .html files', () => {
+			render(<FilePreview {...defaultProps} file={htmlFile} />);
+			expect(screen.getByTestId('html-render-toggle')).toBeInTheDocument();
+		});
+
+		it('shows the HTML render toggle for .htm files', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={{ ...htmlFile, name: 'legacy.htm', path: '/test/legacy.htm' }}
+				/>
+			);
+			expect(screen.getByTestId('html-render-toggle')).toBeInTheDocument();
+		});
+
+		it('does not show the HTML render toggle for non-HTML files', () => {
+			render(<FilePreview {...defaultProps} />);
+			expect(screen.queryByTestId('html-render-toggle')).not.toBeInTheDocument();
+		});
+
+		it('does not show the HTML render toggle while in edit mode', () => {
+			render(<FilePreview {...defaultProps} file={htmlFile} markdownEditMode={true} />);
+			expect(screen.queryByTestId('html-render-toggle')).not.toBeInTheDocument();
+		});
+
+		it('does not render the iframe when htmlRenderMode is false', () => {
+			render(<FilePreview {...defaultProps} file={htmlFile} htmlRenderMode={false} />);
+			expect(screen.queryByTestId('html-render-iframe')).not.toBeInTheDocument();
+		});
+
+		it('renders a sandboxed iframe when htmlRenderMode is true', () => {
+			render(<FilePreview {...defaultProps} file={htmlFile} htmlRenderMode={true} />);
+			const iframe = screen.getByTestId('html-render-iframe') as HTMLIFrameElement;
+			expect(iframe).toBeInTheDocument();
+			// Security-critical: scripts may run but the iframe must not be
+			// same-origin (no `allow-same-origin`), so the rendered page can't
+			// reach the host renderer.
+			const sandbox = iframe.getAttribute('sandbox') ?? '';
+			expect(sandbox).toContain('allow-scripts');
+			expect(sandbox).not.toContain('allow-same-origin');
+			expect(iframe.getAttribute('referrerpolicy')).toBe('no-referrer');
+			expect(iframe.getAttribute('srcdoc')).toBe(htmlFile.content);
+		});
+
+		it('does not render the iframe while in edit mode even if htmlRenderMode is true', () => {
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={htmlFile}
+					htmlRenderMode={true}
+					markdownEditMode={true}
+				/>
+			);
+			expect(screen.queryByTestId('html-render-iframe')).not.toBeInTheDocument();
+		});
+
+		it('calls onHtmlRenderModeChange when the toggle is clicked', () => {
+			const onHtmlRenderModeChange = vi.fn();
+			render(
+				<FilePreview
+					{...defaultProps}
+					file={htmlFile}
+					htmlRenderMode={false}
+					onHtmlRenderModeChange={onHtmlRenderModeChange}
+				/>
+			);
+			fireEvent.click(screen.getByTestId('html-render-toggle'));
+			expect(onHtmlRenderModeChange).toHaveBeenCalledWith(true);
+		});
+	});
+
+	describe('bare font-zoom keys', () => {
+		// The scale is a persisted reading preference (`useScalePreference` writes
+		// it to localStorage), so a case that zooms leaves the next one starting
+		// at its value instead of at 100%. Install a fresh in-memory Storage per
+		// case: it resets the key AND makes the environment deterministic, which
+		// is why this only ever went red on CI - a local `vitest run` gets a
+		// Storage-less jsdom where the writes silently no-op and nothing leaks.
+		beforeEach(() => {
+			installLocalStorageMock();
+		});
+
+		// The floating zoom control also answers bare -/+ and 0, so a reader can
+		// resize the pane without reaching for the pill. Guarded on the view
+		// being zoomable and on the event target not being a text input.
+		function renderPreview(props: Record<string, unknown> = {}) {
+			const { container } = render(<FilePreview {...defaultProps} {...props} />);
+			const previewContainer = container.querySelector('[tabindex="0"]');
+			expect(previewContainer).not.toBeNull();
+			return previewContainer!;
+		}
+
+		function percentButton() {
+			return screen.queryByRole('button', { name: /Reset (preview|editor) font size/ });
+		}
+
+		it('does not show a percentage until the pane is zoomed', () => {
+			renderPreview();
+			expect(percentButton()).toBeNull();
+		});
+
+		it('zooms in on a bare + and on its unshifted twin =', () => {
+			const pane = renderPreview();
+			fireEvent.keyDown(pane, { key: '+' });
+			expect(percentButton()).toHaveTextContent('110%');
+			fireEvent.keyDown(pane, { key: '=' });
+			expect(percentButton()).toHaveTextContent('120%');
+		});
+
+		it('zooms out on a bare - and on its shifted twin _', () => {
+			const pane = renderPreview();
+			fireEvent.keyDown(pane, { key: '-' });
+			expect(percentButton()).toHaveTextContent('90%');
+			fireEvent.keyDown(pane, { key: '_' });
+			expect(percentButton()).toHaveTextContent('80%');
+		});
+
+		it('snaps back to 100% on a bare 0', () => {
+			const pane = renderPreview();
+			fireEvent.keyDown(pane, { key: '+' });
+			expect(percentButton()).toHaveTextContent('110%');
+			fireEvent.keyDown(pane, { key: '0' });
+			expect(percentButton()).toBeNull();
+		});
+
+		it('leaves a modified -/+ to the app font-size shortcuts', () => {
+			const pane = renderPreview();
+			fireEvent.keyDown(pane, { key: '+', metaKey: true });
+			fireEvent.keyDown(pane, { key: '-', ctrlKey: true });
+			fireEvent.keyDown(pane, { key: '0', altKey: true });
+			expect(percentButton()).toBeNull();
+		});
+
+		it('lets a text input inside the pane keep its keys', () => {
+			// The find bar and the CM6 editor live under the same keydown handler,
+			// so a bare '-' typed into one must reach the field, not the zoom.
+			const pane = renderPreview();
+			const input = document.createElement('input');
+			pane.appendChild(input);
+			fireEvent.keyDown(input, { key: '-', bubbles: true });
+			expect(percentButton()).toBeNull();
+			pane.removeChild(input);
 		});
 	});
 });

@@ -1,16 +1,9 @@
 import { useState, useRef, useEffect, useMemo, memo } from 'react';
-import { Loader2, Image, X, Search } from 'lucide-react';
+import { Image, X, Search, PenLine } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
 import { imageCache } from '../../hooks';
+import { safeDecodeURIComponent } from '../../../shared/stringUtils';
 import type { Theme } from '../../types';
-
-// Safe wrapper around safeDecodeURIComponent that falls back to original string on malformed URIs
-function safeDecodeURIComponent(str: string): string {
-	try {
-		return safeDecodeURIComponent(str);
-	} catch {
-		return str;
-	}
-}
 
 // Helper to compute initial image state synchronously from cache
 // This prevents flickering when ReactMarkdown rebuilds the component tree
@@ -213,7 +206,7 @@ export const AttachmentImage = memo(function AttachmentImage({
 				className="inline-flex items-center gap-2 px-3 py-2 rounded"
 				style={{ backgroundColor: theme.colors.bgActivity }}
 			>
-				<Loader2 className="w-4 h-4 animate-spin" style={{ color: theme.colors.textDim }} />
+				<Spinner size={16} color={theme.colors.textDim} />
 				<span className="text-xs" style={{ color: theme.colors.textDim }}>
 					Loading image...
 				</span>
@@ -281,12 +274,14 @@ export function ImagePreview({
 	theme,
 	onRemove,
 	onImageClick,
+	onAnnotate,
 }: {
 	src: string;
 	filename: string;
 	theme: Theme;
 	onRemove: () => void;
 	onImageClick: (filename: string) => void;
+	onAnnotate?: () => void;
 }) {
 	return (
 		<div className="relative inline-block group" style={{ margin: '4px' }}>
@@ -297,6 +292,24 @@ export function ImagePreview({
 				style={{ border: `1px solid ${theme.colors.border}` }}
 				onClick={() => onImageClick(filename)}
 			/>
+			{onAnnotate && (
+				<button
+					type="button"
+					onClick={(e) => {
+						e.stopPropagation();
+						onAnnotate();
+					}}
+					title="Annotate image"
+					aria-label="Annotate image"
+					className="absolute -top-2 -left-2 w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
+					style={{
+						backgroundColor: theme.colors.bgActivity,
+						color: theme.colors.textMain,
+					}}
+				>
+					<PenLine className="w-3 h-3" />
+				</button>
+			)}
 			<button
 				onClick={(e) => {
 					e.stopPropagation();
@@ -312,7 +325,7 @@ export function ImagePreview({
 				<X className="w-3 h-3" />
 			</button>
 			<div
-				className="absolute bottom-0 left-0 right-0 px-1 py-0.5 text-[9px] truncate rounded-b"
+				className="absolute bottom-0 left-0 right-0 px-1 py-0.5 text-3xs truncate rounded-b"
 				style={{
 					backgroundColor: 'rgba(0,0,0,0.6)',
 					color: 'white',

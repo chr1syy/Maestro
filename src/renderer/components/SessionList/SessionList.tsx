@@ -1,55 +1,158 @@
-import React, { useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
+import React, {
+	useState,
+	useEffect,
+	useRef,
+	useMemo,
+	memo,
+	useCallback,
+	useDeferredValue,
+	useSyncExternalStore,
+} from 'react';
 import {
-	Wand2,
 	Plus,
 	ChevronRight,
 	ChevronDown,
-	ChevronUp,
 	X,
 	Radio,
 	Folder,
-	GitBranch,
 	Menu,
 	Bookmark,
 	Trophy,
 	Trash2,
 	Bot,
+	Star,
 } from 'lucide-react';
+import { GhostIconButton } from '../ui/GhostIconButton';
+import { HamburgerDropdown } from './HamburgerDropdown';
+import { NowPlayingIndicator } from '../MediaPlayback/NowPlayingIndicator';
+import { subscribeSidebarReveal, getSidebarRevealToken } from '../../utils/sidebarReveal';
+import { useMediaPlaybackStore, selectNowPlayingVisible } from '../../stores/mediaPlaybackStore';
 import type { Session, Group, Theme } from '../../types';
+import { isWorktreeGroup } from '../../../shared/types';
+import { canSetGroupParent, removeGroupAndPromoteChildren } from '../../../shared/groupHierarchy';
+import { resolveGroupAppearance } from '../ui/groupAppearanceOptions';
+import { SafeSvgIcon } from '../ui/SafeSvgIcon';
 import { getBadgeForTime } from '../../constants/conductorBadges';
 import { SessionItem } from '../SessionItem';
+import { LongPressable, longPressMouseEvent } from '../shared/LongPressable';
 import { GroupChatList } from '../GroupChatList';
-import { useLiveOverlay, useResizablePanel } from '../../hooks';
+import { useLiveOverlay, useResizablePanel, useViewportBreakpoint } from '../../hooks';
 import { useGitFileStatus } from '../../contexts/GitStatusContext';
 import { useUIStore } from '../../stores/uiStore';
 import { useSessionStore } from '../../stores/sessionStore';
-import { useSettingsStore } from '../../stores/settingsStore';
+import { selectGroupsPlusEnabled, useSettingsStore } from '../../stores/settingsStore';
 import { useBatchStore, selectActiveBatchSessionIds } from '../../stores/batchStore';
+import { useActiveOutageSessionSignature } from '../../stores/retryStore';
 import { useShallow } from 'zustand/react/shallow';
+import { useStoreWithEqualityFn } from 'zustand/traditional';
+import { sidebarSessionEquality } from '../../stores/sessionEquality';
 import { useGroupChatStore } from '../../stores/groupChatStore';
+import { useSidebarNavStore } from '../../stores/sidebarNavStore';
+import { useInlineWizardContext } from '../../contexts/InlineWizardContext';
+import { useWindowContextOptional } from '../../contexts/WindowContext';
+import { rollUpWizardActivityToSessions } from '../../utils/wizardActivity';
 import { getModalActions, useModalStore } from '../../stores/modalStore';
 import { SessionContextMenu } from './SessionContextMenu';
+import { buildWindowMoveTargets, scopeSessionsToOwningWindow } from '../../utils/windowTargets';
+import { GroupContextMenu } from './GroupContextMenu';
+import { WizardIndicator } from './WizardIndicator';
+import { PluginUiItemsSlot } from '../plugins/PluginUiItemsSlot';
+import { BusyWand } from './BusyWand';
 import { HamburgerMenuContent } from './HamburgerMenuContent';
-import { CollapsedSessionPill } from './CollapsedSessionPill';
+import { CollapsedSessionPillRows } from './CollapsedSessionPill';
+import { EscCloseButton } from '../ui/EscCloseButton';
 import { SidebarActions } from './SidebarActions';
 import { SkinnySidebar } from './SkinnySidebar';
 import { LiveOverlayPanel } from './LiveOverlayPanel';
 import { useSessionCategories } from '../../hooks/session/useSessionCategories';
 import { useSessionFilterMode } from '../../hooks/session/useSessionFilterMode';
+import {
+	sessionNeedsAttention,
+	outageIdsFromSignature,
+	type AttentionContext,
+} from '../../utils/sessionAttention';
+import { cueService } from '../../services/cue';
+import { captureException } from '../../utils/sentry';
+import { isWebDesktop } from '../../utils/runtimeContext';
+import { getBusyGroupChatIds } from '../../utils/groupChatStatus';
+import { useEventListener } from '../../hooks/utils/useEventListener';
+import type { StarredItem } from '../../hooks/session/useStarredItems';
+import { useHeaderTextDelta } from '../../hooks/ui/useHeaderTextDelta';
+import { Wordmark } from '../ui/Wordmark';
+import { usePluginContributions } from '../../hooks/usePluginContributions';
+import { usePluginGroupings } from '../../hooks/usePluginGroupings';
+import { buildVirtualGrouping } from '../../utils/pluginGroupings';
+
+/**
+ * Sidebar widths at which the header's two pills can afford their text labels.
+ *
+ * The header row neither wraps nor scrolls, so every element in it earns its
+ * width or drops its text. Both pills shed their label the same way; the
+ * now-playing one needs more room because it sits further right and carries
+ * more chrome (two buttons and a divider, none of which are ever dropped -
+ * they are the whole transport a minimized player has). Its tooltip names the
+ * file at any width.
+ */
+/**
+ * All of these are measured against the BASELINE font - Roboto Mono at a 14px
+ * root, which is what Maestro always rendered in before the interface font
+ * became a setting. They are corrected for the font actually in use by
+ * `useHeaderTextDelta`, which adds however much wider each label got. Do not
+ * re-measure them against whatever font you happen to be running: the delta
+ * would then be applied on top of a correction already baked in.
+ */
+const LIVE_LABEL_MIN_WIDTH = 256;
+const NOW_PLAYING_LABEL_MIN_WIDTH = 401;
+/**
+ * Room the achievements badge takes when the conductor has one, pushing both
+ * label thresholds out by the same amount. Shared so the two cannot drift.
+ */
+const HEADER_BADGE_WIDTH = 39;
+/**
+ * Width the header's left cluster needs before the MAESTRO wordmark is drawn:
+ * the wand, the wordmark itself, the hamburger, and the row's own padding.
+ * Excludes the LIVE pill and the now-playing pill, which are added below.
+ *
+ * The wordmark is drawn IN FULL or not at all. It used to `truncate`, which is
+ * how a narrow sidebar rendered the brand as "MAE...", and a clipped brand
+ * reads as a rendering bug rather than as a deliberate space saving. The wand
+ * stays at every width, so the header never loses its identity or its
+ * switch-agent affordance.
+ */
+const WORDMARK_MIN_WIDTH = 232;
+/**
+ * The LIVE toggle's own reserve, broken out rather than folded into the
+ * constant above so a build that hides the toggle can zero it in one line.
+ */
+const LIVE_PILL_RESERVE = 48;
+/**
+ * What the now-playing pill costs, by the form it is currently drawn in. It
+ * sheds its filename below NOW_PLAYING_LABEL_MIN_WIDTH, so reserving the wide
+ * figure at every width would hide the wordmark for a pill that is no longer
+ * that wide.
+ */
+const NOW_PLAYING_COMPACT_RESERVE = 59;
+const NOW_PLAYING_LABEL_RESERVE = 181;
 
 // ============================================================================
 // SessionContextMenu - Right-click context menu for session items
 // ============================================================================
 
 interface SessionListProps {
-	// Computed values (not in stores — remain as props)
+	// Computed values (not in stores - remain as props). Sort/nav/starred default
+	// to sidebarNavStore when omitted so App need not plumb them.
 	theme: Theme;
-	sortedSessions: Session[];
+	sortedSessions?: Session[];
 	navIndexMap?: Map<string, number>;
 	isLiveMode: boolean;
 	webInterfaceUrl: string | null;
 	showSessionJumpNumbers?: boolean;
 	visibleSessions?: Session[];
+
+	/** @deprecated Prefer sidebarNavStore; optional when sync host is mounted. */
+	starredItems?: StarredItem[];
+	/** @deprecated Prefer sidebarNavStore; optional when sync host is mounted. */
+	activateStarredItem?: (item: StarredItem) => void | Promise<void>;
 
 	// Ref for the sidebar container (for focus management)
 	sidebarContainerRef?: React.RefObject<HTMLDivElement>;
@@ -67,7 +170,8 @@ interface SessionListProps {
 	startRenamingGroup: (groupId: string) => void;
 	startRenamingSession: (sessId: string) => void;
 	showConfirmation: (message: string, onConfirm: () => void) => void;
-	createNewGroup: () => void;
+	createNewGroup: (parentGroupId?: string) => void;
+	setGroupParent: (groupId: string, parentGroupId: string | undefined) => void;
 	onCreateGroupAndMove?: (sessionId: string) => void;
 	addNewSession: () => void;
 	onDeleteSession?: (id: string) => void;
@@ -96,6 +200,9 @@ interface SessionListProps {
 	// Maestro Cue
 	onConfigureCue?: (session: Session) => void;
 
+	// Starred Sessions: activation uses sidebarNavStore (jump registered from App).
+	// Do not plumb onJumpToStarredSession - unused and unstable identity busts memo.
+
 	// Group Chat handlers
 	onOpenGroupChat?: (id: string) => void;
 	onNewGroupChat?: () => void;
@@ -103,52 +210,181 @@ interface SessionListProps {
 	onRenameGroupChat?: (id: string) => void;
 	onDeleteGroupChat?: (id: string) => void;
 	onArchiveGroupChat?: (id: string, archived: boolean) => void;
+	onDeleteAllArchivedGroupChats?: () => void;
 }
 
+// Sentinel for the "ungrouped" drop zone in the drag-over highlight state.
+// Real group ids are prefixed `group-`, so this can never collide with one.
+const UNGROUPED_DROP_TARGET = '__ungrouped__';
+
 function SessionListInner(props: SessionListProps) {
+	const pluginContributions = usePluginContributions();
 	// Store subscriptions
-	const sessions = useSessionStore((s) => s.sessions);
+	// PERF: Equality fn skips re-renders driven purely by streaming log/usage
+	// updates. The sidebar only reads name/state/bookmarked/groupId/aiTabs.hasUnread,
+	// so the 200ms batched flush no longer cascades a sidebar re-render unless a
+	// sidebar-relevant field actually changed. See sessionEquality.ts.
+	const allSessions = useStoreWithEqualityFn(
+		useSessionStore,
+		(s) => s.sessions,
+		sidebarSessionEquality
+	);
+	// Multi-window: EVERY window's Left Bar lists only the agents it owns
+	// (single-window-per-agent). Moving an agent into another window removes it
+	// from this window's list - the primary is the catch-all owner of every agent
+	// no secondary has claimed, and a secondary owns exactly its scoped set. In the
+	// common single-window case the primary owns everything, so this is a no-op;
+	// likewise outside a WindowProvider (isolation tests). Worktree children ride
+	// along with an owned parent so a detached agent keeps its worktrees together.
+	//
+	// Separately, a secondary window renders its owned agents as a FOCUSED flat
+	// list (no starred/bookmarks/group section headers - see the `isSecondaryWindow`
+	// gates below); the primary keeps its full sectioned layout, just scoped.
+	const windowCtx = useWindowContextOptional();
+	const isSecondaryWindow = !!windowCtx && !windowCtx.isMainWindow;
+	const scopeSessionsToWindow = useCallback(
+		(list: Session[]): Session[] =>
+			scopeSessionsToOwningWindow(list, windowCtx?.ownsSession ?? null),
+		[windowCtx]
+	);
+	const sessions = useMemo(
+		() => scopeSessionsToWindow(allSessions),
+		[scopeSessionsToWindow, allSessions]
+	);
 	const groups = useSessionStore((s) => s.groups);
 	const activeSessionId = useSessionStore((s) => s.activeSessionId);
 	const leftSidebarOpen = useUIStore((s) => s.leftSidebarOpen);
 	const activeFocus = useUIStore((s) => s.activeFocus);
 	const selectedSidebarIndex = useUIStore((s) => s.selectedSidebarIndex);
+	// Keyboard cursor when it lands on a Starred / Group Chat row (the non-agent
+	// sections); selectedSidebarIndex tracks the agent rows.
+	const sidebarExtraSelection = useUIStore((s) => s.sidebarExtraSelection);
 	const editingGroupId = useUIStore((s) => s.editingGroupId);
 	const editingSessionId = useUIStore((s) => s.editingSessionId);
 	const draggingSessionId = useUIStore((s) => s.draggingSessionId);
+	const profilingActive = useUIStore((s) => s.profilingActive);
 	const bookmarksCollapsed = useUIStore((s) => s.bookmarksCollapsed);
-	const groupChatsExpanded = useUIStore((s) => s.groupChatsExpanded);
+	const groupChatsExpanded = useSettingsStore((s) => s.groupChatsExpanded);
+	const groupChatSortAlphabetical = useSettingsStore((s) => s.groupChatSortAlphabetical);
 	const shortcuts = useSettingsStore((s) => s.shortcuts);
 	const leftSidebarWidthState = useSettingsStore((s) => s.leftSidebarWidth);
+	const leftSidebarHidden = useUIStore((s) => s.leftSidebarHidden);
 	const persistentWebLink = useSettingsStore((s) => s.persistentWebLink);
 	const webInterfaceUseCustomPort = useSettingsStore((s) => s.webInterfaceUseCustomPort);
 	const webInterfaceCustomPort = useSettingsStore((s) => s.webInterfaceCustomPort);
 	const ungroupedCollapsed = useSettingsStore((s) => s.ungroupedCollapsed);
+	const starredSectionCollapsed = useSettingsStore((s) => s.starredSessionsCollapsed);
+	const showStarredSessionsSection = useSettingsStore((s) => s.showStarredSessionsSection);
+	const pianolaEnabled = useSettingsStore((s) => s.encoreFeatures?.pianola);
+	const groupsPlusEnabled = useSettingsStore(selectGroupsPlusEnabled);
+	const pianolaSession = useSessionStore((s) => s.sessions.find((x) => x.isPianola));
+	const showLeftPanelGroupMemberCount = useSettingsStore((s) => s.showLeftPanelGroupMemberCount);
+	const leftPanelCollapsedPillsPerRow = useSettingsStore((s) => s.leftPanelCollapsedPillsPerRow);
 	const autoRunStats = useSettingsStore((s) => s.autoRunStats);
+	// The badge pill occupies part of the header's left cluster, so both label
+	// thresholds below shift by the same amount when it is showing.
+	const headerBadgeWidth =
+		autoRunStats && autoRunStats.currentBadgeLevel > 0 ? HEADER_BADGE_WIDTH : 0;
+	// Whether the now-playing pill is on screen, and in which form. Read from the
+	// store's own selector rather than re-derived here, so the reserve below
+	// cannot end up describing a header nobody is looking at.
+	const nowPlayingVisible = useMediaPlaybackStore(selectNowPlayingVisible);
+	const nowPlayingCompact = leftSidebarWidthState < NOW_PLAYING_LABEL_MIN_WIDTH + headerBadgeWidth;
+	const nowPlayingReserve = !nowPlayingVisible
+		? 0
+		: nowPlayingCompact
+			? NOW_PLAYING_COMPACT_RESERVE
+			: NOW_PLAYING_LABEL_RESERVE;
+	// How much wider the header's own labels render in the current interface font
+	// than in the one the thresholds below were measured against. Zero when the
+	// user is on the original monospace face.
+	const headerTextDelta = useHeaderTextDelta();
+	// Constant on this build. The indirection is deliberate: a build that hides
+	// the LIVE toggle zeroes this one line instead of re-deriving the threshold.
+	// The label's own delta rides with it, since the reserve exists to hold it.
+	const livePillReserve = LIVE_PILL_RESERVE + headerTextDelta.liveLabel;
+	const showWordmark =
+		leftSidebarWidthState >=
+		WORDMARK_MIN_WIDTH +
+			headerTextDelta.wordmark +
+			livePillReserve +
+			headerBadgeWidth +
+			nowPlayingReserve;
 	const contextWarningYellowThreshold = useSettingsStore(
 		(s) => s.contextManagementSettings.contextWarningYellowThreshold
 	);
 	const contextWarningRedThreshold = useSettingsStore(
 		(s) => s.contextManagementSettings.contextWarningRedThreshold
 	);
-	const maestroCueEnabled = useSettingsStore((s) => s.encoreFeatures.maestroCue);
 	const activeBatchSessionIds = useBatchStore(useShallow(selectActiveBatchSessionIds));
 
-	// Cue session status map: sessionId → { count, active } (only active when Encore Feature enabled)
+	// Inline wizard activity per agent (Session.id). Used by the Left Bar to
+	// render the wand glyph on agent rows AND on the group header / Bookmarks
+	// header for the group(s) those agents live in.
+	const { wizardActiveTabs } = useInlineWizardContext();
+
+	// Roll live wizard tabs up to their owning agent, dropping any whose tab is no
+	// longer open. Without that liveness check a single missed eviction (a close
+	// path that forgot to end the wizard, a cancel that ended the wrong tab) leaves
+	// a wand burning on an agent that has no wizard tab to switch to.
+	const wizardActiveSessions = useMemo(
+		() => rollUpWizardActivityToSessions(wizardActiveTabs, sessions),
+		[wizardActiveTabs, sessions]
+	);
+
+	// Multi-window awareness. `windowCtx` is declared above (next to the scoped
+	// session list it drives). It is optional so the Left Bar still renders
+	// standalone (e.g. in isolation tests) outside a WindowProvider, degrading to
+	// no window badges, no per-window scoping, and local-only click behaviour. In
+	// the primary window it lists every agent; `getSessionWindow` tells us which
+	// rows live in another window so we can badge them and focus that window on
+	// click.
+
+	// Roll wizard activity up to the container level (group + bookmarks). For
+	// each session running the wizard, resolve to its parent if it's a worktree
+	// child (worktree children inherit groupId/bookmarked but are filtered out
+	// of `sortedGroupSessionsById` / `bookmarkedSessions`), then bucket by group
+	// and bookmark flag. `null` groupId = ungrouped.
+	const wizardRollup = useMemo(() => {
+		const groups = new Map<string | null, { isGeneratingDocs: boolean }>();
+		let bookmarkActive = false;
+		let bookmarkGenerating = false;
+		if (wizardActiveSessions.size === 0) {
+			return { groups, bookmarkActive, bookmarkGenerating };
+		}
+		const sessionById = new Map(sessions.map((s) => [s.id, s] as const));
+		for (const [sessionId, info] of wizardActiveSessions) {
+			let s = sessionById.get(sessionId);
+			if (!s) continue;
+			if (s.parentSessionId) {
+				const parent = sessionById.get(s.parentSessionId);
+				if (parent) s = parent;
+			}
+			const key = s.groupId ?? null;
+			const existing = groups.get(key);
+			groups.set(key, {
+				isGeneratingDocs: (existing?.isGeneratingDocs ?? false) || info.isGeneratingDocs,
+			});
+			if (s.bookmarked) {
+				bookmarkActive = true;
+				if (info.isGeneratingDocs) bookmarkGenerating = true;
+			}
+		}
+		return { groups, bookmarkActive, bookmarkGenerating };
+	}, [wizardActiveSessions, sessions]);
+
+	// Cue session status map: sessionId → { count, active }
+	// Always fetched - the indicator shows whenever a .maestro/cue.yaml has subscriptions,
+	// regardless of whether the Cue Encore Feature is enabled (that only gates execution).
 	const [cueSessionMap, setCueSessionMap] = useState<
 		Map<string, { count: number; active: boolean }>
 	>(new Map());
 	useEffect(() => {
-		if (!maestroCueEnabled) {
-			setCueSessionMap(new Map());
-			return;
-		}
-
 		let mounted = true;
 
 		const fetchCueStatus = async () => {
 			try {
-				const statuses = await window.maestro.cue.getStatus();
+				const statuses = await cueService.getStatus();
 				if (!mounted) return;
 				const map = new Map<string, { count: number; active: boolean }>();
 				for (const s of statuses) {
@@ -159,14 +395,32 @@ function SessionListInner(props: SessionListProps) {
 						});
 					}
 				}
-				setCueSessionMap(map);
-			} catch {
-				// Cue engine may not be initialized yet
+				// Preserve referential identity when nothing changed - the map is fed
+				// to every SessionItem as a prop, and a fresh reference busts memo even
+				// when contents are equal. With cue activity ticks coming in at ~1Hz this
+				// would otherwise re-render all sidebar rows on every tick.
+				setCueSessionMap((prev) => {
+					if (prev.size !== map.size) return map;
+					for (const [id, next] of map) {
+						const cur = prev.get(id);
+						if (!cur || cur.count !== next.count || cur.active !== next.active) return map;
+					}
+					return prev;
+				});
+			} catch (err: unknown) {
+				// "Cue engine not initialized" is the expected pre-init case;
+				// treat anything else as a real failure and surface it. Note
+				// that cueService.getStatus already swallows IPC failures and
+				// returns the default ([]), so this catch is a defense-in-depth
+				// backstop for engine-not-ready and any future contract change.
+				const message = err instanceof Error ? err.message : String(err);
+				if (message.includes('Cue engine not initialized')) return;
+				captureException(err, { extra: { context: 'SessionList.fetchCueStatus' } });
 			}
 		};
 
 		fetchCueStatus();
-		const unsubscribe = window.maestro.cue.onActivityUpdate(() => {
+		const unsubscribe = cueService.onActivityUpdate(() => {
 			fetchCueStatus();
 		});
 
@@ -174,27 +428,112 @@ function SessionListInner(props: SessionListProps) {
 			mounted = false;
 			unsubscribe();
 		};
-	}, [maestroCueEnabled]);
+		// Re-fetch when sessions change so newly added agents show their Cue indicator
+	}, [sessions.length]);
+	// Starred Sessions: prefer sidebarNavStore (shared with Cmd+[ / ] cycling).
+	// Props remain for tests that inject fixtures without mounting SidebarNavSync.
+	const storeStarredItems = useSidebarNavStore((s) => s.starredItems);
+	const storeActivateStarredItem = useSidebarNavStore((s) => s.activateStarredItem);
+	const starredItems = props.starredItems ?? storeStarredItems;
+	const activateStarredItem = props.activateStarredItem ?? storeActivateStarredItem;
+	const setStarredSectionCollapsed = useSettingsStore.getState().setStarredSessionsCollapsed;
+
 	const groupChats = useGroupChatStore((s) => s.groupChats);
 	const activeGroupChatId = useGroupChatStore((s) => s.activeGroupChatId);
 	const groupChatState = useGroupChatStore((s) => s.groupChatState);
 	const participantStates = useGroupChatStore((s) => s.participantStates);
 	const groupChatStates = useGroupChatStore((s) => s.groupChatStates);
 	const allGroupChatParticipantStates = useGroupChatStore((s) => s.allGroupChatParticipantStates);
+	const unreadGroupChatIds = useGroupChatStore((s) => s.unreadGroupChatIds);
+
+	// Latest nav cursor, read by the reveal effect on the next frame rather than
+	// captured when the reveal was requested. The cursor is not settled at
+	// request time: `selectedSidebarIndex` is synced from `activeSessionId` by a
+	// parent effect, and parent effects run after child ones, so reading it
+	// synchronously gives the row the cursor was leaving.
+	const navCursorRef = useRef({ selectedSidebarIndex, sidebarExtraSelection, activeGroupChatId });
+	navCursorRef.current = { selectedSidebarIndex, sidebarExtraSelection, activeGroupChatId };
+
+	// Shared with the group chat rows' status dots and the agent jumper's LIVE
+	// bucket, so all three agree on what "running" means.
+	const isAnyGroupChatBusy = useMemo(
+		() =>
+			getBusyGroupChatIds(groupChats, {
+				activeGroupChatId,
+				groupChatState,
+				participantStates,
+				groupChatStates,
+				allGroupChatParticipantStates,
+			}).length > 0,
+		[
+			groupChats,
+			activeGroupChatId,
+			groupChatState,
+			participantStates,
+			groupChatStates,
+			allGroupChatParticipantStates,
+		]
+	);
+
+	// Bring the keyboard cursor into view - and ONLY when something asked.
+	//
+	// This used to fire on any `activeSessionId` change, which meant a click
+	// re-aimed the list the user had just scrolled by hand. Intent is now
+	// declared by the caller (`requestSidebarReveal`) rather than inferred from
+	// the state a click and a keystroke both produce; see utils/sidebarReveal.ts.
+	//
+	// Deferred to the next frame so the cursor has settled. Without that, a
+	// programmatic jump scrolls to the row the cursor is leaving and never
+	// corrects, because nothing asks a second time.
+	const revealToken = useSyncExternalStore(subscribeSidebarReveal, getSidebarRevealToken);
+	// Seeded with the token as it stands at mount, because MOUNTING IS NOT A
+	// REQUEST. The counter is global and monotonic, so a fresh SessionList (a new
+	// window, a remount) would otherwise run this effect once against whatever
+	// the last reveal left behind and scroll a list nobody had touched.
+	const handledRevealRef = useRef(revealToken);
+	useEffect(() => {
+		if (revealToken === handledRevealRef.current) return;
+		handledRevealRef.current = revealToken;
+		const frame = requestAnimationFrame(() => {
+			const container = listScrollRef.current;
+			if (!container) return;
+			const cursor = navCursorRef.current;
+			let navKey: string | null = null;
+			if (cursor.sidebarExtraSelection?.kind === 'starred') {
+				navKey = `starred:${cursor.sidebarExtraSelection.key}`;
+			} else if (cursor.sidebarExtraSelection?.kind === 'groupChat') {
+				navKey = `groupchat:${cursor.sidebarExtraSelection.id}`;
+			} else if (cursor.activeGroupChatId) {
+				navKey = `groupchat:${cursor.activeGroupChatId}`;
+			} else if (cursor.selectedSidebarIndex >= 0) {
+				navKey = `idx:${cursor.selectedSidebarIndex}`;
+			}
+			if (!navKey) return;
+			const el = container.querySelector(`[data-nav-key="${CSS.escape(navKey)}"]`);
+			el?.scrollIntoView({ block: 'nearest' });
+		});
+		return () => cancelAnimationFrame(frame);
+	}, [revealToken]);
 
 	// Stable store actions
 	const setActiveFocus = useUIStore.getState().setActiveFocus;
-	const setLeftSidebarOpen = useUIStore.getState().setLeftSidebarOpen;
 	const setBookmarksCollapsed = useUIStore.getState().setBookmarksCollapsed;
-	const setGroupChatsExpanded = useUIStore.getState().setGroupChatsExpanded;
+	const setGroupChatsExpanded = useSettingsStore.getState().setGroupChatsExpanded;
+	const setGroupChatSortAlphabetical = useSettingsStore.getState().setGroupChatSortAlphabetical;
 	const setActiveSessionIdRaw = useSessionStore.getState().setActiveSessionId;
 	const setActiveGroupChatId = useGroupChatStore.getState().setActiveGroupChatId;
+	const closeLeftSidebarForNavigation = useUIStore.getState().closeLeftSidebarForNavigation;
 	const setActiveSessionId = useCallback(
 		(id: string) => {
 			setActiveGroupChatId(null);
 			setActiveSessionIdRaw(id);
+			// Narrow viewports: the drawer covers the agent that was just picked.
+			// Closed here rather than from an effect on activeSessionId, because
+			// picking the agent that is ALREADY active - the common case behind an
+			// open group chat - changes no id at all.
+			closeLeftSidebarForNavigation();
 		},
-		[setActiveSessionIdRaw, setActiveGroupChatId]
+		[setActiveSessionIdRaw, setActiveGroupChatId, closeLeftSidebarForNavigation]
 	);
 	const setSessions = useSessionStore.getState().setSessions;
 	const setGroups = useSessionStore.getState().setGroups;
@@ -212,10 +551,14 @@ function SessionListInner(props: SessionListProps) {
 		setRenameInstanceSessionId,
 	} = getModalActions();
 
+	const storeSortedSessions = useSidebarNavStore((s) => s.sortedSessions);
+	const storeNavIndexMap = useSidebarNavStore((s) => s.navIndexMap);
+	const storeVisibleSessions = useSidebarNavStore((s) => s.visibleSessions);
+
 	const {
 		theme,
-		sortedSessions,
-		navIndexMap,
+		sortedSessions: sortedSessionsProp,
+		navIndexMap: navIndexMapProp,
 		isLiveMode,
 		webInterfaceUrl,
 		toggleGlobalLive,
@@ -231,6 +574,7 @@ function SessionListInner(props: SessionListProps) {
 		startRenamingSession,
 		showConfirmation,
 		createNewGroup,
+		setGroupParent,
 		onCreateGroupAndMove,
 		addNewSession,
 		onDeleteSession,
@@ -244,7 +588,7 @@ function SessionListInner(props: SessionListProps) {
 		onDeleteWorktree,
 		onConfigureCue,
 		showSessionJumpNumbers = false,
-		visibleSessions = [],
+		visibleSessions: visibleSessionsProp,
 		openWizard,
 		startTour,
 		sidebarContainerRef,
@@ -254,15 +598,37 @@ function SessionListInner(props: SessionListProps) {
 		onRenameGroupChat,
 		onDeleteGroupChat,
 		onArchiveGroupChat,
+		onDeleteAllArchivedGroupChats,
 	} = props;
 
-	// Derive whether any session is busy or in auto-run (for wand sparkle animation)
+	const sortedSessionsAll = sortedSessionsProp ?? storeSortedSessions;
+	const navIndexMap = navIndexMapProp ?? storeNavIndexMap;
+	const visibleSessions = visibleSessionsProp ?? storeVisibleSessions;
+
+	// Scope the sorted agent list the same way as the store list (see
+	// scopeSessionsToWindow above): a secondary window only categorizes/renders the
+	// agents it owns, the primary window sees them all.
+	const sortedSessions = useMemo(
+		() => scopeSessionsToWindow(sortedSessionsAll),
+		[scopeSessionsToWindow, sortedSessionsAll]
+	);
+
+	// Derive whether any session is busy or in auto-run (for wand sparkle
+	// animation). A running group chat counts too: the room burns real agent
+	// time, and the wand is the app-wide "something is working" tell.
 	const isAnyBusy = useMemo(
-		() => sessions.some((s) => s.state === 'busy') || activeBatchSessionIds.length > 0,
-		[sessions, activeBatchSessionIds]
+		() =>
+			sessions.some((s) => s.state === 'busy') ||
+			activeBatchSessionIds.length > 0 ||
+			isAnyGroupChatBusy,
+		[sessions, activeBatchSessionIds, isAnyGroupChatBusy]
 	);
 
 	const { sessionFilter, setSessionFilter } = useSessionFilterMode();
+	// Deferred copy used for the heavy categorize/sort pass below. The input value
+	// itself stays bound to `sessionFilter` so typing remains instant; React just
+	// allows the filtered-list recompute to deprioritize under input pressure.
+	const deferredSessionFilter = useDeferredValue(sessionFilter);
 	const { onResizeStart: onSidebarResizeStart, transitionClass: sidebarTransitionClass } =
 		useResizablePanel({
 			width: leftSidebarWidthState,
@@ -277,9 +643,26 @@ function SessionListInner(props: SessionListProps) {
 	const setSessionFilterOpen = useUIStore((s) => s.setSessionFilterOpen);
 	const showUnreadAgentsOnly = useUIStore((s) => s.showUnreadAgentsOnly);
 	const toggleShowUnreadAgentsOnly = useUIStore((s) => s.toggleShowUnreadAgentsOnly);
+	// Agent Resilience: agents stuck auto-retrying an outage count as "needs
+	// attention" and surface in the unread filter (see useSessionCategories).
+	const stuckOutageSignature = useActiveOutageSessionSignature();
+	// Shared "needs attention" context (batch + stuck ids) for the unread filter.
+	const attentionCtx = useMemo<AttentionContext>(
+		() => ({
+			batchSessionIds: new Set(activeBatchSessionIds),
+			stuckOutageIds: outageIdsFromSignature(stuckOutageSignature),
+		}),
+		[activeBatchSessionIds, stuckOutageSignature]
+	);
+	// Drives the Bell button's dot. It must agree with what the unread filter
+	// would actually reveal, and that filter keeps unread group chats too - a
+	// dot-less bell that still un-hides a room reads as a bug. Agents route
+	// through sessionNeedsAttention so this can't drift from the filter itself.
 	const hasUnreadAgents = useMemo(
-		() => sessions.some((s) => s.aiTabs?.some((tab) => tab.hasUnread) || s.state === 'busy'),
-		[sessions]
+		() =>
+			sessions.some((s) => sessionNeedsAttention(s, attentionCtx)) ||
+			groupChats.some((c) => !c.archived && unreadGroupChatIds.has(c.id)),
+		[sessions, attentionCtx, groupChats, unreadGroupChatIds]
 	);
 	const [menuOpen, setMenuOpen] = useState(false);
 
@@ -310,8 +693,100 @@ function SessionListInner(props: SessionListProps) {
 	const contextMenuSession = contextMenu
 		? sessions.find((s) => s.id === contextMenu.sessionId)
 		: null;
+
+	// Group context menu state - opened by right-clicking a group header
+	const [groupContextMenu, setGroupContextMenu] = useState<{
+		x: number;
+		y: number;
+		groupId: string;
+	} | null>(null);
+	const groupContextMenuGroup = groupContextMenu
+		? groups.find((g) => g.id === groupContextMenu.groupId)
+		: null;
+	const groupContextMenuMemberCount = groupContextMenu
+		? sessions.filter((s) => s.groupId === groupContextMenu.groupId && !s.parentSessionId).length
+		: 0;
+	const groupContextMenuEligibleParentGroups = useMemo(
+		() =>
+			groupsPlusEnabled && groupContextMenuGroup
+				? groups.filter(
+						(candidate) =>
+							candidate.id !== groupContextMenuGroup.parentGroupId &&
+							canSetGroupParent(groups, groupContextMenuGroup.id, candidate.id)
+					)
+				: [],
+		[groups, groupContextMenuGroup, groupsPlusEnabled]
+	);
 	const menuRef = useRef<HTMLDivElement>(null);
+	// Phones swap the anchored hamburger dropdown for a full-screen sheet.
+	const { isXs } = useViewportBreakpoint();
 	const ignoreNextBlurRef = useRef(false);
+	// Scrollable list viewport - used to keep the keyboard-selected row in view.
+	const listScrollRef = useRef<HTMLDivElement>(null);
+	const sessionFilterInputRef = useRef<HTMLInputElement>(null);
+
+	// Drag-over highlight for the group / ungrouped drop zones. While an agent is
+	// being dragged, the zone under the cursor lights up so the drop destination
+	// is unambiguous - mirrors the file panel's drop-target affordance. The value
+	// is a group id or the UNGROUPED_DROP_TARGET sentinel (group ids are prefixed
+	// `group-`, so the sentinel can never collide with a real one).
+	const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
+	const [draggingGroupId, setDraggingGroupId] = useState<string | null>(null);
+
+	// The highlight is purely transient: clear it the instant a session or group
+	// drag ends (successful drop, cancel, or release outside any zone).
+	useEffect(() => {
+		if (!draggingSessionId && !draggingGroupId) setDragOverTarget(null);
+	}, [draggingSessionId, draggingGroupId]);
+
+	const handleDropTargetEnter = useCallback(
+		(target: string) => {
+			if (useUIStore.getState().draggingSessionId) {
+				setDragOverTarget(target);
+				return;
+			}
+			if (
+				groupsPlusEnabled &&
+				draggingGroupId &&
+				(target === UNGROUPED_DROP_TARGET || canSetGroupParent(groups, draggingGroupId, target))
+			) {
+				setDragOverTarget(target);
+			}
+		},
+		[draggingGroupId, groups]
+	);
+
+	const handleDropTargetLeave = useCallback((e: React.DragEvent) => {
+		// dragenter/leave also fire for descendants; keep the highlight while the
+		// cursor stays within the zone (relatedTarget still inside currentTarget).
+		const next = e.relatedTarget as Node | null;
+		const zone = e.currentTarget as Node | null;
+		if (zone && next && zone.contains(next)) return;
+		setDragOverTarget(null);
+	}, []);
+
+	const handleGroupDrop = useCallback(
+		(groupId: string) => {
+			setDragOverTarget(null);
+			if (groupsPlusEnabled && draggingGroupId) {
+				setGroupParent(draggingGroupId, groupId);
+				setDraggingGroupId(null);
+				return;
+			}
+			handleDropOnGroup(groupId);
+		},
+		[draggingGroupId, groupsPlusEnabled, handleDropOnGroup, setGroupParent]
+	);
+
+	const handleUngroupedDrop = useCallback(() => {
+		setDragOverTarget(null);
+		if (groupsPlusEnabled && draggingGroupId) {
+			setGroupParent(draggingGroupId, undefined);
+			setDraggingGroupId(null);
+			return;
+		}
+		handleDropOnUngrouped();
+	}, [draggingGroupId, groupsPlusEnabled, handleDropOnUngrouped, setGroupParent]);
 
 	// Toggle bookmark for a session - memoized to prevent SessionItem re-renders
 	const toggleBookmark = useCallback(
@@ -328,6 +803,12 @@ function SessionListInner(props: SessionListProps) {
 		e.preventDefault();
 		e.stopPropagation();
 		setContextMenu({ x: e.clientX, y: e.clientY, sessionId });
+	}, []);
+
+	const handleGroupContextMenu = useCallback((e: React.MouseEvent, groupId: string) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setGroupContextMenu({ x: e.clientX, y: e.clientY, groupId });
 	}, []);
 
 	const handleMoveToGroup = useCallback(
@@ -370,9 +851,12 @@ function SessionListInner(props: SessionListProps) {
 		);
 	};
 
-	// Close menu when clicking outside
+	// Close menu when clicking outside. Clicks inside the phone full-screen
+	// sheet don't count as outside - it renders through a body portal (see
+	// HamburgerDropdown), so menuRef.contains() can't see it.
 	useEffect(() => {
 		const handleClickOutside = (e: MouseEvent) => {
+			if ((e.target as Element).closest?.('[data-hamburger-sheet]')) return;
 			if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
 				setMenuOpen(false);
 			}
@@ -403,26 +887,21 @@ function SessionListInner(props: SessionListProps) {
 	}, [liveOverlayOpen, menuOpen]);
 
 	// Listen for tour UI actions to control hamburger menu state
-	useEffect(() => {
-		const handleTourAction = (event: Event) => {
-			const customEvent = event as CustomEvent<{ type: string; value?: string }>;
-			const { type } = customEvent.detail;
+	useEventListener('tour:action', (event: Event) => {
+		const customEvent = event as CustomEvent<{ type: string; value?: string }>;
+		const { type } = customEvent.detail;
 
-			switch (type) {
-				case 'openHamburgerMenu':
-					setMenuOpen(true);
-					break;
-				case 'closeHamburgerMenu':
-					setMenuOpen(false);
-					break;
-				default:
-					break;
-			}
-		};
-
-		window.addEventListener('tour:action', handleTourAction);
-		return () => window.removeEventListener('tour:action', handleTourAction);
-	}, []);
+		switch (type) {
+			case 'openHamburgerMenu':
+				setMenuOpen(true);
+				break;
+			case 'closeHamburgerMenu':
+				setMenuOpen(false);
+				break;
+			default:
+				break;
+		}
+	});
 
 	// Get git file change counts per session from focused context
 	// Using useGitFileStatus instead of full useGitStatus reduces re-renders
@@ -442,50 +921,189 @@ function SessionListInner(props: SessionListProps) {
 		sortedUngroupedParentSessions,
 		sortedFilteredSessions,
 		sortedGroups,
-	} = useSessionCategories(sessionFilter, sortedSessions, showUnreadAgentsOnly, activeSessionId);
+	} = useSessionCategories(
+		deferredSessionFilter,
+		sortedSessions,
+		showUnreadAgentsOnly,
+		activeSessionId,
+		activeBatchSessionIds,
+		// Scope categorization to this window's agents (no-op in the primary window).
+		// useSessionCategories reads sessions from the store itself, so the scope must
+		// be applied here, not just via the scoped sortedSessions param above.
+		scopeSessionsToWindow,
+		stuckOutageSignature
+	);
 
-	// PERF: Cached callback maps to prevent SessionItem re-renders
-	// These Maps store stable function references keyed by session/editing ID
-	// The callbacks themselves are memoized, so the Map values remain stable
+	const pluginGroupings = usePluginGroupings();
+	const [groupingMode, setGroupingMode] = useState('manual');
+	const [virtualCollapsed, setVirtualCollapsed] = useState<Record<string, boolean>>({});
+	useEffect(() => {
+		void window.maestro.settings.get('leftSidebarGroupingMode').then((value) => {
+			if (typeof value === 'string') setGroupingMode(value);
+		});
+	}, []);
+	const activeVirtualGrouping = pluginGroupings.find((grouping) => grouping.id === groupingMode);
+	useEffect(() => {
+		if (groupingMode === 'manual' || activeVirtualGrouping) return;
+		setGroupingMode('manual');
+		void window.maestro.settings.set('leftSidebarGroupingMode', 'manual');
+	}, [activeVirtualGrouping, groupingMode]);
+	const virtualGrouping = useMemo(
+		() =>
+			activeVirtualGrouping
+				? buildVirtualGrouping(activeVirtualGrouping, sortedFilteredSessions)
+				: undefined,
+		[activeVirtualGrouping, sortedFilteredSessions]
+	);
+	const selectGroupingMode = useCallback((id: string) => {
+		setGroupingMode(id);
+		void window.maestro.settings.set('leftSidebarGroupingMode', id);
+	}, []);
+
+	const { orderedGroups, groupById, childrenByParentId } = useMemo(() => {
+		const groupById = new Map(sortedGroups.map((group) => [group.id, group]));
+		if (!groupsPlusEnabled) {
+			return {
+				orderedGroups: sortedGroups,
+				groupById,
+				childrenByParentId: new Map<string, Group[]>(),
+			};
+		}
+
+		const childrenByParentId = new Map<string, Group[]>();
+		const rootGroups: Group[] = [];
+
+		for (const group of sortedGroups) {
+			const parent = group.parentGroupId ? groupById.get(group.parentGroupId) : undefined;
+			if (!parent || parent.parentGroupId) {
+				rootGroups.push(group);
+				continue;
+			}
+
+			const children = childrenByParentId.get(parent.id);
+			if (children) {
+				children.push(group);
+			} else {
+				childrenByParentId.set(parent.id, [group]);
+			}
+		}
+
+		return {
+			orderedGroups: rootGroups.flatMap((group) => [
+				group,
+				...(childrenByParentId.get(group.id) ?? []),
+			]),
+			groupById,
+			childrenByParentId,
+		};
+	}, [groupsPlusEnabled, sortedGroups]);
+
+	// PERF: Cached callback maps to prevent SessionItem re-renders.
+	// These Maps store stable function references keyed by session id. They only
+	// depend on the *set of session ids* - not on per-session field changes - so
+	// rebuilding them on every sidebar field change (state/name/etc.) was
+	// wasted work that broke SessionItem's React.memo bail-out (5 × N closures
+	// per flush). Key off a derived id signature instead.
+	const sessionIdsKey = useMemo(() => sessions.map((s) => s.id).join('|'), [sessions]);
+
+	// Read sessions through a ref inside the memos so the deps stay tied to the
+	// id-set (sessionIdsKey) rather than the array reference. The handlers care
+	// only about the *set of session ids*, not about per-session field changes.
+	const sessionsRef = useRef(sessions);
+	sessionsRef.current = sessions;
+
+	// Read cross-window ownership through a ref so the cached select handlers stay
+	// stable (keyed only on the session-id set, to preserve SessionItem's memo
+	// bail-out) yet always consult the latest ownership when actually clicked.
+	const getSessionWindowRef = useRef(windowCtx?.getSessionWindow);
+	getSessionWindowRef.current = windowCtx?.getSessionWindow;
+
 	const selectHandlers = useMemo(() => {
 		const map = new Map<string, () => void>();
-		sessions.forEach((s) => {
-			map.set(s.id, () => setActiveSessionId(s.id));
+		sessionsRef.current.forEach((s) => {
+			map.set(s.id, () => {
+				// Agent lives in another window: focus that window instead of stealing
+				// it (single-window-per-agent). Otherwise select it here as before.
+				const otherWindow = getSessionWindowRef.current?.(s.id);
+				if (otherWindow) {
+					void window.maestro.windows.focusWindow(otherWindow.windowId);
+					return;
+				}
+				setActiveSessionId(s.id);
+			});
 		});
 		return map;
-	}, [sessions, setActiveSessionId]);
+	}, [sessionIdsKey, setActiveSessionId]);
 
 	const dragStartHandlers = useMemo(() => {
 		const map = new Map<string, () => void>();
-		sessions.forEach((s) => {
+		sessionsRef.current.forEach((s) => {
 			map.set(s.id, () => handleDragStart(s.id));
 		});
 		return map;
-	}, [sessions, handleDragStart]);
+	}, [sessionIdsKey, handleDragStart]);
 
 	const contextMenuHandlers = useMemo(() => {
 		const map = new Map<string, (e: React.MouseEvent) => void>();
-		sessions.forEach((s) => {
+		sessionsRef.current.forEach((s) => {
 			map.set(s.id, (e: React.MouseEvent) => handleContextMenu(e, s.id));
 		});
 		return map;
-	}, [sessions, handleContextMenu]);
+	}, [sessionIdsKey, handleContextMenu]);
 
 	const finishRenameHandlers = useMemo(() => {
 		const map = new Map<string, (newName: string) => void>();
-		sessions.forEach((s) => {
+		sessionsRef.current.forEach((s) => {
 			map.set(s.id, (newName: string) => finishRenamingSession(s.id, newName));
 		});
 		return map;
-	}, [sessions, finishRenamingSession]);
+	}, [sessionIdsKey, finishRenamingSession]);
 
 	const toggleBookmarkHandlers = useMemo(() => {
 		const map = new Map<string, () => void>();
-		sessions.forEach((s) => {
+		sessionsRef.current.forEach((s) => {
 			map.set(s.id, () => toggleBookmark(s.id));
 		});
 		return map;
-	}, [sessions, toggleBookmark]);
+	}, [sessionIdsKey, toggleBookmark]);
+
+	// `onStartRename` was the one row prop still built inline, so every row got a
+	// fresh callback identity on each SessionList render and SessionItem's memo
+	// bail-out never fired - undoing the maps above. Collapsing/expanding a
+	// sidebar folder or an agent group re-renders this component, so a toggle
+	// that changes nothing about the rows still re-rendered every visible agent
+	// (a dozen icons and ~11 store subscriptions each) (#1186). Rename keys are
+	// per-row strings (they encode the variant), so cache one callback per key;
+	// the cache resets when the session id-set changes.
+	const startRenamingSessionRef = useRef(startRenamingSession);
+	startRenamingSessionRef.current = startRenamingSession;
+
+	const getStartRenameHandler = useMemo(() => {
+		const cache = new Map<string, () => void>();
+		return (renameKey: string) => {
+			let handler = cache.get(renameKey);
+			if (!handler) {
+				handler = () => startRenamingSessionRef.current(renameKey);
+				cache.set(renameKey, handler);
+			}
+			return handler;
+		};
+	}, [sessionIdsKey]);
+
+	// Same story for the grouped rows' drop target: an inline
+	// `() => handleDropOnGroup(group.id)` per row per render. Keyed on the group
+	// id-set so a collapse/expand toggle (which only flips `collapsed`) reuses it.
+	const groupIdsKey = useMemo(() => groups.map((g) => g.id).join('|'), [groups]);
+
+	const dropOnGroupHandlers = useMemo(() => {
+		const map = new Map<string, () => void>();
+		if (groupIdsKey) {
+			groupIdsKey.split('|').forEach((id) => {
+				map.set(id, () => handleDropOnGroup(id));
+			});
+		}
+		return map;
+	}, [groupIdsKey, handleDropOnGroup]);
 
 	// Helper: compute navIndexMap key for a session based on render context
 	const getNavKey = (variant: string, session: Session, groupId?: string): string => {
@@ -513,13 +1131,12 @@ function SessionListInner(props: SessionListProps) {
 		}
 	) => {
 		const allWorktreeChildren = getWorktreeChildren(session.id);
-		// When filtering unread, only show worktree children that are unread or busy
+		// When filtering unread, only show worktree children that need attention:
+		// unread, busy, in an error state, auto-running an Auto Run batch, or stuck
+		// auto-retrying an outage (the shared predicate, plus the active child).
 		const worktreeChildren = showUnreadAgentsOnly
 			? allWorktreeChildren.filter(
-					(child) =>
-						child.id === activeSessionId ||
-						child.aiTabs?.some((tab) => tab.hasUnread) ||
-						child.state === 'busy'
+					(child) => child.id === activeSessionId || sessionNeedsAttention(child, attentionCtx)
 				)
 			: allWorktreeChildren;
 		const hasWorktrees = worktreeChildren.length > 0;
@@ -528,7 +1145,9 @@ function SessionListInner(props: SessionListProps) {
 		// Use navIndexMap for keyboard selection (context-aware: distinguishes bookmark vs group instances)
 		const navKey = getNavKey(variant, session, options.groupId);
 		const globalIdx = navIndexMap?.get(navKey) ?? sortedSessionIndexById.get(session.id) ?? -1;
-		const isKeyboardSelected = activeFocus === 'sidebar' && globalIdx === selectedSidebarIndex;
+		// Suppressed while a Starred/Group-Chat cursor is live so only one row is highlighted.
+		const isKeyboardSelected =
+			activeFocus === 'sidebar' && !sidebarExtraSelection && globalIdx === selectedSidebarIndex;
 
 		// In flat/ungrouped view, wrap sessions with worktrees in a left-bordered container
 		// to visually associate parent and worktrees together (similar to grouped view)
@@ -537,14 +1156,28 @@ function SessionListInner(props: SessionListProps) {
 		// When wrapped, use 'ungrouped' styling for flat sessions (no mx-3, consistent with grouped look)
 		const effectiveVariant = needsWorktreeWrapper && variant === 'flat' ? 'ungrouped' : variant;
 
+		// The Bookmarks section is a filtered view, not a real container - dragging
+		// agents out of it or dropping them into it has no meaningful target (drops
+		// previously fell through to "ungroup"). Disable drag/drop for those rows.
+		const dragDisabled = variant === 'bookmark' || activeVirtualGrouping !== undefined;
+
 		const content = (
 			<>
-				{/* Parent session - no chevron, maintains alignment */}
+				{/* Parent session - chevron in SessionItem toggles worktree expansion. */}
 				<SessionItem
 					session={session}
 					variant={effectiveVariant}
 					theme={theme}
-					isActive={activeSessionId === session.id && !activeGroupChatId}
+					navDomKey={globalIdx >= 0 ? `idx:${globalIdx}` : undefined}
+					isActive={
+						activeSessionId === session.id &&
+						!activeGroupChatId &&
+						// While the keyboard cursor is parked on a Starred row, suppress the
+						// parent agent's active highlight so the starred row is the sole
+						// highlighted item - otherwise the agent's (stronger) active styling
+						// steals visual focus from the row you actually navigated to.
+						sidebarExtraSelection?.kind !== 'starred'
+					}
 					isKeyboardSelected={isKeyboardSelected}
 					isDragging={draggingSessionId === session.id}
 					isEditing={editingSessionId === `${options.keyPrefix}-${session.id}`}
@@ -556,66 +1189,59 @@ function SessionListInner(props: SessionListProps) {
 					jumpNumber={getSessionJumpNumber(session.id)}
 					cueSubscriptionCount={cueSessionMap.get(session.id)?.count}
 					cueActiveRun={cueSessionMap.get(session.id)?.active}
+					wizardActive={wizardActiveSessions.has(session.id)}
+					wizardGeneratingDocs={!!wizardActiveSessions.get(session.id)?.isGeneratingDocs}
+					worktreeChildCount={worktreeChildren.length}
+					otherWindowNumber={windowCtx?.getSessionWindow(session.id)?.windowNumber}
+					dragDisabled={dragDisabled}
 					onSelect={selectHandlers.get(session.id)!}
 					onDragStart={dragStartHandlers.get(session.id)!}
 					onDragOver={handleDragOver}
-					onDrop={options.onDrop || handleDropOnUngrouped}
+					onDrop={options.onDrop || handleUngroupedDrop}
 					onContextMenu={contextMenuHandlers.get(session.id)!}
 					onFinishRename={finishRenameHandlers.get(session.id)!}
-					onStartRename={() => startRenamingSession(`${options.keyPrefix}-${session.id}`)}
+					onStartRename={getStartRenameHandler(`${options.keyPrefix}-${session.id}`)}
 					onToggleBookmark={toggleBookmarkHandlers.get(session.id)!}
+					onToggleWorktrees={onToggleWorktreeExpanded}
 				/>
 
-				{/* Thin band below parent when worktrees exist but collapsed - click to expand */}
-				{hasWorktrees && !worktreesExpanded && onToggleWorktreeExpanded && (
-					<button
-						onClick={(e) => {
-							e.stopPropagation();
-							onToggleWorktreeExpanded(session.id);
-						}}
-						className="w-full flex items-center justify-center gap-1.5 py-0.5 text-[9px] font-medium hover:opacity-80 transition-opacity cursor-pointer"
-						style={{
-							backgroundColor: theme.colors.accent + '15',
-							color: theme.colors.accent,
-						}}
-						title={`${worktreeChildren.length} worktree${worktreeChildren.length > 1 ? 's' : ''} (click to expand)`}
-					>
-						<GitBranch className="w-2.5 h-2.5" />
-						<span>
-							{worktreeChildren.length} worktree{worktreeChildren.length > 1 ? 's' : ''}
-						</span>
-						<ChevronDown className="w-2.5 h-2.5" />
-					</button>
-				)}
-
-				{/* Worktree children drawer (when expanded) */}
-				{hasWorktrees && worktreesExpanded && onToggleWorktreeExpanded && (
+				{/* Worktree children with tree-connector visualization. Always rendered
+				    so maxHeight + opacity drive the expand/collapse animation. */}
+				{hasWorktrees && onToggleWorktreeExpanded && (
 					<div
-						className={`rounded-bl overflow-hidden ${needsWorktreeWrapper ? '' : 'ml-1'}`}
-						style={{
-							backgroundColor: theme.colors.accent + '10',
-							borderLeft: needsWorktreeWrapper ? 'none' : `1px solid ${theme.colors.accent}30`,
-							borderBottom: `1px solid ${theme.colors.accent}30`,
-						}}
+						className="tree-children transition-all duration-200 ease-in-out overflow-hidden"
+						style={
+							{
+								'--tree-line-color': `${theme.colors.accent}30`,
+								'--tree-bg-color': theme.colors.bgSidebar,
+								maxHeight: worktreesExpanded ? `${worktreeChildren.length * 48}px` : '0px',
+								opacity: worktreesExpanded ? 1 : 0,
+							} as React.CSSProperties
+						}
 					>
-						{/* Worktree children list */}
-						<div>
-							{(showUnreadAgentsOnly
-								? worktreeChildren
-								: sortedWorktreeChildrenByParentId.get(session.id) || []
-							).map((child) => {
-								const childNavKey = getChildNavKey(variant, child.id, options.groupId);
-								const childGlobalIdx =
-									navIndexMap?.get(childNavKey) ?? sortedSessionIndexById.get(child.id) ?? -1;
-								const isChildKeyboardSelected =
-									activeFocus === 'sidebar' && childGlobalIdx === selectedSidebarIndex;
-								return (
+						{(showUnreadAgentsOnly
+							? worktreeChildren
+							: sortedWorktreeChildrenByParentId.get(session.id) || []
+						).map((child) => {
+							const childNavKey = getChildNavKey(variant, child.id, options.groupId);
+							const childGlobalIdx =
+								navIndexMap?.get(childNavKey) ?? sortedSessionIndexById.get(child.id) ?? -1;
+							const isChildKeyboardSelected =
+								activeFocus === 'sidebar' &&
+								!sidebarExtraSelection &&
+								childGlobalIdx === selectedSidebarIndex;
+							return (
+								<div key={`worktree-${session.id}-${child.id}`} className="tree-child">
 									<SessionItem
-										key={`worktree-${session.id}-${child.id}`}
 										session={child}
 										variant="worktree"
 										theme={theme}
-										isActive={activeSessionId === child.id && !activeGroupChatId}
+										navDomKey={childGlobalIdx >= 0 ? `idx:${childGlobalIdx}` : undefined}
+										isActive={
+											activeSessionId === child.id &&
+											!activeGroupChatId &&
+											sidebarExtraSelection?.kind !== 'starred'
+										}
 										isKeyboardSelected={isChildKeyboardSelected}
 										isDragging={draggingSessionId === child.id}
 										isEditing={editingSessionId === `worktree-${session.id}-${child.id}`}
@@ -625,35 +1251,20 @@ function SessionListInner(props: SessionListProps) {
 										jumpNumber={getSessionJumpNumber(child.id)}
 										cueSubscriptionCount={cueSessionMap.get(child.id)?.count}
 										cueActiveRun={cueSessionMap.get(child.id)?.active}
+										wizardActive={wizardActiveSessions.has(child.id)}
+										wizardGeneratingDocs={!!wizardActiveSessions.get(child.id)?.isGeneratingDocs}
+										otherWindowNumber={windowCtx?.getSessionWindow(child.id)?.windowNumber}
+										dragDisabled={dragDisabled}
 										onSelect={selectHandlers.get(child.id)!}
 										onDragStart={dragStartHandlers.get(child.id)!}
 										onContextMenu={contextMenuHandlers.get(child.id)!}
 										onFinishRename={finishRenameHandlers.get(child.id)!}
-										onStartRename={() => startRenamingSession(`worktree-${session.id}-${child.id}`)}
+										onStartRename={getStartRenameHandler(`worktree-${session.id}-${child.id}`)}
 										onToggleBookmark={toggleBookmarkHandlers.get(child.id)!}
 									/>
-								);
-							})}
-						</div>
-						{/* Drawer handle at bottom - click to collapse */}
-						<button
-							onClick={(e) => {
-								e.stopPropagation();
-								onToggleWorktreeExpanded(session.id);
-							}}
-							className="w-full flex items-center justify-center gap-1.5 py-0.5 text-[9px] font-medium hover:opacity-80 transition-opacity cursor-pointer"
-							style={{
-								backgroundColor: theme.colors.accent + '20',
-								color: theme.colors.accent,
-							}}
-							title="Click to collapse worktrees"
-						>
-							<GitBranch className="w-2.5 h-2.5" />
-							<span>
-								{worktreeChildren.length} worktree{worktreeChildren.length > 1 ? 's' : ''}
-							</span>
-							<ChevronUp className="w-2.5 h-2.5" />
-						</button>
+								</div>
+							);
+						})}
 					</div>
 				)}
 			</>
@@ -694,7 +1305,10 @@ function SessionListInner(props: SessionListProps) {
 		<div
 			ref={sidebarContainerRef}
 			tabIndex={0}
-			className={`border-r flex flex-col shrink-0 ${sidebarTransitionClass} outline-none relative z-20`}
+			data-panel="left"
+			data-collapsed={leftSidebarOpen ? 'false' : 'true'}
+			data-hidden={leftSidebarHidden ? 'true' : 'false'}
+			className={`chrome-sheen border-r flex flex-col shrink-0 ${sidebarTransitionClass} outline-none relative z-20 maestro-side-panel maestro-side-panel--left`}
 			style={
 				{
 					width: leftSidebarOpen ? `${leftSidebarWidthState}px` : '64px',
@@ -709,24 +1323,36 @@ function SessionListInner(props: SessionListProps) {
 			onClick={() => setActiveFocus('sidebar')}
 			onFocus={() => setActiveFocus('sidebar')}
 			onKeyDown={(e) => {
-				// Open session filter with Cmd+F when sidebar has focus
+				// Open (or re-focus) the session filter with Cmd+F when the sidebar
+				// has focus. If the filter is already open and the user has moved
+				// focus elsewhere (e.g. arrow-key navigation through agents), pull
+				// focus back to the input and put the caret at the end of any
+				// existing query.
 				if (
 					e.key === 'f' &&
 					(e.metaKey || e.ctrlKey) &&
 					activeFocus === 'sidebar' &&
-					leftSidebarOpen &&
-					!sessionFilterOpen
+					leftSidebarOpen
 				) {
 					e.preventDefault();
-					setSessionFilterOpen(true);
+					if (!sessionFilterOpen) {
+						setSessionFilterOpen(true);
+					}
+					setTimeout(() => {
+						const input = sessionFilterInputRef.current;
+						if (!input) return;
+						input.focus();
+						const len = input.value.length;
+						input.setSelectionRange(len, len);
+					}, 0);
 				}
 			}}
 		>
 			{/* Resize Handle */}
 			{leftSidebarOpen && (
 				<div
-					className="absolute top-0 right-0 w-3 h-full cursor-col-resize border-r-4 border-transparent hover:border-blue-500 transition-colors z-20"
-					onMouseDown={onSidebarResizeStart}
+					className="resize-handle absolute top-0 right-0 w-3 h-full cursor-col-resize border-r-4 border-transparent hover:border-blue-500 transition-colors z-20"
+					onPointerDown={onSidebarResizeStart}
 				/>
 			)}
 
@@ -737,22 +1363,59 @@ function SessionListInner(props: SessionListProps) {
 			>
 				{leftSidebarOpen ? (
 					<>
-						<div className="flex items-center gap-2">
-							<Wand2
-								className={`w-5 h-5${isAnyBusy ? ' wand-sparkle-active' : ''}`}
-								style={{ color: theme.colors.accent }}
-							/>
-							<h1
-								className="font-bold tracking-widest text-lg"
-								style={{ color: theme.colors.textMain }}
+						{/* Three zones, left to right: identity, indicators, menu. The
+						    indicator band is the flexible one, so it centers itself in
+						    whatever the other two leave behind and reads as its own group
+						    rather than as a tail on the wordmark.
+
+						    This row neither wraps nor scrolls, so it needs a legitimate
+						    shrink target or any added indicator pushes the hamburger menu
+						    off the edge on a narrow sidebar. That role belongs to the
+						    now-playing pill's filename, which can be clipped without looking
+						    broken. The wordmark is drawn in full or dropped entirely - see
+						    `showWordmark`. */}
+						<div className="flex items-center gap-2 shrink-0">
+							<button
+								type="button"
+								onClick={() => {
+									if (sessions.length > 0) {
+										getModalActions().setQuickActionOpen(true, 'agents');
+									}
+								}}
+								className="flex items-center justify-center rounded hover:bg-white/10 transition-colors p-0.5 -m-0.5"
+								title="Switch agent"
+								aria-label="Switch agent"
 							>
-								MAESTRO
-							</h1>
+								<BusyWand
+									busy={isAnyBusy}
+									profiling={profilingActive}
+									sizeClass="w-5 h-5"
+									color={theme.colors.accent}
+								/>
+							</button>
+							{showWordmark && (
+								<Wordmark
+									as="h1"
+									className="text-lg shrink-0 whitespace-nowrap"
+									style={{ color: theme.colors.textMain }}
+								/>
+							)}
+						</div>
+
+						{/* Indicator band. `flex-1` is what centers it: it takes the space
+						    the identity and menu zones do not, and centers its contents in
+						    that. Anything status-shaped added to the header belongs here,
+						    not beside the wordmark. `min-w-0` so the now-playing filename
+						    stays the row's shrink target. */}
+						<div
+							data-testid="sidebar-header-indicators"
+							className="flex flex-1 items-center justify-center gap-2 min-w-0"
+						>
 							{/* Badge Level Indicator */}
 							{autoRunStats && autoRunStats.currentBadgeLevel > 0 && (
 								<button
 									onClick={() => setAboutModalOpen(true)}
-									className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors hover:bg-white/10"
+									className="flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs font-bold transition-colors hover:bg-white/10"
 									title={`${getBadgeForTime(autoRunStats.cumulativeTimeMs)?.name || 'Apprentice'} - Click to view achievements`}
 									style={{
 										color: autoRunStats.currentBadgeLevel >= 8 ? '#FFD700' : theme.colors.accent,
@@ -762,84 +1425,97 @@ function SessionListInner(props: SessionListProps) {
 									<span>{autoRunStats.currentBadgeLevel}</span>
 								</button>
 							)}
-							{/* Global LIVE Toggle */}
-							<div className="ml-2 relative z-10" ref={liveOverlayRef} data-tour="remote-control">
-								<button
-									onClick={() => {
-										if (!isLiveMode) {
-											void toggleGlobalLive();
-											setLiveOverlayOpen(true);
-										} else {
-											setLiveOverlayOpen(!liveOverlayOpen);
+							{/* Now playing - only while the floating player is hidden, so the
+							    user can always see that audio is coming from Maestro and get
+							    the widget back with one click. Sheds its label on a narrow
+							    sidebar, the same way the LIVE pill below does. */}
+							<NowPlayingIndicator theme={theme} compact={nowPlayingCompact} />
+							{/* Global LIVE Toggle - hidden in the web-desktop bundle, where
+							    toggling it would kill the webserver the user's browser is
+							    currently connected to. */}
+							{!isWebDesktop() && (
+								<div className="ml-2 relative z-10" ref={liveOverlayRef} data-tour="remote-control">
+									<button
+										onClick={() => {
+											if (!isLiveMode) {
+												void toggleGlobalLive();
+												setLiveOverlayOpen(true);
+											} else {
+												setLiveOverlayOpen(!liveOverlayOpen);
+											}
+										}}
+										className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-2xs font-bold transition-colors ${
+											isLiveMode
+												? 'bg-green-500/20 text-green-500 hover:bg-green-500/30'
+												: 'text-gray-500 hover:bg-white/10'
+										}`}
+										title={
+											isLiveMode
+												? 'Web interface active - Click to show URL'
+												: 'Click to enable web interface'
 										}
-									}}
-									className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold transition-colors ${
-										isLiveMode
-											? 'bg-green-500/20 text-green-500 hover:bg-green-500/30'
-											: 'text-gray-500 hover:bg-white/10'
-									}`}
-									title={
-										isLiveMode
-											? 'Web interface active - Click to show URL'
-											: 'Click to enable web interface'
-									}
-								>
-									<Radio className={`w-3 h-3 ${isLiveMode ? 'animate-pulse' : ''}`} />
-									{leftSidebarWidthState >=
-										(autoRunStats && autoRunStats.currentBadgeLevel > 0 ? 295 : 256) &&
-										(isLiveMode ? 'LIVE' : 'OFFLINE')}
-								</button>
+									>
+										<Radio className={`w-3 h-3 ${isLiveMode ? 'animate-pulse' : ''}`} />
+										{/* The badge is an indicator and the wordmark is the yield ahead of
+										    it: once the wordmark has been dropped the row already holds more
+										    width than the badge costs, so charging for it either way is what
+										    left a 256px sidebar showing a bare radio dot beside the space the
+										    wordmark had just vacated. */}
+										{leftSidebarWidthState >=
+											LIVE_LABEL_MIN_WIDTH +
+												headerTextDelta.liveLabel +
+												headerTextDelta.wordmark +
+												(showWordmark ? headerBadgeWidth : 0) && (isLiveMode ? 'LIVE' : 'OFFLINE')}
+									</button>
 
-								{/* LIVE Overlay with URL and QR Code */}
-								{isLiveMode && liveOverlayOpen && webInterfaceUrl && (
-									<LiveOverlayPanel
-										theme={theme}
-										webInterfaceUrl={webInterfaceUrl}
-										tunnelStatus={tunnelStatus}
-										tunnelUrl={tunnelUrl}
-										tunnelError={tunnelError}
-										cloudflaredInstalled={cloudflaredInstalled}
-										activeUrlTab={activeUrlTab}
-										setActiveUrlTab={setActiveUrlTab}
-										copyFlash={copyFlash}
-										setCopyFlash={setCopyFlash}
-										handleTunnelToggle={handleTunnelToggle}
-										persistentWebLink={persistentWebLink}
-										setPersistentWebLink={setPersistentWebLink}
-										webInterfaceUseCustomPort={webInterfaceUseCustomPort}
-										webInterfaceCustomPort={webInterfaceCustomPort}
-										setWebInterfaceUseCustomPort={setWebInterfaceUseCustomPort}
-										setWebInterfaceCustomPort={setWebInterfaceCustomPort}
-										isLiveMode={isLiveMode}
-										toggleGlobalLive={toggleGlobalLive}
-										setLiveOverlayOpen={setLiveOverlayOpen}
-										restartWebServer={restartWebServer}
-										restartTunnel={restartTunnel}
-									/>
-								)}
-							</div>
+									{/* LIVE Overlay with URL and QR Code */}
+									{isLiveMode && liveOverlayOpen && webInterfaceUrl && (
+										<LiveOverlayPanel
+											theme={theme}
+											webInterfaceUrl={webInterfaceUrl}
+											tunnelStatus={tunnelStatus}
+											tunnelUrl={tunnelUrl}
+											tunnelError={tunnelError}
+											cloudflaredInstalled={cloudflaredInstalled}
+											activeUrlTab={activeUrlTab}
+											setActiveUrlTab={setActiveUrlTab}
+											copyFlash={copyFlash}
+											setCopyFlash={setCopyFlash}
+											handleTunnelToggle={handleTunnelToggle}
+											persistentWebLink={persistentWebLink}
+											setPersistentWebLink={setPersistentWebLink}
+											webInterfaceUseCustomPort={webInterfaceUseCustomPort}
+											webInterfaceCustomPort={webInterfaceCustomPort}
+											setWebInterfaceUseCustomPort={setWebInterfaceUseCustomPort}
+											setWebInterfaceCustomPort={setWebInterfaceCustomPort}
+											isLiveMode={isLiveMode}
+											toggleGlobalLive={toggleGlobalLive}
+											setLiveOverlayOpen={setLiveOverlayOpen}
+											restartWebServer={restartWebServer}
+											restartTunnel={restartTunnel}
+										/>
+									)}
+								</div>
+							)}
 						</div>
-						<div className="flex items-center">
+						<div className="flex items-center shrink-0">
 							{/* Hamburger Menu */}
 							<div className="relative z-30" ref={menuRef} data-tour="hamburger-menu">
-								<button
+								<GhostIconButton
 									onClick={() => setMenuOpen(!menuOpen)}
-									className="p-2 rounded hover:bg-white/10 transition-colors"
-									style={{ color: theme.colors.textDim }}
+									padding="p-2"
 									title="Menu"
+									color={theme.colors.textDim}
 								>
 									<Menu className="w-4 h-4" />
-								</button>
+								</GhostIconButton>
 								{/* Menu Overlay */}
 								{menuOpen && (
-									<div
-										className="absolute top-full left-0 -mt-px w-72 rounded-lg shadow-2xl z-[100] overflow-y-auto scrollbar-thin"
-										data-tour="hamburger-menu-contents"
-										style={{
-											backgroundColor: theme.colors.bgSidebar,
-											border: `1px solid ${theme.colors.border}`,
-											maxHeight: 'calc(100vh - 120px)',
-										}}
+									<HamburgerDropdown
+										theme={theme}
+										isPhone={isXs}
+										onClose={() => setMenuOpen(false)}
+										dataTour="hamburger-menu-contents"
 									>
 										<HamburgerMenuContent
 											theme={theme}
@@ -848,33 +1524,40 @@ function SessionListInner(props: SessionListProps) {
 											startTour={startTour}
 											setMenuOpen={setMenuOpen}
 										/>
-									</div>
+									</HamburgerDropdown>
 								)}
 							</div>
 						</div>
 					</>
 				) : (
+					// The collapsed rail gets the pill too, in its compact form.
+					//
+					// It used to be left out on the grounds that a 64px icon strip is
+					// for agents and a media control there competes with them. That
+					// reasoning ignored what minimizing MEANS: the pill is the only
+					// place the widget parks, so on the rail "minimize" hid the player
+					// with nothing left on screen and no way back - the user reads that
+					// as the player having closed itself, which is precisely what the
+					// minimize/close split exists to prevent. A control the user can
+					// always get back to is worth more than 24px of rail.
+					//
+					// The compact form is the transport and the restore button and
+					// nothing else, which fits the rail's width without a label to clip.
 					<div className="w-full flex flex-col items-center gap-2 relative z-30" ref={menuRef}>
-						<button
-							onClick={() => setMenuOpen(!menuOpen)}
-							className="p-2 rounded hover:bg-white/10 transition-colors"
-							title="Menu"
-						>
-							<Wand2
-								className={`w-6 h-6${isAnyBusy ? ' wand-sparkle-active' : ''}`}
-								style={{ color: theme.colors.accent }}
+						<GhostIconButton onClick={() => setMenuOpen(!menuOpen)} padding="p-2" title="Menu">
+							<BusyWand
+								busy={isAnyBusy}
+								profiling={profilingActive}
+								sizeClass="w-6 h-6"
+								color={theme.colors.accent}
 							/>
-						</button>
+						</GhostIconButton>
+						{/* Renders nothing unless the player is actually minimized, so
+						    the rail is unchanged for anyone not playing anything. */}
+						<NowPlayingIndicator theme={theme} compact />
 						{/* Menu Overlay for Collapsed Sidebar */}
 						{menuOpen && (
-							<div
-								className="absolute top-full left-0 -mt-px w-72 rounded-lg shadow-2xl z-[100] overflow-y-auto scrollbar-thin"
-								style={{
-									backgroundColor: theme.colors.bgSidebar,
-									border: `1px solid ${theme.colors.border}`,
-									maxHeight: 'calc(100vh - 120px)',
-								}}
-							>
+							<HamburgerDropdown theme={theme} isPhone={isXs} onClose={() => setMenuOpen(false)}>
 								<HamburgerMenuContent
 									theme={theme}
 									onNewAgentSession={onNewAgentSession}
@@ -882,7 +1565,7 @@ function SessionListInner(props: SessionListProps) {
 									startTour={startTour}
 									setMenuOpen={setMenuOpen}
 								/>
-							</div>
+							</HamburgerDropdown>
 						)}
 					</div>
 				)}
@@ -891,13 +1574,15 @@ function SessionListInner(props: SessionListProps) {
 			{/* SIDEBAR CONTENT: EXPANDED */}
 			{leftSidebarOpen ? (
 				<div
+					ref={listScrollRef}
 					className="flex-1 min-h-0 flex flex-col overflow-y-auto py-2 select-none scrollbar-thin"
 					data-tour="session-list"
 				>
 					{/* Session Filter */}
 					{sessionFilterOpen && (
-						<div className="mx-3 mb-3">
+						<div className="mx-3 mb-3 relative">
 							<input
+								ref={sessionFilterInputRef}
 								autoFocus
 								type="text"
 								placeholder="Filter agents..."
@@ -909,9 +1594,57 @@ function SessionListInner(props: SessionListProps) {
 										setSessionFilter('');
 									}
 								}}
-								className="w-full px-3 py-2 rounded border bg-transparent outline-none text-sm"
+								className="w-full pl-3 pr-14 py-2 rounded border bg-transparent outline-none text-sm"
 								style={{ borderColor: theme.colors.accent, color: theme.colors.textMain }}
 							/>
+							<EscCloseButton
+								theme={theme}
+								variant="adornment"
+								label="Close filter (Esc)"
+								onClose={() => {
+									setSessionFilterOpen(false);
+									setSessionFilter('');
+								}}
+							/>
+						</div>
+					)}
+
+					{pluginGroupings.length > 0 && !isSecondaryWindow && (
+						<label
+							className="mx-3 mb-2 flex items-center gap-2 text-xs"
+							style={{ color: theme.colors.textDim }}
+						>
+							<span>Session grouping</span>
+							<select
+								aria-label="Session grouping mode"
+								value={activeVirtualGrouping?.id ?? 'manual'}
+								onChange={(event) => selectGroupingMode(event.target.value)}
+								className="min-w-0 flex-1 rounded border bg-transparent px-1 py-0.5"
+								style={{ borderColor: theme.colors.border, color: theme.colors.textMain }}
+							>
+								<option value="manual">Manual</option>
+								{pluginGroupings.map((grouping) => (
+									<option key={grouping.id} value={grouping.id}>
+										{grouping.label}
+									</option>
+								))}
+							</select>
+						</label>
+					)}
+
+					{/* PIANOLA - the single pinned manager agent, rendered as one clean row at
+					    the very top of the list (no section header or bordered box, so it reads
+					    as "the manager, pinned" rather than a category). A pin marker on the row
+					    distinguishes it; a divider sets it apart from the sections below. Gated by
+					    the pianola Encore flag. Stays pinned at the top even while filtering by
+					    unread agents (it is the control surface, always reachable), rendered before
+					    the empty state so it is not pushed down. Excluded from all normal categories. */}
+					{pianolaEnabled && pianolaSession && (
+						<div className="mb-1">
+							{renderSessionWithWorktrees(pianolaSession, 'flat', {
+								keyPrefix: 'pianola',
+							})}
+							<div className="mx-3 mt-1 border-t" style={{ borderColor: theme.colors.border }} />
 						</div>
 					)}
 
@@ -922,16 +1655,103 @@ function SessionListInner(props: SessionListProps) {
 							style={{ color: theme.colors.textDim }}
 						>
 							<Bot className="w-8 h-8 opacity-30" />
-							<span className="text-xs italic">No unread or working agents</span>
+							<span className="text-xs italic">No unread, working, or errored agents</span>
 						</div>
 					)}
 
+					{/* STARRED SESSIONS SECTION - hidden when filtering by unread agents.
+					    Lists every starred AI tab (open) plus every starred closed session
+					    aggregated from agentSessions.getAllNamedSessions, across all agents.
+					    Click switches to the owning agent and either jumps to the open tab
+					    or resumes the closed session. */}
+					{showStarredSessionsSection &&
+						!showUnreadAgentsOnly &&
+						!isSecondaryWindow &&
+						starredItems.length > 0 && (
+							<div className="mb-1">
+								<button
+									type="button"
+									className="w-full px-3 py-1.5 flex items-center justify-between cursor-pointer row-hover group"
+									onClick={() => setStarredSectionCollapsed(!starredSectionCollapsed)}
+									aria-expanded={!starredSectionCollapsed}
+								>
+									<div
+										className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider flex-1"
+										style={{ color: theme.colors.accent }}
+									>
+										{starredSectionCollapsed ? (
+											<ChevronRight className="w-3 h-3" />
+										) : (
+											<ChevronDown className="w-3 h-3" />
+										)}
+										<Star className="w-3.5 h-3.5" fill={theme.colors.accent} />
+										<span>
+											Starred Sessions
+											{showLeftPanelGroupMemberCount && (
+												<span className="ml-1 opacity-60">({starredItems.length})</span>
+											)}
+										</span>
+									</div>
+								</button>
+
+								{!starredSectionCollapsed && (
+									<div
+										className="flex flex-col border-l ml-4"
+										style={{ borderColor: theme.colors.accent }}
+									>
+										{starredItems.map((item) => {
+											// Not focus-gated: a starred row has no separate "active" highlight,
+											// so this doubles as the indicator when Cmd+[ / Cmd+] (a global
+											// shortcut, fired with focus on the main panel) lands here.
+											const isStarredKeyboardSelected =
+												sidebarExtraSelection?.kind === 'starred' &&
+												sidebarExtraSelection.key === item.key;
+											return (
+												<button
+													key={item.key}
+													type="button"
+													data-nav-key={`starred:${item.key}`}
+													onClick={() => void activateStarredItem(item)}
+													className="px-3 py-1.5 flex flex-col text-left hover:bg-white/5 transition-colors"
+													style={{
+														color: theme.colors.textMain,
+														backgroundColor: isStarredKeyboardSelected
+															? theme.colors.bgActivity + '40'
+															: undefined,
+														boxShadow: isStarredKeyboardSelected
+															? `inset 2px 0 0 0 ${theme.colors.accent}`
+															: undefined,
+													}}
+													title={`${item.displayName} - ${item.agentName}`}
+												>
+													<span className="flex items-center gap-1.5 text-sm truncate">
+														<Star
+															className="w-3 h-3 flex-shrink-0"
+															fill={theme.colors.accent}
+															stroke={theme.colors.accent}
+														/>
+														<span className="truncate">{item.displayName}</span>
+													</span>
+													<span
+														className="text-xs opacity-60 truncate ml-[1.125rem]"
+														style={{ color: theme.colors.textDim }}
+													>
+														{item.agentName}
+													</span>
+												</button>
+											);
+										})}
+									</div>
+								)}
+							</div>
+						)}
+
 					{/* BOOKMARKS SECTION - hidden when filtering by unread agents */}
-					{bookmarkedSessions.length > 0 && !showUnreadAgentsOnly && (
+					{bookmarkedSessions.length > 0 && !showUnreadAgentsOnly && !isSecondaryWindow && (
 						<div className="mb-1">
 							<button
 								type="button"
-								className="w-full px-3 py-1.5 flex items-center justify-between cursor-pointer hover:bg-opacity-50 group"
+								className="w-full px-3 py-1.5 flex items-center justify-between cursor-pointer row-hover group"
 								onClick={() => setBookmarksCollapsed(!bookmarksCollapsed)}
 								aria-expanded={!bookmarksCollapsed}
 							>
@@ -945,7 +1765,18 @@ function SessionListInner(props: SessionListProps) {
 										<ChevronDown className="w-3 h-3" />
 									)}
 									<Bookmark className="w-3.5 h-3.5" fill={theme.colors.accent} />
-									<span>Bookmarks</span>
+									<span>
+										Bookmarks
+										{showLeftPanelGroupMemberCount && sortedBookmarkedParentSessions.length > 0 && (
+											<span className="ml-1 opacity-60">
+												({sortedBookmarkedParentSessions.length})
+											</span>
+										)}
+									</span>
+									<WizardIndicator
+										active={wizardRollup.bookmarkActive}
+										generatingDocs={wizardRollup.bookmarkGenerating}
+									/>
 								</div>
 							</button>
 
@@ -964,15 +1795,295 @@ function SessionListInner(props: SessionListProps) {
 								</div>
 							) : (
 								/* Collapsed Bookmarks Palette - uses subdivided pills for worktrees */
+								<CollapsedSessionPillRows
+									sessions={sortedBookmarkedParentSessions}
+									keyPrefix="bookmark-collapsed"
+									maxPerRow={leftPanelCollapsedPillsPerRow}
+									onContainerClick={() => setBookmarksCollapsed(false)}
+									theme={theme}
+									activeBatchSessionIds={activeBatchSessionIds}
+									leftSidebarWidth={leftSidebarWidthState}
+									contextWarningYellowThreshold={contextWarningYellowThreshold}
+									contextWarningRedThreshold={contextWarningRedThreshold}
+									getFileCount={getFileCount}
+									getWorktreeChildren={getWorktreeChildren}
+									setActiveSessionId={setActiveSessionId}
+								/>
+							)}
+						</div>
+					)}
+
+					{activeVirtualGrouping &&
+						virtualGrouping &&
+						virtualGrouping.groups
+							.filter(
+								(group) =>
+									!group.parentGroupId ||
+									!virtualGrouping.groups.some((candidate) => candidate.id === group.parentGroupId)
+							)
+							.flatMap((group) => [
+								group,
+								...virtualGrouping.groups.filter(
+									(candidate) => candidate.parentGroupId === group.id
+								),
+							])
+							.map((group) => {
+								const parent = group.parentGroupId
+									? virtualGrouping.groups.find((candidate) => candidate.id === group.parentGroupId)
+									: undefined;
+								const collapsed = virtualCollapsed[group.id] === true;
+								if (parent && virtualCollapsed[parent.id] === true) return null;
+								const groupSessions = sortedFilteredSessions.filter(
+									(session) => virtualGrouping.assignments[session.id] === group.id
+								);
+								return (
+									<div key={group.id} className={parent ? 'ml-4 mb-1 rounded' : 'mb-1 rounded'}>
+										<button
+											type="button"
+											className="w-full px-3 py-1.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wider row-hover"
+											style={{ color: theme.colors.textDim }}
+											aria-expanded={!collapsed}
+											onClick={() =>
+												setVirtualCollapsed((previous) => ({ ...previous, [group.id]: !collapsed }))
+											}
+										>
+											{collapsed ? (
+												<ChevronRight className="w-3 h-3" />
+											) : (
+												<ChevronDown className="w-3 h-3" />
+											)}
+											<Folder className="w-3.5 h-3.5" />
+											<span>{group.name}</span>
+											<span className="normal-case font-normal opacity-60">
+												from {activeVirtualGrouping.pluginName ?? activeVirtualGrouping.pluginId}
+											</span>
+										</button>
+										{!collapsed && (
+											<div
+												className="flex flex-col border-l ml-4"
+												style={{ borderColor: theme.colors.border }}
+											>
+												{groupSessions.map((session) =>
+													renderSessionWithWorktrees(session, 'group', {
+														keyPrefix: ['virtual', group.id].join('-'),
+													})
+												)}
+											</div>
+										)}
+									</div>
+								);
+							})}
+
+					{/* GROUPS - hidden in a secondary window, which renders its owned agents
+					    as a flat focused list (see the flat-list branch below). */}
+					{!activeVirtualGrouping &&
+						(isSecondaryWindow ? [] : orderedGroups).map((group) => {
+							const groupSessions = sortedGroupSessionsById.get(group.id) || [];
+							const parentGroup =
+								groupsPlusEnabled && group.parentGroupId
+									? groupById.get(group.parentGroupId)
+									: undefined;
+							const isNestedGroup = Boolean(parentGroup && !parentGroup.parentGroupId);
+							if (isNestedGroup && parentGroup?.collapsed && !showUnreadAgentsOnly) return null;
+							const childGroups = groupsPlusEnabled ? (childrenByParentId.get(group.id) ?? []) : [];
+							const hasVisibleChild = childGroups.some(
+								(childGroup) => (sortedGroupSessionsById.get(childGroup.id) || []).length > 0
+							);
+							// Keep a parent visible for a matching child while filtering by unread agents.
+							if (showUnreadAgentsOnly && groupSessions.length === 0 && !hasVisibleChild)
+								return null;
+							const groupCollapsedPills = groupSessions.filter(
+								(session) => !session.parentSessionId
+							);
+							const appearance = resolveGroupAppearance(
+								groupsPlusEnabled ? group.icon : undefined,
+								groupsPlusEnabled ? group.color : undefined,
+								groupsPlusEnabled ? (pluginContributions.iconPacks ?? []) : []
+							);
+							return (
 								<div
-									className="ml-8 mr-3 mt-1 mb-2 flex gap-1 h-1.5 cursor-pointer"
-									onClick={() => setBookmarksCollapsed(false)}
+									key={group.id}
+									data-group-depth={isNestedGroup ? 1 : 0}
+									className={`${isNestedGroup ? 'ml-4 ' : ''}mb-1 rounded`}
+									style={
+										dragOverTarget === group.id
+											? {
+													outline: `1px dashed ${theme.colors.accent}`,
+													outlineOffset: '-2px',
+													backgroundColor: `${theme.colors.accent}14`,
+												}
+											: undefined
+									}
+									onDragEnter={() => handleDropTargetEnter(group.id)}
+									onDragLeave={handleDropTargetLeave}
 								>
-									{sortedBookmarkedParentSessions.map((s) => (
-										<CollapsedSessionPill
-											key={`bookmark-collapsed-${s.id}`}
-											session={s}
-											keyPrefix="bookmark-collapsed"
+									<LongPressable
+										role="button"
+										tabIndex={0}
+										draggable={groupsPlusEnabled && editingGroupId !== group.id}
+										onDragStart={
+											groupsPlusEnabled
+												? (event) => {
+														event.dataTransfer.effectAllowed = 'move';
+														event.dataTransfer.setData('text/plain', group.id);
+														setDraggingGroupId(group.id);
+													}
+												: undefined
+										}
+										onDragEnd={
+											groupsPlusEnabled
+												? () => {
+														setDraggingGroupId(null);
+														setDragOverTarget(null);
+													}
+												: undefined
+										}
+										aria-expanded={!group.collapsed}
+										onKeyDown={(e) => {
+											if (e.target !== e.currentTarget) return;
+											if (e.key === 'Enter' || e.key === ' ') {
+												e.preventDefault();
+												toggleGroup(group.id);
+											}
+										}}
+										className="px-3 py-1.5 flex items-center justify-between cursor-pointer row-hover group"
+										style={
+											dragOverTarget === group.id
+												? { backgroundColor: `${theme.colors.accent}33` }
+												: undefined
+										}
+										onClick={() => toggleGroup(group.id)}
+										onContextMenu={(e) => handleGroupContextMenu(e, group.id)}
+										// Touch: a long-press opens the same group context menu right-click opens.
+										onLongPress={(rect) =>
+											handleGroupContextMenu(longPressMouseEvent(rect), group.id)
+										}
+										onDragOver={handleDragOver}
+										onDrop={() => handleGroupDrop(group.id)}
+									>
+										<div
+											className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider flex-1"
+											style={{ color: theme.colors.textDim }}
+										>
+											{group.collapsed && !showUnreadAgentsOnly ? (
+												<ChevronRight className="w-3 h-3" />
+											) : (
+												<ChevronDown className="w-3 h-3" />
+											)}
+											{appearance.icon ? (
+												appearance.icon.kind === 'plugin' ? (
+													<SafeSvgIcon
+														className="w-4 h-4"
+														path={appearance.icon.path}
+														viewBox={appearance.icon.viewBox}
+														style={{ color: appearance.color || theme.colors.textDim }}
+													/>
+												) : (
+													<appearance.icon.Icon
+														className="w-4 h-4"
+														style={{ color: appearance.color || theme.colors.textDim }}
+													/>
+												)
+											) : group.emoji ? (
+												<span className="text-sm">{group.emoji}</span>
+											) : (
+												<Folder className="w-4 h-4" />
+											)}
+											{editingGroupId === group.id ? (
+												<input
+													autoFocus
+													className="bg-transparent outline-none w-full border-b border-indigo-500"
+													defaultValue={group.name}
+													onClick={(e) => e.stopPropagation()}
+													onBlur={(e) => {
+														if (ignoreNextBlurRef.current) {
+															ignoreNextBlurRef.current = false;
+															return;
+														}
+														finishRenamingGroup(group.id, e.target.value);
+													}}
+													onKeyDown={(e) => {
+														e.stopPropagation();
+														if (e.key === 'Enter') {
+															ignoreNextBlurRef.current = true;
+															finishRenamingGroup(group.id, e.currentTarget.value);
+														}
+													}}
+												/>
+											) : (
+												<span
+													onDoubleClick={() => startRenamingGroup(group.id)}
+													style={appearance.color ? { color: appearance.color } : undefined}
+												>
+													{group.name}
+													{showLeftPanelGroupMemberCount && groupCollapsedPills.length > 0 && (
+														<span className="ml-1 opacity-60">({groupCollapsedPills.length})</span>
+													)}
+												</span>
+											)}
+											<WizardIndicator
+												active={wizardRollup.groups.has(group.id)}
+												generatingDocs={!!wizardRollup.groups.get(group.id)?.isGeneratingDocs}
+											/>
+										</div>
+										<PluginUiItemsSlot surface="groupHeaderBadge" className="mr-2 shrink-0" />
+										{/* Delete button for empty groups */}
+										{groupSessions.length === 0 && (
+											<button
+												onClick={(e) => {
+													e.stopPropagation();
+													showConfirmation(
+														`Are you sure you want to delete the group "${group.name}"?`,
+														() => {
+															setGroups((prev) => removeGroupAndPromoteChildren(prev, group.id));
+														}
+													);
+												}}
+												className="p-1 rounded hover:bg-red-500/20 opacity-0 group-hover:opacity-100 transition-opacity"
+												style={{ color: theme.colors.error }}
+												title="Delete empty group"
+											>
+												<X className="w-3 h-3" />
+											</button>
+										)}
+										{/* Delete button for worktree groups with agents */}
+										{isWorktreeGroup(group) &&
+											groupSessions.length > 0 &&
+											onDeleteWorktreeGroup && (
+												<button
+													onClick={(e) => {
+														e.stopPropagation();
+														onDeleteWorktreeGroup(group.id);
+													}}
+													className="p-1 rounded hover:bg-red-500/20 opacity-0 group-hover:opacity-100 transition-opacity"
+													style={{ color: theme.colors.error }}
+													title="Remove group and all agents"
+												>
+													<Trash2 className="w-3 h-3" />
+												</button>
+											)}
+									</LongPressable>
+
+									{!group.collapsed || showUnreadAgentsOnly ? (
+										<div
+											className="flex flex-col border-l ml-4"
+											style={{ borderColor: theme.colors.border }}
+										>
+											{groupSessions.map((session) =>
+												renderSessionWithWorktrees(session, 'group', {
+													keyPrefix: `group-${group.id}`,
+													groupId: group.id,
+													onDrop: dropOnGroupHandlers.get(group.id),
+												})
+											)}
+										</div>
+									) : groupCollapsedPills.length > 0 ? (
+										/* Collapsed Group Palette - uses subdivided pills for worktrees */
+										<CollapsedSessionPillRows
+											sessions={groupCollapsedPills}
+											keyPrefix={`group-collapsed-${group.id}`}
+											maxPerRow={leftPanelCollapsedPillsPerRow}
+											onContainerClick={() => toggleGroup(group.id)}
 											theme={theme}
 											activeBatchSessionIds={activeBatchSessionIds}
 											leftSidebarWidth={leftSidebarWidthState}
@@ -982,147 +2093,17 @@ function SessionListInner(props: SessionListProps) {
 											getWorktreeChildren={getWorktreeChildren}
 											setActiveSessionId={setActiveSessionId}
 										/>
-									))}
+									) : null}
 								</div>
-							)}
-						</div>
-					)}
+							);
+						})}
 
-					{/* GROUPS */}
-					{sortedGroups.map((group) => {
-						const groupSessions = sortedGroupSessionsById.get(group.id) || [];
-						// Hide empty groups when filtering by unread agents
-						if (showUnreadAgentsOnly && groupSessions.length === 0) return null;
-						const groupCollapsedPills = groupSessions.filter((session) => !session.parentSessionId);
-						return (
-							<div key={group.id} className="mb-1">
-								<div
-									role="button"
-									tabIndex={0}
-									aria-expanded={!group.collapsed}
-									onKeyDown={(e) => {
-										if (e.key === 'Enter' || e.key === ' ') {
-											e.preventDefault();
-											toggleGroup(group.id);
-										}
-									}}
-									className="px-3 py-1.5 flex items-center justify-between cursor-pointer hover:bg-opacity-50 group"
-									onClick={() => toggleGroup(group.id)}
-									onDragOver={handleDragOver}
-									onDrop={() => handleDropOnGroup(group.id)}
-								>
-									<div
-										className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider flex-1"
-										style={{ color: theme.colors.textDim }}
-									>
-										{group.collapsed && !showUnreadAgentsOnly ? (
-											<ChevronRight className="w-3 h-3" />
-										) : (
-											<ChevronDown className="w-3 h-3" />
-										)}
-										<span className="text-sm">{group.emoji}</span>
-										{editingGroupId === group.id ? (
-											<input
-												autoFocus
-												className="bg-transparent outline-none w-full border-b border-indigo-500"
-												defaultValue={group.name}
-												onClick={(e) => e.stopPropagation()}
-												onBlur={(e) => {
-													if (ignoreNextBlurRef.current) {
-														ignoreNextBlurRef.current = false;
-														return;
-													}
-													finishRenamingGroup(group.id, e.target.value);
-												}}
-												onKeyDown={(e) => {
-													e.stopPropagation();
-													if (e.key === 'Enter') {
-														ignoreNextBlurRef.current = true;
-														finishRenamingGroup(group.id, e.currentTarget.value);
-													}
-												}}
-											/>
-										) : (
-											<span onDoubleClick={() => startRenamingGroup(group.id)}>{group.name}</span>
-										)}
-									</div>
-									{/* Delete button for empty groups */}
-									{groupSessions.length === 0 && (
-										<button
-											onClick={(e) => {
-												e.stopPropagation();
-												showConfirmation(
-													`Are you sure you want to delete the group "${group.name}"?`,
-													() => {
-														setGroups((prev) => prev.filter((g) => g.id !== group.id));
-													}
-												);
-											}}
-											className="p-1 rounded hover:bg-red-500/20 opacity-0 group-hover:opacity-100 transition-opacity"
-											style={{ color: theme.colors.error }}
-											title="Delete empty group"
-										>
-											<X className="w-3 h-3" />
-										</button>
-									)}
-									{/* Delete button for worktree groups with agents */}
-									{group.emoji === '🌳' && groupSessions.length > 0 && onDeleteWorktreeGroup && (
-										<button
-											onClick={(e) => {
-												e.stopPropagation();
-												onDeleteWorktreeGroup(group.id);
-											}}
-											className="p-1 rounded hover:bg-red-500/20 opacity-0 group-hover:opacity-100 transition-opacity"
-											style={{ color: theme.colors.error }}
-											title="Remove group and all agents"
-										>
-											<Trash2 className="w-3 h-3" />
-										</button>
-									)}
-								</div>
-
-								{!group.collapsed || showUnreadAgentsOnly ? (
-									<div
-										className="flex flex-col border-l ml-4"
-										style={{ borderColor: theme.colors.border }}
-									>
-										{groupSessions.map((session) =>
-											renderSessionWithWorktrees(session, 'group', {
-												keyPrefix: `group-${group.id}`,
-												groupId: group.id,
-												onDrop: () => handleDropOnGroup(group.id),
-											})
-										)}
-									</div>
-								) : groupCollapsedPills.length > 0 ? (
-									/* Collapsed Group Palette - uses subdivided pills for worktrees */
-									<div
-										className="ml-8 mr-3 mt-1 mb-2 flex gap-1 h-1.5 cursor-pointer"
-										onClick={() => toggleGroup(group.id)}
-									>
-										{groupCollapsedPills.map((s) => (
-											<CollapsedSessionPill
-												key={`group-collapsed-${group.id}-${s.id}`}
-												session={s}
-												keyPrefix={`group-collapsed-${group.id}`}
-												theme={theme}
-												activeBatchSessionIds={activeBatchSessionIds}
-												leftSidebarWidth={leftSidebarWidthState}
-												contextWarningYellowThreshold={contextWarningYellowThreshold}
-												contextWarningRedThreshold={contextWarningRedThreshold}
-												getFileCount={getFileCount}
-												getWorktreeChildren={getWorktreeChildren}
-												setActiveSessionId={setActiveSessionId}
-											/>
-										))}
-									</div>
-								) : null}
-							</div>
-						);
-					})}
-
-					{/* SESSIONS - Flat list when no groups exist, otherwise show Ungrouped folder */}
-					{sessions.length > 0 && groups.length === 0 ? (
+					{/* SESSIONS - Flat list when no groups exist (or in a secondary window, which
+					    always shows its owned agents as a flat focused list), otherwise the
+					    Ungrouped folder. */}
+					{!activeVirtualGrouping &&
+					sessions.length > 0 &&
+					(groups.length === 0 || isSecondaryWindow) ? (
 						/* FLAT LIST - No groups exist yet, show sessions directly with New Group button */
 						<>
 							<div className="flex flex-col">
@@ -1130,11 +2111,11 @@ function SessionListInner(props: SessionListProps) {
 									renderSessionWithWorktrees(session, 'flat', { keyPrefix: 'flat' })
 								)}
 							</div>
-							{!showUnreadAgentsOnly && (
+							{!showUnreadAgentsOnly && !isSecondaryWindow && (
 								<div className="mt-4 px-3">
 									<button
-										onClick={createNewGroup}
-										className="w-full px-2 py-1.5 rounded-full text-[10px] font-medium hover:opacity-80 transition-opacity flex items-center justify-center gap-1"
+										onClick={() => createNewGroup()}
+										className="w-full px-2 py-1.5 rounded-full text-2xs font-medium hover:opacity-80 transition-opacity flex items-center justify-center gap-1"
 										style={{
 											backgroundColor: theme.colors.accent + '20',
 											color: theme.colors.accent,
@@ -1148,14 +2129,35 @@ function SessionListInner(props: SessionListProps) {
 								</div>
 							)}
 						</>
-					) : groups.length > 0 && ungroupedSessions.length > 0 ? (
+					) : !activeVirtualGrouping &&
+					  !isSecondaryWindow &&
+					  groups.length > 0 &&
+					  ungroupedSessions.length > 0 ? (
 						/* UNGROUPED FOLDER - Groups exist and there are ungrouped agents */
-						<div className="mb-1 mt-4">
+						<div
+							className="mb-1 mt-4 rounded"
+							style={
+								dragOverTarget === UNGROUPED_DROP_TARGET
+									? {
+											outline: `1px dashed ${theme.colors.accent}`,
+											outlineOffset: '-2px',
+											backgroundColor: `${theme.colors.accent}14`,
+										}
+									: undefined
+							}
+							onDragEnter={() => handleDropTargetEnter(UNGROUPED_DROP_TARGET)}
+							onDragLeave={handleDropTargetLeave}
+						>
 							<div
-								className="px-3 py-1.5 flex items-center justify-between cursor-pointer hover:bg-opacity-50 group"
+								className="px-3 py-1.5 flex items-center justify-between cursor-pointer row-hover group"
+								style={
+									dragOverTarget === UNGROUPED_DROP_TARGET
+										? { backgroundColor: `${theme.colors.accent}33` }
+										: undefined
+								}
 								onClick={() => setUngroupedCollapsed(!ungroupedCollapsed)}
 								onDragOver={handleDragOver}
-								onDrop={handleDropOnUngrouped}
+								onDrop={handleUngroupedDrop}
 							>
 								<div
 									className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider flex-1"
@@ -1167,7 +2169,18 @@ function SessionListInner(props: SessionListProps) {
 										<ChevronDown className="w-3 h-3" />
 									)}
 									<Folder className="w-3.5 h-3.5" />
-									<span>Ungrouped Agents</span>
+									<span>
+										Ungrouped Agents
+										{showLeftPanelGroupMemberCount && sortedUngroupedParentSessions.length > 0 && (
+											<span className="ml-1 opacity-60">
+												({sortedUngroupedParentSessions.length})
+											</span>
+										)}
+									</span>
+									<WizardIndicator
+										active={wizardRollup.groups.has(null)}
+										generatingDocs={!!wizardRollup.groups.get(null)?.isGeneratingDocs}
+									/>
 								</div>
 								{!showUnreadAgentsOnly && (
 									<button
@@ -1175,7 +2188,7 @@ function SessionListInner(props: SessionListProps) {
 											e.stopPropagation();
 											createNewGroup();
 										}}
-										className="px-2 py-0.5 rounded-full text-[10px] font-medium hover:opacity-80 transition-opacity flex items-center gap-1"
+										className="px-2 py-0.5 rounded-full text-2xs font-medium hover:opacity-80 transition-opacity flex items-center gap-1"
 										style={{
 											backgroundColor: theme.colors.accent + '20',
 											color: theme.colors.accent,
@@ -1200,47 +2213,57 @@ function SessionListInner(props: SessionListProps) {
 								</div>
 							) : (
 								/* Collapsed Ungrouped Palette - uses subdivided pills for worktrees */
-								<div
-									className="ml-8 mr-3 mt-1 mb-2 flex gap-1 h-1.5 cursor-pointer"
-									onClick={() => setUngroupedCollapsed(false)}
-								>
-									{sortedUngroupedParentSessions.map((s) => (
-										<CollapsedSessionPill
-											key={`ungrouped-collapsed-${s.id}`}
-											session={s}
-											keyPrefix="ungrouped-collapsed"
-											theme={theme}
-											activeBatchSessionIds={activeBatchSessionIds}
-											leftSidebarWidth={leftSidebarWidthState}
-											contextWarningYellowThreshold={contextWarningYellowThreshold}
-											contextWarningRedThreshold={contextWarningRedThreshold}
-											getFileCount={getFileCount}
-											getWorktreeChildren={getWorktreeChildren}
-											setActiveSessionId={setActiveSessionId}
-										/>
-									))}
-								</div>
+								<CollapsedSessionPillRows
+									sessions={sortedUngroupedParentSessions}
+									keyPrefix="ungrouped-collapsed"
+									maxPerRow={leftPanelCollapsedPillsPerRow}
+									onContainerClick={() => setUngroupedCollapsed(false)}
+									theme={theme}
+									activeBatchSessionIds={activeBatchSessionIds}
+									leftSidebarWidth={leftSidebarWidthState}
+									contextWarningYellowThreshold={contextWarningYellowThreshold}
+									contextWarningRedThreshold={contextWarningRedThreshold}
+									getFileCount={getFileCount}
+									getWorktreeChildren={getWorktreeChildren}
+									setActiveSessionId={setActiveSessionId}
+								/>
 							)}
 						</div>
-					) : groups.length > 0 && !showUnreadAgentsOnly ? (
+					) : !activeVirtualGrouping &&
+					  !isSecondaryWindow &&
+					  groups.length > 0 &&
+					  !showUnreadAgentsOnly ? (
 						/* NO UNGROUPED AGENTS - Show drop zone for ungrouping + New Group button */
-						<div className="mt-4 px-3" onDragOver={handleDragOver} onDrop={handleDropOnUngrouped}>
-							{/* Drop zone indicator when dragging */}
-							{draggingSessionId && (
+						<div
+							className="mt-4 px-3"
+							onDragOver={handleDragOver}
+							onDragEnter={() => handleDropTargetEnter(UNGROUPED_DROP_TARGET)}
+							onDragLeave={handleDropTargetLeave}
+							onDrop={handleUngroupedDrop}
+						>
+							{/* Drop zone indicator when dragging - intensifies on hover so the
+							    drop destination is obvious, matching the group-header affordance. */}
+							{(draggingSessionId || draggingGroupId) && (
 								<div
-									className="mb-2 px-3 py-2 rounded border-2 border-dashed text-center text-xs"
+									className="mb-2 px-3 py-2 rounded border-2 border-dashed text-center text-xs transition-colors"
 									style={{
 										borderColor: theme.colors.accent,
-										color: theme.colors.textDim,
-										backgroundColor: theme.colors.accent + '10',
+										color:
+											dragOverTarget === UNGROUPED_DROP_TARGET
+												? theme.colors.textMain
+												: theme.colors.textDim,
+										backgroundColor:
+											dragOverTarget === UNGROUPED_DROP_TARGET
+												? `${theme.colors.accent}33`
+												: theme.colors.accent + '10',
 									}}
 								>
 									Drop here to ungroup
 								</div>
 							)}
 							<button
-								onClick={createNewGroup}
-								className="w-full px-2 py-1.5 rounded-full text-[10px] font-medium hover:opacity-80 transition-opacity flex items-center justify-center gap-1"
+								onClick={() => createNewGroup()}
+								className="w-full px-2 py-1.5 rounded-full text-2xs font-medium hover:opacity-80 transition-opacity flex items-center justify-center gap-1"
 								style={{
 									backgroundColor: theme.colors.accent + '20',
 									color: theme.colors.accent,
@@ -1268,18 +2291,28 @@ function SessionListInner(props: SessionListProps) {
 								theme={theme}
 								groupChats={groupChats}
 								activeGroupChatId={activeGroupChatId}
+								keyboardSelectedChatId={
+									activeFocus === 'sidebar' && sidebarExtraSelection?.kind === 'groupChat'
+										? sidebarExtraSelection.id
+										: null
+								}
 								onOpenGroupChat={onOpenGroupChat}
 								onNewGroupChat={onNewGroupChat}
 								onEditGroupChat={onEditGroupChat}
 								onRenameGroupChat={onRenameGroupChat}
 								onDeleteGroupChat={onDeleteGroupChat}
 								onArchiveGroupChat={onArchiveGroupChat}
+								onDeleteAllArchivedGroupChats={onDeleteAllArchivedGroupChats}
 								isExpanded={groupChatsExpanded}
 								onExpandedChange={setGroupChatsExpanded}
+								sortAlphabetical={groupChatSortAlphabetical}
+								onSortAlphabeticalChange={setGroupChatSortAlphabetical}
 								groupChatState={groupChatState}
 								participantStates={participantStates}
 								groupChatStates={groupChatStates}
 								allGroupChatParticipantStates={allGroupChatParticipantStates}
+								showUnreadAgentsOnly={showUnreadAgentsOnly}
+								unreadGroupChatIds={unreadGroupChatIds}
 							/>
 						)}
 				</div>
@@ -1296,6 +2329,8 @@ function SessionListInner(props: SessionListProps) {
 					getFileCount={getFileCount}
 					setActiveSessionId={setActiveSessionId}
 					handleContextMenu={handleContextMenu}
+					showUnreadAgentsOnly={showUnreadAgentsOnly}
+					stuckOutageSignature={stuckOutageSignature}
 				/>
 			)}
 
@@ -1307,9 +2342,9 @@ function SessionListInner(props: SessionListProps) {
 				shortcuts={shortcuts}
 				showUnreadAgentsOnly={showUnreadAgentsOnly}
 				hasUnreadAgents={hasUnreadAgents}
+				sidebarWidth={leftSidebarWidthState}
 				addNewSession={addNewSession}
 				openFeedback={props.openFeedback}
-				setLeftSidebarOpen={setLeftSidebarOpen}
 				toggleShowUnreadAgentsOnly={toggleShowUnreadAgentsOnly}
 			/>
 
@@ -1335,6 +2370,7 @@ function SessionListInner(props: SessionListProps) {
 						setContextMenu(null);
 					}}
 					onToggleBookmark={() => toggleBookmark(contextMenuSession.id)}
+					showGroupActions={!activeVirtualGrouping}
 					onMoveToGroup={(groupId) => handleMoveToGroup(contextMenuSession.id, groupId)}
 					onDelete={() => handleDeleteSession(contextMenuSession.id)}
 					onDismiss={() => setContextMenu(null)}
@@ -1363,11 +2399,92 @@ function SessionListInner(props: SessionListProps) {
 							? () => onCreateGroupAndMove(contextMenuSession.id)
 							: createNewGroup
 					}
-					onConfigureCue={
-						onConfigureCue && maestroCueEnabled
-							? () => onConfigureCue(contextMenuSession)
+					onConfigureCue={onConfigureCue ? () => onConfigureCue(contextMenuSession) : undefined}
+					windowTargets={
+						windowCtx ? buildWindowMoveTargets(windowCtx.windows, contextMenuSession.id) : undefined
+					}
+					onMoveToNewWindow={
+						windowCtx
+							? () => void windowCtx.moveSessionToNewWindow(contextMenuSession.id)
 							: undefined
 					}
+					onMoveToWindow={
+						windowCtx
+							? (targetWindowId) =>
+									void windowCtx.moveSessionToWindow(contextMenuSession.id, targetWindowId)
+							: undefined
+					}
+					onRenameWindow={
+						windowCtx
+							? (targetWindowId, name) => void windowCtx.renameWindow(targetWindowId, name)
+							: undefined
+					}
+				/>
+			)}
+
+			{/* Group Context Menu */}
+			{groupContextMenu && groupContextMenuGroup && (
+				<GroupContextMenu
+					x={groupContextMenu.x}
+					y={groupContextMenu.y}
+					theme={theme}
+					group={groupContextMenuGroup}
+					memberCount={groupContextMenuMemberCount}
+					eligibleParentGroups={groupContextMenuEligibleParentGroups}
+					groupsPlusEnabled={groupsPlusEnabled}
+					onMoveInto={(parentGroupId) => setGroupParent(groupContextMenuGroup.id, parentGroupId)}
+					onMoveToTopLevel={() => setGroupParent(groupContextMenuGroup.id, undefined)}
+					onNewGroupInside={() => createNewGroup(groupContextMenuGroup.id)}
+					onRename={() => {
+						const modalActions = getModalActions();
+						modalActions.setRenameGroupId(groupContextMenuGroup.id);
+						modalActions.setRenameGroupValue(groupContextMenuGroup.name);
+						modalActions.setRenameGroupEmoji(groupContextMenuGroup.emoji);
+						modalActions.setRenameGroupIcon(groupContextMenuGroup.icon);
+						modalActions.setRenameGroupColor(groupContextMenuGroup.color);
+						modalActions.setRenameGroupModalOpen(true);
+					}}
+					onNewAgent={() => {
+						// Expand the group so the new agent is visible when it lands here.
+						if (groupContextMenuGroup.collapsed) {
+							toggleGroup(groupContextMenuGroup.id);
+						}
+						useModalStore.getState().openModal('newInstance', {
+							duplicatingSessionId: null,
+							presetGroupId: groupContextMenuGroup.id,
+						});
+					}}
+					onDelete={
+						// Worktree groups always cascade-delete (handler removes agents).
+						isWorktreeGroup(groupContextMenuGroup) && onDeleteWorktreeGroup
+							? () => onDeleteWorktreeGroup(groupContextMenuGroup.id)
+							: groupContextMenuMemberCount === 0
+								? () =>
+										showConfirmation(
+											`Are you sure you want to delete the group "${groupContextMenuGroup.name}"?`,
+											() => {
+												setGroups((prev) =>
+													removeGroupAndPromoteChildren(prev, groupContextMenuGroup.id)
+												);
+											}
+										)
+								: () =>
+										showConfirmation(
+											`Delete the group "${groupContextMenuGroup.name}"? Its ${groupContextMenuMemberCount} agent${groupContextMenuMemberCount === 1 ? '' : 's'} will be moved out of the group, not deleted.`,
+											() => {
+												const gid = groupContextMenuGroup.id;
+												// Ungroup members (and their synced worktree children) first.
+												setSessions((prev) =>
+													prev.map((s) => (s.groupId === gid ? { ...s, groupId: undefined } : s))
+												);
+												setGroups((prev) => removeGroupAndPromoteChildren(prev, gid));
+											}
+										)
+					}
+					deleteLabel={
+						isWorktreeGroup(groupContextMenuGroup) ? 'Remove Group and Agents' : 'Delete Group'
+					}
+					onDismiss={() => setGroupContextMenu(null)}
 				/>
 			)}
 		</div>

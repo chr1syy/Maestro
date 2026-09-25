@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import path from 'path';
 import { ipcMain } from 'electron';
 import {
 	registerAgentsHandlers,
@@ -23,12 +24,14 @@ vi.mock('electron', () => ({
 // Mock agents module (capabilities exports)
 vi.mock('../../../../main/agents', async () => {
 	const opencodeConfig = await import('../../../../main/agents/opencode-config');
+	const codexConfig = await import('../../../../main/agents/codex-config');
 	return {
 		getAgentCapabilities: vi.fn(),
 		AGENT_DEFINITIONS: [
 			{ id: 'claude-code', name: 'Claude Code', binaryName: 'claude', configOptions: [] },
 			{ id: 'codex', name: 'Codex', binaryName: 'codex', configOptions: [] },
 			{ id: 'opencode', name: 'OpenCode', binaryName: 'opencode', configOptions: [] },
+			{ id: 'omp', name: 'Oh My Pi', binaryName: 'omp', configOptions: [] },
 			{ id: 'terminal', name: 'Terminal', binaryName: 'bash', configOptions: [] },
 		],
 		DEFAULT_CAPABILITIES: {
@@ -53,6 +56,9 @@ vi.mock('../../../../main/agents', async () => {
 		extractModelsFromConfig: opencodeConfig.extractModelsFromConfig,
 		getOpenCodeConfigPaths: opencodeConfig.getOpenCodeConfigPaths,
 		getOpenCodeCommandDirs: opencodeConfig.getOpenCodeCommandDirs,
+		getCodexSkillDirs: codexConfig.getCodexSkillDirs,
+		getCodexPromptDirs: codexConfig.getCodexPromptDirs,
+		parseCodexMarkdownDoc: codexConfig.parseCodexMarkdownDoc,
 	};
 });
 
@@ -74,6 +80,9 @@ vi.mock('../../../../main/utils/execFile', () => ({
 // Mock fs
 vi.mock('fs', () => ({
 	existsSync: vi.fn(),
+	readdirSync: vi.fn(),
+	accessSync: vi.fn(),
+	constants: { R_OK: 4 },
 	promises: {
 		readdir: vi.fn(),
 		readFile: vi.fn(),
@@ -94,9 +103,10 @@ vi.mock('../../../../main/utils/stripAnsi', () => ({
 import { execFileNoThrow } from '../../../../main/utils/execFile';
 import { buildSshCommand } from '../../../../main/utils/ssh-command-builder';
 import * as fs from 'fs';
+import { getCodexSkillDirs, getCodexPromptDirs } from '../../../../main/agents/codex-config';
 
 describe('agents IPC handlers', () => {
-	let handlers: Map<string, Function>;
+	let handlers: Map<string, (...args: never[]) => unknown>;
 	let mockAgentDetector: {
 		detectAgents: ReturnType<typeof vi.fn>;
 		getAgent: ReturnType<typeof vi.fn>;
@@ -113,6 +123,8 @@ describe('agents IPC handlers', () => {
 	beforeEach(() => {
 		// Clear mocks
 		vi.clearAllMocks();
+		vi.mocked(fs.readdirSync).mockReturnValue([] as any);
+		vi.mocked(fs.accessSync).mockImplementation(() => undefined);
 
 		// Create mock agent detector
 		mockAgentDetector = {
@@ -156,6 +168,7 @@ describe('agents IPC handlers', () => {
 				'agents:refresh',
 				'agents:get',
 				'agents:getCapabilities',
+				'agents:getAllCapabilities',
 				'agents:getConfig',
 				'agents:setConfig',
 				'agents:getConfigValue',
@@ -169,15 +182,181 @@ describe('agents IPC handlers', () => {
 				'agents:setCustomEnvVars',
 				'agents:getCustomEnvVars',
 				'agents:getAllCustomEnvVars',
+				'agents:getKnownEnvVarKeys',
 				'agents:getModels',
 				'agents:getConfigOptions',
 				'agents:discoverSlashCommands',
+				// Capability snapshot bridge (status pill + reprobe + live events)
+				'agents:getSnapshot',
+				'agents:getAllSnapshots',
+				'agents:reprobe',
+				'agents:getMaestroPDetectedPath',
+				'agents:getRemoteMaestroPAvailable',
+				'agents:getClaudeUsageSnapshots',
+				'agents:getClaudeUsageAccountKeys',
+				'agents:getKnownAuthDirs',
+				'agents:getLimitResetAt',
+				'claude:usage:refresh-all',
+				'agents:getCodexUsageSnapshots',
+				'agents:getCodexUsageAccountKeys',
+				// Codex rate-limit reset credits: READ the list, WRITE one back.
+				'agents:getCodexResetCredits',
+				'agents:consumeCodexResetCredit',
+				'codex:usage:refresh-all',
 			];
 
 			for (const channel of expectedChannels) {
 				expect(handlers.has(channel)).toBe(true);
 			}
 			expect(handlers.size).toBe(expectedChannels.length);
+		});
+	});
+
+	describe('agents:getKnownAuthDirs', () => {
+		it('returns canonical local auth paths from agent and session env vars', async () => {
+			mockAgentConfigsStore.get.mockImplementation((key: string, fallback?: unknown) => {
+				if (key !== 'configs') return fallback;
+				return {
+					'claude-code': {
+						customEnvVars: { CLAUDE_CONFIG_DIR: '/Users/me/.claude-agent' },
+					},
+					codex: {
+						customEnvVars: { CODEX_HOME: '/Users/me/.codex-agent' },
+					},
+				};
+			});
+			const sessionsStore = {
+				get: vi.fn().mockReturnValue([
+					{
+						toolType: 'claude-code',
+						cwd: '/Users/me/project',
+						customEnvVars: {
+							CLAUDE_CONFIG_DIR: '/Users/me/work/../.claude-session',
+						},
+					},
+					{
+						toolType: 'codex',
+						cwd: '/Users/me/project',
+						customEnvVars: { CODEX_HOME: '/Users/me/.codex-session' },
+					},
+					{
+						toolType: 'claude-code',
+						cwd: 'ssh://host/project',
+						sshRemoteId: 'remote-1',
+						customEnvVars: { CLAUDE_CONFIG_DIR: '/remote/.claude' },
+					},
+					{
+						toolType: 'codex',
+						cwd: '/Users/me/project',
+						sessionSshRemoteConfig: { enabled: true },
+						customEnvVars: { CODEX_HOME: '/remote/.codex' },
+					},
+				]),
+			};
+			// The handler accepts electron-store's full Store shape, but reads only get().
+			registerAgentsHandlers({
+				...deps,
+				sessionsStore: sessionsStore as unknown as NonNullable<
+					AgentsHandlerDependencies['sessionsStore']
+				>,
+			});
+
+			const handler = handlers.get('agents:getKnownAuthDirs');
+			expect(handler).toBeDefined();
+			const result = await handler?.({});
+
+			expect(result).toEqual({
+				claudeConfigDirs: [
+					path.resolve('/Users/me/.claude-agent'),
+					path.resolve('/Users/me/.claude-session'),
+				],
+				codexHomes: [
+					path.resolve('/Users/me/.codex-agent'),
+					path.resolve('/Users/me/.codex-session'),
+				],
+			});
+		});
+
+		it('excludes sessions whose migrated SSH enabled value explicitly enables SSH', async () => {
+			mockAgentConfigsStore.get.mockReturnValue({
+				'claude-code': {
+					customEnvVars: { CLAUDE_CONFIG_DIR: '/Users/me/.claude-agent' },
+				},
+				codex: {
+					customEnvVars: { CODEX_HOME: '/Users/me/.codex-agent' },
+				},
+			});
+			const sessionsStore = {
+				get: vi.fn().mockReturnValue([
+					{
+						toolType: 'claude-code',
+						cwd: '/Users/me/project',
+						sessionSshRemoteConfig: { enabled: 'true' },
+						customEnvVars: { CLAUDE_CONFIG_DIR: '/remote/.claude-migrated' },
+					},
+					{
+						toolType: 'claude-code',
+						cwd: '/Users/me/project',
+						sessionSshRemoteConfig: { enabled: 'TRUE' },
+						customEnvVars: { CLAUDE_CONFIG_DIR: '/remote/.claude-uppercase' },
+					},
+					{
+						toolType: 'codex',
+						cwd: '/Users/me/project',
+						sessionSshRemoteConfig: { enabled: 1 },
+						customEnvVars: { CODEX_HOME: '/remote/.codex-migrated' },
+					},
+				]),
+			};
+			registerAgentsHandlers({
+				...deps,
+				sessionsStore: sessionsStore as unknown as NonNullable<
+					AgentsHandlerDependencies['sessionsStore']
+				>,
+			});
+
+			const handler = handlers.get('agents:getKnownAuthDirs');
+			const result = await handler?.({});
+
+			expect(result).toEqual({
+				claudeConfigDirs: [path.resolve('/Users/me/.claude-agent')],
+				codexHomes: [path.resolve('/Users/me/.codex-agent')],
+			});
+		});
+
+		it('includes session auth paths when a migrated SSH enabled value explicitly disables SSH', async () => {
+			mockAgentConfigsStore.get.mockReturnValue({
+				'claude-code': {
+					customEnvVars: { CLAUDE_CONFIG_DIR: '/Users/me/.claude-agent' },
+				},
+			});
+			const sessionsStore = {
+				get: vi.fn().mockReturnValue([
+					{
+						toolType: 'claude-code',
+						cwd: '/Users/me/project',
+						sessionSshRemoteConfig: { enabled: 'false' },
+						customEnvVars: { CLAUDE_CONFIG_DIR: '/Users/me/.claude-migrated' },
+					},
+				]),
+			};
+			registerAgentsHandlers({
+				...deps,
+				sessionsStore: sessionsStore as unknown as NonNullable<
+					AgentsHandlerDependencies['sessionsStore']
+				>,
+			});
+
+			const handler = handlers.get('agents:getKnownAuthDirs');
+			const result = await handler?.({});
+
+			expect(result).toEqual({
+				claudeConfigDirs: [
+					path.resolve('/Users/me/.claude-agent'),
+					path.resolve('/Users/me/.claude-migrated'),
+				],
+				codexHomes: [],
+			});
 		});
 	});
 
@@ -222,6 +401,29 @@ describe('agents IPC handlers', () => {
 			const result = await handler!({} as any);
 
 			expect(result).toEqual([]);
+		});
+
+		it('should strip every arg-builder function so the payload survives IPC', async () => {
+			// A definition carries arg builders (including ones added after this test was
+			// written). Leaving even one behind makes the whole response fail to structured
+			// clone, which strands the agent pickers on "Loading agents..." forever.
+			mockAgentDetector.detectAgents.mockResolvedValue([
+				{
+					id: 'claude-code',
+					name: 'Claude Code',
+					binaryName: 'claude',
+					available: true,
+					resumeArgs: (id: string) => ['--resume', id],
+					additionalDirArgs: (dirs: unknown[]) => dirs.map(() => '--add-dir'),
+					configOptions: [{ id: 'model', argBuilder: (v: string) => ['--model', v] }],
+				},
+			]);
+
+			const handler = handlers.get('agents:detect');
+			const result = await handler!({} as any);
+
+			expect(() => structuredClone(result)).not.toThrow();
+			expect(result[0].id).toBe('claude-code');
 		});
 
 		it('should include agent id and path for each detected agent', async () => {
@@ -289,6 +491,103 @@ describe('agents IPC handlers', () => {
 			// configOptions should still exist but without argBuilder
 			expect(result[0].configOptions[0].argBuilder).toBeUndefined();
 			expect(result[0].configOptions[0].key).toBe('test');
+		});
+
+		describe('SSH remote detection (issue #878)', () => {
+			let mockSettingsStore: {
+				get: ReturnType<typeof vi.fn>;
+				set: ReturnType<typeof vi.fn>;
+			};
+
+			beforeEach(() => {
+				mockSettingsStore = {
+					get: vi.fn().mockReturnValue([
+						{
+							id: 'remote-1',
+							host: 'dev.example.com',
+							username: 'dev',
+							port: 22,
+							enabled: true,
+						},
+					]),
+					set: vi.fn(),
+				};
+
+				handlers.clear();
+				registerAgentsHandlers({
+					...deps,
+					settingsStore: mockSettingsStore as any,
+				});
+
+				vi.mocked(buildSshCommand).mockResolvedValue({
+					command: 'ssh',
+					args: ['-o', 'BatchMode=yes', 'dev@dev.example.com', 'mock'],
+				});
+			});
+
+			it("uses POSIX 'command -v' (not 'which') to probe each agent binary", async () => {
+				vi.mocked(execFileNoThrow).mockResolvedValue({
+					exitCode: 0,
+					stdout: '/home/dev/.local/bin/claude\n',
+					stderr: '',
+				});
+
+				const handler = handlers.get('agents:detect');
+				await handler!({} as any, 'remote-1');
+
+				// The remote detection piggybacks one extra maestro-p launch test
+				// (`maestro-p --version`) on top of the per-agent binary probes, so the
+				// total is AGENT_DEFINITIONS.length + 1.
+				const calls = vi.mocked(buildSshCommand).mock.calls;
+				expect(calls.length).toBe(agentCapabilities.AGENT_DEFINITIONS.length + 1);
+
+				// The maestro-p availability check is a LAUNCH test, not a path check:
+				// it runs `maestro-p --version` (which loads node + node-pty) rather
+				// than `command -v maestro-p`, so a host with no node fails it.
+				const maestroPProbe = calls.find(([, o]) => o.command === 'maestro-p');
+				expect(maestroPProbe).toBeDefined();
+				expect(maestroPProbe![1].args).toEqual(['--version']);
+
+				// Every other (per-agent) probe should invoke 'command -v <binary>',
+				// never 'which'. Asserting one such call per AGENT_DEFINITION catches
+				// regressions that silently skip agents instead of just dropping to zero.
+				const agentProbes = calls.filter(([, o]) => o.command !== 'maestro-p');
+				expect(agentProbes.length).toBe(agentCapabilities.AGENT_DEFINITIONS.length);
+				for (const [, options] of agentProbes) {
+					expect(options.command).toBe('command');
+					expect(options.args[0]).toBe('-v');
+				}
+			});
+
+			it('marks the agent available and records the resolved remote path', async () => {
+				vi.mocked(execFileNoThrow).mockResolvedValue({
+					exitCode: 0,
+					stdout: '/home/dev/.claude/local/claude\n',
+					stderr: '',
+				});
+
+				const handler = handlers.get('agents:detect');
+				const result = await handler!({} as any, 'remote-1');
+
+				const claude = result.find((a: any) => a.id === 'claude-code');
+				expect(claude.available).toBe(true);
+				expect(claude.path).toBe('/home/dev/.claude/local/claude');
+			});
+
+			it('marks the agent unavailable when command -v exits non-zero', async () => {
+				vi.mocked(execFileNoThrow).mockResolvedValue({
+					exitCode: 1,
+					stdout: '',
+					stderr: '',
+				});
+
+				const handler = handlers.get('agents:detect');
+				const result = await handler!({} as any, 'remote-1');
+
+				const claude = result.find((a: any) => a.id === 'claude-code');
+				expect(claude.available).toBe(false);
+				expect(claude.path).toBeUndefined();
+			});
 		});
 	});
 
@@ -362,6 +661,15 @@ describe('agents IPC handlers', () => {
 				supportsResultMessages: true,
 				supportsModelSelection: false,
 				supportsStreamJsonInput: true,
+				supportsThinkingDisplay: false,
+				supportsContextMerge: false,
+				supportsContextExport: false,
+				supportsWizard: false,
+				supportsGroupChatModeration: false,
+				usesJsonLineOutput: false,
+				usesCombinedContextWindow: false,
+				supportsAppendSystemPrompt: false,
+				supportsProjectMemory: false,
 			};
 
 			vi.mocked(agentCapabilities.getAgentCapabilities).mockReturnValue(mockCapabilities);
@@ -391,6 +699,15 @@ describe('agents IPC handlers', () => {
 				supportsResultMessages: false,
 				supportsModelSelection: false,
 				supportsStreamJsonInput: false,
+				supportsThinkingDisplay: false,
+				supportsContextMerge: false,
+				supportsContextExport: false,
+				supportsWizard: false,
+				supportsGroupChatModeration: false,
+				usesJsonLineOutput: false,
+				usesCombinedContextWindow: false,
+				supportsAppendSystemPrompt: false,
+				supportsProjectMemory: false,
 			};
 
 			vi.mocked(agentCapabilities.getAgentCapabilities).mockReturnValue(defaultCaps);
@@ -420,6 +737,15 @@ describe('agents IPC handlers', () => {
 				supportsResultMessages: true,
 				supportsModelSelection: true,
 				supportsStreamJsonInput: true,
+				supportsThinkingDisplay: false,
+				supportsContextMerge: false,
+				supportsContextExport: false,
+				supportsWizard: false,
+				supportsGroupChatModeration: false,
+				usesJsonLineOutput: false,
+				usesCombinedContextWindow: false,
+				supportsAppendSystemPrompt: false,
+				supportsProjectMemory: false,
 			};
 
 			vi.mocked(agentCapabilities.getAgentCapabilities).mockReturnValue(mockCapabilities);
@@ -443,6 +769,42 @@ describe('agents IPC handlers', () => {
 			expect(result).toHaveProperty('supportsResultMessages');
 			expect(result).toHaveProperty('supportsModelSelection');
 			expect(result).toHaveProperty('supportsStreamJsonInput');
+		});
+	});
+
+	describe('agents:getAllCapabilities', () => {
+		it('should return an entry for every known agent definition', async () => {
+			// Delegate to the REAL capability table so the assertions below are
+			// about shipped values, not values this test invented.
+			const real = await import('../../../../main/agents/capabilities');
+			vi.mocked(agentCapabilities.getAgentCapabilities).mockImplementation(
+				real.getAgentCapabilities
+			);
+
+			const handler = handlers.get('agents:getAllCapabilities');
+			const result = (await handler!({} as any)) as Record<string, { supportsBatchMode: boolean }>;
+
+			const expectedIds = agentCapabilities.AGENT_DEFINITIONS.map((def) => def.id);
+			expect(Object.keys(result).sort()).toEqual([...expectedIds].sort());
+			for (const id of expectedIds) {
+				expect(result[id]).toBeDefined();
+			}
+		});
+
+		it('should report the two poles of the dispatch capability bug', async () => {
+			// opencode IS batch-capable and terminal is NOT. A background CLI
+			// dispatch to opencode used to be dropped purely because nothing had
+			// ever primed the renderer cache for it (finding V1).
+			const real = await import('../../../../main/agents/capabilities');
+			vi.mocked(agentCapabilities.getAgentCapabilities).mockImplementation(
+				real.getAgentCapabilities
+			);
+
+			const handler = handlers.get('agents:getAllCapabilities');
+			const result = (await handler!({} as any)) as Record<string, { supportsBatchMode: boolean }>;
+
+			expect(result['opencode'].supportsBatchMode).toBe(true);
+			expect(result['terminal'].supportsBatchMode).toBe(false);
 		});
 	});
 
@@ -904,6 +1266,62 @@ describe('agents IPC handlers', () => {
 		});
 	});
 
+	describe('agents:getKnownEnvVarKeys', () => {
+		it('remembers names set on agent configs, sessions, and the global environment', async () => {
+			mockAgentConfigsStore.get.mockImplementation((key: string, fallback?: unknown) => {
+				if (key !== 'configs') return fallback;
+				return {
+					'claude-code': {
+						customEnvVars: { CLAUDE_CONFIG_DIR: '/Users/me/.claude-agent' },
+						customEnvVarsDisabled: { ANTHROPIC_BASE_URL: 'https://gateway.example' },
+					},
+					codex: { customEnvVars: { CODEX_HOME: '/Users/me/.codex-agent' } },
+				};
+			});
+			const sessionsStore = {
+				get: vi.fn().mockReturnValue([
+					{ toolType: 'claude-code', customEnvVars: { MAX_THINKING_TOKENS: '31999' } },
+					{ toolType: 'opencode', customEnvVars: { OPENCODE_CONFIG: '/Users/me/oc.json' } },
+				]),
+			};
+			const settingsStore = {
+				get: vi.fn().mockImplementation((key: string, fallback?: unknown) => {
+					if (key === 'shellEnvVars') return { HTTPS_PROXY: 'http://proxy:3128' };
+					if (key === 'shellEnvVarsDisabled') return { NO_PROXY: 'localhost' };
+					return fallback;
+				}),
+			};
+			registerAgentsHandlers({
+				...deps,
+				sessionsStore: sessionsStore as any,
+				settingsStore: settingsStore as any,
+			});
+
+			const handler = handlers.get('agents:getKnownEnvVarKeys');
+			expect(handler).toBeDefined();
+
+			expect(await handler!({} as any)).toEqual({
+				byProvider: {
+					'claude-code': ['ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR', 'MAX_THINKING_TOKENS'],
+					codex: ['CODEX_HOME'],
+					opencode: ['OPENCODE_CONFIG'],
+				},
+				global: ['HTTPS_PROXY', 'NO_PROXY'],
+			});
+		});
+
+		it('skips names with no value, so a half-finished row is never suggested back', async () => {
+			mockAgentConfigsStore.get.mockImplementation((key: string, fallback?: unknown) => {
+				if (key !== 'configs') return fallback;
+				return { 'claude-code': { customEnvVars: { VAR: '', ANTHROPIC_MODEL: '  ' } } };
+			});
+
+			const handler = handlers.get('agents:getKnownEnvVarKeys');
+
+			expect(await handler!({} as any)).toEqual({ byProvider: {}, global: [] });
+		});
+	});
+
 	describe('agents:getModels', () => {
 		it('should return models for agent', async () => {
 			const mockModels = ['opencode/gpt-5-nano', 'ollama/qwen3:8b', 'anthropic/claude-sonnet'];
@@ -987,6 +1405,42 @@ describe('agents IPC handlers', () => {
 				expect(mockAgentDetector.discoverModels).not.toHaveBeenCalled();
 			});
 
+			it('should discover omp models over SSH via models --json', async () => {
+				mockSettingsStore.get.mockReturnValue([
+					{
+						id: 'remote-1',
+						host: 'dev.example.com',
+						user: 'dev',
+						enabled: true,
+					},
+				]);
+
+				vi.mocked(buildSshCommand).mockResolvedValue({
+					command: 'ssh',
+					args: ['-o', 'BatchMode=yes', 'dev@dev.example.com', 'omp models --json'],
+				});
+
+				vi.mocked(execFileNoThrow).mockResolvedValue({
+					exitCode: 0,
+					stdout: JSON.stringify({
+						models: [
+							{ id: 'claude-opus-4-8', selector: 'anthropic/claude-opus-4-8' },
+							{ id: 'gpt-5.2', selector: 'openai-codex/gpt-5.2' },
+						],
+					}),
+					stderr: '',
+				});
+
+				const handler = handlers.get('agents:getModels');
+				const result = await handler!({} as any, 'omp', false, 'remote-1');
+
+				expect(buildSshCommand).toHaveBeenCalledWith(
+					expect.objectContaining({ id: 'remote-1', host: 'dev.example.com' }),
+					expect.objectContaining({ command: 'omp', args: ['models', '--json'] })
+				);
+				expect(result).toEqual(['anthropic/claude-opus-4-8', 'openai-codex/gpt-5.2']);
+			});
+
 			it('should throw when SSH remote not found', async () => {
 				mockSettingsStore.get.mockReturnValue([
 					{ id: 'remote-1', host: 'dev.example.com', enabled: true },
@@ -1058,6 +1512,130 @@ describe('agents IPC handlers', () => {
 			expect(result).toEqual([{ name: '/help' }, { name: '/compact' }, { name: '/clear' }]);
 		});
 
+		it('enriches Claude skill commands with descriptions from SKILL.md frontmatter', async () => {
+			const mockAgent = {
+				id: 'claude-code',
+				available: true,
+				path: '/usr/bin/claude',
+				command: 'claude',
+			};
+			mockAgentDetector.getAgent.mockResolvedValue(mockAgent);
+
+			const initMessage = JSON.stringify({
+				type: 'system',
+				subtype: 'init',
+				slash_commands: ['/Research', '/help'],
+			});
+
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+			vi.mocked(execFileNoThrow).mockResolvedValue({
+				stdout: initMessage + '\n',
+				stderr: '',
+				exitCode: 0,
+			});
+
+			// Project-level skill directory lists Research; user-level has nothing.
+			vi.mocked(fs.promises.readdir).mockImplementation(async (dir: any) => {
+				if (String(dir).replace(/\\/g, '/') === '/test/project/.claude/skills') {
+					return [{ name: 'Research', isDirectory: () => true }] as any;
+				}
+				const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+				throw enoent;
+			});
+			vi.mocked(fs.promises.readFile).mockImplementation(async (filePath: any) => {
+				const p = String(filePath).replace(/\\/g, '/');
+				// Canonical uppercase SKILL.md is what Claude Code actually writes.
+				if (p === '/test/project/.claude/skills/Research/SKILL.md') {
+					return '---\nname: Research\ndescription: Deep literature review\n---\n\nBody';
+				}
+				const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+				throw enoent;
+			});
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'claude-code', '/test/project');
+
+			expect(result).toEqual([
+				{ name: '/Research', description: 'Deep literature review' },
+				{ name: '/help' }, // built-in, no skill file → no description
+			]);
+		});
+
+		it('ignores a "description:" line that appears in the body (not the frontmatter)', async () => {
+			const mockAgent = {
+				id: 'claude-code',
+				available: true,
+				path: '/usr/bin/claude',
+				command: 'claude',
+			};
+			mockAgentDetector.getAgent.mockResolvedValue(mockAgent);
+
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+			vi.mocked(execFileNoThrow).mockResolvedValue({
+				stdout:
+					JSON.stringify({
+						type: 'system',
+						subtype: 'init',
+						slash_commands: ['/Research'],
+					}) + '\n',
+				stderr: '',
+				exitCode: 0,
+			});
+
+			vi.mocked(fs.promises.readdir).mockImplementation(async (dir: any) => {
+				if (String(dir) === '/test/project/.claude/skills') {
+					return [{ name: 'Research', isDirectory: () => true }] as any;
+				}
+				const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+				throw enoent;
+			});
+			vi.mocked(fs.promises.readFile).mockImplementation(async (filePath: any) => {
+				const p = String(filePath);
+				// Frontmatter has no description; body contains a misleading
+				// "description:" line that must NOT be picked up.
+				if (p === '/test/project/.claude/skills/Research/SKILL.md') {
+					return '---\nname: Research\n---\n\nSee description: this is body text.';
+				}
+				const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+				throw enoent;
+			});
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'claude-code', '/test/project');
+
+			expect(result).toEqual([{ name: '/Research' }]);
+		});
+
+		it('falls back to names-only when skill enrichment fails, preserving slash commands', async () => {
+			const mockAgent = {
+				id: 'claude-code',
+				available: true,
+				path: '/usr/bin/claude',
+				command: 'claude',
+			};
+			mockAgentDetector.getAgent.mockResolvedValue(mockAgent);
+
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+			vi.mocked(execFileNoThrow).mockResolvedValue({
+				stdout:
+					JSON.stringify({ type: 'system', subtype: 'init', slash_commands: ['/x', '/y'] }) + '\n',
+				stderr: '',
+				exitCode: 0,
+			});
+
+			// An unexpected failure on the skills dir (e.g. EACCES) should
+			// NOT tear down the slash-command list - enrichment is
+			// best-effort. The error is still captured by Sentry inside
+			// discoverSlashCommands; the list itself survives.
+			vi.mocked(fs.promises.readdir).mockImplementation(async () => {
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+			});
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'claude-code', '/test/project');
+			expect(result).toEqual([{ name: '/x' }, { name: '/y' }]);
+		});
+
 		it('should use custom path if provided', async () => {
 			const mockAgent = {
 				id: 'claude-code',
@@ -1089,15 +1667,15 @@ describe('agents IPC handlers', () => {
 
 		it('should return null for unsupported agents', async () => {
 			const mockAgent = {
-				id: 'codex',
+				id: 'terminal',
 				available: true,
-				path: '/usr/bin/codex',
+				path: '/bin/bash',
 			};
 
 			mockAgentDetector.getAgent.mockResolvedValue(mockAgent);
 
 			const handler = handlers.get('agents:discoverSlashCommands');
-			const result = await handler!({} as any, 'codex', '/test');
+			const result = await handler!({} as any, 'terminal', '/test');
 
 			expect(result).toBeNull();
 			expect(execFileNoThrow).not.toHaveBeenCalled();
@@ -1120,7 +1698,7 @@ describe('agents IPC handlers', () => {
 			const handler = handlers.get('agents:discoverSlashCommands');
 			const result = await handler!({} as any, 'opencode', '/test');
 
-			// No built-in commands — only custom .md commands are discoverable
+			// No built-in commands - only custom .md commands are discoverable
 			expect(result).toEqual([]);
 			expect(execFileNoThrow).not.toHaveBeenCalled();
 		});
@@ -1137,7 +1715,7 @@ describe('agents IPC handlers', () => {
 			const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 			// Project commands dir has custom .md files
 			vi.mocked(fs.promises.readdir).mockImplementation(async (dir) => {
-				if (String(dir).includes('/test/.opencode/commands')) {
+				if (String(dir).replace(/\\/g, '/').includes('/test/.opencode/commands')) {
 					return ['deploy.md', 'lint.md', 'README.txt'] as any;
 				}
 				throw enoent;
@@ -1174,7 +1752,10 @@ describe('agents IPC handlers', () => {
 			const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 			const homeDir = require('os').homedir();
 			vi.mocked(fs.promises.readdir).mockImplementation(async (dir) => {
-				if (String(dir) === `${homeDir}/.opencode/commands`) {
+				if (
+					String(dir).replace(/\\/g, '/') ===
+					`${String(homeDir).replace(/\\/g, '/')}/.opencode/commands`
+				) {
 					return ['octest.md'] as any;
 				}
 				throw enoent;
@@ -1205,7 +1786,7 @@ describe('agents IPC handlers', () => {
 
 			const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 			vi.mocked(fs.promises.readdir).mockImplementation(async (dir) => {
-				if (String(dir).includes('/test/.opencode/commands')) {
+				if (String(dir).replace(/\\/g, '/').includes('/test/.opencode/commands')) {
 					return ['deploy.md'] as any;
 				}
 				throw enoent;
@@ -1236,7 +1817,7 @@ describe('agents IPC handlers', () => {
 			const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 			vi.mocked(fs.promises.readdir).mockRejectedValue(enoent);
 			vi.mocked(fs.promises.readFile).mockImplementation(async (filePath) => {
-				if (String(filePath).includes('/test/opencode.json')) {
+				if (String(filePath).replace(/\\/g, '/').includes('/test/opencode.json')) {
 					return JSON.stringify({ command: { 'my-cmd': { prompt: 'Do the thing' } } });
 				}
 				throw enoent;
@@ -1273,7 +1854,7 @@ describe('agents IPC handlers', () => {
 			const handler = handlers.get('agents:discoverSlashCommands');
 			const result = await handler!({} as any, 'opencode', '/test');
 
-			// Array config ignored, no built-ins — result should be empty
+			// Array config ignored, no built-ins - result should be empty
 			expect(result).toEqual([]);
 		});
 
@@ -1298,7 +1879,7 @@ describe('agents IPC handlers', () => {
 			const handler = handlers.get('agents:discoverSlashCommands');
 			const result = await handler!({} as any, 'opencode', '/test');
 
-			// Malformed JSON skipped gracefully, no built-ins — empty result
+			// Malformed JSON skipped gracefully, no built-ins - empty result
 			expect(result).toEqual([]);
 		});
 
@@ -1356,6 +1937,178 @@ describe('agents IPC handlers', () => {
 
 			const handler = handlers.get('agents:discoverSlashCommands');
 			await expect(handler!({} as any, 'opencode', '/test')).rejects.toThrow('EACCES');
+		});
+
+		// ---- Codex (issue #1434) -------------------------------------------
+		// Codex custom commands live on disk as skills / prompts. Maestro drives
+		// Codex through headless `codex exec`, which does NOT expand a slash, so
+		// every discovered command must carry its body as `prompt` for the
+		// renderer to substitute before sending.
+
+		const codexAgent = { id: 'codex', available: true, path: '/usr/bin/codex' };
+		const enoentError = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+
+		/** Build a readdir/readFile pair backed by a virtual path -> content map. */
+		const mockCodexDisk = (
+			dirs: Record<string, { name: string; isDirectory: () => boolean }[]>,
+			files: Record<string, string>
+		) => {
+			vi.mocked(fs.promises.readdir).mockImplementation(async (dir: any) => {
+				const entries = dirs[String(dir)];
+				if (!entries) throw enoentError();
+				return entries as any;
+			});
+			vi.mocked(fs.promises.readFile).mockImplementation(async (filePath: any) => {
+				const content = files[String(filePath)];
+				if (content === undefined) throw enoentError();
+				return content;
+			});
+		};
+
+		it('discovers Codex skills and carries SKILL.md body as the prompt', async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+
+			const [projectSkills] = getCodexSkillDirs('/test');
+			mockCodexDisk(
+				{ [projectSkills]: [{ name: 'ship-it', isDirectory: () => true }] },
+				{
+					[path.join(projectSkills, 'ship-it', 'SKILL.md')]:
+						'---\nname: ship-it\ndescription: Cut a release\n---\n\nRun the release checklist.',
+				}
+			);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'codex', '/test');
+
+			expect(result).toEqual([
+				{
+					name: 'ship-it',
+					description: 'Cut a release',
+					prompt: 'Run the release checklist.',
+				},
+			]);
+			// Discovery is pure disk reads - it must never spawn the CLI.
+			expect(execFileNoThrow).not.toHaveBeenCalled();
+		});
+
+		it('discovers legacy Codex prompts from <CODEX_HOME>/prompts/*.md', async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+
+			const globalPrompts = getCodexPromptDirs('/test')[1];
+			// A prompts dir is read without withFileTypes, so it yields filenames.
+			vi.mocked(fs.promises.readdir).mockImplementation(async (dir: any) => {
+				if (String(dir) === globalPrompts) return ['triage.md', 'notes.txt'] as any;
+				throw enoentError();
+			});
+			vi.mocked(fs.promises.readFile).mockImplementation(async (filePath: any) => {
+				if (String(filePath) === path.join(globalPrompts, 'triage.md')) {
+					return 'Triage the open bugs.';
+				}
+				throw enoentError();
+			});
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'codex', '/test');
+
+			expect(result).toEqual([
+				{ name: 'triage', description: undefined, prompt: 'Triage the open bugs.' },
+			]);
+		});
+
+		it('skips Codex skills marked user-invocable: false', async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+
+			const [projectSkills] = getCodexSkillDirs('/test');
+			mockCodexDisk(
+				{
+					[projectSkills]: [
+						{ name: 'background', isDirectory: () => true },
+						{ name: 'usable', isDirectory: () => true },
+					],
+				},
+				{
+					[path.join(projectSkills, 'background', 'SKILL.md')]:
+						'---\nname: background\nuser-invocable: false\n---\nReference only.',
+					[path.join(projectSkills, 'usable', 'SKILL.md')]: '---\nname: usable\n---\nDo it.',
+				}
+			);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'codex', '/test');
+
+			expect(result.map((c: any) => c.name)).toEqual(['usable']);
+		});
+
+		it("skips Codex's internal .system skills directory", async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+
+			const [projectSkills] = getCodexSkillDirs('/test');
+			mockCodexDisk(
+				{ [projectSkills]: [{ name: '.system', isDirectory: () => true }] },
+				{
+					[path.join(projectSkills, '.system', 'SKILL.md')]:
+						'---\nname: review-agent\n---\nInternal.',
+				}
+			);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			expect(await handler!({} as any, 'codex', '/test')).toEqual([]);
+		});
+
+		it('lets a project-local Codex skill win over a same-named global one', async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+
+			const [projectSkills, globalSkills] = getCodexSkillDirs('/test');
+			mockCodexDisk(
+				{
+					[projectSkills]: [{ name: 'dup', isDirectory: () => true }],
+					[globalSkills]: [{ name: 'dup', isDirectory: () => true }],
+				},
+				{
+					[path.join(projectSkills, 'dup', 'SKILL.md')]: 'project body',
+					[path.join(globalSkills, 'dup', 'SKILL.md')]: 'global body',
+				}
+			);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'codex', '/test');
+
+			expect(result).toEqual([{ name: 'dup', description: undefined, prompt: 'project body' }]);
+		});
+
+		it('returns an empty list when Codex has no custom commands on disk', async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+			vi.mocked(fs.promises.readdir).mockRejectedValue(enoentError());
+			vi.mocked(fs.promises.readFile).mockRejectedValue(enoentError());
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			expect(await handler!({} as any, 'codex', '/test')).toEqual([]);
+		});
+
+		it("returns null for an SSH-remote Codex agent rather than this machine's commands", async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+
+			const [projectSkills] = getCodexSkillDirs('/test');
+			mockCodexDisk(
+				{ [projectSkills]: [{ name: 'local-only', isDirectory: () => true }] },
+				{ [path.join(projectSkills, 'local-only', 'SKILL.md')]: 'local body' }
+			);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			const result = await handler!({} as any, 'codex', '/test', undefined, 'remote-1');
+
+			expect(result).toBeNull();
+			expect(fs.promises.readdir).not.toHaveBeenCalled();
+		});
+
+		it('rethrows non-ENOENT errors from Codex discovery so Sentry sees them', async () => {
+			mockAgentDetector.getAgent.mockResolvedValue(codexAgent);
+			vi.mocked(fs.promises.readdir).mockRejectedValue(
+				Object.assign(new Error('EACCES'), { code: 'EACCES' })
+			);
+
+			const handler = handlers.get('agents:discoverSlashCommands');
+			await expect(handler!({} as any, 'codex', '/test')).rejects.toThrow('EACCES');
 		});
 
 		it('should return null when agent is not available', async () => {
@@ -1423,6 +2176,141 @@ describe('agents IPC handlers', () => {
 			const handler = handlers.get('agents:detect');
 
 			await expect(handler!({} as any)).rejects.toThrow('Agent detector');
+		});
+	});
+
+	describe('agents:getClaudeUsageSnapshots', () => {
+		// The dashboard mirror serves the RETAINED map, not the live one: an
+		// account whose agents all moved away keeps its row (and its last known
+		// bars, badged stale) instead of vanishing at the 24h TTL.
+		it('returns the retained snapshot map from claudeUsageStore', async () => {
+			const claudeUsageStore = await import('../../../../main/stores/claudeUsageStore');
+			const getAllSpy = vi.spyOn(claudeUsageStore, 'getRetainedSnapshots').mockReturnValue({
+				'/Users/me/.claude': {
+					sampledAt: '2026-05-15T00:00:00.000Z',
+					configDirKey: '/Users/me/.claude',
+					session: { percent: 42, resetsAt: '2026-05-15T05:00:00.000Z' },
+					weekAllModels: { percent: 7, resetsAt: '2026-05-22T00:00:00.000Z' },
+					weekSonnetOnly: { percent: 3, resetsAt: '2026-05-22T00:00:00.000Z' },
+				},
+			});
+
+			const handler = handlers.get('agents:getClaudeUsageSnapshots')!;
+			const result = await handler({} as any);
+
+			expect(getAllSpy).toHaveBeenCalled();
+			expect(result).toHaveProperty('/Users/me/.claude');
+			expect(result['/Users/me/.claude'].session.percent).toBe(42);
+			getAllSpy.mockRestore();
+		});
+
+		it('returns an empty object when no snapshots are cached', async () => {
+			const claudeUsageStore = await import('../../../../main/stores/claudeUsageStore');
+			const getAllSpy = vi.spyOn(claudeUsageStore, 'getRetainedSnapshots').mockReturnValue({});
+
+			const handler = handlers.get('agents:getClaudeUsageSnapshots')!;
+			const result = await handler({} as any);
+
+			expect(result).toEqual({});
+			getAllSpy.mockRestore();
+		});
+	});
+
+	describe('agents:getClaudeUsageAccountKeys', () => {
+		it('unions discovered dirs with remembered accounts', async () => {
+			// The remembered account is the one whose agents all moved away after it
+			// hit its limit: the sweep cannot see it (symlinked / outside $HOME /
+			// name filtered) but its row has to stay on the dashboard.
+			const claudeUsageStartup = await import('../../../../main/agents/claude-usage-startup');
+			const quotaAccountsStore = await import('../../../../main/stores/quotaAccountsStore');
+			// A remembered key was itself written through `resolveConfigDirKey`, so
+			// it arrives already resolved - spell both sides that way or the union
+			// stops deduping on Windows, where the discovered dir gains a drive
+			// letter the POSIX literal does not have.
+			const discoveredKey = path.resolve('/Users/me/.claude');
+			const cappedKey = path.resolve('/Volumes/keys/claude-capped');
+			const discoverSpy = vi
+				.spyOn(claudeUsageStartup, 'discoverClaudeConfigDirs')
+				.mockResolvedValue(['/Users/me/.claude']);
+			const pruneSpy = vi
+				.spyOn(quotaAccountsStore, 'pruneMissingQuotaAccounts')
+				.mockResolvedValue([discoveredKey, cappedKey]);
+
+			const handler = handlers.get('agents:getClaudeUsageAccountKeys')!;
+			const result = await handler({} as any);
+
+			expect(pruneSpy).toHaveBeenCalledWith('claude-code');
+			expect(result).toEqual([discoveredKey, cappedKey]);
+			discoverSpy.mockRestore();
+			pruneSpy.mockRestore();
+		});
+	});
+
+	describe('claude:usage:refresh-all', () => {
+		it('delegates to runStartupUsageSampling and returns the snapshot count', async () => {
+			const claudeUsageStartup = await import('../../../../main/agents/claude-usage-startup');
+			const claudeUsageStore = await import('../../../../main/stores/claudeUsageStore');
+
+			const runSpy = vi
+				.spyOn(claudeUsageStartup, 'runStartupUsageSampling')
+				.mockResolvedValue(undefined);
+			const getAllSpy = vi.spyOn(claudeUsageStore, 'getAllSnapshots').mockReturnValue({
+				'/Users/me/.claude': {
+					sampledAt: '2026-05-15T00:00:00.000Z',
+					configDirKey: '/Users/me/.claude',
+					session: { percent: 50, resetsAt: '2026-05-15T05:00:00.000Z' },
+					weekAllModels: { percent: 7, resetsAt: '2026-05-22T00:00:00.000Z' },
+					weekSonnetOnly: { percent: 3, resetsAt: '2026-05-22T00:00:00.000Z' },
+				},
+				'/Users/me/.claude-gmail': {
+					sampledAt: '2026-05-15T00:00:00.000Z',
+					configDirKey: '/Users/me/.claude-gmail',
+					session: { percent: 20, resetsAt: '2026-05-15T05:00:00.000Z' },
+					weekAllModels: { percent: 5, resetsAt: '2026-05-22T00:00:00.000Z' },
+					weekSonnetOnly: { percent: 1, resetsAt: '2026-05-22T00:00:00.000Z' },
+				},
+			});
+
+			// Re-register with the full dep set so the handler can delegate.
+			handlers.clear();
+			vi.mocked(ipcMain.handle).mockImplementation((channel, handler) => {
+				handlers.set(channel, handler);
+			});
+			registerAgentsHandlers({
+				getAgentDetector: () => mockAgentDetector as any,
+				agentConfigsStore: mockAgentConfigsStore as any,
+				settingsStore: { get: vi.fn(), set: vi.fn() } as any,
+				sessionsStore: { get: vi.fn(), set: vi.fn() } as any,
+			});
+
+			const handler = handlers.get('claude:usage:refresh-all')!;
+			const result = await handler({} as any);
+
+			expect(runSpy).toHaveBeenCalledTimes(1);
+			// Manual refresh must opt into the aggressive sampling path - startup
+			// mode would skip when no maestro-p session exists.
+			expect(runSpy).toHaveBeenCalledWith(expect.objectContaining({ mode: 'manual' }));
+			expect(result).toEqual({ refreshed: 2 });
+
+			runSpy.mockRestore();
+			getAllSpy.mockRestore();
+		});
+
+		it('returns refreshed: 0 without throwing when sessionsStore is missing', async () => {
+			const claudeUsageStartup = await import('../../../../main/agents/claude-usage-startup');
+			const runSpy = vi
+				.spyOn(claudeUsageStartup, 'runStartupUsageSampling')
+				.mockResolvedValue(undefined);
+
+			// The default beforeEach() wires deps WITHOUT sessionsStore/settingsStore,
+			// so the registered handler should fall back to the no-op path.
+			const handler = handlers.get('claude:usage:refresh-all')!;
+			const result = await handler({} as any);
+
+			expect(runSpy).not.toHaveBeenCalled();
+			expect(result).toEqual({ refreshed: 0 });
+
+			runSpy.mockRestore();
 		});
 	});
 });

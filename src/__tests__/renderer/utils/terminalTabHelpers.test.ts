@@ -1,5 +1,5 @@
 /**
- * Tests for terminalTabHelpers.ts — pure functions for managing TerminalTab state.
+ * Tests for terminalTabHelpers.ts - pure functions for managing TerminalTab state.
  *
  * Functions tested:
  * - createTerminalTab
@@ -25,13 +25,18 @@ import {
 	addTerminalTab,
 	closeTerminalTab,
 	selectTerminalTab,
+	restartTerminalTab,
 	updateTerminalTabState,
 	updateTerminalTabPid,
 	updateTerminalTabCwd,
 	renameTerminalTab,
+	setTerminalTabStartupCommand,
 	reorderTerminalTabs,
+	resolveTerminalTab,
 } from '../../../renderer/utils/terminalTabHelpers';
 import type { Session, TerminalTab } from '../../../renderer/types';
+import { createMockSession } from '../../helpers/mockSession';
+import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 
 // Mock generateId for predictable test IDs
 vi.mock('../../../renderer/utils/ids', () => ({
@@ -51,44 +56,6 @@ function createMockTerminalTab(overrides: Partial<TerminalTab> = {}): TerminalTa
 		state: 'idle',
 		...overrides,
 	};
-}
-
-function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: 'session-1',
-		name: 'Test Session',
-		toolType: 'claude-code',
-		state: 'idle',
-		cwd: '/test',
-		fullPath: '/test',
-		projectRoot: '/test',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
-		isGitRepo: false,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
-		executionQueue: [],
-		activeTimeMs: 0,
-		aiTabs: [],
-		activeTabId: '',
-		closedTabHistory: [],
-		filePreviewTabs: [],
-		activeFileTabId: null,
-		unifiedTabOrder: [],
-		unifiedClosedTabHistory: [],
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		...overrides,
-	} as Session;
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -164,6 +131,12 @@ describe('getTerminalSessionId / parseTerminalSessionId', () => {
 });
 
 describe('addTerminalTab', () => {
+	// Several tests here assert insert-after-active placement; the setting defaults
+	// to 'end', so opt into 'after-current' for the duration of this block.
+	beforeEach(() => {
+		useSettingsStore.setState({ newTabPlacement: 'after-current' });
+	});
+
 	it('appends the tab to terminalTabs', () => {
 		const session = createMockSession();
 		const tab = createMockTerminalTab({ id: 'new-tab' });
@@ -179,11 +152,141 @@ describe('addTerminalTab', () => {
 		expect(updated.activeTerminalTabId).toBe('new-tab');
 	});
 
+	it('leaves any active tiled group (clears activeGroupId)', () => {
+		// Regression: a new standalone terminal must exit the group, otherwise the
+		// group stays active and a tiled browser overlay bleeds over the terminal view.
+		const session = createMockSession({
+			activeGroupId: 'g1',
+			tabGroups: [
+				{
+					id: 'g1',
+					name: 'Group',
+					createdAt: 0,
+					focusedPaneId: 'l1',
+					layout: {
+						kind: 'split',
+						id: 's1',
+						direction: 'row',
+						sizes: [1],
+						children: [{ kind: 'leaf', id: 'l1', tab: { type: 'browser', id: 'b1' } }],
+					},
+				},
+			] as never,
+		});
+		const updated = addTerminalTab(session, createMockTerminalTab({ id: 'new-tab' }));
+		expect(updated.activeGroupId).toBeNull();
+	});
+
+	it('adds the tab without showing it when activate is false', () => {
+		// Background create: the tab is in the bar and in the unified order, but
+		// the selection and the input mode are untouched. The mode matters as much
+		// as the ids here - flipping an agent into terminal mode is itself a view
+		// change for anyone looking at that agent.
+		const session = createMockSession({
+			activeFileTabId: 'file-1',
+			activeBrowserTabId: 'browser-1',
+			activeTerminalTabId: 'terminal-old',
+			inputMode: 'ai',
+		});
+		const tab = createMockTerminalTab({ id: 'new-tab' });
+
+		const updated = addTerminalTab(session, tab, { activate: false });
+
+		expect(updated.terminalTabs).toHaveLength(1);
+		expect(updated.unifiedTabOrder).toContainEqual({ type: 'terminal', id: 'new-tab' });
+		expect(updated.activeTerminalTabId).toBe('terminal-old');
+		expect(updated.activeFileTabId).toBe('file-1');
+		expect(updated.activeBrowserTabId).toBe('browser-1');
+		expect(updated.inputMode).toBe('ai');
+	});
+
 	it('adds a terminal ref to unifiedTabOrder', () => {
 		const session = createMockSession();
 		const tab = createMockTerminalTab({ id: 'new-tab' });
 		const updated = addTerminalTab(session, tab);
 		expect(updated.unifiedTabOrder).toContainEqual({ type: 'terminal', id: 'new-tab' });
+	});
+
+	it('touches no active-tab id and keeps the group when activate is false', () => {
+		// The tile-below path mints a terminal that goes straight into a pane.
+		// Activating it would clear the very group the caller is about to build,
+		// and pointing activeTerminalTabId at a tiled tab would leave the single
+		// view aimed at a tab it does not own.
+		const session = createMockSession({
+			activeGroupId: 'g1',
+			activeTerminalTabId: 'old-tab',
+			activeFileTabId: 'f1',
+			activeBrowserTabId: 'b1',
+		});
+		const updated = addTerminalTab(session, createMockTerminalTab({ id: 'new-tab' }), {
+			activate: false,
+		});
+		expect(updated.activeGroupId).toBe('g1');
+		expect(updated.activeTerminalTabId).toBe('old-tab');
+		expect(updated.activeFileTabId).toBe('f1');
+		expect(updated.activeBrowserTabId).toBe('b1');
+		// The tab is still created and ordered, just not focused.
+		expect(updated.terminalTabs).toHaveLength(1);
+		expect(updated.unifiedTabOrder).toContainEqual({ type: 'terminal', id: 'new-tab' });
+	});
+
+	it('mints a coworkingId starting at 1 and increments the session counter', () => {
+		const session = createMockSession();
+		const tab = createMockTerminalTab({ id: 'new-tab' });
+		const updated = addTerminalTab(session, tab);
+		expect(updated.terminalTabs![0].coworkingId).toBe(1);
+		expect(updated.nextCoworkingId).toBe(2);
+	});
+
+	it('clamps nextCoworkingId against existing ids even when the counter is set but stale', () => {
+		// Persisted counter is 3, but an existing tab already carries id=10. Without the
+		// Math.max clamp we'd hand out term:3 - a duplicate of nothing yet, but the next
+		// few adds would collide with the existing 10. The clamp must jump past it.
+		const existingTab = createMockTerminalTab({ id: 'old', coworkingId: 10 });
+		const session = createMockSession({
+			terminalTabs: [existingTab],
+			activeTerminalTabId: 'old',
+			unifiedTabOrder: [{ type: 'terminal', id: 'old' }],
+			nextCoworkingId: 3,
+		});
+		const updated = addTerminalTab(session, createMockTerminalTab({ id: 'new' }));
+		const newTab = updated.terminalTabs!.find((t) => t.id === 'new');
+		expect(newTab?.coworkingId).toBe(11);
+		expect(updated.nextCoworkingId).toBe(12);
+	});
+
+	it('falls back to max(existing coworkingId)+1 when nextCoworkingId is missing (legacy migration)', () => {
+		// Simulates a session deserialized from disk before nextCoworkingId existed:
+		// the existing tab already carries coworkingId=7, so a fresh add must mint 8 - not 1.
+		const existingTab = createMockTerminalTab({ id: 'old', coworkingId: 7 });
+		const session = createMockSession({
+			terminalTabs: [existingTab],
+			activeTerminalTabId: 'old',
+			unifiedTabOrder: [{ type: 'terminal', id: 'old' }],
+			// nextCoworkingId intentionally omitted to mimic legacy persisted state
+		});
+		const updated = addTerminalTab(session, createMockTerminalTab({ id: 'new' }));
+		const newTab = updated.terminalTabs!.find((t) => t.id === 'new');
+		expect(newTab?.coworkingId).toBe(8);
+		expect(updated.nextCoworkingId).toBe(9);
+	});
+
+	it('coworkingId is monotonic and never reused after close', () => {
+		let session = createMockSession();
+		session = addTerminalTab(session, createMockTerminalTab({ id: 'a' })); // id=1
+		session = addTerminalTab(session, createMockTerminalTab({ id: 'b' })); // id=2
+		session = addTerminalTab(session, createMockTerminalTab({ id: 'c' })); // id=3
+		// Drop the middle tab manually (closeTerminalTab path tested elsewhere) and add another.
+		session = {
+			...session,
+			terminalTabs: session.terminalTabs!.filter((t) => t.id !== 'b'),
+		};
+		session = addTerminalTab(session, createMockTerminalTab({ id: 'd' })); // must be id=4, not 2
+		const ids = session.terminalTabs!.map((t) => t.coworkingId);
+		expect(ids).toContain(1);
+		expect(ids).toContain(3);
+		expect(ids).toContain(4);
+		expect(ids).not.toContain(2);
 	});
 
 	it('preserves existing tabs', () => {
@@ -197,6 +300,87 @@ describe('addTerminalTab', () => {
 		const updated = addTerminalTab(session, newTab);
 		expect(updated.terminalTabs).toHaveLength(2);
 		expect(updated.unifiedTabOrder).toHaveLength(2);
+	});
+
+	it('inserts the new terminal directly to the right of the active terminal tab', () => {
+		const term1 = createMockTerminalTab({ id: 'term-1' });
+		const term2 = createMockTerminalTab({ id: 'term-2' });
+		const session = createMockSession({
+			terminalTabs: [term1, term2],
+			activeTerminalTabId: 'term-1',
+			inputMode: 'terminal',
+			unifiedTabOrder: [
+				{ type: 'terminal', id: 'term-1' },
+				{ type: 'terminal', id: 'term-2' },
+			],
+		});
+		const newTab = createMockTerminalTab({ id: 'new-tab' });
+
+		const updated = addTerminalTab(session, newTab);
+
+		expect(updated.unifiedTabOrder).toEqual([
+			{ type: 'terminal', id: 'term-1' },
+			{ type: 'terminal', id: 'new-tab' },
+			{ type: 'terminal', id: 'term-2' },
+		]);
+	});
+
+	it('inserts the new terminal directly to the right of the active AI tab', () => {
+		const session = createMockSession({
+			aiTabs: [
+				{
+					id: 'ai-1',
+					agentSessionId: null,
+					name: null,
+					starred: false,
+					logs: [],
+					inputValue: '',
+					stagedImages: [],
+					createdAt: 0,
+					state: 'idle',
+				},
+				{
+					id: 'ai-2',
+					agentSessionId: null,
+					name: null,
+					starred: false,
+					logs: [],
+					inputValue: '',
+					stagedImages: [],
+					createdAt: 0,
+					state: 'idle',
+				},
+			],
+			activeTabId: 'ai-1',
+			unifiedTabOrder: [
+				{ type: 'ai', id: 'ai-1' },
+				{ type: 'ai', id: 'ai-2' },
+			],
+		});
+		const newTab = createMockTerminalTab({ id: 'new-term' });
+
+		const updated = addTerminalTab(session, newTab);
+
+		expect(updated.unifiedTabOrder).toEqual([
+			{ type: 'ai', id: 'ai-1' },
+			{ type: 'terminal', id: 'new-term' },
+			{ type: 'ai', id: 'ai-2' },
+		]);
+	});
+
+	it('appends when active tab is missing from unifiedTabOrder', () => {
+		const session = createMockSession({
+			activeTabId: 'ai-missing',
+			unifiedTabOrder: [{ type: 'ai', id: 'ai-other' }],
+		});
+		const newTab = createMockTerminalTab({ id: 'new-term' });
+
+		const updated = addTerminalTab(session, newTab);
+
+		expect(updated.unifiedTabOrder).toEqual([
+			{ type: 'ai', id: 'ai-other' },
+			{ type: 'terminal', id: 'new-term' },
+		]);
 	});
 });
 
@@ -394,6 +578,54 @@ describe('selectTerminalTab', () => {
 	});
 });
 
+describe('restartTerminalTab', () => {
+	it('resets an exited tab to a spawnable state', () => {
+		const tab = createMockTerminalTab({
+			id: 'tab-1',
+			pid: 4242,
+			state: 'exited',
+			exitCode: 255,
+		});
+		const session = createMockSession({ terminalTabs: [tab], activeTerminalTabId: null });
+		const updated = restartTerminalTab(session, 'tab-1');
+		expect(updated.terminalTabs![0].pid).toBe(0);
+		expect(updated.terminalTabs![0].state).toBe('idle');
+		expect(updated.terminalTabs![0].exitCode).toBeUndefined();
+	});
+
+	it('preserves the startup command so the restart re-runs it', () => {
+		const tab = createMockTerminalTab({
+			id: 'tab-1',
+			pid: 99,
+			state: 'exited',
+			startupCommand: 'ssh prod',
+		});
+		const session = createMockSession({ terminalTabs: [tab] });
+		const updated = restartTerminalTab(session, 'tab-1');
+		expect(updated.terminalTabs![0].startupCommand).toBe('ssh prod');
+	});
+
+	it('selects the restarted tab and clears other active tab kinds', () => {
+		const tab = createMockTerminalTab({ id: 'tab-1', state: 'exited' });
+		const session = createMockSession({
+			terminalTabs: [tab],
+			activeTerminalTabId: null,
+			activeFileTabId: 'file-tab-1',
+			activeBrowserTabId: 'browser-tab-1',
+		});
+		const updated = restartTerminalTab(session, 'tab-1');
+		expect(updated.activeTerminalTabId).toBe('tab-1');
+		expect(updated.activeFileTabId).toBeNull();
+		expect(updated.activeBrowserTabId).toBeNull();
+	});
+
+	it('returns original session when tab not found', () => {
+		const session = createMockSession({ terminalTabs: [] });
+		const updated = restartTerminalTab(session, 'nonexistent');
+		expect(updated).toBe(session);
+	});
+});
+
 describe('updateTerminalTabState', () => {
 	it('updates the state of the matching tab', () => {
 		const tab = createMockTerminalTab({ id: 'tab-1', state: 'idle' });
@@ -454,6 +686,54 @@ describe('renameTerminalTab', () => {
 	it('returns original session when tab not found', () => {
 		const session = createMockSession({ terminalTabs: [] });
 		const updated = renameTerminalTab(session, 'nonexistent', 'Name');
+		expect(updated).toBe(session);
+	});
+});
+
+describe('setTerminalTabStartupCommand', () => {
+	it('sets command and cwd on the matching tab', () => {
+		const tab = createMockTerminalTab({ id: 'tab-1' });
+		const session = createMockSession({ terminalTabs: [tab] });
+		const updated = setTerminalTabStartupCommand(session, 'tab-1', 'npm run dev', '/proj');
+		expect(updated.terminalTabs![0].startupCommand).toBe('npm run dev');
+		expect(updated.terminalTabs![0].startupCommandCwd).toBe('/proj');
+	});
+
+	it('trims whitespace from command and cwd', () => {
+		const tab = createMockTerminalTab({ id: 'tab-1' });
+		const session = createMockSession({ terminalTabs: [tab] });
+		const updated = setTerminalTabStartupCommand(session, 'tab-1', '  npm test  ', '  /a  ');
+		expect(updated.terminalTabs![0].startupCommand).toBe('npm test');
+		expect(updated.terminalTabs![0].startupCommandCwd).toBe('/a');
+	});
+
+	it('clears the configuration when command is empty', () => {
+		const tab = createMockTerminalTab({
+			id: 'tab-1',
+			startupCommand: 'old',
+			startupCommandCwd: '/x',
+		});
+		const session = createMockSession({ terminalTabs: [tab] });
+		const updated = setTerminalTabStartupCommand(session, 'tab-1', '', '');
+		expect(updated.terminalTabs![0].startupCommand).toBeUndefined();
+		expect(updated.terminalTabs![0].startupCommandCwd).toBeUndefined();
+	});
+
+	it('clears only the cwd override when cwd is empty but command is set', () => {
+		const tab = createMockTerminalTab({
+			id: 'tab-1',
+			startupCommand: 'old',
+			startupCommandCwd: '/old',
+		});
+		const session = createMockSession({ terminalTabs: [tab] });
+		const updated = setTerminalTabStartupCommand(session, 'tab-1', 'new', '');
+		expect(updated.terminalTabs![0].startupCommand).toBe('new');
+		expect(updated.terminalTabs![0].startupCommandCwd).toBeUndefined();
+	});
+
+	it('returns original session when tab not found', () => {
+		const session = createMockSession({ terminalTabs: [] });
+		const updated = setTerminalTabStartupCommand(session, 'nonexistent', 'cmd', '');
 		expect(updated).toBe(session);
 	});
 });
@@ -524,6 +804,104 @@ describe('hasRunningTerminalProcess', () => {
 			terminalTabs: [createMockTerminalTab({ id: 'tab-1', state: 'exited' })],
 		});
 		expect(hasRunningTerminalProcess(session)).toBe(false);
+	});
+});
+
+describe('resolveTerminalTab', () => {
+	const agentA = createMockSession({
+		id: 'agent-a',
+		terminalTabs: [
+			createMockTerminalTab({ id: 'a1', name: 'Dev server' }),
+			createMockTerminalTab({ id: 'a2', name: 'Logs' }),
+		],
+		activeTerminalTabId: 'a2',
+	});
+	const agentB = createMockSession({
+		id: 'agent-b',
+		terminalTabs: [createMockTerminalTab({ id: 'b1', name: 'Dev server' })],
+		activeTerminalTabId: 'b1',
+	});
+	const sessions = [agentA, agentB];
+
+	it('resolves a tab id belonging to another agent', () => {
+		// Ids are unique, so open-terminal's id works without also naming the agent.
+		const result = resolveTerminalTab(sessions, 'agent-a', 'b1');
+		expect(result?.session.id).toBe('agent-b');
+		expect(result?.tab.id).toBe('b1');
+	});
+
+	it('scopes a name match to the target agent', () => {
+		// Both agents have a "Dev server" - the name must not cross agents.
+		const result = resolveTerminalTab(sessions, 'agent-b', 'Dev server');
+		expect(result?.session.id).toBe('agent-b');
+		expect(result?.tab.id).toBe('b1');
+	});
+
+	it('matches a name case-insensitively', () => {
+		expect(resolveTerminalTab(sessions, 'agent-a', 'dev SERVER')?.tab.id).toBe('a1');
+	});
+
+	it('matches the auto-generated "Terminal N" name', () => {
+		const session = createMockSession({
+			id: 'agent-c',
+			terminalTabs: [createMockTerminalTab({ id: 'c1', name: null })],
+		});
+		expect(resolveTerminalTab([session], 'agent-c', 'Terminal 1')?.tab.id).toBe('c1');
+	});
+
+	it('returns null when two tabs in one agent share a name', () => {
+		const session = createMockSession({
+			id: 'agent-d',
+			terminalTabs: [
+				createMockTerminalTab({ id: 'd1', name: 'Build' }),
+				createMockTerminalTab({ id: 'd2', name: 'Build' }),
+			],
+		});
+		expect(resolveTerminalTab([session], 'agent-d', 'Build')).toBeNull();
+	});
+
+	it('falls back to the active terminal tab with no ref', () => {
+		expect(resolveTerminalTab(sessions, 'agent-a')?.tab.id).toBe('a2');
+	});
+
+	it('uses the only tab when there is no active pointer', () => {
+		const session = createMockSession({
+			id: 'agent-e',
+			terminalTabs: [createMockTerminalTab({ id: 'e1' })],
+			activeTerminalTabId: null,
+		});
+		expect(resolveTerminalTab([session], 'agent-e')?.tab.id).toBe('e1');
+	});
+
+	it('returns null rather than guessing between several inactive tabs', () => {
+		const session = createMockSession({
+			id: 'agent-f',
+			terminalTabs: [createMockTerminalTab({ id: 'f1' }), createMockTerminalTab({ id: 'f2' })],
+			activeTerminalTabId: null,
+		});
+		expect(resolveTerminalTab([session], 'agent-f')).toBeNull();
+	});
+
+	it('returns null when the agent has no terminal tabs', () => {
+		const session = createMockSession({ id: 'agent-g', terminalTabs: [] });
+		expect(resolveTerminalTab([session], 'agent-g')).toBeNull();
+	});
+
+	it('returns null for an unknown agent', () => {
+		expect(resolveTerminalTab(sessions, 'nope')).toBeNull();
+	});
+
+	it('returns null for a ref that matches nothing', () => {
+		expect(resolveTerminalTab(sessions, 'agent-a', 'missing')).toBeNull();
+	});
+
+	it('ignores a stale active pointer', () => {
+		const session = createMockSession({
+			id: 'agent-h',
+			terminalTabs: [createMockTerminalTab({ id: 'h1' }), createMockTerminalTab({ id: 'h2' })],
+			activeTerminalTabId: 'gone',
+		});
+		expect(resolveTerminalTab([session], 'agent-h')).toBeNull();
 	});
 });
 

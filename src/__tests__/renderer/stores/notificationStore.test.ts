@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import {
 	useNotificationStore,
 	notifyToast,
@@ -19,8 +20,18 @@ import {
 	selectToasts,
 	selectToastCount,
 	selectConfig,
+	triggerCustomNotification,
 } from '../../../renderer/stores/notificationStore';
 import type { Toast } from '../../../renderer/stores/notificationStore';
+import { showOsNotification } from '../../../renderer/stores/notificationStore';
+import { isWebDesktop } from '../../../renderer/utils/runtimeContext';
+
+// runtimeContext is mocked so tests can flip between the Electron desktop path
+// (default false) and the web-desktop browser path.
+vi.mock('../../../renderer/utils/runtimeContext', () => ({
+	isWebDesktop: vi.fn(() => false),
+	isElectronDesktop: vi.fn(() => true),
+}));
 
 // ============================================================================
 // Mocks
@@ -29,6 +40,7 @@ import type { Toast } from '../../../renderer/stores/notificationStore';
 const mockSpeak = vi.fn().mockResolvedValue(undefined);
 const mockShow = vi.fn().mockResolvedValue(undefined);
 const mockLoggerToast = vi.fn();
+const mockIsWebDesktop = vi.mocked(isWebDesktop);
 
 beforeEach(() => {
 	// Reset store
@@ -39,9 +51,10 @@ beforeEach(() => {
 			audioFeedbackEnabled: false,
 			audioFeedbackCommand: '',
 			osNotificationsEnabled: true,
+			idleNotificationEnabled: false,
+			idleNotificationCommand: '',
 		},
 	});
-	resetToastIdCounter();
 
 	// Mock window.maestro
 	(globalThis as any).window = {
@@ -52,6 +65,8 @@ beforeEach(() => {
 	};
 
 	vi.clearAllMocks();
+	// Default every test to the Electron desktop path unless it opts into web-desktop.
+	mockIsWebDesktop.mockReturnValue(false);
 	vi.useFakeTimers();
 });
 
@@ -213,15 +228,39 @@ describe('notificationStore', () => {
 		});
 	});
 
+	describe('setIdleNotification', () => {
+		it('enables idle notification with command', () => {
+			useNotificationStore.getState().setIdleNotification(true, 'say Maestro is idle');
+			const { config } = useNotificationStore.getState();
+			expect(config.idleNotificationEnabled).toBe(true);
+			expect(config.idleNotificationCommand).toBe('say Maestro is idle');
+		});
+
+		it('disables idle notification', () => {
+			useNotificationStore.getState().setIdleNotification(true, 'say idle');
+			useNotificationStore.getState().setIdleNotification(false, '');
+			const { config } = useNotificationStore.getState();
+			expect(config.idleNotificationEnabled).toBe(false);
+			expect(config.idleNotificationCommand).toBe('');
+		});
+
+		it('does not affect other config fields', () => {
+			useNotificationStore.getState().setAudioFeedback(true, 'say');
+			useNotificationStore.getState().setIdleNotification(true, 'notify-send idle');
+			expect(useNotificationStore.getState().config.audioFeedbackEnabled).toBe(true);
+			expect(useNotificationStore.getState().config.audioFeedbackCommand).toBe('say');
+		});
+	});
+
 	// ==========================================================================
 	// notifyToast wrapper
 	// ==========================================================================
 
 	describe('notifyToast', () => {
 		describe('ID generation', () => {
-			it('returns generated toast ID', () => {
+			it('returns generated toast ID with expected shape', () => {
 				const id = notifyToast({ type: 'success', title: 'Test', message: 'msg' });
-				expect(id).toMatch(/^toast-\d+-0$/);
+				expect(id).toMatch(/^toast-\d+-\d+$/);
 			});
 
 			it('generates unique IDs', () => {
@@ -230,10 +269,12 @@ describe('notificationStore', () => {
 				expect(id1).not.toBe(id2);
 			});
 
-			it('increments counter', () => {
-				notifyToast({ type: 'success', title: 'A', message: 'a' });
+			it('counter portion increments between consecutive calls', () => {
+				const id1 = notifyToast({ type: 'success', title: 'A', message: 'a' });
 				const id2 = notifyToast({ type: 'success', title: 'B', message: 'b' });
-				expect(id2).toMatch(/^toast-\d+-1$/);
+				const counter1 = Number(id1.split('-').pop());
+				const counter2 = Number(id2.split('-').pop());
+				expect(counter2).toBe(counter1 + 1);
 			});
 		});
 
@@ -355,10 +396,24 @@ describe('notificationStore', () => {
 		});
 
 		describe('audio feedback', () => {
-			it('calls speak when enabled with command and content', () => {
+			it('calls speak when enabled with command, content, and Maestro context vars', () => {
 				useNotificationStore.getState().setAudioFeedback(true, 'say');
-				notifyToast({ type: 'success', title: 'Test', message: 'Hello world' });
-				expect(mockSpeak).toHaveBeenCalledWith('Hello world', 'say');
+				notifyToast({
+					type: 'success',
+					title: 'Test',
+					message: 'Hello world',
+					project: 'refactor-auth',
+					tabName: 'main',
+					group: 'Backend',
+				});
+				// The agent/tab/group/task context rides along so custom commands can
+				// reference it via MAESTRO_NOTIFY_* env vars.
+				expect(mockSpeak).toHaveBeenCalledWith('Hello world', 'say', {
+					agent: 'refactor-auth',
+					tab: 'main',
+					group: 'Backend',
+					task: 'Test',
+				});
 			});
 
 			it('does not call speak when disabled', () => {
@@ -397,6 +452,37 @@ describe('notificationStore', () => {
 			});
 		});
 
+		describe('triggerCustomNotification (audio without a visual toast)', () => {
+			it('fires the command and returns true when enabled with content', () => {
+				useNotificationStore.getState().setAudioFeedback(true, 'say');
+				const fired = triggerCustomNotification('Task complete');
+				expect(fired).toBe(true);
+				expect(mockSpeak).toHaveBeenCalledWith('Task complete', 'say');
+			});
+
+			it('does not fire and returns false when disabled', () => {
+				useNotificationStore.getState().setAudioFeedback(false, 'say');
+				const fired = triggerCustomNotification('Task complete');
+				expect(fired).toBe(false);
+				expect(mockSpeak).not.toHaveBeenCalled();
+			});
+
+			it('does not fire when no command is configured', () => {
+				useNotificationStore.getState().setAudioFeedback(true, '');
+				const fired = triggerCustomNotification('Task complete');
+				expect(fired).toBe(false);
+				expect(mockSpeak).not.toHaveBeenCalled();
+			});
+
+			it('does not fire when message is empty or whitespace only', () => {
+				useNotificationStore.getState().setAudioFeedback(true, 'say');
+				expect(triggerCustomNotification('')).toBe(false);
+				expect(triggerCustomNotification('   ')).toBe(false);
+				expect(triggerCustomNotification(undefined)).toBe(false);
+				expect(mockSpeak).not.toHaveBeenCalled();
+			});
+		});
+
 		describe('OS notifications', () => {
 			it('calls show when enabled', () => {
 				notifyToast({ type: 'success', title: 'Done', message: 'Task complete.' });
@@ -407,6 +493,26 @@ describe('notificationStore', () => {
 				useNotificationStore.getState().setOsNotifications(false);
 				notifyToast({ type: 'success', title: 'Done', message: 'Task complete.' });
 				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('does not call show when the toast opts out with skipOsNotification', () => {
+				notifyToast({
+					type: 'info',
+					title: 'Toast Width: Large',
+					message: 'Toasts now render 480-720px wide.',
+					skipOsNotification: true,
+				});
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('still renders an in-app toast when the OS notification is skipped', () => {
+				notifyToast({
+					type: 'info',
+					title: 'Toast Width: Large',
+					message: 'Toasts now render 480-720px wide.',
+					skipOsNotification: true,
+				});
+				expect(useNotificationStore.getState().toasts).toHaveLength(1);
 			});
 
 			it('uses project as notification title when available', () => {
@@ -475,6 +581,115 @@ describe('notificationStore', () => {
 			});
 		});
 
+		describe('web-desktop OS notifications', () => {
+			let notificationCtor: ReturnType<typeof vi.fn>;
+			let requestPermission: ReturnType<typeof vi.fn>;
+
+			// Install a fake Web Notifications API on both the global scope (the
+			// store references bare `Notification`) and the mock window (the store's
+			// `'Notification' in window` support check).
+			function installNotificationApi(
+				permission: NotificationPermission,
+				requestResult: NotificationPermission = 'granted'
+			) {
+				notificationCtor = vi.fn();
+				requestPermission = vi.fn().mockResolvedValue(requestResult);
+				class MockNotification {
+					onclick: (() => void) | null = null;
+					static permission: NotificationPermission = permission;
+					static requestPermission = requestPermission;
+					constructor(title: string, options?: NotificationOptions) {
+						notificationCtor(title, options);
+					}
+				}
+				(globalThis as any).Notification = MockNotification;
+				(globalThis as any).window.Notification = MockNotification;
+			}
+
+			// Let a suspended `await Notification.requestPermission()` continuation run.
+			async function flushMicrotasks() {
+				await Promise.resolve();
+				await Promise.resolve();
+			}
+
+			beforeEach(() => {
+				mockIsWebDesktop.mockReturnValue(true);
+			});
+
+			afterEach(() => {
+				delete (globalThis as any).Notification;
+				if ((globalThis as any).window) {
+					delete (globalThis as any).window.Notification;
+				}
+			});
+
+			it('shows a browser notification instead of the host bridge when granted', () => {
+				installNotificationApi('granted');
+				showOsNotification('Title', 'Body');
+				expect(notificationCtor).toHaveBeenCalledWith('Title', { body: 'Body' });
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('falls back to an in-app toast when permission is denied', () => {
+				installNotificationApi('denied');
+				const before = useNotificationStore.getState().toasts.length;
+				showOsNotification('Title', 'Body');
+				const toasts = useNotificationStore.getState().toasts;
+				expect(toasts).toHaveLength(before + 1);
+				expect(toasts[toasts.length - 1].message).toBe('Body');
+				expect(notificationCtor).not.toHaveBeenCalled();
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('does not add a fallback toast when fallbackToast is false', () => {
+				installNotificationApi('denied');
+				const before = useNotificationStore.getState().toasts.length;
+				showOsNotification('Title', 'Body', undefined, undefined, { fallbackToast: false });
+				expect(useNotificationStore.getState().toasts).toHaveLength(before);
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('falls back to a toast when the Notification API is unavailable', () => {
+				// No installNotificationApi(): the mock window has no Notification.
+				const before = useNotificationStore.getState().toasts.length;
+				showOsNotification('Title', 'Body');
+				expect(useNotificationStore.getState().toasts).toHaveLength(before + 1);
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('requests permission lazily when default, then shows on grant', async () => {
+				installNotificationApi('default', 'granted');
+				showOsNotification('Title', 'Body');
+				expect(requestPermission).toHaveBeenCalledTimes(1);
+				await flushMicrotasks();
+				expect(notificationCtor).toHaveBeenCalledWith('Title', { body: 'Body' });
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('never routes through the host bridge (show) in web-desktop', async () => {
+				installNotificationApi('default', 'denied');
+				showOsNotification('Title', 'Body');
+				await flushMicrotasks();
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('notifyToast uses the browser notification when granted', () => {
+				installNotificationApi('granted');
+				notifyToast({ type: 'success', title: 'Done', message: 'Task complete.' });
+				expect(notificationCtor).toHaveBeenCalledWith('Done', { body: 'Task complete.' });
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+
+			it('notifyToast keeps a single toast (no duplicate) when denied', () => {
+				installNotificationApi('denied');
+				notifyToast({ type: 'success', title: 'Done', message: 'Task complete.' });
+				// Just the one visible toast - the failed web notification must not
+				// spawn a second fallback toast.
+				expect(useNotificationStore.getState().toasts).toHaveLength(1);
+				expect(mockShow).not.toHaveBeenCalled();
+			});
+		});
+
 		describe('auto-dismiss', () => {
 			it('removes toast after duration', () => {
 				notifyToast({ type: 'success', title: 'Test', message: 'msg' });
@@ -504,20 +719,20 @@ describe('notificationStore', () => {
 	// Selectors
 	// ==========================================================================
 
-	describe('selectors', () => {
-		it('selectToasts returns toasts array', () => {
+	describe('store state access', () => {
+		it('toasts array reflects addToast calls', () => {
 			useNotificationStore.getState().addToast(createToast({ id: 'a' }));
-			expect(selectToasts(useNotificationStore.getState())).toHaveLength(1);
+			expect(useNotificationStore.getState().toasts).toHaveLength(1);
 		});
 
-		it('selectToastCount returns count', () => {
+		it('toasts length reflects count', () => {
 			useNotificationStore.getState().addToast(createToast({ id: 'a' }));
 			useNotificationStore.getState().addToast(createToast({ id: 'b' }));
-			expect(selectToastCount(useNotificationStore.getState())).toBe(2);
+			expect(useNotificationStore.getState().toasts).toHaveLength(2);
 		});
 
-		it('selectConfig returns config object', () => {
-			const config = selectConfig(useNotificationStore.getState());
+		it('config object exposes defaults', () => {
+			const { config } = useNotificationStore.getState();
 			expect(config.defaultDuration).toBe(20);
 			expect(config.osNotificationsEnabled).toBe(true);
 		});
@@ -528,20 +743,19 @@ describe('notificationStore', () => {
 	// ==========================================================================
 
 	describe('non-React access', () => {
-		it('getNotificationState returns current state', () => {
+		it('useNotificationStore.getState() returns current state', () => {
 			notifyToast({ type: 'info', title: 'Test', message: 'msg' });
-			expect(getNotificationState().toasts).toHaveLength(1);
+			expect(useNotificationStore.getState().toasts).toHaveLength(1);
 		});
 
-		it('getNotificationActions returns working action references', () => {
-			const actions = getNotificationActions();
-			actions.addToast(createToast({ id: 'from-actions' }));
+		it('useNotificationStore.getState() exposes working action references', () => {
+			useNotificationStore.getState().addToast(createToast({ id: 'from-actions' }));
 			expect(useNotificationStore.getState().toasts[0].id).toBe('from-actions');
 		});
 
-		it('getNotificationActions.clearToasts works', () => {
+		it('useNotificationStore.getState().clearToasts works', () => {
 			notifyToast({ type: 'info', title: 'A', message: 'a' });
-			getNotificationActions().clearToasts();
+			useNotificationStore.getState().clearToasts();
 			expect(useNotificationStore.getState().toasts).toHaveLength(0);
 		});
 	});
@@ -561,6 +775,7 @@ describe('notificationStore', () => {
 			expect(actions1.setDefaultDuration).toBe(actions2.setDefaultDuration);
 			expect(actions1.setAudioFeedback).toBe(actions2.setAudioFeedback);
 			expect(actions1.setOsNotifications).toBe(actions2.setOsNotifications);
+			expect(actions1.setIdleNotification).toBe(actions2.setIdleNotification);
 		});
 	});
 
@@ -580,6 +795,8 @@ describe('notificationStore', () => {
 					audioFeedbackEnabled: false,
 					audioFeedbackCommand: '',
 					osNotificationsEnabled: true,
+					idleNotificationEnabled: false,
+					idleNotificationCommand: '',
 				},
 			});
 
@@ -637,7 +854,7 @@ describe('notificationStore', () => {
 		});
 
 		it('handles speak() rejection gracefully', async () => {
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 			mockSpeak.mockRejectedValueOnce(new Error('speak failed'));
 			useNotificationStore.getState().setAudioFeedback(true, 'say');
 			notifyToast({ type: 'info', title: 'Test', message: 'Hello' });
@@ -646,19 +863,21 @@ describe('notificationStore', () => {
 			await vi.advanceTimersByTimeAsync(0);
 			expect(consoleSpy).toHaveBeenCalledWith(
 				'[notificationStore] Custom notification failed:',
+				undefined,
 				expect.any(Error)
 			);
 			consoleSpy.mockRestore();
 		});
 
 		it('handles show() rejection gracefully', async () => {
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 			mockShow.mockRejectedValueOnce(new Error('show failed'));
 			notifyToast({ type: 'info', title: 'Test', message: 'Hello' });
 
 			await vi.advanceTimersByTimeAsync(0);
 			expect(consoleSpy).toHaveBeenCalledWith(
 				'[notificationStore] Failed to show OS notification:',
+				undefined,
 				expect.any(Error)
 			);
 			consoleSpy.mockRestore();
@@ -666,7 +885,7 @@ describe('notificationStore', () => {
 	});
 
 	// ==========================================================================
-	// notifyToast — logging disabled reason variants
+	// notifyToast - logging disabled reason variants
 	// ==========================================================================
 
 	describe('notifyToast logging disabled reasons', () => {
@@ -714,7 +933,7 @@ describe('notificationStore', () => {
 	});
 
 	// ==========================================================================
-	// notifyToast — OS notification body construction
+	// notifyToast - OS notification body construction
 	// ==========================================================================
 
 	describe('notifyToast OS notification body variants', () => {
@@ -756,7 +975,7 @@ describe('notificationStore', () => {
 	});
 
 	// ==========================================================================
-	// notifyToast — optional field passthrough
+	// notifyToast - optional field passthrough
 	// ==========================================================================
 
 	describe('notifyToast field passthrough', () => {
@@ -787,10 +1006,54 @@ describe('notificationStore', () => {
 			const toast = useNotificationStore.getState().toasts[0];
 			expect(toast.taskDuration).toBe(5000);
 		});
+
+		it('preserves clickAction (jump-session) on toast', () => {
+			notifyToast({
+				type: 'info',
+				title: 'Agent ready',
+				message: 'Click to jump.',
+				clickAction: { kind: 'jump-session', sessionId: 'sess-9', tabId: 'tab-3' },
+			});
+			const toast = useNotificationStore.getState().toasts[0];
+			expect(toast.clickAction).toEqual({
+				kind: 'jump-session',
+				sessionId: 'sess-9',
+				tabId: 'tab-3',
+			});
+		});
+
+		it('preserves clickAction (open-file) on toast', () => {
+			notifyToast({
+				type: 'info',
+				title: 'Diff ready',
+				message: 'Open the patch.',
+				clickAction: { kind: 'open-file', sessionId: 'sess-9', path: '/tmp/foo.ts' },
+			});
+			const toast = useNotificationStore.getState().toasts[0];
+			expect(toast.clickAction).toEqual({
+				kind: 'open-file',
+				sessionId: 'sess-9',
+				path: '/tmp/foo.ts',
+			});
+		});
+
+		it('preserves clickAction (open-url) on toast', () => {
+			notifyToast({
+				type: 'info',
+				title: 'Run finished',
+				message: 'View logs.',
+				clickAction: { kind: 'open-url', url: 'https://example.com/logs' },
+			});
+			const toast = useNotificationStore.getState().toasts[0];
+			expect(toast.clickAction).toEqual({
+				kind: 'open-url',
+				url: 'https://example.com/logs',
+			});
+		});
 	});
 
 	// ==========================================================================
-	// notifyToast — concurrent auto-dismiss timers
+	// notifyToast - concurrent auto-dismiss timers
 	// ==========================================================================
 
 	describe('notifyToast concurrent auto-dismiss', () => {
@@ -822,14 +1085,14 @@ describe('notificationStore', () => {
 			useNotificationStore.getState().removeToast(toastId);
 			expect(useNotificationStore.getState().toasts).toHaveLength(0);
 
-			// Timer fires but toast already gone — should not error
+			// Timer fires but toast already gone - should not error
 			vi.advanceTimersByTime(5000);
 			expect(useNotificationStore.getState().toasts).toHaveLength(0);
 		});
 	});
 
 	// ==========================================================================
-	// notifyToast — duration edge cases
+	// notifyToast - duration edge cases
 	// ==========================================================================
 
 	describe('notifyToast duration edge cases', () => {

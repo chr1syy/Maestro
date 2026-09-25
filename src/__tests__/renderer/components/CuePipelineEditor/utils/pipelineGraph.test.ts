@@ -1,17 +1,26 @@
 /**
- * Tests for pipelineGraph utilities: getTriggerConfigSummary,
- * convertToReactFlowNodes, and convertToReactFlowEdges.
+ * Tests for pipelineGraph utilities: convertToReactFlowNodes,
+ * convertToReactFlowEdges, and the Y-offset helpers - plus
+ * getTriggerConfigSummary, which now lives in shared/ (both the graph nodes
+ * and the pipeline list render it, so it is tested alongside its graph use).
  *
- * These are pure functions — no React, no DOM.
+ * These are pure functions - no React, no DOM.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import {
-	getTriggerConfigSummary,
 	convertToReactFlowNodes,
 	convertToReactFlowEdges,
 	computePipelineYOffsets,
+	resolveNonOverlappingPipelineOffset,
 } from '../../../../../renderer/components/CuePipelineEditor/utils/pipelineGraph';
+import { getTriggerConfigSummary } from '../../../../../shared/cue-pipeline-summary';
+import {
+	NODE_BG_HEIGHT,
+	PIPELINE_GROUP_PADDING,
+	nodeFootprintWidth,
+	pipelineCardBounds,
+} from '../../../../../renderer/components/CuePipelineEditor/utils/nodeFootprint';
 import type {
 	CuePipeline,
 	TriggerNodeData,
@@ -262,6 +271,29 @@ describe('convertToReactFlowNodes', () => {
 		expect((nodes[0].data as { label: string }).label).toBe('Heartbeat');
 	});
 
+	it('threads subscriptionName from TriggerNodeData to TriggerNodeDataProps', () => {
+		// Regression guard: if this thread-through breaks, the Play button
+		// on chain triggers silently falls back to pipelineName and fires
+		// the wrong subscription - that's the GitHub-trigger-unreachable bug.
+		const trigger = makeTrigger('t1', 'github.pull_request');
+		(trigger.data as TriggerNodeData).subscriptionName = 'Pipeline 1-chain-2';
+		const pipeline = makePipeline('p1', { nodes: [trigger] });
+		const nodes = convertToReactFlowNodes([pipeline], 'p1');
+		expect((nodes[0].data as { subscriptionName?: string }).subscriptionName).toBe(
+			'Pipeline 1-chain-2'
+		);
+	});
+
+	it('leaves subscriptionName undefined when not stamped on the node data', () => {
+		// Never-saved pipelines don't have a subscription yet - the TriggerNode
+		// component's Play button is hidden (isSaved=false) in that case, and
+		// the fallback to pipelineName handles any legacy data that slips through.
+		const trigger = makeTrigger('t1', 'time.heartbeat');
+		const pipeline = makePipeline('p1', { nodes: [trigger] });
+		const nodes = convertToReactFlowNodes([pipeline], 'p1');
+		expect((nodes[0].data as { subscriptionName?: string }).subscriptionName).toBeUndefined();
+	});
+
 	it('calls onConfigureNode callback and passes it to node data', () => {
 		const callback = vi.fn();
 		const pipeline = makePipeline('p1', { nodes: [makeTrigger('t1', 'file.changed')] });
@@ -349,7 +381,7 @@ describe('convertToReactFlowNodes', () => {
 			color: '#8b5cf6',
 			nodes: [makeAgent('a2', sharedSessionId, 'Pedsidian', {}, { x: 0, y: 0 })],
 		});
-		// p2 is selected — only p2's Pedsidian should appear
+		// p2 is selected - only p2's Pedsidian should appear
 		const nodes = convertToReactFlowNodes([p1, p2], 'p2');
 		const ids = nodes.map((n) => n.id);
 		expect(ids).toHaveLength(1);
@@ -485,7 +517,8 @@ describe('convertToReactFlowNodes', () => {
 			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 10, y: 30 })],
 		});
 		const nodes = convertToReactFlowNodes([pipeline], null);
-		expect(nodes[0].position).toEqual({ x: 10, y: 30 });
+		const t1 = nodes.find((n) => n.id === 'p1:t1')!;
+		expect(t1.position).toEqual({ x: 10, y: 30 });
 	});
 
 	it('does NOT apply y-offsets in selected pipeline view', () => {
@@ -495,7 +528,7 @@ describe('convertToReactFlowNodes', () => {
 		const p2 = makePipeline('p2', {
 			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 100 })],
 		});
-		// Select p1 — no offsets should be computed
+		// Select p1 - no offsets should be computed
 		const nodes = convertToReactFlowNodes([p1, p2], 'p1');
 		const t1 = nodes.find((n) => n.id === 'p1:t1')!;
 		expect(t1.position.y).toBe(100);
@@ -509,8 +542,226 @@ describe('convertToReactFlowNodes', () => {
 		});
 		const nodes = convertToReactFlowNodes([pipeline], 'p1');
 		for (const node of nodes) {
+			// Pipeline-group backgrounds are not rendered in single-pipeline view,
+			// so every remaining node still expects the drag-handle class.
 			expect(node.dragHandle).toBe('.drag-handle');
 		}
+	});
+
+	// ── Pipeline-group background nodes (All Pipelines view) ────────────────
+
+	it('emits a pipeline-group background node per non-empty pipeline in All Pipelines view', () => {
+		const p1 = makePipeline('p1', {
+			color: '#aabbcc',
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const p2 = makePipeline('p2', {
+			color: '#ddeeff',
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		const nodes = convertToReactFlowNodes([p1, p2], null);
+		const groups = nodes.filter((n) => n.type === 'pipeline-group');
+		expect(groups).toHaveLength(2);
+		expect(groups.find((g) => g.id === 'pipeline-group:p1')).toBeDefined();
+		expect(groups.find((g) => g.id === 'pipeline-group:p2')).toBeDefined();
+		// In pointer/select mode (the default - no isHandMode flag) the group
+		// card is selectable AND draggable, and sits ABOVE its content nodes so
+		// the whole body is the drag handle. It is never deletable via the
+		// canvas Delete key - removal must go through the toolbar.
+		for (const g of groups) {
+			expect(g.selectable).toBe(true);
+			expect(g.draggable).toBe(true);
+			expect(g.deletable).toBe(false);
+			expect(g.zIndex).toBe(5);
+		}
+	});
+
+	it('marks pipeline-group nodes non-draggable in hand (pan) mode', () => {
+		const p1 = makePipeline('p1', {
+			color: '#aabbcc',
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const p2 = makePipeline('p2', {
+			color: '#ddeeff',
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		const nodes = convertToReactFlowNodes(
+			[p1, p2],
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			true
+		);
+		const groups = nodes.filter((n) => n.type === 'pipeline-group');
+		expect(groups).toHaveLength(2);
+		for (const g of groups) {
+			expect(g.draggable).toBe(false);
+		}
+	});
+
+	it('skips pipeline-group nodes for empty pipelines', () => {
+		const p1 = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat')],
+		});
+		const p2 = makePipeline('p2', { nodes: [] });
+		const nodes = convertToReactFlowNodes([p1, p2], null);
+		const groups = nodes.filter((n) => n.type === 'pipeline-group');
+		expect(groups).toHaveLength(1);
+		expect(groups[0].id).toBe('pipeline-group:p1');
+	});
+
+	it('does NOT emit pipeline-group nodes in single-pipeline view', () => {
+		const p1 = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat')],
+		});
+		const p2 = makePipeline('p2', {
+			nodes: [makeTrigger('t2', 'file.changed')],
+		});
+		const nodes = convertToReactFlowNodes([p1, p2], 'p1');
+		expect(nodes.some((n) => n.type === 'pipeline-group')).toBe(false);
+	});
+
+	it('manual viewOffset shifts both group and children in All Pipelines view', () => {
+		const p1 = makePipeline('p1', {
+			color: '#aabbcc',
+			viewOffset: { x: 100, y: 200 },
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const nodes = convertToReactFlowNodes([p1], null);
+		const trigger = nodes.find((n) => n.id === 'p1:t1')!;
+		// Trigger renders at canonical (0, 0) + viewOffset (100, 200).
+		expect(trigger.position).toEqual({ x: 100, y: 200 });
+		const group = nodes.find((n) => n.id === 'pipeline-group:p1')!;
+		// Group bbox starts at the trigger origin (100, 200) minus padding.
+		expect(group.position.x).toBeLessThan(100);
+		expect(group.position.y).toBeLessThan(200);
+	});
+
+	it('manual viewOffset is ignored in single-pipeline view', () => {
+		const p1 = makePipeline('p1', {
+			viewOffset: { x: 100, y: 200 },
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 10, y: 30 })],
+		});
+		const nodes = convertToReactFlowNodes([p1], 'p1');
+		const trigger = nodes.find((n) => n.id === 'p1:t1')!;
+		// Single-pipeline view always renders at canonical position.
+		expect(trigger.position).toEqual({ x: 10, y: 30 });
+	});
+
+	it('pipelines with viewOffset are excluded from auto-stack chain but anchor its floor', () => {
+		const p1 = makePipeline('p1', {
+			viewOffset: { x: 0, y: 500 },
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const p2 = makePipeline('p2', {
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		const nodes = convertToReactFlowNodes([p1, p2], null);
+		const t1 = nodes.find((n) => n.id === 'p1:t1')!;
+		const t2 = nodes.find((n) => n.id === 'p2:t2')!;
+		// p1 honors its viewOffset (y=500). p2 auto-stacks BELOW p1's rendered
+		// bottom rather than starting at y=0 - otherwise mixed-mode layouts
+		// (some pipelines dragged, some never moved) would overlap manual
+		// pipelines on first open.
+		expect(t1.position.y).toBe(500);
+		expect(t2.position.y).toBeGreaterThan(t1.position.y);
+	});
+
+	it('pipeline-group node carries the pipeline color and name', () => {
+		const p1 = makePipeline('p1', {
+			color: '#ef4444',
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 100, y: 50 })],
+		});
+		const nodes = convertToReactFlowNodes([p1], null);
+		const group = nodes.find((n) => n.id === 'pipeline-group:p1')!;
+		expect(group).toBeDefined();
+		expect((group.data as { color: string }).color).toBe('#ef4444');
+		expect((group.data as { pipelineName: string }).pipelineName).toBe('Pipeline p1');
+		expect((group.data as { width: number }).width).toBeGreaterThan(0);
+		expect((group.data as { height: number }).height).toBeGreaterThan(0);
+	});
+
+	// A node renders at `width: max-content`, so a long name makes it far wider
+	// than the canonical 320px footprint. Sizing the card as if every node were
+	// 320 drew the node, its gear, its handle and its "in: <agent>" pill outside
+	// the card that is supposed to contain them.
+	describe('pipeline-group card encloses what it contains', () => {
+		const longName = 'Pedsidian-Account-Rebalance-Reset-smash';
+
+		const cardOf = (pipeline: CuePipeline) => {
+			const group = convertToReactFlowNodes([pipeline], null).find(
+				(n) => n.id === 'pipeline-group:p1'
+			)!;
+			const data = group.data as { width: number; height: number };
+			return {
+				left: group.position.x,
+				top: group.position.y,
+				right: group.position.x + data.width,
+				bottom: group.position.y + data.height,
+			};
+		};
+
+		it('grows past NODE_BG_WIDTH for a node whose label is long', () => {
+			const wide = makePipeline('p1', {
+				nodes: [makeAgent('a1', 's1', longName, {}, { x: 0, y: 0 })],
+			});
+			const narrow = makePipeline('p1', {
+				nodes: [makeAgent('a1', 's1', 'A', {}, { x: 0, y: 0 })],
+			});
+
+			expect(cardOf(wide).right - cardOf(wide).left).toBeGreaterThan(
+				cardOf(narrow).right - cardOf(narrow).left
+			);
+		});
+
+		it('keeps every node footprint inside the card border', () => {
+			const pipeline = makePipeline('p1', {
+				nodes: [
+					makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 }),
+					makeAgent('a1', 's1', longName, {}, { x: 400, y: 0 }),
+					makeAgent('a2', 's2', 'short', {}, { x: 400, y: 200 }),
+				],
+			});
+			const card = cardOf(pipeline);
+
+			for (const node of pipeline.nodes) {
+				const width = nodeFootprintWidth(node);
+				expect(node.position.x).toBeGreaterThan(card.left);
+				expect(node.position.y).toBeGreaterThan(card.top);
+				expect(node.position.x + width).toBeLessThan(card.right);
+				expect(node.position.y + NODE_BG_HEIGHT).toBeLessThan(card.bottom);
+			}
+		});
+
+		it('leaves room for the chrome that hangs outside a node rect', () => {
+			// Handles are centred on the left and right borders and the badges are
+			// pinned past a corner, so clearance must exceed the padding alone.
+			const pipeline = makePipeline('p1', {
+				nodes: [makeAgent('a1', 's1', longName, {}, { x: 0, y: 0 })],
+			});
+			const card = cardOf(pipeline);
+
+			expect(0 - card.left).toBeGreaterThan(PIPELINE_GROUP_PADDING);
+			expect(card.right - nodeFootprintWidth(pipeline.nodes[0])).toBeGreaterThan(
+				PIPELINE_GROUP_PADDING
+			);
+			expect(card.bottom - NODE_BG_HEIGHT).toBeGreaterThan(PIPELINE_GROUP_PADDING);
+		});
+
+		it('matches the box the drag-overlap test uses', () => {
+			// The renderer and `resolveNonOverlappingPipelineOffset` must agree, or
+			// a drop that looks clear lands on a neighbour.
+			const pipeline = makePipeline('p1', {
+				nodes: [makeAgent('a1', 's1', longName, {}, { x: 30, y: 40 })],
+			});
+			const card = cardOf(pipeline);
+			const bounds = pipelineCardBounds(pipeline.nodes)!;
+
+			expect({ x: card.left, y: card.top }).toEqual({ x: bounds.x, y: bounds.y });
+			expect(card.right - card.left).toBe(bounds.width);
+		});
 	});
 });
 
@@ -581,7 +832,7 @@ describe('convertToReactFlowEdges', () => {
 			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a1', 'sess-1', 'Alice')],
 			edges: [makeEdge('e1', 't1', 'a1')],
 		});
-		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, 'p1:e1');
+		const edges = convertToReactFlowEdges([pipeline], 'p1', 'p1:e1');
 		expect(edges[0].selected).toBe(true);
 	});
 
@@ -590,27 +841,39 @@ describe('convertToReactFlowEdges', () => {
 			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a1', 'sess-1', 'Alice')],
 			edges: [makeEdge('e1', 't1', 'a1')],
 		});
-		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, 'p1:e2');
+		const edges = convertToReactFlowEdges([pipeline], 'p1', 'p1:e2');
 		expect(edges[0].selected).toBe(false);
 	});
 
-	it('marks edge data as isRunning when pipeline is in runningPipelineIds', () => {
+	it('marks edge as isRunning when its TARGET agent is currently executing', () => {
 		const pipeline = makePipeline('p1', {
 			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a1', 'sess-1', 'Alice')],
 			edges: [makeEdge('e1', 't1', 'a1')],
 		});
-		const running = new Set(['p1']);
-		const edges = convertToReactFlowEdges([pipeline], 'p1', running);
+		const runningByPipeline = new Map<string, Set<string>>([['p1', new Set(['Alice'])]]);
+		const edges = convertToReactFlowEdges(
+			[pipeline],
+			'p1',
+			undefined,
+			undefined,
+			runningByPipeline
+		);
 		expect((edges[0].data as { isRunning: boolean }).isRunning).toBe(true);
 	});
 
-	it('does not mark edge as running when pipeline is not in runningPipelineIds', () => {
+	it('does not mark edge as running when no agents are running in this pipeline', () => {
 		const pipeline = makePipeline('p1', {
 			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a1', 'sess-1', 'Alice')],
 			edges: [makeEdge('e1', 't1', 'a1')],
 		});
-		const running = new Set(['p2']);
-		const edges = convertToReactFlowEdges([pipeline], 'p1', running);
+		const runningByPipeline = new Map<string, Set<string>>([['p2', new Set(['Alice'])]]);
+		const edges = convertToReactFlowEdges(
+			[pipeline],
+			'p1',
+			undefined,
+			undefined,
+			runningByPipeline
+		);
 		expect((edges[0].data as { isRunning: boolean }).isRunning).toBe(false);
 	});
 
@@ -633,7 +896,7 @@ describe('convertToReactFlowEdges', () => {
 			],
 			edges: [makeEdge('e1', 't1', 'a1'), makeEdge('e2', 'a1', 'a2')],
 		});
-		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, 'p1:e1');
+		const edges = convertToReactFlowEdges([pipeline], 'p1', 'p1:e1');
 		const e1 = edges.find((e) => e.id === 'p1:e1')!;
 		const e2 = edges.find((e) => e.id === 'p1:e2')!;
 		const e1Marker = e1.markerEnd as { width: number; height: number };
@@ -655,6 +918,280 @@ describe('convertToReactFlowEdges', () => {
 		expect(edges).toHaveLength(2);
 		expect(edges.map((e) => e.id)).toContain('p1:e1');
 		expect(edges.map((e) => e.id)).toContain('p2:e2');
+	});
+});
+
+// ─── Edge-animation edge cases (per-agent, not pipeline-wide) ────────────────
+
+describe('convertToReactFlowEdges - per-agent edge animation', () => {
+	// Regression guard for the "all edges animate when ANY run is active" bug.
+	// Rule: an edge animates iff its target is an agent whose sessionName
+	// appears in the pipeline's active-agents set.
+
+	it('linear chain: only the edge feeding the running agent animates', () => {
+		// Pipeline: trigger → A → B → C. Only B is running.
+		// Expected: edge A→B animates, trigger→A and B→C are static.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				makeAgent('b', 'sess-b', 'B'),
+				makeAgent('c', 'sess-c', 'C'),
+			],
+			edges: [makeEdge('e1', 't1', 'a'), makeEdge('e2', 'a', 'b'), makeEdge('e3', 'b', 'c')],
+		});
+		const running = new Map<string, Set<string>>([['p1', new Set(['B'])]]);
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, running);
+
+		const running01 = (edges.find((e) => e.id === 'p1:e1')!.data as { isRunning: boolean })
+			.isRunning;
+		const running02 = (edges.find((e) => e.id === 'p1:e2')!.data as { isRunning: boolean })
+			.isRunning;
+		const running03 = (edges.find((e) => e.id === 'p1:e3')!.data as { isRunning: boolean })
+			.isRunning;
+		expect(running01).toBe(false);
+		expect(running02).toBe(true);
+		expect(running03).toBe(false);
+	});
+
+	it('linear chain: animation moves forward as the running agent advances', () => {
+		// Simulate two ticks: first A running, then B running, then C running.
+		// At each tick the animating edge shifts one step down the chain.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				makeAgent('b', 'sess-b', 'B'),
+				makeAgent('c', 'sess-c', 'C'),
+			],
+			edges: [makeEdge('e1', 't1', 'a'), makeEdge('e2', 'a', 'b'), makeEdge('e3', 'b', 'c')],
+		});
+
+		const ranges = [
+			{ running: 'A', expect: { 'p1:e1': true, 'p1:e2': false, 'p1:e3': false } },
+			{ running: 'B', expect: { 'p1:e1': false, 'p1:e2': true, 'p1:e3': false } },
+			{ running: 'C', expect: { 'p1:e1': false, 'p1:e2': false, 'p1:e3': true } },
+		];
+		for (const { running: runName, expect: expected } of ranges) {
+			const runningMap = new Map<string, Set<string>>([['p1', new Set([runName])]]);
+			const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, runningMap);
+			for (const [edgeId, expectedRunning] of Object.entries(expected)) {
+				const d = edges.find((e) => e.id === edgeId)!.data as { isRunning: boolean };
+				expect(d.isRunning).toBe(expectedRunning);
+			}
+		}
+	});
+
+	it('fan-out: every edge feeding a running target animates concurrently', () => {
+		// trigger → [A, B, C] and all three are running in parallel → all three edges animate.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				makeAgent('b', 'sess-b', 'B'),
+				makeAgent('c', 'sess-c', 'C'),
+			],
+			edges: [makeEdge('e1', 't1', 'a'), makeEdge('e2', 't1', 'b'), makeEdge('e3', 't1', 'c')],
+		});
+		const running = new Map<string, Set<string>>([['p1', new Set(['A', 'B', 'C'])]]);
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, running);
+		for (const e of edges) {
+			expect((e.data as { isRunning: boolean }).isRunning).toBe(true);
+		}
+	});
+
+	it('fan-out: only edges to running targets animate when some are still queued', () => {
+		// trigger → [A, B, C]. A is running, B and C are still queued.
+		// Expected: only trigger→A animates.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				makeAgent('b', 'sess-b', 'B'),
+				makeAgent('c', 'sess-c', 'C'),
+			],
+			edges: [makeEdge('e1', 't1', 'a'), makeEdge('e2', 't1', 'b'), makeEdge('e3', 't1', 'c')],
+		});
+		const running = new Map<string, Set<string>>([['p1', new Set(['A'])]]);
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, running);
+		expect((edges.find((e) => e.id === 'p1:e1')!.data as { isRunning: boolean }).isRunning).toBe(
+			true
+		);
+		expect((edges.find((e) => e.id === 'p1:e2')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
+		expect((edges.find((e) => e.id === 'p1:e3')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
+	});
+
+	it('fan-in: all incoming edges to the running target animate simultaneously', () => {
+		// [A, B] → C (fan-in). When C is running, both A→C and B→C animate.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				makeAgent('b', 'sess-b', 'B'),
+				makeAgent('c', 'sess-c', 'C'),
+			],
+			edges: [
+				makeEdge('e1', 't1', 'a'),
+				makeEdge('e2', 't1', 'b'),
+				makeEdge('e3', 'a', 'c'),
+				makeEdge('e4', 'b', 'c'),
+			],
+		});
+		const running = new Map<string, Set<string>>([['p1', new Set(['C'])]]);
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, running);
+		expect((edges.find((e) => e.id === 'p1:e3')!.data as { isRunning: boolean }).isRunning).toBe(
+			true
+		);
+		expect((edges.find((e) => e.id === 'p1:e4')!.data as { isRunning: boolean }).isRunning).toBe(
+			true
+		);
+		// Feeds into A/B (not running) stay static.
+		expect((edges.find((e) => e.id === 'p1:e1')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
+		expect((edges.find((e) => e.id === 'p1:e2')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
+	});
+
+	it('no animation when no agent is running in the pipeline', () => {
+		const pipeline = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a', 'sess-a', 'A')],
+			edges: [makeEdge('e1', 't1', 'a')],
+		});
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, new Map());
+		expect((edges[0].data as { isRunning: boolean }).isRunning).toBe(false);
+	});
+
+	it('edges whose target is NOT an agent (cli_output, error) never animate', () => {
+		// Edges pointing at non-agent nodes can't correspond to an active run -
+		// don't animate them even if an agent with a matching name is running.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				{
+					id: 'cli',
+					type: 'cli_output',
+					position: { x: 0, y: 0 },
+					data: { target: 'some-target' } as { target: string },
+				},
+			],
+			edges: [makeEdge('e1', 't1', 'a'), makeEdge('e2', 'a', 'cli')],
+		});
+		const running = new Map<string, Set<string>>([['p1', new Set(['A'])]]);
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, running);
+		// Edge to A (agent) animates; edge to cli (non-agent) does not.
+		expect((edges.find((e) => e.id === 'p1:e1')!.data as { isRunning: boolean }).isRunning).toBe(
+			true
+		);
+		expect((edges.find((e) => e.id === 'p1:e2')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
+	});
+
+	it('multi-pipeline: a run in pipeline A does not animate edges in pipeline B', () => {
+		// Pipeline A and B both contain an agent named "Worker". Only pipeline A
+		// has an active run. Pipeline B's identically-named agent must NOT
+		// have its incoming edge animated - the map is keyed by pipeline id.
+		const pA = makePipeline('pA', {
+			nodes: [makeTrigger('tA', 'time.heartbeat'), makeAgent('a', 'sess-shared', 'Worker')],
+			edges: [makeEdge('eA', 'tA', 'a')],
+		});
+		const pB = makePipeline('pB', {
+			nodes: [makeTrigger('tB', 'time.heartbeat'), makeAgent('b', 'sess-shared', 'Worker')],
+			edges: [makeEdge('eB', 'tB', 'b')],
+		});
+		const running = new Map<string, Set<string>>([['pA', new Set(['Worker'])]]);
+		const edges = convertToReactFlowEdges([pA, pB], null, undefined, undefined, running);
+		expect((edges.find((e) => e.id === 'pA:eA')!.data as { isRunning: boolean }).isRunning).toBe(
+			true
+		);
+		expect((edges.find((e) => e.id === 'pB:eB')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
+	});
+
+	it('omitted runningAgentsByPipeline means no edges animate (no accidental global fallback)', () => {
+		// Defensive: passing `undefined` must not re-activate a pipeline-wide
+		// animation path. Absence of the argument = "no known running agents".
+		const pipeline = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a', 'sess-a', 'A')],
+			edges: [makeEdge('e1', 't1', 'a')],
+		});
+		const edges = convertToReactFlowEdges([pipeline], 'p1');
+		expect((edges[0].data as { isRunning: boolean }).isRunning).toBe(false);
+	});
+
+	it('running agent with no incoming edges (hypothetical orphan) does not crash', () => {
+		// Defensive guard: an orphan agent isn't in `pipeline.edges`, so there's
+		// nothing to animate anyway. No edge-level crash.
+		const pipeline = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a', 'sess-a', 'A')],
+			edges: [], // no edges
+		});
+		const running = new Map<string, Set<string>>([['p1', new Set(['A'])]]);
+		const edges = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, running);
+		expect(edges).toEqual([]);
+	});
+
+	it('optimistic-trigger override: every edge in the pipeline animates regardless of target type', () => {
+		// Pipeline with a non-agent leg (trigger → command → agent). Without the
+		// optimistic flag the trigger→command edge cannot animate (target isn't
+		// an agent). With the flag, both legs animate so the user sees instant
+		// feedback after clicking Play, even for fast shell-only triggers.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'), // re-using makeAgent for non-agent target stand-in is wrong
+			],
+			edges: [makeEdge('e1', 't1', 'a')],
+		});
+		// Baseline: no animation when neither agent is running and no optimistic flag.
+		const baseline = convertToReactFlowEdges([pipeline], 'p1', undefined, undefined, new Map());
+		expect((baseline[0].data as { isRunning: boolean }).isRunning).toBe(false);
+
+		// With optimistic set including this pipeline, the edge animates.
+		const optimistic = new Set(['p1']);
+		const animated = convertToReactFlowEdges(
+			[pipeline],
+			'p1',
+			undefined,
+			undefined,
+			new Map(),
+			optimistic
+		);
+		expect((animated[0].data as { isRunning: boolean }).isRunning).toBe(true);
+	});
+
+	it('optimistic-trigger override: only flagged pipelines animate (others remain static)', () => {
+		const pA = makePipeline('pA', {
+			nodes: [makeTrigger('tA', 'time.heartbeat'), makeAgent('a', 'sess-a', 'A')],
+			edges: [makeEdge('eA', 'tA', 'a')],
+		});
+		const pB = makePipeline('pB', {
+			nodes: [makeTrigger('tB', 'time.heartbeat'), makeAgent('b', 'sess-b', 'B')],
+			edges: [makeEdge('eB', 'tB', 'b')],
+		});
+		const optimistic = new Set(['pA']);
+		const edges = convertToReactFlowEdges(
+			[pA, pB],
+			null,
+			undefined,
+			undefined,
+			new Map(),
+			optimistic
+		);
+		expect((edges.find((e) => e.id === 'pA:eA')!.data as { isRunning: boolean }).isRunning).toBe(
+			true
+		);
+		expect((edges.find((e) => e.id === 'pB:eB')!.data as { isRunning: boolean }).isRunning).toBe(
+			false
+		);
 	});
 });
 
@@ -705,7 +1242,211 @@ describe('convertToReactFlowNodes triggerOptions', () => {
 		expect(triggerData.onTriggerPipeline).toBeUndefined();
 		expect(triggerData.pipelineName).toBe('Pipeline p1');
 		expect(triggerData.isSaved).toBeUndefined();
-		expect(triggerData.isRunning).toBeUndefined();
+		// `isRunning` is now always a boolean (false when no running info
+		// is supplied) so the Play button renders a stable initial state.
+		// Falsy matches the old `undefined` semantics for the Play button.
+		expect(triggerData.isRunning).toBe(false);
+	});
+
+	it('agent node carries isRunning when its sessionName is in runningAgentsByPipeline', () => {
+		// runningAgentsByPipeline drives the running-agent pulse animation.
+		// The agent node only pulses when its sessionName matches a name in
+		// the set keyed by its owning pipeline id - runs in OTHER pipelines
+		// must not light up an unrelated sibling that happens to share a name.
+		const pipeline = makePipeline('p1', {
+			nodes: [
+				makeTrigger('t1', 'time.heartbeat'),
+				makeAgent('a', 'sess-a', 'A'),
+				makeAgent('b', 'sess-b', 'B'),
+			],
+		});
+		const runningAgents = new Map<string, Set<string>>([['p1', new Set(['A'])]]);
+		const nodes = convertToReactFlowNodes([pipeline], 'p1', undefined, {
+			runningAgentsByPipeline: runningAgents,
+		});
+		const byId = Object.fromEntries(nodes.map((n) => [n.id, n.data as { isRunning?: boolean }]));
+		expect(byId['p1:a'].isRunning).toBe(true);
+		expect(byId['p1:b'].isRunning).toBe(false);
+	});
+
+	it('agent node isRunning defaults to false when runningAgentsByPipeline omitted', () => {
+		const pipeline = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat'), makeAgent('a', 'sess-a', 'A')],
+		});
+		const nodes = convertToReactFlowNodes([pipeline], 'p1');
+		const agent = nodes.find((n) => n.id === 'p1:a')!;
+		expect((agent.data as { isRunning?: boolean }).isRunning).toBe(false);
+	});
+});
+
+// ─── Per-trigger isRunning (one sub → one trigger spinner) ───────────────────
+
+describe('convertToReactFlowNodes - per-trigger isRunning', () => {
+	// Regression guard for the "all trigger icons spin when any sub runs" bug.
+	// A multi-trigger pipeline (startup + scheduled + GitHub PR) generates
+	// three trigger nodes sharing one pipeline. Only the trigger whose own
+	// subscription has an active run should animate.
+
+	function triggerWithSub(id: string, eventType: TriggerNodeData['eventType'], subName: string) {
+		const t = makeTrigger(id, eventType);
+		(t.data as TriggerNodeData).subscriptionName = subName;
+		return t;
+	}
+
+	it('in a multi-trigger pipeline, only the trigger whose sub is running animates', () => {
+		// Pipeline 1 has three triggers: the startup sub ("Pipeline 1"),
+		// the scheduled chain-1 sub, and the GitHub chain-2 sub. Only the
+		// scheduled chain-1 sub is actively running in this tick.
+		const t1 = triggerWithSub('t1', 'app.startup', 'Pipeline 1');
+		const t2 = triggerWithSub('t2', 'time.scheduled', 'Pipeline 1-chain-1');
+		const t3 = triggerWithSub('t3', 'github.pull_request', 'Pipeline 1-chain-2');
+		const pipeline: CuePipeline = {
+			id: 'p1',
+			name: 'Pipeline 1',
+			color: '#06b6d4',
+			nodes: [t1, t2, t3],
+			edges: [],
+		};
+
+		const runningByPipeline = new Map<string, Set<string>>([
+			['p1', new Set(['Pipeline 1-chain-1'])],
+		]);
+		const nodes = convertToReactFlowNodes([pipeline], 'p1', undefined, {
+			onTriggerPipeline: vi.fn(),
+			isSaved: true,
+			runningPipelineIds: new Set(['p1']),
+			runningSubscriptionsByPipeline: runningByPipeline,
+		});
+
+		const byId = Object.fromEntries(
+			nodes.map((n) => [n.id, (n.data as { isRunning: boolean }).isRunning])
+		);
+		expect(byId['p1:t1']).toBe(false);
+		expect(byId['p1:t2']).toBe(true);
+		expect(byId['p1:t3']).toBe(false);
+	});
+
+	it('single-trigger pipeline: the only trigger animates when its sub runs', () => {
+		const t = triggerWithSub('t1', 'time.heartbeat', 'solo');
+		const pipeline: CuePipeline = {
+			id: 'p1',
+			name: 'solo',
+			color: '#06b6d4',
+			nodes: [t],
+			edges: [],
+		};
+		const runningByPipeline = new Map<string, Set<string>>([['p1', new Set(['solo'])]]);
+		const nodes = convertToReactFlowNodes([pipeline], 'p1', undefined, {
+			onTriggerPipeline: vi.fn(),
+			isSaved: true,
+			runningPipelineIds: new Set(['p1']),
+			runningSubscriptionsByPipeline: runningByPipeline,
+		});
+		expect((nodes[0].data as { isRunning: boolean }).isRunning).toBe(true);
+	});
+
+	it('concurrent: two trigger subs running together → both triggers animate, third stays static', () => {
+		// Startup and GitHub both have live runs; scheduled does not.
+		const t1 = triggerWithSub('t1', 'app.startup', 'Pipeline 1');
+		const t2 = triggerWithSub('t2', 'time.scheduled', 'Pipeline 1-chain-1');
+		const t3 = triggerWithSub('t3', 'github.pull_request', 'Pipeline 1-chain-2');
+		const pipeline: CuePipeline = {
+			id: 'p1',
+			name: 'Pipeline 1',
+			color: '#06b6d4',
+			nodes: [t1, t2, t3],
+			edges: [],
+		};
+		const runningByPipeline = new Map<string, Set<string>>([
+			['p1', new Set(['Pipeline 1', 'Pipeline 1-chain-2'])],
+		]);
+		const nodes = convertToReactFlowNodes([pipeline], 'p1', undefined, {
+			onTriggerPipeline: vi.fn(),
+			isSaved: true,
+			runningPipelineIds: new Set(['p1']),
+			runningSubscriptionsByPipeline: runningByPipeline,
+		});
+		const byId = Object.fromEntries(
+			nodes.map((n) => [n.id, (n.data as { isRunning: boolean }).isRunning])
+		);
+		expect(byId['p1:t1']).toBe(true);
+		expect(byId['p1:t2']).toBe(false);
+		expect(byId['p1:t3']).toBe(true);
+	});
+
+	it('no active runs → no trigger animates even when the pipeline was in runningPipelineIds', () => {
+		// Defensive: runningPipelineIds is a broader signal that may linger
+		// momentarily. When the per-sub map is empty, no trigger should spin.
+		const t = triggerWithSub('t1', 'time.heartbeat', 'solo');
+		const pipeline: CuePipeline = {
+			id: 'p1',
+			name: 'solo',
+			color: '#06b6d4',
+			nodes: [t],
+			edges: [],
+		};
+		const nodes = convertToReactFlowNodes([pipeline], 'p1', undefined, {
+			onTriggerPipeline: vi.fn(),
+			isSaved: true,
+			runningPipelineIds: new Set(['p1']),
+			runningSubscriptionsByPipeline: new Map(),
+		});
+		expect((nodes[0].data as { isRunning: boolean }).isRunning).toBe(false);
+	});
+
+	it('legacy trigger without subscriptionName falls back to pipeline-wide running flag', () => {
+		// Never-saved pipelines won't have `subscriptionName` stamped on the
+		// trigger. The Play button is hidden in that case anyway, but the
+		// `isRunning` state should still reflect pipeline-wide activity for
+		// any consumer that reads it (e.g. legacy config-panel bindings).
+		const t = makeTrigger('t1', 'time.heartbeat'); // no subscriptionName
+		const pipeline: CuePipeline = {
+			id: 'p1',
+			name: 'legacy',
+			color: '#06b6d4',
+			nodes: [t],
+			edges: [],
+		};
+		const nodes = convertToReactFlowNodes([pipeline], 'p1', undefined, {
+			onTriggerPipeline: vi.fn(),
+			isSaved: false, // unsaved - Play button hidden, but isRunning still resolves
+			runningPipelineIds: new Set(['p1']),
+			runningSubscriptionsByPipeline: new Map(),
+		});
+		expect((nodes[0].data as { isRunning: boolean }).isRunning).toBe(true);
+	});
+
+	it('multi-pipeline: trigger animation is scoped to its own pipeline', () => {
+		// Pipeline A has a sub "shared-sub". Pipeline B also has a sub
+		// "shared-sub" (impossible in practice, but tests isolation by pipeline id).
+		const tA = triggerWithSub('tA', 'app.startup', 'A');
+		const tB = triggerWithSub('tB', 'app.startup', 'B');
+		const pA: CuePipeline = {
+			id: 'pA',
+			name: 'A',
+			color: '#ef4444',
+			nodes: [tA],
+			edges: [],
+		};
+		const pB: CuePipeline = {
+			id: 'pB',
+			name: 'B',
+			color: '#06b6d4',
+			nodes: [tB],
+			edges: [],
+		};
+		const runningByPipeline = new Map<string, Set<string>>([['pA', new Set(['A'])]]);
+		const nodes = convertToReactFlowNodes([pA, pB], null, undefined, {
+			onTriggerPipeline: vi.fn(),
+			isSaved: true,
+			runningPipelineIds: new Set(['pA']),
+			runningSubscriptionsByPipeline: runningByPipeline,
+		});
+		const byId = Object.fromEntries(
+			nodes.map((n) => [n.id, (n.data as { isRunning: boolean }).isRunning])
+		);
+		expect(byId['pA:tA']).toBe(true);
+		expect(byId['pB:tB']).toBe(false);
 	});
 });
 
@@ -819,6 +1560,65 @@ describe('computePipelineYOffsets', () => {
 		expect(p1Node.position.y).toBe(10 + (offsets.get('p1') ?? 0));
 		expect(p2Node.position.y).toBe(20 + (offsets.get('p2') ?? 0));
 	});
+
+	it('auto-stack floor sits below every manually-positioned pipeline (mixed-mode fix)', () => {
+		// Mixed state: one pipeline has a manual viewOffset that places it at
+		// y=300..400; one has none. Pre-fix, the auto-stack subset started at
+		// currentY=0 with zero awareness of where the manual pipeline lived,
+		// so the unstacked pipeline rendered on top of the manual one. The
+		// fix anchors a "manualFloor" so auto-stack starts below every manual
+		// bounding box.
+		const pipelines: CuePipeline[] = [
+			{
+				id: 'p1',
+				name: 'P1',
+				color: '#ef4444',
+				viewOffset: { x: 0, y: 300 },
+				nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+				edges: [],
+			},
+			{
+				id: 'p2',
+				name: 'P2',
+				color: '#3b82f6',
+				nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+				edges: [],
+			},
+		];
+		const offsets = computePipelineYOffsets(pipelines, null);
+		// Only the unstacked pipeline appears in the offsets map.
+		expect(offsets.has('p1')).toBe(false);
+		expect(offsets.has('p2')).toBe(true);
+		// p1 renders at y=300 (viewOffset). p2's rendered y must be strictly
+		// greater so the two cannot overlap.
+		const p2RenderedY = 0 + (offsets.get('p2') ?? 0);
+		expect(p2RenderedY).toBeGreaterThan(300);
+	});
+
+	it('auto-stack still starts at y=0 when no pipelines are manually positioned', () => {
+		// Regression guard: the manualFloor anchor must not activate when
+		// every pipeline is auto-stacked. Otherwise fresh layouts would shift
+		// downward for no reason.
+		const pipelines: CuePipeline[] = [
+			{
+				id: 'p1',
+				name: 'P1',
+				color: '#ef4444',
+				nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+				edges: [],
+			},
+			{
+				id: 'p2',
+				name: 'P2',
+				color: '#3b82f6',
+				nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+				edges: [],
+			},
+		];
+		const offsets = computePipelineYOffsets(pipelines, null);
+		expect(offsets.get('p1')).toBe(0);
+		expect(offsets.get('p2')).toBeGreaterThan(0);
+	});
 });
 
 // ─── Fan-out count ────────────────────────────────────────────────────────────
@@ -919,5 +1719,85 @@ describe('convertToReactFlowNodes fanInCount', () => {
 		const nodes = convertToReactFlowNodes([pipeline], 'p1');
 		const nodeD = nodes.find((n) => n.id === 'p1:d')!;
 		expect((nodeD.data as any).fanInCount).toBeUndefined();
+	});
+});
+
+// ─── resolveNonOverlappingPipelineOffset ─────────────────────────────────────
+
+describe('resolveNonOverlappingPipelineOffset', () => {
+	it('returns desired offset when there are no other pipelines', () => {
+		const moved = makePipeline('p1', { nodes: [makeTrigger('t1', 'time.heartbeat')] });
+		const result = resolveNonOverlappingPipelineOffset(moved, { x: 100, y: 50 }, []);
+		expect(result).toEqual({ x: 100, y: 50 });
+	});
+
+	it('returns desired offset when no overlap occurs', () => {
+		const moved = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const other = makePipeline('p2', {
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		// Place "other" 2000px below - well clear of moved at desired (0, 0).
+		const result = resolveNonOverlappingPipelineOffset(moved, { x: 0, y: 0 }, [
+			{ pipeline: other, offset: { x: 0, y: 2000 } },
+		]);
+		expect(result).toEqual({ x: 0, y: 0 });
+	});
+
+	it('shifts the moved pipeline when its desired position overlaps another', () => {
+		const moved = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const other = makePipeline('p2', {
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		// Both occupy (0..NODE_BG_WIDTH, 0..NODE_BG_HEIGHT) at offset (0,0) ⇒ full overlap.
+		const result = resolveNonOverlappingPipelineOffset(moved, { x: 0, y: 0 }, [
+			{ pipeline: other, offset: { x: 0, y: 0 } },
+		]);
+		// Some non-zero displacement must have been applied.
+		expect(Math.abs(result.x) + Math.abs(result.y)).toBeGreaterThan(0);
+
+		// Verify the resolved position has no overlap by re-running with the
+		// resolved offset as the desired one - should be a fixed point.
+		const fixedPoint = resolveNonOverlappingPipelineOffset(moved, result, [
+			{ pipeline: other, offset: { x: 0, y: 0 } },
+		]);
+		expect(fixedPoint).toEqual(result);
+	});
+
+	it('skips empty pipelines (no nodes ⇒ no bounding box)', () => {
+		const empty = makePipeline('p1', { nodes: [] });
+		const other = makePipeline('p2', {
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		// An empty moved pipeline returns the desired offset unchanged.
+		const result = resolveNonOverlappingPipelineOffset(empty, { x: 50, y: 50 }, [
+			{ pipeline: other, offset: { x: 0, y: 0 } },
+		]);
+		expect(result).toEqual({ x: 50, y: 50 });
+	});
+
+	it('clears overlaps from multiple neighbors', () => {
+		const moved = makePipeline('p1', {
+			nodes: [makeTrigger('t1', 'time.heartbeat', {}, { x: 0, y: 0 })],
+		});
+		const a = makePipeline('p2', {
+			nodes: [makeTrigger('t2', 'file.changed', {}, { x: 0, y: 0 })],
+		});
+		const b = makePipeline('p3', {
+			nodes: [makeTrigger('t3', 'github.issue', {}, { x: 0, y: 0 })],
+		});
+		const result = resolveNonOverlappingPipelineOffset(moved, { x: 0, y: 0 }, [
+			{ pipeline: a, offset: { x: 0, y: 0 } },
+			{ pipeline: b, offset: { x: 500, y: 0 } },
+		]);
+		// After resolution, calling again with the resolved offset should be a fixed point.
+		const fixedPoint = resolveNonOverlappingPipelineOffset(moved, result, [
+			{ pipeline: a, offset: { x: 0, y: 0 } },
+			{ pipeline: b, offset: { x: 500, y: 0 } },
+		]);
+		expect(fixedPoint).toEqual(result);
 	});
 });

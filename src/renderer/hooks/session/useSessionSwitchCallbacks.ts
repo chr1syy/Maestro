@@ -16,19 +16,19 @@
  */
 
 import { useCallback, useEffect, useMemo } from 'react';
-import type { Session, LogEntry, UsageStats } from '../../types';
-import { useSessionStore } from '../../stores/sessionStore';
-import { useActiveSession } from './useActiveSession';
+import type { LogEntry, UsageStats } from '../../types';
+import type { FlatFileItem } from '../../components/FileSearchModal';
+import type { FileNode } from '../../types/fileTree';
+import { useSessionStore, selectActiveSession, updateSessionWith } from '../../stores/sessionStore';
 import { useUIStore } from '../../stores/uiStore';
-
-/** Helper: update a single session by ID using an updater function */
-function updateSession(sessionId: string, updater: (s: Session) => Session): void {
-	useSessionStore
-		.getState()
-		.setSessions((prev: Session[]) =>
-			prev.map((s: Session) => (s.id === sessionId ? updater(s) : s))
-		);
-}
+import { useFileExplorerStore } from '../../stores/fileExplorerStore';
+import { aiTabFocusFields, focusAiTabInSession } from '../../utils/tabHelpers';
+import { outputSearchKeyFor } from '../../utils/outputSearch';
+import type { CrossTabSearchJumpTarget } from '../../components/CrossTabSearchModal';
+import { subscribeToInAppDeepLinks } from '../../utils/openMaestroLink';
+import type { ParsedDeepLink } from '../../../shared/types';
+import { isWebDesktop } from '../../utils/runtimeContext';
+import { noteDesktopAiTabSelection } from '../../utils/desktopTabSelectionSync';
 
 // ============================================================================
 // Dependencies interface
@@ -37,16 +37,24 @@ function updateSession(sessionId: string, updater: (s: Session) => Session): voi
 export interface UseSessionSwitchCallbacksDeps {
 	/** setActiveSessionId wrapper that also dismisses active group chat */
 	setActiveSessionId: (id: string) => void;
-	/** Resume a provider session, opening as a new tab or switching to existing */
+	/**
+	 * Resume a provider session, opening as a new tab or switching to existing.
+	 * Resolves to `true` when opened/switched, `false` when the session could not
+	 * be loaded (e.g. aged out).
+	 */
 	handleResumeSession: (
 		agentSessionId: string,
 		providedMessages?: LogEntry[],
 		sessionName?: string,
 		starred?: boolean,
-		usageStats?: UsageStats
-	) => Promise<void>;
+		usageStats?: UsageStats,
+		projectPath?: string,
+		opts?: { targetSessionId?: string; suppressUnavailableFlash?: boolean }
+	) => Promise<boolean>;
 	/** Ref to main input textarea (for auto-focus after navigation) */
 	inputRef: React.RefObject<HTMLTextAreaElement | null>;
+	/** Open a file in the file preview tab (from fuzzy file search) */
+	handleFileClick: (file: FileNode, path: string) => void;
 }
 
 // ============================================================================
@@ -69,10 +77,26 @@ export interface UseSessionSwitchCallbacksReturn {
 		sessionName: string,
 		starred?: boolean
 	) => void;
+	/**
+	 * Jump to a starred session from the Left Bar, switching to its owning agent
+	 * and resuming the conversation. Resolves to `false` when the session can no
+	 * longer be loaded (aged out) so the caller can offer to remove the star.
+	 */
+	handleJumpToStarredSession: (
+		agentId: string,
+		projectPath: string,
+		agentSessionId: string,
+		sessionName: string,
+		parentSessionId: string
+	) => Promise<boolean>;
 	/** Switch to an AI tab from utility modals (tab switcher, queue browser, etc.) */
 	handleUtilityTabSelect: (tabId: string) => void;
 	/** Switch to a file tab from utility modals */
 	handleUtilityFileTabSelect: (tabId: string) => void;
+	/** Preview a file selected from fuzzy file search */
+	handleFileSearchSelect: (file: FlatFileItem) => void;
+	/** Jump to one message in one AI tab, from cross-tab message search */
+	handleCrossTabSearchJump: (target: CrossTabSearchJumpTarget) => void;
 }
 
 // ============================================================================
@@ -82,14 +106,15 @@ export interface UseSessionSwitchCallbacksReturn {
 export function useSessionSwitchCallbacks(
 	deps: UseSessionSwitchCallbacksDeps
 ): UseSessionSwitchCallbacksReturn {
-	const { setActiveSessionId, handleResumeSession, inputRef } = deps;
+	const { setActiveSessionId, handleResumeSession, inputRef, handleFileClick } = deps;
 
 	// Self-source stable actions from stores
 	const setSessions = useMemo(() => useSessionStore.getState().setSessions, []);
 	const setGroups = useMemo(() => useSessionStore.getState().setGroups, []);
 	const setActiveFocus = useMemo(() => useUIStore.getState().setActiveFocus, []);
 
-	const activeSession = useActiveSession();
+	// PERF: Never subscribe to the full Session. Utility tab selects resolve the
+	// active agent at event time via getState().
 
 	// Navigate from ProcessMonitor to a specific session/tab
 	const handleProcessMonitorNavigateToSession = useCallback(
@@ -110,9 +135,15 @@ export function useSessionSwitchCallbacks(
 					)
 				);
 			} else if (tabId) {
-				// Switch to the specific AI tab within the session
+				// Switch to the specific AI tab within the session, through the shared
+				// jump transform. It clears the file/terminal/browser selections that
+				// outrank the AI tab (without that, activeTabId changes and the session
+				// still renders its previous non-AI view), AND it REVEALS the tab first.
+				// The reveal is what makes a cross-agent consult row usable: consult tabs
+				// are hidden, so activating one the strip refuses to draw strands the
+				// user on a tab with no chip.
 				setSessions((prev) =>
-					prev.map((s) => (s.id === sessionId ? { ...s, activeTabId: tabId } : s))
+					prev.map((s) => (s.id === sessionId ? focusAiTabInSession(s, tabId) : s))
 				);
 			}
 		},
@@ -122,31 +153,32 @@ export function useSessionSwitchCallbacks(
 	// Navigate from toast notification to a session/tab
 	const handleToastSessionClick = useCallback(
 		(sessionId: string, tabId?: string) => {
+			// Close the Document Graph if it's open. It's a full-screen modal
+			// overlay (fixed inset-0, z-9999), so without this the graph stays
+			// on top of the agent we just jumped to and swallows clicks meant
+			// for it. The toast jump should always land the user on the agent.
+			if (useFileExplorerStore.getState().isGraphViewOpen) {
+				useFileExplorerStore.getState().closeGraphView();
+			}
 			// Switch to the session
 			setActiveSessionId(sessionId);
-			// Clear file preview and switch to AI tab (with specific tab if provided)
-			// This ensures clicking a toast always shows the AI terminal, not a file preview
-			updateSession(sessionId, (s) => {
-				// If a specific tab ID is provided, check if it exists
-				if (tabId && !s.aiTabs?.some((t) => t.id === tabId)) {
-					// Tab doesn't exist, just clear file preview
-					return { ...s, activeFileTabId: null, inputMode: 'ai' };
-				}
-				return {
-					...s,
-					...(tabId && { activeTabId: tabId }),
-					activeFileTabId: null,
-					inputMode: 'ai',
-				};
-			});
+			// Switch to AI tab (with specific tab if provided). Clear file/terminal/browser
+			// active-tab state so the jump actually shows the AI terminal even when the agent
+			// was last viewed on a browser, terminal, or file-preview tab. Without clearing
+			// activeBrowserTabId/activeTerminalTabId, activeTabId changes but the session keeps
+			// rendering its previous non-AI view (the bug: clicking a toast while a browser tab
+			// is active silently leaves the user on the browser tab).
+			// Shared with the thinking status pill: reveals a hidden tab, reopens a
+			// closed one, and focuses the right pane when the tab lives in a tiled group.
+			updateSessionWith(sessionId, (s) => focusAiTabInSession(s, tabId));
 		},
 		[setActiveSessionId]
 	);
 
 	// Deep link navigation handler - processes maestro:// URLs from OS notifications,
-	// external apps, and CLI commands
+	// external apps, CLI commands, AND in-renderer markdown link clicks.
 	useEffect(() => {
-		const unsubscribe = window.maestro.app.onDeepLink((deepLink) => {
+		const handleDeepLink = (deepLink: ParsedDeepLink) => {
 			if (deepLink.action === 'focus') {
 				// Window already brought to foreground by main process
 				return;
@@ -169,9 +201,34 @@ export function useSessionSwitchCallbacks(
 				setGroups((prev) =>
 					prev.map((g) => (g.id === deepLink.groupId ? { ...g, collapsed: false } : g))
 				);
+				return;
 			}
-		});
-		return unsubscribe;
+			if (deepLink.action === 'file' && deepLink.sessionId && deepLink.filePath) {
+				// Open the file inside the target session's file-preview tab.
+				// Re-uses the same CustomEvent pipeline the CLI / remote layer
+				// drives so the open path stays unified. The line number is
+				// surfaced via `detail.line` for callers that want to scroll on
+				// mount; older listeners that ignore it still open the file.
+				const sessions = useSessionStore.getState().sessions;
+				const targetExists = sessions.some((s) => s.id === deepLink.sessionId);
+				if (!targetExists) return;
+				window.dispatchEvent(
+					new CustomEvent('maestro:openFileTab', {
+						detail: {
+							sessionId: deepLink.sessionId,
+							filePath: deepLink.filePath,
+							line: deepLink.line,
+						},
+					})
+				);
+			}
+		};
+		const unsubscribeIpc = window.maestro.app.onDeepLink(handleDeepLink);
+		const unsubscribeInApp = subscribeToInAppDeepLinks(handleDeepLink);
+		return () => {
+			unsubscribeIpc();
+			unsubscribeInApp();
+		};
 	}, [handleToastSessionClick, setGroups]);
 
 	// Open a closed named session from the agent session browser
@@ -186,44 +243,105 @@ export function useSessionSwitchCallbacks(
 		[handleResumeSession, setActiveFocus, inputRef]
 	);
 
-	// Switch to an AI tab from utility modals (tab switcher, queue browser, etc.)
-	const handleUtilityTabSelect = useCallback(
-		(tabId: string) => {
-			if (!activeSession) return;
-			// Clear activeFileTabId and activeTerminalTabId when selecting an AI tab.
-			// Also reset inputMode to 'ai' in case we're coming from terminal mode.
-			updateSession(activeSession.id, (s) => ({
-				...s,
-				activeTabId: tabId,
-				activeFileTabId: null,
-				activeTerminalTabId: null,
-				inputMode: 'ai',
-			}));
+	// Jump to a starred session from the Left Bar. Unlike handleNamedSessionSelect,
+	// this can cross agents, so it first switches to the owning agent and resumes
+	// against that explicit target (the active-session closure is stale at this
+	// point). Returns whether the session was actually loaded so the caller can
+	// offer to remove a stale star when it has aged out.
+	const handleJumpToStarredSession = useCallback(
+		async (
+			_agentId: string,
+			projectPath: string,
+			agentSessionId: string,
+			sessionName: string,
+			parentSessionId: string
+		): Promise<boolean> => {
+			setActiveSessionId(parentSessionId);
+			const opened = await handleResumeSession(
+				agentSessionId,
+				[],
+				sessionName,
+				true,
+				undefined,
+				projectPath,
+				{ targetSessionId: parentSessionId, suppressUnavailableFlash: true }
+			);
+			if (opened) {
+				setActiveFocus('main');
+				setTimeout(() => inputRef.current?.focus(), 50);
+			}
+			return opened;
 		},
-		[activeSession]
+		[setActiveSessionId, handleResumeSession, setActiveFocus, inputRef]
+	);
+
+	// Switch to an AI tab from utility modals (tab switcher, queue browser, etc.)
+	const handleUtilityTabSelect = useCallback((tabId: string) => {
+		const activeSession = selectActiveSession(useSessionStore.getState());
+		if (!activeSession) return;
+		// Land on the AI tab, clearing any active file/terminal/browser view that
+		// would otherwise outrank it in the render precedence.
+		updateSessionWith(activeSession.id, (s) => ({ ...s, ...aiTabFocusFields(tabId) }));
+		if (!isWebDesktop()) {
+			noteDesktopAiTabSelection(activeSession.id, tabId);
+		}
+	}, []);
+
+	// Jump to a specific message from cross-tab search: land on the tab, seed that
+	// tab's Find bar with the same query (so every hit stays highlighted and
+	// next/prev works), and leave a jump request the transcript consumes to scroll
+	// + flash the entry.
+	const handleCrossTabSearchJump = useCallback(
+		({ tabId, logId, query, regex }: CrossTabSearchJumpTarget) => {
+			const activeSession = selectActiveSession(useSessionStore.getState());
+			if (!activeSession) return;
+			updateSessionWith(activeSession.id, (s) => ({ ...s, ...aiTabFocusFields(tabId) }));
+			if (!isWebDesktop()) {
+				noteDesktopAiTabSelection(activeSession.id, tabId);
+			}
+
+			const ui = useUIStore.getState();
+			const searchKey = outputSearchKeyFor(activeSession.id, tabId);
+			ui.setOutputSearchQuery(searchKey, query);
+			ui.setOutputSearchRegex(searchKey, regex);
+			ui.setOutputSearchOpen(searchKey, true);
+			ui.setPendingLogJump({ sessionId: activeSession.id, tabId, logId });
+			setActiveFocus('main');
+		},
+		[setActiveFocus]
 	);
 
 	// Switch to a file tab from utility modals
-	const handleUtilityFileTabSelect = useCallback(
-		(tabId: string) => {
-			if (!activeSession) return;
-			// Set activeFileTabId, keep activeTabId as-is (for when returning to AI tabs).
-			// Also reset inputMode to 'ai' and clear activeTerminalTabId in case we're coming from terminal mode.
-			updateSession(activeSession.id, (s) => ({
-				...s,
-				activeFileTabId: tabId,
-				activeTerminalTabId: null,
-				inputMode: 'ai',
-			}));
+	const handleUtilityFileTabSelect = useCallback((tabId: string) => {
+		const activeSession = selectActiveSession(useSessionStore.getState());
+		if (!activeSession) return;
+		// Set activeFileTabId, keep activeTabId as-is (for when returning to AI tabs).
+		// Also reset inputMode to 'ai' and clear activeTerminalTabId in case we're coming from terminal mode.
+		updateSessionWith(activeSession.id, (s) => ({
+			...s,
+			activeFileTabId: tabId,
+			activeTerminalTabId: null,
+			inputMode: 'ai',
+		}));
+	}, []);
+
+	const handleFileSearchSelect = useCallback(
+		(file: FlatFileItem) => {
+			if (!file.isFolder) {
+				handleFileClick({ name: file.name, type: 'file' }, file.fullPath);
+			}
 		},
-		[activeSession]
+		[handleFileClick]
 	);
 
 	return {
 		handleProcessMonitorNavigateToSession,
 		handleToastSessionClick,
 		handleNamedSessionSelect,
+		handleJumpToStarredSession,
 		handleUtilityTabSelect,
 		handleUtilityFileTabSelect,
+		handleFileSearchSelect,
+		handleCrossTabSearchJump,
 	};
 }

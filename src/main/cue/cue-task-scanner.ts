@@ -21,6 +21,13 @@ export interface CueTaskScannerConfig {
 	onEvent: (event: CueEvent) => void;
 	onLog: (level: string, message: string) => void;
 	triggerName: string;
+	/**
+	 * Optional gate: when this returns `false`, the scanner skips its tick
+	 * (no directory walk, no file reads, no events). Used by the
+	 * visibility-aware pause - CLAUDE-PERFORMANCE.md§"Visibility-Aware Operations".
+	 * Defaults to always-active when omitted.
+	 */
+	isActive?: () => boolean;
 }
 
 /** A pending task extracted from a markdown file */
@@ -52,6 +59,31 @@ export function extractPendingTasks(content: string): PendingTask[] {
 }
 
 /**
+ * Build the CueEvent payload for a markdown file that has pending tasks.
+ *
+ * Shared by the polling scanner and the manual-trigger path (Run Now / CLI)
+ * so both surfaces produce identical `task.pending` template variables
+ * ({{CUE_TASK_LIST}}, {{CUE_TASK_COUNT}}, {{CUE_TASK_FILE}}, etc.).
+ */
+export function buildTaskPendingPayload(
+	absPath: string,
+	relPath: string,
+	content: string,
+	tasks: PendingTask[]
+): Record<string, unknown> {
+	return {
+		path: absPath,
+		filename: path.basename(relPath),
+		directory: path.dirname(absPath),
+		extension: path.extname(relPath),
+		taskCount: tasks.length,
+		taskList: tasks.map((t) => `L${t.line}: ${t.text}`).join('\n'),
+		tasks,
+		content: content.slice(0, 10000),
+	};
+}
+
+/**
  * Recursively walk a directory and return all file paths (relative to root).
  */
 function walkDir(dir: string, root: string): string[] {
@@ -80,12 +112,55 @@ function walkDir(dir: string, root: string): string[] {
 	return results;
 }
 
+/** A markdown file under the project root that currently has pending tasks. */
+export interface ScannedTaskFile {
+	relPath: string;
+	absPath: string;
+	content: string;
+	tasks: PendingTask[];
+}
+
+/**
+ * Walk `projectRoot`, match files against `watchGlob`, and return every file
+ * that currently has at least one pending task.
+ *
+ * Unlike the polling scanner, this does NO content-hash dedup: it always
+ * reports the current task state. It is the "scan right now" primitive used by
+ * manual triggers (dashboard Run Now, `maestro-cli cue trigger`), where the
+ * user explicitly asked to act on whatever tasks are open this instant,
+ * regardless of whether the polling scanner has already seen the file.
+ */
+export function scanTaskFilesNow(projectRoot: string, watchGlob: string): ScannedTaskFile[] {
+	const isMatch = picomatch(watchGlob);
+	const results: ScannedTaskFile[] = [];
+
+	for (const relPath of walkDir(projectRoot, projectRoot)) {
+		if (!isMatch(relPath)) continue;
+
+		const absPath = path.resolve(projectRoot, relPath);
+		let content: string;
+		try {
+			content = fs.readFileSync(absPath, 'utf-8');
+		} catch {
+			continue;
+		}
+
+		const tasks = extractPendingTasks(content);
+		if (tasks.length === 0) continue;
+
+		results.push({ relPath, absPath, content, tasks });
+	}
+
+	return results;
+}
+
 /**
  * Creates a task scanner for a Cue task.pending subscription.
  * Returns a cleanup function to stop scanning.
  */
 export function createCueTaskScanner(config: CueTaskScannerConfig): () => void {
 	const { watchGlob, pollMinutes, projectRoot, onEvent, onLog, triggerName } = config;
+	const isActive = config.isActive ?? (() => true);
 
 	let stopped = false;
 	let initialTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -102,6 +177,10 @@ export function createCueTaskScanner(config: CueTaskScannerConfig): () => void {
 
 	async function doScan(): Promise<void> {
 		if (stopped) return;
+		// Visibility-aware pause: skip the entire tick when inactive.
+		// The interval keeps firing so we resume cleanly on the next visible
+		// tick - no need to tear down and re-create timers.
+		if (!isActive()) return;
 
 		try {
 			const allFiles = walkDir(projectRoot, projectRoot);
@@ -131,6 +210,7 @@ export function createCueTaskScanner(config: CueTaskScannerConfig): () => void {
 
 				// On first scan, seed the hash but don't fire events
 				if (prevHash === undefined) {
+					onLog('info', `[CUE] "${triggerName}" seeded task file: ${relPath}`);
 					continue;
 				}
 
@@ -140,18 +220,11 @@ export function createCueTaskScanner(config: CueTaskScannerConfig): () => void {
 					continue;
 				}
 
-				const taskList = pendingTasks.map((t) => `L${t.line}: ${t.text}`).join('\n');
-
-				const event = createCueEvent('task.pending', triggerName, {
-					path: absPath,
-					filename: path.basename(relPath),
-					directory: path.dirname(absPath),
-					extension: path.extname(relPath),
-					taskCount: pendingTasks.length,
-					taskList,
-					tasks: pendingTasks,
-					content: content.slice(0, 10000),
-				});
+				const event = createCueEvent(
+					'task.pending',
+					triggerName,
+					buildTaskPendingPayload(absPath, relPath, content, pendingTasks)
+				);
 
 				onEvent(event);
 			}

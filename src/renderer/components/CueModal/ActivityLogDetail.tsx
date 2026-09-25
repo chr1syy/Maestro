@@ -1,5 +1,5 @@
 /**
- * ActivityLogDetail — Expanded detail view for a single Cue run execution.
+ * ActivityLogDetail - Expanded detail view for a single Cue run execution.
  *
  * Shows metadata grid, event payload, stdout, and stderr.
  */
@@ -8,7 +8,7 @@ import { Clock, Zap, Terminal, AlertTriangle } from 'lucide-react';
 import type { Theme } from '../../types';
 import type { CueRunResult } from '../../hooks/useCue';
 import { CUE_COLOR } from '../../../shared/cue-pipeline-types';
-import { formatDuration, formatPayloadEntries } from './cueModalUtils';
+import { cleanStderrForDisplay, formatDuration, formatPayloadEntries } from './cueModalUtils';
 
 interface ActivityLogDetailProps {
 	entry: CueRunResult;
@@ -18,7 +18,11 @@ interface ActivityLogDetailProps {
 export function ActivityLogDetail({ entry, theme }: ActivityLogDetailProps) {
 	const payloadEntries = formatPayloadEntries(entry.event.payload);
 	const hasStdout = entry.stdout.trim().length > 0;
-	const hasStderr = entry.stderr.trim().length > 0;
+	// Apply the benign-stderr filter at display time too so older log entries
+	// (captured before the backend filter existed) don't paint the red Errors
+	// panel with agent-CLI diagnostics that aren't actually errors.
+	const displayStderr = cleanStderrForDisplay(entry.stderr);
+	const hasStderr = displayStderr.trim().length > 0;
 
 	return (
 		<div
@@ -57,7 +61,7 @@ export function ActivityLogDetail({ entry, theme }: ActivityLogDetailProps) {
 										: theme.colors.textDim,
 						}}
 					>
-						{entry.exitCode ?? '—'}
+						{entry.exitCode ?? '-'}
 					</span>
 				</div>
 				<div className="flex items-center gap-1.5">
@@ -76,13 +80,13 @@ export function ActivityLogDetail({ entry, theme }: ActivityLogDetailProps) {
 			{payloadEntries.length > 0 && (
 				<div>
 					<div
-						className="text-[10px] font-bold uppercase tracking-wider mb-1"
+						className="text-2xs font-bold uppercase tracking-wider mb-1"
 						style={{ color: theme.colors.textDim }}
 					>
 						Event Payload
 					</div>
 					<div
-						className="rounded px-2 py-1.5 font-mono text-[11px] space-y-0.5 max-h-32 overflow-y-auto"
+						className="rounded px-2 py-1.5 font-mono text-xs-plus space-y-0.5 max-h-32 overflow-y-auto"
 						style={{ backgroundColor: theme.colors.bgActivity }}
 					>
 						{payloadEntries.map(([key, value]) => (
@@ -103,13 +107,13 @@ export function ActivityLogDetail({ entry, theme }: ActivityLogDetailProps) {
 			{hasStdout && (
 				<div>
 					<div
-						className="text-[10px] font-bold uppercase tracking-wider mb-1"
+						className="text-2xs font-bold uppercase tracking-wider mb-1"
 						style={{ color: theme.colors.textDim }}
 					>
 						Output
 					</div>
 					<pre
-						className="rounded px-2 py-1.5 text-[11px] max-h-48 overflow-y-auto whitespace-pre-wrap break-all"
+						className="rounded px-2 py-1.5 text-xs-plus max-h-48 overflow-y-auto whitespace-pre-wrap break-all"
 						style={{ backgroundColor: theme.colors.bgActivity, color: theme.colors.textMain }}
 					>
 						{entry.stdout.slice(-5000)}
@@ -120,15 +124,15 @@ export function ActivityLogDetail({ entry, theme }: ActivityLogDetailProps) {
 			{/* stderr */}
 			{hasStderr && (
 				<div>
-					<div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider mb-1">
+					<div className="flex items-center gap-1 text-2xs font-bold uppercase tracking-wider mb-1">
 						<AlertTriangle className="w-3 h-3" style={{ color: theme.colors.error }} />
 						<span style={{ color: theme.colors.error }}>Errors</span>
 					</div>
 					<pre
-						className="rounded px-2 py-1.5 text-[11px] max-h-32 overflow-y-auto whitespace-pre-wrap break-all"
+						className="rounded px-2 py-1.5 text-xs-plus max-h-32 overflow-y-auto whitespace-pre-wrap break-all"
 						style={{ backgroundColor: `${theme.colors.error}10`, color: theme.colors.error }}
 					>
-						{entry.stderr.slice(-3000)}
+						{displayStderr.slice(-3000)}
 					</pre>
 				</div>
 			)}

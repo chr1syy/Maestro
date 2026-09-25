@@ -27,9 +27,12 @@ const createMockParentSession = (overrides: Partial<Session> = {}): Session =>
 		customPath: '/usr/local/bin/claude',
 		customArgs: ['--verbose'],
 		customEnvVars: { KEY: 'val' },
+		customEnvVarsDisabled: { PARKED: 'later' },
 		customModel: 'opus',
 		customContextWindow: 200000,
+		contextWindowSource: 'user-edited' as const,
 		nudgeMessage: 'Keep going',
+		newSessionMessage: 'Init context',
 		autoRunFolderPath: '/autorun/docs',
 		sessionSshRemoteConfig: undefined,
 		...overrides,
@@ -68,9 +71,18 @@ describe('buildWorktreeSession', () => {
 		expect(session.customPath).toBe('/usr/local/bin/claude');
 		expect(session.customArgs).toEqual(['--verbose']);
 		expect(session.customEnvVars).toEqual({ KEY: 'val' });
+		// Parked vars come along too, or the worktree agent silently loses the
+		// switched-off entries the user is keeping for later.
+		expect(session.customEnvVarsDisabled).toEqual({ PARKED: 'later' });
 		expect(session.customModel).toBe('opus');
 		expect(session.customContextWindow).toBe(200000);
+		// Provenance travels with the value (finding AD1): inheriting the number
+		// alone would demote the parent's deliberate budget to unknown provenance
+		// here, so a provider report would override it in the worktree while still
+		// being outranked in the parent.
+		expect(session.contextWindowSource).toBe('user-edited');
 		expect(session.nudgeMessage).toBe('Keep going');
+		expect(session.newSessionMessage).toBe('Init context');
 		expect(session.autoRunFolderPath).toBe('/autorun/docs');
 	});
 
@@ -91,7 +103,9 @@ describe('buildWorktreeSession', () => {
 		expect(session.worktreeParentPath).toBe('/projects');
 		expect(session.inputMode).toBe('terminal'); // inherited directly
 		expect(session.customContextWindow).toBeUndefined();
+		expect(session.contextWindowSource).toBeUndefined();
 		expect(session.nudgeMessage).toBeUndefined();
+		expect(session.newSessionMessage).toBeUndefined();
 		expect(session.autoRunFolderPath).toBeUndefined();
 	});
 

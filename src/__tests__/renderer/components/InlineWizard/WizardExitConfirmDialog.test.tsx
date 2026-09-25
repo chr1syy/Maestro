@@ -4,7 +4,7 @@
  * Tests the exit confirmation dialog for the inline wizard:
  * - Renders with correct content
  * - Cancel button closes dialog and calls onCancel
- * - Exit button calls onConfirm
+ * - The destructive "Yes, Exit" button calls onConfirm and holds focus
  * - Escape key calls onCancel
  * - Layer stack registration
  * - Focus management
@@ -13,8 +13,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { WizardExitConfirmDialog } from '../../../../renderer/components/InlineWizard/WizardExitConfirmDialog';
-import type { Theme } from '../../../../renderer/types';
 
+import { mockTheme } from '../../../helpers/mockTheme';
 // Mock useLayerStack
 const mockRegisterLayer = vi.fn(() => 'layer-1');
 const mockUnregisterLayer = vi.fn();
@@ -29,35 +29,11 @@ vi.mock('../../../../renderer/contexts/LayerStackContext', () => ({
 }));
 
 // Mock theme for testing
-const mockTheme: Theme = {
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		background: '#1a1a1a',
-		backgroundDim: '#0d0d0d',
-		backgroundBright: '#2a2a2a',
-		bgActivity: '#333333',
-		bgMain: '#1a1a1a',
-		bgSidebar: '#141414',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		textMuted: '#666666',
-		textBright: '#ffffff',
-		border: '#333333',
-		borderBright: '#444444',
-		success: '#00ff00',
-		warning: '#ffff00',
-		error: '#ff0000',
-		accent: '#007bff',
-		accentForeground: '#ffffff',
-		accentText: '#66b2ff',
-	},
-};
 
 describe('WizardExitConfirmDialog', () => {
 	const defaultProps = {
 		theme: mockTheme,
+		willCloseTab: true,
 		onConfirm: vi.fn(),
 		onCancel: vi.fn(),
 	};
@@ -76,16 +52,24 @@ describe('WizardExitConfirmDialog', () => {
 			expect(screen.getByText('Exit Wizard?')).toBeInTheDocument();
 		});
 
-		it('renders the warning message', () => {
+		it('renders the warning message when exiting closes the wizard tab', () => {
 			render(<WizardExitConfirmDialog {...defaultProps} />);
 			expect(
-				screen.getByText('Progress will be lost. Are you sure you want to exit the wizard?')
+				screen.getByText(/Are you sure you want to exit the wizard and lose your progress\?/)
 			).toBeInTheDocument();
 		});
 
-		it('renders Exit and Cancel buttons', () => {
+		// The in-place case keeps the conversation (flattenWizardIntoTab), so promising
+		// the user their progress is lost would be a lie that scares them off exiting.
+		it('promises the conversation is kept when the wizard ran in place', () => {
+			render(<WizardExitConfirmDialog {...defaultProps} willCloseTab={false} />);
+			expect(screen.getByText(/The conversation stays in this tab/)).toBeInTheDocument();
+			expect(screen.queryByText(/lose your progress/)).not.toBeInTheDocument();
+		});
+
+		it('renders the destructive confirm and Cancel buttons', () => {
 			render(<WizardExitConfirmDialog {...defaultProps} />);
-			expect(screen.getByRole('button', { name: 'Exit' })).toBeInTheDocument();
+			expect(screen.getByRole('button', { name: 'Yes, Exit' })).toBeInTheDocument();
 			expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
 		});
 
@@ -105,11 +89,11 @@ describe('WizardExitConfirmDialog', () => {
 	});
 
 	describe('button interactions', () => {
-		it('calls onConfirm when Exit button is clicked', () => {
+		it('calls onConfirm when the destructive button is clicked', () => {
 			const onConfirm = vi.fn();
 			render(<WizardExitConfirmDialog {...defaultProps} onConfirm={onConfirm} />);
 
-			fireEvent.click(screen.getByRole('button', { name: 'Exit' }));
+			fireEvent.click(screen.getByTestId('wizard-exit-confirm-button'));
 
 			expect(onConfirm).toHaveBeenCalledTimes(1);
 		});
@@ -165,11 +149,26 @@ describe('WizardExitConfirmDialog', () => {
 	});
 
 	describe('focus management', () => {
-		it('focuses Cancel button on mount (safer default)', () => {
+		it('focuses the destructive button on mount so Enter confirms', () => {
 			render(<WizardExitConfirmDialog {...defaultProps} />);
 
-			// The Cancel button should be focused as the safer default action
-			expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+			expect(screen.getByTestId('wizard-exit-confirm-button')).toHaveFocus();
+		});
+
+		it('confirms on Enter, since Enter activates the focused destructive button', () => {
+			const onConfirm = vi.fn();
+			const onCancel = vi.fn();
+			render(
+				<WizardExitConfirmDialog {...defaultProps} onConfirm={onConfirm} onCancel={onCancel} />
+			);
+
+			// jsdom does not synthesize the click a real Enter press produces on a focused
+			// button, so assert the wiring: focus is on the confirm button and it confirms.
+			expect(screen.getByTestId('wizard-exit-confirm-button')).toHaveFocus();
+			fireEvent.click(document.activeElement as HTMLElement);
+
+			expect(onConfirm).toHaveBeenCalledTimes(1);
+			expect(onCancel).not.toHaveBeenCalled();
 		});
 	});
 
@@ -202,12 +201,20 @@ describe('WizardExitConfirmDialog', () => {
 			});
 		});
 
-		it('applies warning color to icon container', () => {
+		it('applies the destructive color to the icon container', () => {
 			const { container } = render(<WizardExitConfirmDialog {...defaultProps} />);
 
 			const iconContainer = container.querySelector('.rounded-lg');
 			expect(iconContainer).toHaveStyle({
-				backgroundColor: `${mockTheme.colors.warning}20`,
+				backgroundColor: `${mockTheme.colors.error}20`,
+			});
+		});
+
+		it('paints the confirm button in the destructive color', () => {
+			render(<WizardExitConfirmDialog {...defaultProps} />);
+
+			expect(screen.getByTestId('wizard-exit-confirm-button')).toHaveStyle({
+				backgroundColor: mockTheme.colors.error,
 			});
 		});
 	});

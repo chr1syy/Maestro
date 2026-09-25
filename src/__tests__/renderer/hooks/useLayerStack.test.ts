@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { renderHook, act } from '@testing-library/react';
 import { useLayerStack } from '../../../renderer/hooks';
 import { ModalLayer, OverlayLayer } from '../../../renderer/types/layer';
@@ -36,6 +37,7 @@ describe('useLayerStack', () => {
 			priority: options.priority ?? 100,
 			blocksLowerLayers: options.blocksLowerLayers ?? true,
 			capturesFocus: options.capturesFocus ?? true,
+			blocksAppShortcuts: options.blocksAppShortcuts,
 			focusTrap: options.focusTrap ?? 'strict',
 			onEscape: options.onEscape ?? vi.fn(),
 			ariaLabel: options.ariaLabel,
@@ -54,6 +56,7 @@ describe('useLayerStack', () => {
 			priority: options.priority ?? 50,
 			blocksLowerLayers: options.blocksLowerLayers ?? false,
 			capturesFocus: options.capturesFocus ?? false,
+			blocksAppShortcuts: options.blocksAppShortcuts,
 			focusTrap: options.focusTrap ?? 'none',
 			onEscape: options.onEscape ?? vi.fn(),
 			allowClickOutside: options.allowClickOutside ?? true,
@@ -552,6 +555,32 @@ describe('useLayerStack', () => {
 
 			expect(result.current.hasOpenLayers()).toBe(false);
 		});
+
+		// A passive panel (floating inspector, thought stream) is stacked so that
+		// Escape reaches it, but it takes no focus. Counting it here is what used
+		// to make Cmd+K and Opt+Cmd+T go dead the moment such a panel opened.
+		it('should ignore layers that declared blocksAppShortcuts: false', () => {
+			const { result } = renderHook(() => useLayerStack());
+
+			act(() => {
+				result.current.registerLayer(createModalLayer({ blocksAppShortcuts: false }));
+				result.current.registerLayer(createOverlayLayer({ blocksAppShortcuts: false }));
+			});
+
+			expect(result.current.layerCount).toBe(2);
+			expect(result.current.hasOpenLayers()).toBe(false);
+		});
+
+		it('should still report a blocking layer stacked alongside a passive one', () => {
+			const { result } = renderHook(() => useLayerStack());
+
+			act(() => {
+				result.current.registerLayer(createModalLayer({ blocksAppShortcuts: false }));
+				result.current.registerLayer(createModalLayer({ priority: 200 }));
+			});
+
+			expect(result.current.hasOpenLayers()).toBe(true);
+		});
 	});
 
 	describe('hasOpenModal', () => {
@@ -607,6 +636,30 @@ describe('useLayerStack', () => {
 
 			act(() => {
 				result.current.unregisterLayer(modalId!);
+			});
+
+			expect(result.current.hasOpenModal()).toBe(false);
+		});
+
+		// Dropdowns and docked search bars register as `type: 'modal'` (that is all
+		// useModalLayer can register) while declaring they do not block what is
+		// under them. Treating them as true modals blocked every app shortcut.
+		it('should not count a modal that declared blocksLowerLayers: false', () => {
+			const { result } = renderHook(() => useLayerStack());
+
+			act(() => {
+				result.current.registerLayer(createModalLayer({ blocksLowerLayers: false }));
+			});
+
+			expect(result.current.layerCount).toBe(1);
+			expect(result.current.hasOpenModal()).toBe(false);
+		});
+
+		it('should not count a modal that declared blocksAppShortcuts: false', () => {
+			const { result } = renderHook(() => useLayerStack());
+
+			act(() => {
+				result.current.registerLayer(createModalLayer({ blocksAppShortcuts: false }));
 			});
 
 			expect(result.current.hasOpenModal()).toBe(false);
@@ -1052,7 +1105,7 @@ describe('useLayerStack', () => {
 
 			it('top() should log the top layer', () => {
 				process.env.NODE_ENV = 'development';
-				const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				const consoleSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
 
 				const { result } = renderHook(() => useLayerStack());
 
@@ -1064,6 +1117,7 @@ describe('useLayerStack', () => {
 
 				expect(consoleSpy).toHaveBeenCalledWith(
 					'Top Layer:',
+					undefined,
 					expect.objectContaining({ ariaLabel: 'Top Layer' })
 				);
 
@@ -1072,7 +1126,7 @@ describe('useLayerStack', () => {
 
 			it('top() should log message when no layers exist', () => {
 				process.env.NODE_ENV = 'development';
-				const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				const consoleSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
 
 				// Need to register and then unregister to have debug API but no layers
 				const { result } = renderHook(() => useLayerStack());
@@ -1095,7 +1149,7 @@ describe('useLayerStack', () => {
 
 			it('simulate.escape() should dispatch Escape key event', () => {
 				process.env.NODE_ENV = 'development';
-				const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				const consoleSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
 				const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
 
 				const { result } = renderHook(() => useLayerStack());
@@ -1121,7 +1175,7 @@ describe('useLayerStack', () => {
 
 			it('simulate.closeAll() should clear all layers', () => {
 				process.env.NODE_ENV = 'development';
-				const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				const consoleSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
 
 				const { result } = renderHook(() => useLayerStack());
 
@@ -1240,6 +1294,111 @@ describe('useLayerStack', () => {
 
 			expect(closed!).toBe(true);
 			expect(handler).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe('focus restoration', () => {
+		// The layer stack is the only thing that knows a layer opened at all, so
+		// it is where "give the caret back" belongs. Without it, every modal
+		// dismissed with Escape left focus on document.body and the pane behind
+		// it silently swallowed the next keystroke.
+		let input: HTMLInputElement;
+
+		beforeEach(() => {
+			input = document.createElement('input');
+			document.body.appendChild(input);
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+			input.remove();
+		});
+
+		it('returns focus to the element that had it when the layer opened', () => {
+			input.focus();
+			expect(document.activeElement).toBe(input);
+
+			const { result } = renderHook(() => useLayerStack());
+			let id = '';
+			act(() => {
+				id = result.current.registerLayer(createModalLayer());
+			});
+
+			// Stand in for the modal taking focus, then giving it up on unmount.
+			(document.activeElement as HTMLElement)?.blur();
+			expect(document.activeElement).toBe(document.body);
+
+			act(() => {
+				result.current.unregisterLayer(id);
+				vi.runAllTimers();
+			});
+
+			expect(document.activeElement).toBe(input);
+		});
+
+		it('does not steal focus from whatever claimed it during the close', () => {
+			input.focus();
+			const { result } = renderHook(() => useLayerStack());
+			let id = '';
+			act(() => {
+				id = result.current.registerLayer(createModalLayer());
+			});
+
+			// A modal that deliberately moves focus on its way out (opens a tab,
+			// focuses a result) must win - restoring over it would undo the thing
+			// the user just asked for.
+			const other = document.createElement('input');
+			document.body.appendChild(other);
+			other.focus();
+
+			act(() => {
+				result.current.unregisterLayer(id);
+				vi.runAllTimers();
+			});
+
+			expect(document.activeElement).toBe(other);
+			other.remove();
+		});
+
+		it('does not restore for a layer that never captured focus', () => {
+			input.focus();
+			const { result } = renderHook(() => useLayerStack());
+			let id = '';
+			act(() => {
+				id = result.current.registerLayer(createOverlayLayer({ capturesFocus: false }));
+			});
+
+			(document.activeElement as HTMLElement)?.blur();
+
+			act(() => {
+				result.current.unregisterLayer(id);
+				vi.runAllTimers();
+			});
+
+			// A layer that never took the keyboard has no claim to hand it back.
+			expect(document.activeElement).toBe(document.body);
+		});
+
+		it('does not restore focus to an element that left the document', () => {
+			input.focus();
+			const { result } = renderHook(() => useLayerStack());
+			let id = '';
+			act(() => {
+				id = result.current.registerLayer(createModalLayer());
+			});
+
+			// The surface behind the modal can unmount while it is open (an agent
+			// switch, a closed tab). Focusing a detached node is a no-op in a real
+			// browser, but the intent check belongs in the hook, not in luck.
+			input.remove();
+
+			act(() => {
+				result.current.unregisterLayer(id);
+				vi.runAllTimers();
+			});
+
+			expect(document.activeElement).toBe(document.body);
 		});
 	});
 

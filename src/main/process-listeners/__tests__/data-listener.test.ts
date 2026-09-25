@@ -79,6 +79,8 @@ describe('Data Listener', () => {
 			const handler = eventHandlers.get('data');
 
 			handler?.('regular-session-123', 'test output');
+			// process:data is coalesced (~16ms); flush via the exit boundary.
+			eventHandlers.get('exit')?.('regular-session-123');
 
 			expect(mockSafeSend).toHaveBeenCalledWith(
 				'process:data',
@@ -213,7 +215,7 @@ describe('Data Listener', () => {
 		// unknown variant, or a regex tightening rejecting a legacy format),
 		// the data MUST be dropped, NOT forwarded to the regular process:data
 		// channel or the web broadcast path. Otherwise group-chat transcript
-		// bytes leak into the renderer/web-client stream — the suspected root
+		// bytes leak into the renderer/web-client stream - the suspected root
 		// cause of "group chat bled into cue pipeline output".
 		it('drops unrecognized group-chat session data instead of forwarding', () => {
 			// Moderator regex won't match (no "-moderator-" anywhere).
@@ -241,6 +243,7 @@ describe('Data Listener', () => {
 			const handler = eventHandlers.get('data');
 
 			handler?.('plain-session', 'plain data');
+			eventHandlers.get('exit')?.('plain-session');
 
 			expect(mockSafeSend).toHaveBeenCalledWith('process:data', 'plain-session', 'plain data');
 		});
@@ -252,6 +255,7 @@ describe('Data Listener', () => {
 			const handler = eventHandlers.get('data');
 
 			handler?.('session-123-terminal', 'terminal output');
+			eventHandlers.get('exit')?.('session-123-terminal');
 
 			// Should broadcast as terminal_data (for xterm.js in web client)
 			expect(mockWebServer.broadcastToSessionClients).toHaveBeenCalledWith(
@@ -310,6 +314,7 @@ describe('Data Listener', () => {
 			const handler = eventHandlers.get('data');
 
 			handler?.('session-123-ai-a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'test output');
+			eventHandlers.get('exit')?.('session-123-ai-a1b2c3d4-e5f6-7890-abcd-ef1234567890');
 
 			// Should still forward to renderer
 			expect(mockSafeSend).toHaveBeenCalledWith(

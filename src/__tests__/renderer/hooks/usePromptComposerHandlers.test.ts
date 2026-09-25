@@ -31,12 +31,17 @@ vi.mock('../../../renderer/utils/tabHelpers', async () => {
 // ============================================================================
 
 import {
+	getPromptComposerInitialValue,
 	usePromptComposerHandlers,
 	type UsePromptComposerHandlersDeps,
 } from '../../../renderer/hooks/modal/usePromptComposerHandlers';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
-import { useGroupChatStore } from '../../../renderer/stores/groupChatStore';
+import {
+	useGroupChatStore,
+	selectActiveGroupChatStagedImages,
+} from '../../../renderer/stores/groupChatStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
+import { useComposerInputStore } from '../../../renderer/stores/composerInputStore';
 
 // ============================================================================
 // Helpers
@@ -138,11 +143,11 @@ const initialGroupChatState = {
 	moderatorUsage: null,
 	groupChatStates: new Map(),
 	allGroupChatParticipantStates: new Map(),
-	groupChatExecutionQueue: [],
+	groupChatQueues: {},
 	groupChatReadOnlyMode: false,
 	groupChatRightTab: 'participants' as const,
 	groupChatParticipantColors: {},
-	groupChatStagedImages: [],
+	groupChatStagedImagesById: {},
 	groupChatError: null,
 };
 
@@ -159,7 +164,10 @@ beforeEach(() => {
 
 	useSettingsStore.setState({
 		enterToSendAI: true,
+		enterToSendAIExpanded: false,
 	} as any);
+
+	useComposerInputStore.setState({ aiValue: '', terminalValue: '' });
 });
 
 afterEach(() => {
@@ -171,6 +179,53 @@ afterEach(() => {
 // ============================================================================
 
 describe('usePromptComposerHandlers', () => {
+	describe('getPromptComposerInitialValue', () => {
+		it('seeds AI composer from the live store instead of a stale persisted tab draft', () => {
+			const session = createSession({
+				aiTabs: [createTab({ inputValue: 'stale persisted draft' })],
+				inputMode: 'ai',
+			});
+			useComposerInputStore.setState({ aiValue: 'live AI draft', terminalValue: 'ls -la' });
+
+			expect(
+				getPromptComposerInitialValue({
+					activeGroupChatId: null,
+					groupChats: [],
+					activeInputMode: session.inputMode,
+				})
+			).toBe('live AI draft');
+		});
+
+		it('seeds terminal composer from the live terminal store slice', () => {
+			useComposerInputStore.setState({ aiValue: 'AI draft', terminalValue: 'git status' });
+
+			expect(
+				getPromptComposerInitialValue({
+					activeGroupChatId: null,
+					groupChats: [],
+					activeInputMode: 'terminal',
+				})
+			).toBe('git status');
+		});
+
+		it('uses the active group chat draft when group chat is active', () => {
+			useComposerInputStore.setState({ aiValue: 'AI draft', terminalValue: 'terminal draft' });
+
+			expect(
+				getPromptComposerInitialValue({
+					activeGroupChatId: 'group-chat-1',
+					groupChats: [
+						{
+							id: 'group-chat-1',
+							draftMessage: 'group chat draft',
+						},
+					],
+					activeInputMode: 'ai',
+				})
+			).toBe('group chat draft');
+		});
+	});
+
 	// ========================================================================
 	// Return shape
 	// ========================================================================
@@ -274,7 +329,7 @@ describe('usePromptComposerHandlers', () => {
 
 				// setInputValue is called synchronously
 				expect(deps.setInputValue).toHaveBeenCalledWith('send this message');
-				// processInput is scheduled via setTimeout — not called yet
+				// processInput is scheduled via setTimeout - not called yet
 				expect(deps.processInput).not.toHaveBeenCalled();
 
 				// Advance timers to flush the setTimeout
@@ -328,7 +383,7 @@ describe('usePromptComposerHandlers', () => {
 				useGroupChatStore.setState({
 					activeGroupChatId: 'gc-send',
 					groupChats: [{ id: 'gc-send', name: 'Chat', draftMessage: 'hello' } as any],
-					groupChatStagedImages: [],
+					groupChatStagedImagesById: {},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -350,7 +405,10 @@ describe('usePromptComposerHandlers', () => {
 				useGroupChatStore.setState({
 					activeGroupChatId: 'gc-img',
 					groupChats: [{ id: 'gc-img', name: 'Chat', draftMessage: '' } as any],
-					groupChatStagedImages: ['data:image/png;base64,abc', 'data:image/png;base64,def'],
+					groupChatStagedImagesById: {
+						'gc-img': ['data:image/png;base64,abc', 'data:image/png;base64,def'],
+						'gc-other': ['data:image/png;base64,other'],
+					},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -372,7 +430,7 @@ describe('usePromptComposerHandlers', () => {
 				useGroupChatStore.setState({
 					activeGroupChatId: 'gc-no-img',
 					groupChats: [{ id: 'gc-no-img', name: 'Chat', draftMessage: '' } as any],
-					groupChatStagedImages: [],
+					groupChatStagedImagesById: {},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -394,7 +452,7 @@ describe('usePromptComposerHandlers', () => {
 				useGroupChatStore.setState({
 					activeGroupChatId: 'gc-ro',
 					groupChats: [{ id: 'gc-ro', name: 'Chat', draftMessage: '' } as any],
-					groupChatStagedImages: [],
+					groupChatStagedImagesById: {},
 					groupChatReadOnlyMode: true,
 				});
 
@@ -416,7 +474,10 @@ describe('usePromptComposerHandlers', () => {
 				useGroupChatStore.setState({
 					activeGroupChatId: 'gc-clear-img',
 					groupChats: [{ id: 'gc-clear-img', name: 'Chat', draftMessage: '' } as any],
-					groupChatStagedImages: ['data:image/png;base64,img1'],
+					groupChatStagedImagesById: {
+						'gc-clear-img': ['data:image/png;base64,img1'],
+						'gc-other': ['data:image/png;base64,other'],
+					},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -427,7 +488,11 @@ describe('usePromptComposerHandlers', () => {
 					result.current.handlePromptComposerSend('send and clear');
 				});
 
-				expect(useGroupChatStore.getState().groupChatStagedImages).toEqual([]);
+				expect(selectActiveGroupChatStagedImages(useGroupChatStore.getState())).toEqual([]);
+				// Only the room that sent loses its staged images.
+				expect(useGroupChatStore.getState().groupChatStagedImagesById).toEqual({
+					'gc-other': ['data:image/png;base64,other'],
+				});
 			});
 
 			it('clears the draft message on the active chat after sending', () => {
@@ -436,7 +501,7 @@ describe('usePromptComposerHandlers', () => {
 					groupChats: [
 						{ id: 'gc-draft-clear', name: 'Chat', draftMessage: 'pending draft' } as any,
 					],
-					groupChatStagedImages: [],
+					groupChatStagedImagesById: {},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -459,7 +524,7 @@ describe('usePromptComposerHandlers', () => {
 						{ id: 'gc-active', name: 'Active', draftMessage: 'will be cleared' } as any,
 						{ id: 'gc-other', name: 'Other', draftMessage: 'untouched' } as any,
 					],
-					groupChatStagedImages: [],
+					groupChatStagedImagesById: {},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -481,7 +546,7 @@ describe('usePromptComposerHandlers', () => {
 				useGroupChatStore.setState({
 					activeGroupChatId: 'gc-no-ai',
 					groupChats: [{ id: 'gc-no-ai', name: 'Chat', draftMessage: '' } as any],
-					groupChatStagedImages: [],
+					groupChatStagedImagesById: {},
 					groupChatReadOnlyMode: false,
 				});
 
@@ -1061,8 +1126,8 @@ describe('usePromptComposerHandlers', () => {
 	// handlePromptToggleEnterToSend
 	// ========================================================================
 	describe('handlePromptToggleEnterToSend', () => {
-		it('toggles enterToSendAI from true to false', () => {
-			useSettingsStore.setState({ enterToSendAI: true } as any);
+		it('toggles enterToSendAIExpanded from true to false', () => {
+			useSettingsStore.setState({ enterToSendAIExpanded: true } as any);
 
 			const deps = createDeps();
 			const { result } = renderHook(() => usePromptComposerHandlers(deps));
@@ -1071,11 +1136,11 @@ describe('usePromptComposerHandlers', () => {
 				result.current.handlePromptToggleEnterToSend();
 			});
 
-			expect(useSettingsStore.getState().enterToSendAI).toBe(false);
+			expect(useSettingsStore.getState().enterToSendAIExpanded).toBe(false);
 		});
 
-		it('toggles enterToSendAI from false to true', () => {
-			useSettingsStore.setState({ enterToSendAI: false } as any);
+		it('toggles enterToSendAIExpanded from false to true', () => {
+			useSettingsStore.setState({ enterToSendAIExpanded: false } as any);
 
 			const deps = createDeps();
 			const { result } = renderHook(() => usePromptComposerHandlers(deps));
@@ -1084,11 +1149,11 @@ describe('usePromptComposerHandlers', () => {
 				result.current.handlePromptToggleEnterToSend();
 			});
 
-			expect(useSettingsStore.getState().enterToSendAI).toBe(true);
+			expect(useSettingsStore.getState().enterToSendAIExpanded).toBe(true);
 		});
 
 		it('toggles correctly on repeated calls', () => {
-			useSettingsStore.setState({ enterToSendAI: true } as any);
+			useSettingsStore.setState({ enterToSendAIExpanded: true } as any);
 
 			const deps = createDeps();
 			const { result } = renderHook(() => usePromptComposerHandlers(deps));
@@ -1096,12 +1161,12 @@ describe('usePromptComposerHandlers', () => {
 			act(() => {
 				result.current.handlePromptToggleEnterToSend();
 			});
-			expect(useSettingsStore.getState().enterToSendAI).toBe(false);
+			expect(useSettingsStore.getState().enterToSendAIExpanded).toBe(false);
 
 			act(() => {
 				result.current.handlePromptToggleEnterToSend();
 			});
-			expect(useSettingsStore.getState().enterToSendAI).toBe(true);
+			expect(useSettingsStore.getState().enterToSendAIExpanded).toBe(true);
 		});
 	});
 });

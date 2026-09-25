@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateGroupChatExportHtml } from '../../../renderer/utils/groupChatExport';
+import { mockTheme } from '../../helpers/mockTheme';
 import type {
 	GroupChat,
 	GroupChatMessage,
@@ -8,26 +9,6 @@ import type {
 } from '../../../renderer/types';
 
 // Mock theme for testing
-const mockTheme: Theme = {
-	id: 'dracula',
-	name: 'Dracula',
-	mode: 'dark',
-	colors: {
-		bgMain: '#282a36',
-		bgSidebar: '#21222c',
-		bgActivity: '#1e1f29',
-		border: '#44475a',
-		textMain: '#f8f8f2',
-		textDim: '#6272a4',
-		accent: '#bd93f9',
-		accentDim: 'rgba(189, 147, 249, 0.1)',
-		accentText: '#bd93f9',
-		accentForeground: '#282a36',
-		success: '#50fa7b',
-		warning: '#f1fa8c',
-		error: '#ff5555',
-	},
-};
 
 // Mock data factories
 function createMockGroupChat(overrides?: Partial<GroupChat>): GroupChat {
@@ -276,7 +257,47 @@ describe('groupChatExport', () => {
 				expect(html).toContain('Agents');
 				expect(html).toContain('Messages');
 				expect(html).toContain('Agent Replies');
-				expect(html).toContain('Duration');
+				expect(html).toContain('Working');
+				expect(html).toContain('Tokens');
+				expect(html).toContain('Cost');
+			});
+
+			it('reports working time from the history log, not the message span', () => {
+				const groupChat = createMockGroupChat();
+				const messages = createMockMessages(5);
+				const start = Date.parse('2023-12-21T10:00:00Z');
+				const history: GroupChatHistoryEntry[] = [
+					{
+						id: 'h1',
+						timestamp: start + 120_000,
+						summary: 'worked',
+						participantName: 'Agent1',
+						participantColor: '#fff',
+						type: 'response',
+						elapsedTimeMs: 120_000,
+						tokenCount: 1500,
+						cost: 0.42,
+					},
+				];
+
+				const html = generateGroupChatExportHtml(groupChat, messages, history, {}, mockTheme);
+
+				expect(html).toContain('<div class="stat-value">2m</div>');
+				expect(html).toContain('<div class="stat-value">~2K</div>');
+				expect(html).toContain('<div class="stat-value">$0.42</div>');
+			});
+
+			it('reports tokens as unknown rather than zero when no turn recorded usage', () => {
+				const groupChat = createMockGroupChat();
+				const html = generateGroupChatExportHtml(
+					groupChat,
+					createMockMessages(5),
+					[],
+					{},
+					mockTheme
+				);
+
+				expect(html).toContain('<div class="stat-value">-</div>');
 			});
 		});
 

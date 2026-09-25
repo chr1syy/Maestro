@@ -2,13 +2,15 @@
  * Tests for useCueAutoDiscovery hook
  *
  * This hook auto-discovers .maestro/cue.yaml files when sessions are loaded,
- * created, or removed. It gates all operations on the maestroCue encore feature.
+ * created, or removed. Session discovery always runs so the Cue indicator
+ * shows in the Left Bar. The encore feature flag only gates engine start/stop.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useCueAutoDiscovery } from '../../../renderer/hooks/useCueAutoDiscovery';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
+import { resetStore } from '../../helpers/resetStores';
 import type { Session, EncoreFeatureFlags } from '../../../renderer/types';
 
 // Mock Cue API
@@ -19,6 +21,7 @@ const mockDisable = vi.fn();
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	resetStore(useSessionStore);
 
 	mockRefreshSession.mockResolvedValue(undefined);
 	mockRemoveSession.mockResolvedValue(undefined);
@@ -35,9 +38,6 @@ beforeEach(() => {
 			disable: mockDisable,
 		},
 	};
-
-	// Reset session store
-	useSessionStore.setState({ sessionsLoaded: false });
 });
 
 function makeSession(id: string, projectRoot: string): Session {
@@ -53,13 +53,37 @@ function makeEncoreFeatures(maestroCue: boolean): EncoreFeatureFlags {
 	return { maestroCue } as EncoreFeatureFlags;
 }
 
+function seedSessions(sessions: Session[], sessionsLoaded = false) {
+	useSessionStore.setState({ sessions, sessionsLoaded });
+}
+
 describe('useCueAutoDiscovery', () => {
+	describe('lifecycle ownership', () => {
+		it('does not run main-process Cue lifecycle work in a browser mirror', async () => {
+			const sessions = [makeSession('s1', '/project/a')];
+			seedSessions(sessions, true);
+
+			const { rerender } = renderHook(({ encore }) => useCueAutoDiscovery(encore, false), {
+				initialProps: { encore: makeEncoreFeatures(false) },
+			});
+
+			rerender({ encore: makeEncoreFeatures(true) });
+			await act(async () => {});
+
+			expect(mockRefreshSession).not.toHaveBeenCalled();
+			expect(mockRemoveSession).not.toHaveBeenCalled();
+			expect(mockEnable).not.toHaveBeenCalled();
+			expect(mockDisable).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('initial scan on app startup', () => {
 		it('should not call refreshSession before sessions are loaded', () => {
 			const sessions = [makeSession('s1', '/project/a')];
 			const encoreFeatures = makeEncoreFeatures(true);
 
-			renderHook(() => useCueAutoDiscovery(sessions, encoreFeatures));
+			seedSessions(sessions, false);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			expect(mockRefreshSession).not.toHaveBeenCalled();
 		});
@@ -68,7 +92,8 @@ describe('useCueAutoDiscovery', () => {
 			const sessions = [makeSession('s1', '/project/a'), makeSession('s2', '/project/b')];
 			const encoreFeatures = makeEncoreFeatures(true);
 
-			renderHook(() => useCueAutoDiscovery(sessions, encoreFeatures));
+			seedSessions(sessions, false);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			// Simulate sessions loaded
 			act(() => {
@@ -80,24 +105,27 @@ describe('useCueAutoDiscovery', () => {
 			expect(mockRefreshSession).toHaveBeenCalledWith('s2', '/project/b');
 		});
 
-		it('should not scan sessions if maestroCue is disabled', () => {
+		it('should scan sessions even if maestroCue is disabled (indicator always shows)', () => {
 			const sessions = [makeSession('s1', '/project/a')];
 			const encoreFeatures = makeEncoreFeatures(false);
 
-			renderHook(() => useCueAutoDiscovery(sessions, encoreFeatures));
+			seedSessions(sessions, false);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			act(() => {
 				useSessionStore.setState({ sessionsLoaded: true });
 			});
 
-			expect(mockRefreshSession).not.toHaveBeenCalled();
+			expect(mockRefreshSession).toHaveBeenCalledTimes(1);
+			expect(mockRefreshSession).toHaveBeenCalledWith('s1', '/project/a');
 		});
 
 		it('should skip sessions without projectRoot', () => {
 			const sessions = [makeSession('s1', '/project/a'), makeSession('s2', '')];
 			const encoreFeatures = makeEncoreFeatures(true);
 
-			renderHook(() => useCueAutoDiscovery(sessions, encoreFeatures));
+			seedSessions(sessions, false);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			act(() => {
 				useSessionStore.setState({ sessionsLoaded: true });
@@ -113,18 +141,15 @@ describe('useCueAutoDiscovery', () => {
 			const initialSessions = [makeSession('s1', '/project/a')];
 			const encoreFeatures = makeEncoreFeatures(true);
 
-			useSessionStore.setState({ sessionsLoaded: true });
-
-			const { rerender } = renderHook(
-				({ sessions, encore }) => useCueAutoDiscovery(sessions, encore),
-				{ initialProps: { sessions: initialSessions, encore: encoreFeatures } }
-			);
+			seedSessions(initialSessions, true);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			mockRefreshSession.mockClear();
 
 			// Add a new session
-			const updatedSessions = [...initialSessions, makeSession('s2', '/project/b')];
-			rerender({ sessions: updatedSessions, encore: encoreFeatures });
+			act(() => {
+				seedSessions([...initialSessions, makeSession('s2', '/project/b')], true);
+			});
 
 			expect(mockRefreshSession).toHaveBeenCalledWith('s2', '/project/b');
 		});
@@ -135,21 +160,58 @@ describe('useCueAutoDiscovery', () => {
 			const initialSessions = [makeSession('s1', '/project/a'), makeSession('s2', '/project/b')];
 			const encoreFeatures = makeEncoreFeatures(true);
 
-			useSessionStore.setState({ sessionsLoaded: true });
-
-			const { rerender } = renderHook(
-				({ sessions, encore }) => useCueAutoDiscovery(sessions, encore),
-				{ initialProps: { sessions: initialSessions, encore: encoreFeatures } }
-			);
+			seedSessions(initialSessions, true);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			mockRefreshSession.mockClear();
 			mockRemoveSession.mockClear();
 
 			// Remove session s2
-			const updatedSessions = [makeSession('s1', '/project/a')];
-			rerender({ sessions: updatedSessions, encore: encoreFeatures });
+			act(() => {
+				seedSessions([makeSession('s1', '/project/a')], true);
+			});
 
 			expect(mockRemoveSession).toHaveBeenCalledWith('s2');
+		});
+	});
+
+	describe('projectRoot moves', () => {
+		it('removes and refreshes when an existing session changes projectRoot', async () => {
+			const initialSessions = [makeSession('s1', '/project/a')];
+			const encoreFeatures = makeEncoreFeatures(true);
+
+			seedSessions(initialSessions, true);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
+
+			mockRefreshSession.mockClear();
+			mockRemoveSession.mockClear();
+
+			act(() => {
+				seedSessions([makeSession('s1', '/project/moved')], true);
+			});
+
+			expect(mockRemoveSession).toHaveBeenCalledWith('s1');
+			await act(async () => {});
+			expect(mockRefreshSession).toHaveBeenCalledWith('s1', '/project/moved');
+		});
+
+		it('removes without refresh when projectRoot is cleared', async () => {
+			const initialSessions = [makeSession('s1', '/project/a')];
+			const encoreFeatures = makeEncoreFeatures(true);
+
+			seedSessions(initialSessions, true);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
+
+			mockRefreshSession.mockClear();
+			mockRemoveSession.mockClear();
+
+			act(() => {
+				seedSessions([makeSession('s1', '')], true);
+			});
+
+			expect(mockRemoveSession).toHaveBeenCalledWith('s1');
+			await act(async () => {});
+			expect(mockRefreshSession).not.toHaveBeenCalled();
 		});
 	});
 
@@ -157,17 +219,17 @@ describe('useCueAutoDiscovery', () => {
 		it('should enable Cue and scan all sessions when maestroCue is toggled ON', async () => {
 			const sessions = [makeSession('s1', '/project/a'), makeSession('s2', '/project/b')];
 
-			useSessionStore.setState({ sessionsLoaded: true });
+			seedSessions(sessions, true);
 
-			const { rerender } = renderHook(({ sessions: s, encore }) => useCueAutoDiscovery(s, encore), {
-				initialProps: { sessions, encore: makeEncoreFeatures(false) },
+			const { rerender } = renderHook(({ encore }) => useCueAutoDiscovery(encore), {
+				initialProps: { encore: makeEncoreFeatures(false) },
 			});
 
 			mockRefreshSession.mockClear();
 			mockEnable.mockClear();
 
 			// Toggle maestroCue ON
-			rerender({ sessions, encore: makeEncoreFeatures(true) });
+			rerender({ encore: makeEncoreFeatures(true) });
 			await act(async () => {});
 
 			expect(mockEnable).toHaveBeenCalledTimes(1);
@@ -176,17 +238,20 @@ describe('useCueAutoDiscovery', () => {
 			expect(mockRefreshSession).toHaveBeenCalledWith('s2', '/project/b');
 		});
 
-		it('should call disable when maestroCue is toggled OFF', () => {
+		it('should call disable when maestroCue is toggled OFF', async () => {
 			const sessions = [makeSession('s1', '/project/a')];
 
-			useSessionStore.setState({ sessionsLoaded: true });
+			seedSessions(sessions, true);
 
-			const { rerender } = renderHook(({ sessions: s, encore }) => useCueAutoDiscovery(s, encore), {
-				initialProps: { sessions, encore: makeEncoreFeatures(true) },
+			const { rerender } = renderHook(({ encore }) => useCueAutoDiscovery(encore), {
+				initialProps: { encore: makeEncoreFeatures(true) },
 			});
 
 			// Toggle maestroCue OFF
-			rerender({ sessions, encore: makeEncoreFeatures(false) });
+			rerender({ encore: makeEncoreFeatures(false) });
+			// Toggle calls are now serialized on a Promise chain, so the
+			// disable fires on the next microtask rather than synchronously.
+			await act(async () => {});
 
 			expect(mockDisable).toHaveBeenCalledTimes(1);
 		});
@@ -194,42 +259,147 @@ describe('useCueAutoDiscovery', () => {
 		it('should not trigger actions when feature toggle value unchanged', () => {
 			const sessions = [makeSession('s1', '/project/a')];
 
-			useSessionStore.setState({ sessionsLoaded: true });
+			seedSessions(sessions, true);
 
-			const { rerender } = renderHook(({ sessions: s, encore }) => useCueAutoDiscovery(s, encore), {
-				initialProps: { sessions, encore: makeEncoreFeatures(true) },
+			const { rerender } = renderHook(({ encore }) => useCueAutoDiscovery(encore), {
+				initialProps: { encore: makeEncoreFeatures(true) },
 			});
 
 			mockRefreshSession.mockClear();
 			mockDisable.mockClear();
 
 			// Rerender with same feature state
-			rerender({ sessions, encore: makeEncoreFeatures(true) });
+			rerender({ encore: makeEncoreFeatures(true) });
 
 			// Only the initial scan calls should exist, no toggle-related calls
 			expect(mockDisable).not.toHaveBeenCalled();
 		});
 	});
 
-	describe('gating behavior', () => {
-		it('should not refresh sessions when maestroCue is disabled even if sessions change', () => {
+	describe('discovery always runs', () => {
+		it('should refresh new sessions even when maestroCue is disabled', () => {
 			const initialSessions = [makeSession('s1', '/project/a')];
 			const encoreFeatures = makeEncoreFeatures(false);
 
-			useSessionStore.setState({ sessionsLoaded: true });
-
-			const { rerender } = renderHook(
-				({ sessions, encore }) => useCueAutoDiscovery(sessions, encore),
-				{ initialProps: { sessions: initialSessions, encore: encoreFeatures } }
-			);
+			seedSessions(initialSessions, true);
+			renderHook(() => useCueAutoDiscovery(encoreFeatures));
 
 			mockRefreshSession.mockClear();
 
-			// Add a new session while feature is disabled
-			const updatedSessions = [...initialSessions, makeSession('s2', '/project/b')];
-			rerender({ sessions: updatedSessions, encore: encoreFeatures });
+			// Add a new session while feature is disabled - should still refresh
+			act(() => {
+				seedSessions([...initialSessions, makeSession('s2', '/project/b')], true);
+			});
+
+			expect(mockRefreshSession).toHaveBeenCalledWith('s2', '/project/b');
+		});
+	});
+
+	describe('rapid-toggle serialization', () => {
+		// These tests guard the queueing behavior that prevents ON → OFF → ON
+		// toggles from racing when enable/disable IPC calls have different
+		// latencies. Without serialization, a slow enable() resolving after a
+		// fast disable() could leave the engine enabled when the flag says off.
+
+		it('serializes enable/disable calls in flag-change order even when IPC latency varies', async () => {
+			const sessions = [makeSession('s1', '/project/a')];
+			seedSessions(sessions, true);
+
+			const callOrder: string[] = [];
+			let resolveEnable: (() => void) | undefined;
+			mockEnable.mockImplementationOnce(
+				() =>
+					new Promise<void>((resolve) => {
+						callOrder.push('enable:start');
+						resolveEnable = () => {
+							callOrder.push('enable:resolve');
+							resolve();
+						};
+					})
+			);
+			mockDisable.mockImplementationOnce(async () => {
+				callOrder.push('disable:start');
+				callOrder.push('disable:resolve');
+			});
+
+			const { rerender } = renderHook(({ encore }) => useCueAutoDiscovery(encore), {
+				initialProps: { encore: makeEncoreFeatures(false) },
+			});
+
+			// ON → queues enable (which will hang until we resolve it)
+			rerender({ encore: makeEncoreFeatures(true) });
+			await act(async () => {});
+			// OFF → queues disable. Must NOT execute until enable resolves.
+			rerender({ encore: makeEncoreFeatures(false) });
+			await act(async () => {});
+
+			// Disable has not started yet; it's waiting in the chain.
+			expect(callOrder).toEqual(['enable:start']);
+			expect(mockDisable).not.toHaveBeenCalled();
+
+			// Resolve enable; disable should then fire in order.
+			await act(async () => {
+				resolveEnable!();
+			});
+			await act(async () => {});
+
+			expect(callOrder).toEqual([
+				'enable:start',
+				'enable:resolve',
+				'disable:start',
+				'disable:resolve',
+			]);
+		});
+
+		it('applies the final flag value when rapid toggles occur', async () => {
+			const sessions = [makeSession('s1', '/project/a')];
+			seedSessions(sessions, true);
+
+			const { rerender } = renderHook(({ encore }) => useCueAutoDiscovery(encore), {
+				initialProps: { encore: makeEncoreFeatures(false) },
+			});
+
+			// OFF → ON → OFF → ON, firing 3 transitions back-to-back
+			rerender({ encore: makeEncoreFeatures(true) });
+			rerender({ encore: makeEncoreFeatures(false) });
+			rerender({ encore: makeEncoreFeatures(true) });
+			await act(async () => {});
+			// Let the microtask chain drain across all three toggles.
+			await act(async () => {});
+
+			// Every transition must have been observed once - never skipped or
+			// reordered. Final call is enable to match the final flag value.
+			expect(mockEnable).toHaveBeenCalledTimes(2);
+			expect(mockDisable).toHaveBeenCalledTimes(1);
+		});
+
+		it('drops queued lifecycle work after the hook unmounts', async () => {
+			seedSessions([makeSession('s1', '/project/a')], true);
+			let resolveEnable: (() => void) | undefined;
+			mockEnable.mockReturnValueOnce(
+				new Promise<void>((resolve) => {
+					resolveEnable = resolve;
+				})
+			);
+
+			const { rerender, unmount } = renderHook(({ encore }) => useCueAutoDiscovery(encore), {
+				initialProps: { encore: makeEncoreFeatures(false) },
+			});
+			mockRefreshSession.mockClear();
+
+			rerender({ encore: makeEncoreFeatures(true) });
+			await act(async () => {});
+			expect(mockEnable).toHaveBeenCalledOnce();
+
+			rerender({ encore: makeEncoreFeatures(false) });
+			unmount();
+			await act(async () => {
+				resolveEnable?.();
+			});
+			await act(async () => {});
 
 			expect(mockRefreshSession).not.toHaveBeenCalled();
+			expect(mockDisable).not.toHaveBeenCalled();
 		});
 	});
 });

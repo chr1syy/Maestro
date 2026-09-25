@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import type { MarkdownEditorHandle } from '../../components/FilePreview/markdownEditor';
 
 /**
  * Cache for loaded images to avoid repeated IPC calls.
@@ -18,12 +19,10 @@ export interface UseAutoRunImageHandlingDeps {
 	localContent: string;
 	/** Function to update the local content state */
 	setLocalContent: (content: string) => void;
-	/** Function to sync content to parent state */
-	handleContentChange: (content: string) => void;
 	/** Whether editing is locked (e.g., during batch run) */
 	isLocked: boolean;
-	/** Ref to the textarea element for cursor position */
-	textareaRef: React.RefObject<HTMLTextAreaElement>;
+	/** Ref to the CodeMirror editor, for cursor position and insertion */
+	editorRef: React.RefObject<MarkdownEditorHandle>;
 	/** Push undo state before content modifications */
 	pushUndoState: () => void;
 	/** Ref to last snapshotted content */
@@ -51,11 +50,19 @@ export interface UseAutoRunImageHandlingReturn {
 	/** Ref to the file input element */
 	fileInputRef: React.RefObject<HTMLInputElement>;
 	/** Handle paste event (for clipboard images) */
-	handlePaste: (e: React.ClipboardEvent) => Promise<void>;
+	/**
+	 * Paste handler for the source editor. Returns `true` when it claimed the
+	 * paste (trimmed text, or an image it is saving as an attachment), which is
+	 * what stops CodeMirror from also inserting the clipboard contents. Image
+	 * saving continues asynchronously after it returns.
+	 */
+	handlePaste: (e: ClipboardEvent) => boolean;
 	/** Handle file input change (for manual upload) */
 	handleFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
 	/** Remove an attachment by relative path */
 	handleRemoveAttachment: (relativePath: string) => Promise<void>;
+	/** Replace an existing attachment's bytes with a new data URL (overwrites the file in place) */
+	replaceAttachment: (relativePath: string, newDataUrl: string) => Promise<void>;
 	/** Open lightbox for a filename or URL */
 	openLightboxByFilename: (filenameOrUrl: string) => void;
 	/** Close the lightbox */
@@ -114,9 +121,8 @@ const removeImageMarkdownReference = (content: string, relativePath: string): st
  *   selectedFile,
  *   localContent,
  *   setLocalContent,
- *   handleContentChange,
  *   isLocked,
- *   textareaRef,
+ *   editorRef,
  *   pushUndoState,
  *   lastUndoSnapshotRef,
  * });
@@ -127,9 +133,8 @@ export function useAutoRunImageHandling({
 	selectedFile,
 	localContent,
 	setLocalContent,
-	handleContentChange,
 	isLocked,
-	textareaRef,
+	editorRef,
 	pushUndoState,
 	lastUndoSnapshotRef,
 	sshRemoteId,
@@ -208,14 +213,14 @@ export function useAutoRunImageHandling({
 
 	// Handle paste (images and text with whitespace trimming)
 	const handlePaste = useCallback(
-		async (e: React.ClipboardEvent) => {
+		(e: ClipboardEvent): boolean => {
 			if (isLocked) {
-				return;
+				return false;
 			}
 
 			const items = e.clipboardData?.items;
 			if (!items) {
-				return;
+				return false;
 			}
 
 			// Check if pasting an image
@@ -223,127 +228,119 @@ export function useAutoRunImageHandling({
 
 			// Handle text paste with whitespace trimming (when no images)
 			if (!hasImage) {
-				const text = e.clipboardData.getData('text/plain');
+				const text = e.clipboardData?.getData('text/plain');
 				if (text) {
 					const trimmedText = text.trim();
 					// Only intercept if trimming actually changed the text
 					if (trimmedText !== text) {
 						e.preventDefault();
-						const textarea = textareaRef.current;
-						if (textarea) {
-							const start = textarea.selectionStart ?? 0;
-							const end = textarea.selectionEnd ?? 0;
-							const newContent =
-								localContent.slice(0, start) + trimmedText + localContent.slice(end);
-							setLocalContent(newContent);
-							handleContentChange(newContent);
-							// Set cursor position after the pasted text
-							requestAnimationFrame(() => {
-								textarea.selectionStart = textarea.selectionEnd = start + trimmedText.length;
-							});
-						}
+						const editor = editorRef.current;
+						if (!editor) return false;
+						const { from, to } = editor.getSelectionRange();
+						// Insert through the editor so the caret lands after the text
+						// and the change reaches state via the editor's own onChange.
+						editor.replaceRange(from, to, trimmedText);
+						return true;
 					}
 				}
-				return;
+				return false;
 			}
 
 			// Image paste requires folder and file context
 			if (!folderPath || !selectedFile) {
-				return;
+				return false;
 			}
 
-			for (let i = 0; i < items.length; i++) {
-				const item = items[i];
-				if (item.type.startsWith('image/')) {
-					e.preventDefault();
+			const imageItem = Array.from(items).find((item) => item.type.startsWith('image/'));
+			const file = imageItem?.getAsFile();
+			if (!imageItem || !file) {
+				return false;
+			}
 
-					const file = item.getAsFile();
-					if (!file) {
-						continue;
-					}
+			// Claim the paste before the async read - CodeMirror only honors a
+			// synchronous answer, and an image has no text for it to insert anyway.
+			e.preventDefault();
 
-					// Read as base64
-					const reader = new FileReader();
-					reader.onload = async (event) => {
-						const base64Data = event.target?.result as string;
-						if (!base64Data) {
-							return;
-						}
+			// Where the caret sits right now; the read below is async, and the
+			// user could click elsewhere before it resolves.
+			const cursorPos = editorRef.current?.getCaret() ?? localContent.length;
 
-						// Extract the base64 content without the data URL prefix
-						const base64Content = base64Data.replace(/^data:image\/\w+;base64,/, '');
-						const extension = item.type.split('/')[1] || 'png';
-
-						// Save to Auto Run folder using the new API
-						const result = await window.maestro.autorun.saveImage(
-							folderPath,
-							selectedFile,
-							base64Content,
-							extension,
-							sshRemoteId
-						);
-						if (result.success && result.relativePath) {
-							// Update attachments list with the relative path
-							const filename = result.relativePath.split('/').pop() || result.relativePath;
-							setAttachmentsList((prev) => [...prev, result.relativePath!]);
-							setAttachmentPreviews((prev) => new Map(prev).set(result.relativePath!, base64Data));
-
-							// Insert markdown reference at cursor position using relative path
-							const textarea = textareaRef.current;
-							if (textarea) {
-								const cursorPos = textarea.selectionStart;
-								const textBefore = localContent.substring(0, cursorPos);
-								const textAfter = localContent.substring(cursorPos);
-								// URL-encode the path to handle spaces and special characters
-								const encodedPath = result
-									.relativePath!.split('/')
-									.map((part) => encodeURIComponent(part))
-									.join('/');
-								const imageMarkdown = `![${filename}](${encodedPath})`;
-
-								// Push undo state before modifying content
-								pushUndoState();
-
-								// Add newlines if not at start of line
-								let prefix = '';
-								let suffix = '';
-								if (textBefore.length > 0 && !textBefore.endsWith('\n')) {
-									prefix = '\n';
-								}
-								if (textAfter.length > 0 && !textAfter.startsWith('\n')) {
-									suffix = '\n';
-								}
-
-								const newContent = textBefore + prefix + imageMarkdown + suffix + textAfter;
-								// Update local state and sync to parent immediately for explicit user action
-								setLocalContent(newContent);
-								handleContentChange(newContent);
-								lastUndoSnapshotRef.current = newContent;
-
-								// Move cursor after the inserted markdown
-								const newCursorPos =
-									cursorPos + prefix.length + imageMarkdown.length + suffix.length;
-								setTimeout(() => {
-									textarea.setSelectionRange(newCursorPos, newCursorPos);
-									textarea.focus();
-								}, 0);
-							}
-						}
-					};
-					reader.readAsDataURL(file);
-					break; // Only handle first image
+			// Read as base64
+			const reader = new FileReader();
+			reader.onload = async (event) => {
+				const base64Data = event.target?.result as string;
+				if (!base64Data) {
+					return;
 				}
-			}
+
+				// Extract the base64 content without the data URL prefix
+				const base64Content = base64Data.replace(/^data:image\/\w+;base64,/, '');
+				const extension = imageItem.type.split('/')[1] || 'png';
+
+				// Save to Auto Run folder using the new API
+				const result = await window.maestro.autorun.saveImage(
+					folderPath,
+					selectedFile,
+					base64Content,
+					extension,
+					sshRemoteId
+				);
+				if (!result.success || !result.relativePath) {
+					return;
+				}
+
+				// Update attachments list with the relative path
+				const filename = result.relativePath.split('/').pop() || result.relativePath;
+				setAttachmentsList((prev) => [...prev, result.relativePath!]);
+				setAttachmentPreviews((prev) => new Map(prev).set(result.relativePath!, base64Data));
+
+				// Insert markdown reference at cursor position using relative path
+				const textBefore = localContent.substring(0, cursorPos);
+				const textAfter = localContent.substring(cursorPos);
+				// URL-encode the path to handle spaces and special characters
+				const encodedPath = result
+					.relativePath!.split('/')
+					.map((part) => encodeURIComponent(part))
+					.join('/');
+				const imageMarkdown = `![${filename}](${encodedPath})`;
+
+				// Push undo state before modifying content
+				pushUndoState();
+
+				// Add newlines if not at start of line
+				let prefix = '';
+				let suffix = '';
+				if (textBefore.length > 0 && !textBefore.endsWith('\n')) {
+					prefix = '\n';
+				}
+				if (textAfter.length > 0 && !textAfter.startsWith('\n')) {
+					suffix = '\n';
+				}
+
+				const newContent = textBefore + prefix + imageMarkdown + suffix + textAfter;
+				// Draft-only: the insertion stays unsaved until Save, so Revert discards it.
+				setLocalContent(newContent);
+				lastUndoSnapshotRef.current = newContent;
+
+				// Move cursor after the inserted markdown, once the editor has
+				// taken the new content.
+				const newCursorPos = cursorPos + prefix.length + imageMarkdown.length + suffix.length;
+				setTimeout(() => {
+					editorRef.current?.setSelection(newCursorPos, newCursorPos);
+					editorRef.current?.focus();
+				}, 0);
+			};
+			reader.readAsDataURL(file);
+			return true;
 		},
 		[
 			localContent,
 			isLocked,
-			handleContentChange,
 			folderPath,
 			selectedFile,
 			pushUndoState,
 			setLocalContent,
-			textareaRef,
+			editorRef,
 			lastUndoSnapshotRef,
 			sshRemoteId,
 		]
@@ -380,7 +377,7 @@ export function useAutoRunImageHandling({
 					// Push undo state before modifying content
 					pushUndoState();
 
-					// Insert at end of content - update local and sync to parent immediately
+					// Insert at end of content
 					// URL-encode the path to handle spaces and special characters
 					const encodedPath = result
 						.relativePath!.split('/')
@@ -389,7 +386,6 @@ export function useAutoRunImageHandling({
 					const imageMarkdown = `\n![${filename}](${encodedPath})\n`;
 					const newContent = localContent + imageMarkdown;
 					setLocalContent(newContent);
-					handleContentChange(newContent);
 					lastUndoSnapshotRef.current = newContent;
 				}
 			};
@@ -400,7 +396,6 @@ export function useAutoRunImageHandling({
 		},
 		[
 			localContent,
-			handleContentChange,
 			folderPath,
 			selectedFile,
 			pushUndoState,
@@ -427,25 +422,41 @@ export function useAutoRunImageHandling({
 			// Push undo state before modifying content
 			pushUndoState();
 
-			// Remove the markdown reference from content - update local and sync to parent immediately
+			// Remove the markdown reference from content
 			// The markdown content uses URL-encoded paths, so we need to match the encoded version
 			const newContent = removeImageMarkdownReference(localContent, relativePath);
 			setLocalContent(newContent);
-			handleContentChange(newContent);
 			lastUndoSnapshotRef.current = newContent;
 
 			// Clear from cache
 			imageCache.delete(`${folderPath}:${relativePath}`);
 		},
-		[
-			localContent,
-			handleContentChange,
-			folderPath,
-			pushUndoState,
-			setLocalContent,
-			lastUndoSnapshotRef,
-			sshRemoteId,
-		]
+		[localContent, folderPath, pushUndoState, setLocalContent, lastUndoSnapshotRef, sshRemoteId]
+	);
+
+	// Overwrite an existing attachment's bytes with a new data URL.
+	// Used by the image annotator: original file path is preserved so markdown
+	// references stay valid; only the on-disk content (and the in-memory preview) changes.
+	const replaceAttachment = useCallback(
+		async (relativePath: string, newDataUrl: string) => {
+			if (!folderPath) return;
+
+			const base64Content = newDataUrl.replace(/^data:image\/\w+;base64,/, '');
+
+			const result = await window.maestro.autorun.replaceImage(
+				folderPath,
+				relativePath,
+				base64Content,
+				sshRemoteId
+			);
+			if (!result.success) {
+				throw new Error(result.error || 'Failed to replace image');
+			}
+
+			setAttachmentPreviews((prev) => new Map(prev).set(relativePath, newDataUrl));
+			imageCache.set(`${folderPath}:${relativePath}`, newDataUrl);
+		},
+		[folderPath, sshRemoteId]
 	);
 
 	// Lightbox helpers - handles both attachment filenames and external URLs
@@ -492,25 +503,16 @@ export function useAutoRunImageHandling({
 			// Push undo state before modifying content
 			pushUndoState();
 
-			// Remove the markdown reference from content - update local and sync to parent immediately
+			// Remove the markdown reference from content
 			// The markdown content uses URL-encoded paths, so we need to match the encoded version
 			const newContent = removeImageMarkdownReference(localContent, relativePath);
 			setLocalContent(newContent);
-			handleContentChange(newContent);
 			lastUndoSnapshotRef.current = newContent;
 
 			// Clear from cache
 			imageCache.delete(`${folderPath}:${relativePath}`);
 		},
-		[
-			folderPath,
-			localContent,
-			handleContentChange,
-			pushUndoState,
-			setLocalContent,
-			lastUndoSnapshotRef,
-			sshRemoteId,
-		]
+		[folderPath, localContent, pushUndoState, setLocalContent, lastUndoSnapshotRef, sshRemoteId]
 	);
 
 	return {
@@ -524,6 +526,7 @@ export function useAutoRunImageHandling({
 		handlePaste,
 		handleFileSelect,
 		handleRemoveAttachment,
+		replaceAttachment,
 		openLightboxByFilename,
 		closeLightbox,
 		handleLightboxNavigate,

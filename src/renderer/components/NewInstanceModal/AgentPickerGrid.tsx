@@ -1,16 +1,25 @@
 import React from 'react';
 import { RefreshCw, ChevronRight, AlertTriangle } from 'lucide-react';
+import { GhostIconButton } from '../ui/GhostIconButton';
+import { ProviderAvailabilityBar } from '../ui/ProviderAvailabilityBar';
 import { AgentConfigPanel } from '../shared/AgentConfigPanel';
 import { isBetaAgent } from '../../../shared/agentMetadata';
+import { isAdaptiveModeDefaultOn } from '../../../shared/agentConstants';
 import { buildMaestroUrl } from '../../utils/buildMaestroUrl';
 import { SUPPORTED_AGENTS } from './types';
 import type { AgentPickerGridProps } from './types';
+import { openUrl } from '../../utils/openUrl';
 
 export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 	theme,
 	loading,
 	sshConnectionError,
-	sortedAgents,
+	visibleAgents,
+	availableProviderCount,
+	totalProviderCount,
+	providerLocationLabel,
+	showAllProviders,
+	onShowAllProvidersChange,
 	selectedAgent,
 	expandedAgent,
 	refreshingAgent,
@@ -18,6 +27,10 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 	customAgentPaths,
 	customAgentArgs,
 	customAgentEnvVars,
+	enableMaestroPByAgent,
+	maestroPModeByAgent,
+	maestroPPathByAgent,
+	detectedMaestroPPath,
 	agentConfigs,
 	availableModels,
 	loadingModels,
@@ -27,6 +40,9 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 	onDismissDebug,
 	onCustomPathChange,
 	onCustomArgsChange,
+	onEnableMaestroPChange,
+	onMaestroPModeChange,
+	onMaestroPPathChange,
 	onEnvVarKeyChange,
 	onEnvVarValueChange,
 	onEnvVarRemove,
@@ -39,14 +55,35 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 	dynamicOptions = {},
 	loadingDynamicOptions = {},
 	onLoadDynamicOptionsForAgent,
+	codexAutoResetByAgent,
+	onCodexAutoResetChange,
 }: AgentPickerGridProps) {
 	return (
 		<div>
-			<div
-				className="block text-xs font-bold opacity-70 uppercase mb-2"
-				style={{ color: theme.colors.textMain }}
-			>
-				Agent Provider
+			{/*
+				Counts and filter ride the section heading rather than a row of their
+				own: this modal scrolls, and every line spent here pushes the Working
+				Directory field - the one field that cannot be defaulted - further below
+				the fold.
+			*/}
+			<div className="flex items-center justify-between gap-3 mb-2">
+				<div
+					className="block text-xs font-bold opacity-70 uppercase"
+					style={{ color: theme.colors.textMain }}
+				>
+					Agent Provider
+				</div>
+				{!loading && !sshConnectionError && (
+					<ProviderAvailabilityBar
+						theme={theme}
+						variant="compact"
+						availableCount={availableProviderCount}
+						totalCount={totalProviderCount}
+						locationLabel={providerLocationLabel}
+						showAll={showAllProviders}
+						onShowAllChange={onShowAllProvidersChange}
+					/>
+				)}
 			</div>
 			{loading ? (
 				<div className="text-sm opacity-50">Loading agents...</div>
@@ -72,7 +109,7 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 				</div>
 			) : (
 				<div className="space-y-1" role="listbox" aria-label="Agent provider selection">
-					{sortedAgents.map((agent) => {
+					{visibleAgents.map((agent) => {
 						const isSupported = SUPPORTED_AGENTS.includes(agent.id);
 						const isExpanded = expandedAgent === agent.id;
 						const isSelected = selectedAgent === agent.id;
@@ -136,7 +173,7 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 										<span className="font-medium">{agent.name}</span>
 										{isBetaAgent(agent.id) && (
 											<span
-												className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase"
+												className="text-3xs px-1.5 py-0.5 rounded font-bold uppercase"
 												style={{
 													backgroundColor: theme.colors.warning + '30',
 													color: theme.colors.warning,
@@ -170,20 +207,18 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 														Not Found
 													</span>
 												)}
-												<button
-													type="button"
+												<GhostIconButton
 													onClick={(e) => {
 														e.stopPropagation();
 														onRefreshAgent(agent.id);
 													}}
-													className="p-1 rounded hover:bg-white/10 transition-colors"
 													title="Refresh detection"
-													style={{ color: theme.colors.textDim }}
+													color={theme.colors.textDim}
 												>
 													<RefreshCw
 														className={`w-3 h-3 ${refreshingAgent === agent.id ? 'animate-spin' : ''}`}
 													/>
-												</button>
+												</GhostIconButton>
 											</>
 										) : (
 											<span
@@ -250,6 +285,36 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 											onRefreshAgent={() => onRefreshAgent(agent.id)}
 											refreshingAgent={refreshingAgent === agent.id}
 											showBuiltInEnvVars
+											enableMaestroP={
+												enableMaestroPByAgent?.[agent.id] ?? isAdaptiveModeDefaultOn(agent.id)
+											}
+											onEnableMaestroPChange={
+												onEnableMaestroPChange
+													? (value) => onEnableMaestroPChange(agent.id, value)
+													: undefined
+											}
+											codexAutoResetOnExhaustion={codexAutoResetByAgent?.[agent.id] ?? false}
+											onCodexAutoResetChange={
+												onCodexAutoResetChange
+													? (value) => onCodexAutoResetChange(agent.id, value)
+													: undefined
+											}
+											maestroPMode={maestroPModeByAgent?.[agent.id] ?? 'dynamic'}
+											onMaestroPModeChange={
+												onMaestroPModeChange
+													? (mode) => onMaestroPModeChange(agent.id, mode)
+													: undefined
+											}
+											maestroPPath={maestroPPathByAgent?.[agent.id] ?? ''}
+											onMaestroPPathChange={
+												onMaestroPPathChange
+													? (value) => onMaestroPPathChange(agent.id, value)
+													: undefined
+											}
+											onMaestroPPathBlur={() => {
+												/* Saved on agent create */
+											}}
+											detectedMaestroPPath={detectedMaestroPPath}
 										/>
 									</div>
 								)}
@@ -267,7 +332,7 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 					className="underline hover:opacity-80"
 					style={{ color: theme.colors.accent }}
 					onClick={() =>
-						window.maestro.shell.openExternal(
+						openUrl(
 							buildMaestroUrl('https://docs.runmaestro.ai/autorun-playbooks#environment-variables')
 						)
 					}
@@ -301,7 +366,7 @@ export const AgentPickerGrid = React.memo(function AgentPickerGrid({
 						<div>
 							<span className="opacity-50">PATH:</span>
 						</div>
-						<div className="pl-2 break-all text-[10px]">
+						<div className="pl-2 break-all text-2xs">
 							{debugInfo.envPath.split(debugInfo.platform === 'win32' ? ';' : ':').map((p, i) => (
 								<div key={`${debugInfo.platform}-${i}-${p}`}>{p}</div>
 							))}

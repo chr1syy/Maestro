@@ -1,12 +1,13 @@
-import React, { useState, useCallback, memo, useEffect, useRef } from 'react';
+import React, { useState, useCallback, memo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ChevronLeft, ChevronRight, Copy, Check, Trash2, FileText } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Copy, Check, Trash2, FileText, PenLine } from 'lucide-react';
 import type { Theme } from '../../types';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
 import { ConfirmModal } from '../ConfirmModal';
 import { safeClipboardWrite, safeClipboardWriteImage } from '../../utils/clipboard';
+import { logger } from '../../utils/logger';
 
 // ============================================================================
 // AutoRunLightbox - Full-screen image viewer with navigation, copy, delete
@@ -29,6 +30,8 @@ interface AutoRunLightboxProps {
 	onNavigate: (filename: string | null) => void;
 	/** Callback to delete an attachment image (only for local attachments) */
 	onDelete?: (relativePath: string) => void;
+	/** Callback to open the image annotator for the current local attachment */
+	onAnnotate?: (relativePath: string) => void;
 }
 
 /**
@@ -48,50 +51,30 @@ export const AutoRunLightbox = memo(
 		onClose,
 		onNavigate,
 		onDelete,
+		onAnnotate,
 	}: AutoRunLightboxProps) => {
 		const [copied, setCopied] = useState(false);
 		const [copiedMarkdown, setCopiedMarkdown] = useState(false);
 		const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-		const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-		const layerIdRef = useRef<string>();
 		const onCloseRef = useRef(onClose);
 		onCloseRef.current = onClose;
 
-		// Determine if lightbox is visible
-		const isVisible = Boolean(lightboxFilename);
+		// Determine if lightbox is visible and has a renderable image
+		const lightboxImageUrl =
+			lightboxExternalUrl ||
+			(lightboxFilename ? attachmentPreviews.get(lightboxFilename) : undefined);
+		const isVisible = Boolean(lightboxFilename && lightboxImageUrl);
 
 		// Register with layer stack when lightbox is visible
 		// This ensures Escape closes the lightbox first before the expanded modal
-		useEffect(() => {
-			if (isVisible) {
-				const id = registerLayer({
-					type: 'modal',
-					priority: MODAL_PRIORITIES.AUTORUN_LIGHTBOX,
-					blocksLowerLayers: true,
-					capturesFocus: true,
-					focusTrap: 'lenient',
-					onEscape: () => {
-						onCloseRef.current();
-					},
-				});
-				layerIdRef.current = id;
-
-				return () => {
-					if (layerIdRef.current) {
-						unregisterLayer(layerIdRef.current);
-					}
-				};
-			}
-		}, [isVisible, registerLayer, unregisterLayer]);
-
-		// Keep escape handler up to date
-		useEffect(() => {
-			if (layerIdRef.current) {
-				updateLayerHandler(layerIdRef.current, () => {
-					onCloseRef.current();
-				});
-			}
-		}, [onClose, updateLayerHandler]);
+		useModalLayer(
+			MODAL_PRIORITIES.AUTORUN_LIGHTBOX,
+			undefined,
+			() => {
+				onCloseRef.current();
+			},
+			{ focusTrap: 'lenient', enabled: isVisible }
+		);
 
 		// Calculate current index and navigation availability
 		const currentIndex = lightboxFilename ? attachmentsList.indexOf(lightboxFilename) : -1;
@@ -125,7 +108,7 @@ export const AutoRunLightbox = memo(
 					setTimeout(() => setCopied(false), 2000);
 				}
 			} catch (err) {
-				console.error('Failed to copy image to clipboard:', err);
+				logger.error('Failed to copy image to clipboard:', undefined, err);
 			}
 		}, [lightboxFilename, lightboxExternalUrl, attachmentPreviews]);
 
@@ -160,6 +143,13 @@ export const AutoRunLightbox = memo(
 			if (!lightboxFilename || !onDelete || lightboxExternalUrl) return;
 			setShowDeleteConfirm(true);
 		}, [lightboxFilename, lightboxExternalUrl, onDelete]);
+
+		// Open the annotator for the current local attachment, then close the lightbox.
+		const triggerAnnotate = useCallback(() => {
+			if (!lightboxFilename || !onAnnotate || lightboxExternalUrl) return;
+			onAnnotate(lightboxFilename);
+			onClose();
+		}, [lightboxFilename, lightboxExternalUrl, onAnnotate, onClose]);
 
 		// Actually delete the current image (called after confirmation)
 		const handleDeleteConfirmed = useCallback(() => {
@@ -212,9 +202,23 @@ export const AutoRunLightbox = memo(
 				} else if (e.key === 'c' && (e.metaKey || e.ctrlKey)) {
 					e.preventDefault();
 					copyToClipboard();
+				} else if ((e.key === 'e' || e.key === 'E') && (e.metaKey || e.ctrlKey)) {
+					e.preventDefault();
+					if (!lightboxExternalUrl && onAnnotate) {
+						triggerAnnotate();
+					}
 				}
 			},
-			[goToPrevImage, goToNextImage, lightboxExternalUrl, onDelete, promptDelete, copyToClipboard]
+			[
+				goToPrevImage,
+				goToNextImage,
+				lightboxExternalUrl,
+				onDelete,
+				promptDelete,
+				copyToClipboard,
+				onAnnotate,
+				triggerAnnotate,
+			]
 		);
 
 		// Don't render if no image is selected
@@ -282,6 +286,22 @@ export const AutoRunLightbox = memo(
 						{copied ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
 						{copied && <span className="text-sm">Copied!</span>}
 					</button>
+
+					{/* Annotate image - only for local attachments */}
+					{!lightboxExternalUrl && onAnnotate && (
+						<button
+							type="button"
+							onClick={(e) => {
+								e.stopPropagation();
+								triggerAnnotate();
+							}}
+							className="bg-white/10 hover:bg-white/20 text-white rounded-full p-3 backdrop-blur-sm transition-colors"
+							title={`Annotate image (${formatShortcutKeys(['Meta', 'e'])})`}
+							aria-label="Annotate image"
+						>
+							<PenLine className="w-5 h-5" />
+						</button>
+					)}
 
 					{/* Delete image - only for attachments, not external URLs */}
 					{!lightboxExternalUrl && onDelete && (

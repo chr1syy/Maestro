@@ -1,6 +1,9 @@
 import { useCallback, useMemo } from 'react';
+import { useStoreWithEqualityFn } from 'zustand/traditional';
+import { passesUnreadFilter } from '../../utils/sidebarMembership';
 import type { Session, Group } from '../../types';
 import { useSessionStore } from '../../stores/sessionStore';
+import { sidebarSessionEquality } from '../../stores/sessionEquality';
 import { compareNamesIgnoringEmojis as compareSessionNames } from '../../../shared/emojiUtils';
 
 export interface SessionCategories {
@@ -24,75 +27,133 @@ export function useSessionCategories(
 	sessionFilter: string,
 	sortedSessions: Session[],
 	showUnreadAgentsOnly = false,
-	activeSessionId?: string | null
+	activeSessionId?: string | null,
+	activeBatchSessionIds: string[] = [],
+	// Multi-window: optionally narrow the session universe BEFORE categorization so
+	// a secondary window's Left Bar categorizes only the agents it owns. This hook
+	// reads `sessions` straight from the store (below) rather than from the
+	// `sortedSessions` param, so scoping the param alone would NOT scope the
+	// rendered category lists - the scope has to be applied here. No-op (identity)
+	// when omitted, so the primary window and every existing caller are unchanged.
+	scopeSessions?: (list: Session[]) => Session[],
+	// Comma-joined signature of agents with an active Agent Resilience outage.
+	// Stuck agents are treated as "needs attention" and surface in the unread
+	// filter alongside genuinely unread ones (see stuckOutageSessionIds below).
+	stuckOutageSignature = ''
 ): SessionCategories {
-	const sessions = useSessionStore((s) => s.sessions);
+	// PERF: Match SessionList's sidebar-only equality so categorization doesn't
+	// recompute on every streaming flush - only when a sidebar-relevant field
+	// (state, name, group/bookmark/parent membership, AI tab unread/state) shifts.
+	const allSessions = useStoreWithEqualityFn(
+		useSessionStore,
+		(s) => s.sessions,
+		sidebarSessionEquality
+	);
+	const sessions = useMemo(
+		() => (scopeSessions ? scopeSessions(allSessions) : allSessions),
+		[allSessions, scopeSessions]
+	);
 	const groups = useSessionStore((s) => s.groups);
 
-	const worktreeChildrenByParentId = useMemo(() => {
-		const map = new Map<string, Session[]>();
-		sessions.forEach((session) => {
-			if (!session.parentSessionId) return;
-			const siblings = map.get(session.parentSessionId);
-			if (siblings) {
-				siblings.push(session);
-			} else {
-				map.set(session.parentSessionId, [session]);
+	// PR-A 1.3: collapse what used to be four chained `useMemo`s
+	// (worktreeChildrenByParentId → sortedWorktreeChildrenByParentId →
+	// sortedSessionIndexById → getWorktreeChildren) into a single pass.
+	// All four invalidate together when either `sessions` or `sortedSessions`
+	// changes, so chaining gave us four cascading recomputations on every
+	// session mutation. Computing them in one memo with a shared loop drops
+	// the per-mutation render cost roughly in proportion to the number of
+	// chained memos eliminated.
+	//
+	// See CLAUDE-PERFORMANCE.md§"Consolidate chained `useMemo` calls".
+	const { worktreeChildrenByParentId, sortedWorktreeChildrenByParentId, sortedSessionIndexById } =
+		useMemo(() => {
+			const childMap = new Map<string, Session[]>();
+			for (const session of sessions) {
+				if (!session.parentSessionId) continue;
+				const siblings = childMap.get(session.parentSessionId);
+				if (siblings) {
+					siblings.push(session);
+				} else {
+					childMap.set(session.parentSessionId, [session]);
+				}
 			}
-		});
-		return map;
-	}, [sessions]);
 
-	const sortedWorktreeChildrenByParentId = useMemo(() => {
-		const map = new Map<string, Session[]>();
-		worktreeChildrenByParentId.forEach((children, parentId) => {
-			map.set(
-				parentId,
-				[...children].sort((a, b) => compareSessionNames(a.name, b.name))
-			);
-		});
-		return map;
-	}, [worktreeChildrenByParentId]);
+			const sortedChildMap = new Map<string, Session[]>();
+			for (const [parentId, children] of childMap) {
+				sortedChildMap.set(
+					parentId,
+					[...children].sort((a, b) => compareSessionNames(a.name, b.name))
+				);
+			}
 
-	const sortedSessionIndexById = useMemo(() => {
-		const map = new Map<string, number>();
-		sortedSessions.forEach((session, index) => {
-			map.set(session.id, index);
-		});
-		return map;
-	}, [sortedSessions]);
+			const indexMap = new Map<string, number>();
+			for (let i = 0; i < sortedSessions.length; i++) {
+				indexMap.set(sortedSessions[i].id, i);
+			}
+
+			return {
+				worktreeChildrenByParentId: childMap,
+				sortedWorktreeChildrenByParentId: sortedChildMap,
+				sortedSessionIndexById: indexMap,
+			};
+		}, [sessions, sortedSessions]);
 
 	const getWorktreeChildren = useCallback(
 		(parentId: string): Session[] => worktreeChildrenByParentId.get(parentId) || [],
 		[worktreeChildrenByParentId]
 	);
 
-	// Consolidated session categorization and sorting - computed in a single pass
-	const groupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
+	// Consolidated session categorization and sorting - computed in a single pass.
+	// `groupIds` is only ever membership-tested below, so key it on a signature of
+	// the ids rather than the `groups` array reference. Collapsing or expanding a
+	// group rebuilds `groups` without changing which ids exist; keying on the array
+	// handed the categorization memo a fresh Set and re-ran the whole
+	// filter/categorize/sort pass over every agent on each toggle (#1186).
+	const groupIdsSignature = useMemo(() => groups.map((g) => g.id).join('|'), [groups]);
+	const groupIds = useMemo(
+		() => new Set(groupIdsSignature ? groupIdsSignature.split('|') : []),
+		[groupIdsSignature]
+	);
+
+	// Stable Set of stuck (outage) agent ids, recomputed only when the signature
+	// changes so the categorization memo isn't invalidated on unrelated renders.
+	const stuckOutageSessionIds = useMemo(
+		() => new Set(stuckOutageSignature ? stuckOutageSignature.split(',') : []),
+		[stuckOutageSignature]
+	);
 
 	const sessionCategories = useMemo(() => {
 		// Step 1: Filter sessions based on search query and unread filter
 		const query = sessionFilter?.toLowerCase() ?? '';
 		const filtered: Session[] = [];
 
+		// Auto Run agents (the AUTO badge) sit between prompts in state 'idle', so
+		// the busy/unread checks below would drop them. Keep them visible in the
+		// unread filter using the same set that drives the badge.
+		const batchSessionIds = new Set(activeBatchSessionIds);
+
 		for (const s of sessions) {
 			// Exclude worktree children from main list (they appear under parent)
 			if (s.parentSessionId) continue;
 
-			// Apply unread agents filter (also keep busy/working agents visible)
-			// Always keep the active session (or its parent) visible so user doesn't lose their place
-			const isActiveOrParentOfActive =
-				s.id === activeSessionId ||
-				worktreeChildrenByParentId.get(s.id)?.some((child) => child.id === activeSessionId);
-			if (showUnreadAgentsOnly && !isActiveOrParentOfActive) {
-				const hasUnread = s.aiTabs?.some((tab) => tab.hasUnread);
-				const isBusy = s.state === 'busy';
-				// Also check if any worktree children have unread or are busy
-				const children = worktreeChildrenByParentId.get(s.id);
-				const hasUnreadChildren = children?.some(
-					(child) => child.aiTabs?.some((tab) => tab.hasUnread) || child.state === 'busy'
-				);
-				if (!hasUnread && !isBusy && !hasUnreadChildren) continue;
+			// Pianola is the pinned manager agent: it renders in its own top
+			// section, never in Bookmarks/Groups/Ungrouped, so exclude it here.
+			if (s.isPianola) continue;
+
+			// Apply the unread-agents filter through the SHARED predicate, which the
+			// Cmd+[ / Cmd+] cycle also uses - the two disagreeing about which agents
+			// are on screen is what made the cycle walk agents the sidebar was not
+			// drawing. It keeps the active session (or its parent) visible either way.
+			if (
+				!passesUnreadFilter(s, {
+					showUnreadAgentsOnly,
+					activeSessionId,
+					worktreeChildren: worktreeChildrenByParentId.get(s.id) ?? [],
+					batchSessionIds,
+					stuckOutageIds: stuckOutageSessionIds,
+				})
+			) {
+				continue;
 			}
 
 			if (!query) {
@@ -174,9 +235,11 @@ export function useSessionCategories(
 		sessionFilter,
 		showUnreadAgentsOnly,
 		activeSessionId,
+		activeBatchSessionIds,
 		sessions,
 		worktreeChildrenByParentId,
 		groupIds,
+		stuckOutageSessionIds,
 	]);
 
 	const sortedGroups = useMemo(

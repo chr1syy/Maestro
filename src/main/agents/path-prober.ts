@@ -22,14 +22,73 @@ import { execFileNoThrow } from '../utils/execFile';
 import { logger } from '../utils/logger';
 import { expandTilde, detectNodeVersionManagerBinPaths } from '../../shared/pathUtils';
 import { isWindows, getWhichCommand } from '../../shared/platformDetection';
+import { captureException } from '../utils/sentry';
 
 const LOG_CONTEXT = 'PathProber';
+
+/** Bound on the `which -a` / `where` lookup in {@link findAllBinaryPaths}. */
+const WHICH_LOOKUP_TIMEOUT_MS = 5000;
 
 // ============ Types ============
 
 export interface BinaryDetectionResult {
 	exists: boolean;
 	path?: string;
+}
+
+function getCodexDesktopBinRoot(): string {
+	const home = os.homedir();
+	const localAppData = process.env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local');
+	return path.win32.join(localAppData, 'OpenAI', 'Codex', 'bin');
+}
+
+function isCodexDesktopBinaryPath(binaryPath: string): boolean {
+	const normalizedPath = path.win32.normalize(binaryPath);
+	const binRoot = path.win32.normalize(getCodexDesktopBinRoot());
+
+	return (
+		path.win32.basename(normalizedPath).toLowerCase() === 'codex.exe' &&
+		path.win32.dirname(path.win32.dirname(normalizedPath)).toLowerCase() === binRoot.toLowerCase()
+	);
+}
+
+function isMissingPathError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+async function findLatestCodexDesktopBinary(): Promise<string | null> {
+	const binRoot = getCodexDesktopBinRoot();
+
+	try {
+		const entries = await fs.promises.readdir(binRoot, { withFileTypes: true });
+		const candidates = await Promise.all(
+			entries
+				.filter((entry) => entry.isDirectory())
+				.map(async (entry) => {
+					const candidatePath = path.win32.join(binRoot, entry.name, 'codex.exe');
+					try {
+						const stats = await fs.promises.stat(candidatePath);
+						return stats.isFile() ? { path: candidatePath, installedAt: stats.birthtimeMs } : null;
+					} catch (error) {
+						if (isMissingPathError(error)) return null;
+						throw error;
+					}
+				})
+		);
+
+		return (
+			candidates
+				.filter(
+					(candidate): candidate is { path: string; installedAt: number } => candidate !== null
+				)
+				.sort((a, b) => b.installedAt - a.installedAt || b.path.localeCompare(a.path))[0]?.path ||
+			null
+		);
+	} catch (error) {
+		if (isMissingPathError(error)) return null;
+		throw error;
+	}
 }
 
 // ============ Environment Expansion ============
@@ -112,6 +171,7 @@ export function getExpandedEnv(): NodeJS.ProcessEnv {
 			'/usr/local/sbin',
 			`${home}/.local/bin`, // User local installs (pip, etc.)
 			`${home}/.npm-global/bin`, // npm global with custom prefix
+			`${home}/.bun/bin`, // Bun runtime and package manager (omp installs here)
 			`${home}/bin`, // User bin directory
 			`${home}/.claude/local`, // Claude local install location
 			`${home}/.opencode/bin`, // OpenCode installer default location
@@ -163,13 +223,22 @@ export async function getExpandedEnvWithShell(): Promise<NodeJS.ProcessEnv> {
 		env.PATH = merged.join(delim);
 		return env;
 	} catch (err) {
-		// If shell probing fails, log debug so diagnostics can distinguish
-		// a probe failure from an absent shell PATH, then fall back to base env.
+		// Shell PATH probe failures (timeouts, exit-non-zero) are recoverable -
+		// callers fall back to the base expanded env. Reporting these to Sentry
+		// produces high-volume noise from slow shell init scripts; only escalate
+		// for unexpected error shapes.
+		const message = err instanceof Error ? err.message : String(err);
+		const isExpected =
+			message.includes('Timed out reading shell PATH') ||
+			message.startsWith('Shell exited with code');
+		if (!isExpected) {
+			void captureException(err);
+		}
 		try {
 			logger.debug('Shell PATH probe failed; using base expanded env', LOG_CONTEXT, { err });
 		} catch {
 			// Safe fallback if logger is not available
-			console.debug('Shell PATH probe failed; using base expanded env', err);
+			logger.debug('Shell PATH probe failed; using base expanded env', undefined, err);
 		}
 		return env;
 	}
@@ -235,10 +304,25 @@ export async function checkCustomPath(customPath: string): Promise<BinaryDetecti
 					return { exists: true, path: cmdPath };
 				}
 			}
+
+			// Codex Desktop rotates the version directory containing codex.exe on update.
+			// Recover only this known path shape so arbitrary missing overrides are not
+			// silently redirected to a different executable.
+			if (isCodexDesktopBinaryPath(expandedPath)) {
+				const currentCodexPath = await findLatestCodexDesktopBinary();
+				if (currentCodexPath) {
+					logger.info(`Recovered rotated Codex Desktop path`, LOG_CONTEXT, {
+						original: customPath,
+						resolved: currentCodexPath,
+					});
+					return { exists: true, path: currentCodexPath };
+				}
+			}
 		}
 
 		return { exists: false };
 	} catch (error) {
+		void captureException(error);
 		logger.debug(`Error checking custom path: ${customPath}`, LOG_CONTEXT, { error });
 		return { exists: false };
 	}
@@ -266,12 +350,6 @@ function getWindowsKnownPaths(binaryName: string): string[] {
 		path.join(programFiles, 'WinGet', 'Links', `${bin}.exe`),
 	];
 	const goBin = (bin: string) => [path.join(home, 'go', 'bin', `${bin}.exe`)];
-	const pythonScripts = (bin: string) => [
-		path.join(appData, 'Python', 'Scripts', `${bin}.exe`),
-		path.join(localAppData, 'Programs', 'Python', 'Python312', 'Scripts', `${bin}.exe`),
-		path.join(localAppData, 'Programs', 'Python', 'Python311', 'Scripts', `${bin}.exe`),
-		path.join(localAppData, 'Programs', 'Python', 'Python310', 'Scripts', `${bin}.exe`),
-	];
 
 	// Define known installation paths for each binary, in priority order
 	// Prefer .exe (standalone installers) over .cmd (npm wrappers)
@@ -310,13 +388,52 @@ function getWindowsKnownPaths(binaryName: string): string[] {
 			// npm (has known issues on Windows, but check anyway)
 			...npmGlobal('opencode'),
 		],
+		'copilot-cli': [
+			// WinGet installation (primary method on Windows)
+			path.join(programFiles, 'GitHub Copilot CLI', 'copilot.exe'),
+			// npm global installation
+			...npmGlobal('copilot'),
+			// Scoop installation
+			path.join(home, 'scoop', 'shims', 'copilot.exe'),
+			path.join(home, 'scoop', 'apps', 'copilot', 'current', 'copilot.exe'),
+			// Chocolatey installation
+			path.join(
+				process.env.ChocolateyInstall || 'C:\\ProgramData\\chocolatey',
+				'bin',
+				'copilot.exe'
+			),
+			// Standalone installation
+			...localBin('copilot'),
+			// Winget
+			...wingetLinks('copilot'),
+		],
 		gemini: [
 			// npm global installation
 			...npmGlobal('gemini'),
 		],
-		aider: [
-			// pip installation
-			...pythonScripts('aider'),
+		hermes: [
+			// Python/pipx and standalone installations
+			...localBin('hermes'),
+			path.join(home, 'AppData', 'Roaming', 'Python', 'Scripts', 'hermes.exe'),
+			...npmGlobal('hermes'),
+		],
+		pi: [
+			// npm global installation
+			...npmGlobal('pi'),
+			...localBin('pi'),
+		],
+		omp: [
+			// Bun global installation (primary method for Oh My Pi)
+			path.join(home, '.bun', 'bin', 'omp.exe'),
+			// npm global installation
+			...npmGlobal('omp'),
+			...localBin('omp'),
+		],
+		agy: [
+			// Official install.ps1 / install.cmd target
+			path.join(localAppData, 'agy', 'bin', 'agy.exe'),
+			// Some shells resolve the installer's shim from the user local bin
+			...localBin('agy'),
 		],
 		gh: [
 			// GitHub CLI official installer (MSI)
@@ -344,13 +461,31 @@ function getWindowsKnownPaths(binaryName: string): string[] {
  * Uses parallel probing for performance on slow file systems.
  */
 export async function probeWindowsPaths(binaryName: string): Promise<string | null> {
-	const pathsToCheck = getWindowsKnownPaths(binaryName);
+	const all = await probeWindowsPathsAll(binaryName);
+	const first = all[0] ?? null;
+	if (first) {
+		logger.debug(`Direct probe found ${binaryName}`, LOG_CONTEXT, { path: first });
+	}
+	return first;
+}
 
-	if (pathsToCheck.length === 0) {
-		return null;
+/**
+ * Like {@link probeWindowsPaths} but returns every existing match in priority order.
+ * Used so the UI can surface alternative installations when more than one is detected.
+ */
+export async function probeWindowsPathsAll(binaryName: string): Promise<string[]> {
+	const pathsToCheck = getWindowsKnownPaths(binaryName);
+	if (binaryName === 'codex') {
+		const codexDesktopPath = await findLatestCodexDesktopBinary();
+		if (codexDesktopPath) {
+			pathsToCheck.push(codexDesktopPath);
+		}
 	}
 
-	// Check all paths in parallel for performance
+	if (pathsToCheck.length === 0) {
+		return [];
+	}
+
 	const results = await Promise.allSettled(
 		pathsToCheck.map(async (probePath) => {
 			await fs.promises.access(probePath, fs.constants.F_OK);
@@ -358,16 +493,13 @@ export async function probeWindowsPaths(binaryName: string): Promise<string | nu
 		})
 	);
 
-	// Return the first successful result (maintains priority order from pathsToCheck)
-	for (let i = 0; i < results.length; i++) {
-		const result = results[i];
+	const found: string[] = [];
+	for (const result of results) {
 		if (result.status === 'fulfilled') {
-			logger.debug(`Direct probe found ${binaryName}`, LOG_CONTEXT, { path: result.value });
-			return result.value;
+			found.push(result.value);
 		}
 	}
-
-	return null;
+	return found;
 }
 
 // ============ Unix Path Probing ============
@@ -425,6 +557,19 @@ function getUnixKnownPaths(binaryName: string): string[] {
 			// Node version managers (nvm, fnm, volta, etc.)
 			...nodeVersionManagers('opencode'),
 		],
+		'copilot-cli': [
+			// Homebrew installation (primary method on macOS)
+			...homebrew('copilot'),
+			// GitHub CLI installation
+			'/usr/local/bin/copilot',
+			path.join(home, '.local', 'bin', 'copilot'),
+			// npm global
+			...npmGlobal('copilot'),
+			// User bin
+			path.join(home, 'bin', 'copilot'),
+			// Node version managers
+			...nodeVersionManagers('copilot'),
+		],
 		gemini: [
 			// npm global paths
 			...npmGlobal('gemini'),
@@ -433,13 +578,36 @@ function getUnixKnownPaths(binaryName: string): string[] {
 			// Node version managers (nvm, fnm, volta, etc.)
 			...nodeVersionManagers('gemini'),
 		],
-		aider: [
-			// pip installation
-			...localBin('aider'),
-			// Homebrew paths
-			...homebrew('aider'),
-			// Node version managers (in case installed via npm)
-			...nodeVersionManagers('aider'),
+		hermes: [
+			// Python/pipx and standalone installations
+			...localBin('hermes'),
+			...homebrew('hermes'),
+			path.join(home, 'bin', 'hermes'),
+		],
+		pi: [
+			// npm global and Node version manager installations
+			...localBin('pi'),
+			...homebrew('pi'),
+			...npmGlobal('pi'),
+			path.join(home, 'bin', 'pi'),
+			...nodeVersionManagers('pi'),
+		],
+		omp: [
+			// Bun global installation (primary method for Oh My Pi)
+			path.join(home, '.bun', 'bin', 'omp'),
+			...localBin('omp'),
+			...homebrew('omp'),
+			...npmGlobal('omp'),
+			path.join(home, 'bin', 'omp'),
+			...nodeVersionManagers('omp'),
+		],
+		agy: [
+			// Official install.sh target on macOS/Linux
+			...localBin('agy'),
+			// User bin directory
+			path.join(home, 'bin', 'agy'),
+			// Homebrew, should a formula land later
+			...homebrew('agy'),
 		],
 		gh: [
 			// Homebrew (Apple Silicon + Intel)
@@ -465,31 +633,40 @@ function getUnixKnownPaths(binaryName: string): string[] {
  * Uses parallel probing for performance on slow file systems.
  */
 export async function probeUnixPaths(binaryName: string): Promise<string | null> {
+	const all = await probeUnixPathsAll(binaryName);
+	const first = all[0] ?? null;
+	if (first) {
+		logger.debug(`Direct probe found ${binaryName}`, LOG_CONTEXT, { path: first });
+	}
+	return first;
+}
+
+/**
+ * Like {@link probeUnixPaths} but returns every existing executable match in
+ * priority order. Used so the UI can offer alternative installations when
+ * more than one valid binary is detected (e.g. Codex wrapper + npm global).
+ */
+export async function probeUnixPathsAll(binaryName: string): Promise<string[]> {
 	const pathsToCheck = getUnixKnownPaths(binaryName);
 
 	if (pathsToCheck.length === 0) {
-		return null;
+		return [];
 	}
 
-	// Check all paths in parallel for performance
 	const results = await Promise.allSettled(
 		pathsToCheck.map(async (probePath) => {
-			// Check both existence and executability
 			await fs.promises.access(probePath, fs.constants.F_OK | fs.constants.X_OK);
 			return probePath;
 		})
 	);
 
-	// Return the first successful result (maintains priority order from pathsToCheck)
-	for (let i = 0; i < results.length; i++) {
-		const result = results[i];
+	const found: string[] = [];
+	for (const result of results) {
 		if (result.status === 'fulfilled') {
-			logger.debug(`Direct probe found ${binaryName}`, LOG_CONTEXT, { path: result.value });
-			return result.value;
+			found.push(result.value);
 		}
 	}
-
-	return null;
+	return found;
 }
 
 // ============ Binary Detection ============
@@ -603,4 +780,76 @@ export async function checkBinaryExists(binaryName: string): Promise<BinaryDetec
 	} catch {
 		return { exists: false };
 	}
+}
+
+/**
+ * Find every existing path where a binary is installed.
+ *
+ * Combines:
+ * - Direct probes of known installation locations (Homebrew, npm global, nvm/fnm/volta, etc.)
+ * - `which -a` (Unix) or `where` (Windows) lookups against the expanded shell PATH
+ *
+ * Returns absolute paths in priority order, de-duplicated by resolved canonical path
+ * (so the same binary reached via symlink and direct path is reported once).
+ *
+ * Used by the agent detector to populate `AgentConfig.allPaths` so the renderer
+ * can present a chooser when multiple valid installations exist (e.g. an
+ * `nvm`-managed `codex` alongside a `codex-multi-auth-codex` wrapper).
+ */
+export async function findAllBinaryPaths(binaryName: string): Promise<string[]> {
+	// 1. Direct probes
+	const probedPaths = isWindows()
+		? await probeWindowsPathsAll(binaryName)
+		: await probeUnixPathsAll(binaryName);
+
+	// 2. which/where lookup
+	const fromShell: string[] = [];
+	try {
+		const command = getWhichCommand();
+		const env = await getExpandedEnvWithShell();
+		// On Unix, `which -a` returns every match in PATH. On Windows, `where`
+		// returns every match by default.
+		const args = isWindows() ? [binaryName] : ['-a', binaryName];
+		// Bounded: env passed bare (the legacy signature) skips the timeout
+		// entirely, since execFileNoThrow only honors it on the ExecOptions
+		// form. A broken PATH entry pointing at an unresponsive network mount
+		// could otherwise hang this indefinitely - doDetectAgents awaits it
+		// once per detected agent, sequentially.
+		const result = await execFileNoThrow(command, args, undefined, {
+			env,
+			timeout: WHICH_LOOKUP_TIMEOUT_MS,
+		});
+		if (result.exitCode === 0 && result.stdout.trim()) {
+			const matches = result.stdout
+				.trim()
+				.split(/\r?\n/)
+				.map((p) => p.trim())
+				.filter((p) => p);
+			fromShell.push(...matches);
+		}
+	} catch {
+		// which/where failures are non-fatal; we still have direct probe results
+	}
+
+	// 3. De-duplicate by canonical resolved path, preserving order
+	const seenKeys = new Set<string>();
+	const result: string[] = [];
+	const candidates = [...probedPaths, ...fromShell];
+
+	for (const candidate of candidates) {
+		let key: string;
+		try {
+			// realpath collapses symlinks (e.g., volta/bin/codex → volta/tools/...)
+			key = await fs.promises.realpath(candidate);
+		} catch {
+			key = candidate;
+		}
+		// Windows is case-insensitive
+		const normalizedKey = isWindows() ? key.toLowerCase() : key;
+		if (seenKeys.has(normalizedKey)) continue;
+		seenKeys.add(normalizedKey);
+		result.push(candidate);
+	}
+
+	return result;
 }

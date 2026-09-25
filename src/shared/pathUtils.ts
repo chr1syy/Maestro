@@ -58,9 +58,25 @@ export function expandTilde(filePath: string, homeDir?: string): string {
  * Encode a project path the same way Claude Code does.
  * Claude replaces all non-alphanumeric characters with '-'.
  * See: https://github.com/RunMaestro/Maestro/issues/348
+ *
+ * Trailing separators are stripped first. Claude Code encodes its own resolved
+ * cwd, which never carries one, but an agent's projectRoot can be saved with a
+ * trailing slash (e.g. "/path/to/repo/"). Encoding that verbatim yields a
+ * "...-repo-" directory that never exists, so every lookup silently comes back
+ * empty. See: https://github.com/RunMaestro/Maestro/issues/1409
  */
 export function encodeClaudeProjectPath(projectPath: string): string {
-	return projectPath.replace(/[^a-zA-Z0-9]/g, '-');
+	return stripTrailingSeparators(projectPath).replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
+ * Remove trailing '/' or '\\' separators from a path, leaving filesystem roots
+ * ("/" and "C:\\") untouched since trimming those yields "" or a bare drive letter.
+ */
+function stripTrailingSeparators(filePath: string): string {
+	const trimmed = filePath.replace(/[/\\]+$/, '');
+	if (trimmed === '' || /^[a-zA-Z]:$/.test(trimmed)) return filePath;
+	return trimmed;
 }
 
 /**
@@ -79,26 +95,6 @@ function splitVersionParts(version: string): [string, string | undefined] {
 	const dashIndex = version.indexOf('-');
 	if (dashIndex === -1) return [version, undefined];
 	return [version.substring(0, dashIndex), version.substring(dashIndex + 1)];
-}
-
-/**
- * Parse version string to comparable array of numbers.
- * Pre-release suffixes (e.g., -rc.1, -beta.2) are stripped before parsing.
- *
- * @param version - Version string (e.g., "v22.10.0" or "0.14.0" or "0.15.0-rc.1")
- * @returns Array of version numbers (e.g., [22, 10, 0])
- *
- * @example
- * ```typescript
- * parseVersion('v22.10.0')      // [22, 10, 0]
- * parseVersion('0.14.0')        // [0, 14, 0]
- * parseVersion('0.15.0-rc.1')   // [0, 15, 0]
- * ```
- */
-export function parseVersion(version: string): number[] {
-	const cleaned = version.replace(/^v/, '');
-	const [numericPart] = splitVersionParts(cleaned);
-	return numericPart.split('.').map((n) => parseInt(n, 10) || 0);
 }
 
 /**
@@ -152,13 +148,13 @@ export function compareVersions(a: string, b: string): number {
 		if (na < nb) return -1;
 	}
 
-	// Numeric parts are equal — apply semver pre-release rules:
+	// Numeric parts are equal - apply semver pre-release rules:
 	// A version without a pre-release suffix has higher precedence
 	if (!preA && preB) return 1; // 0.15.0 > 0.15.0-rc.1
 	if (preA && !preB) return -1; // 0.15.0-rc.1 < 0.15.0
 	if (!preA && !preB) return 0; // both stable, equal
 
-	// Both have pre-release suffixes — compare lexically
+	// Both have pre-release suffixes - compare lexically
 	if (preA! < preB!) return -1;
 	if (preA! > preB!) return 1;
 	return 0;
@@ -380,6 +376,7 @@ export function buildExpandedPath(customPaths?: string[]): string {
 			'/usr/local/sbin',
 			`${home}/.local/bin`, // User local installs (pip, etc.)
 			`${home}/.npm-global/bin`, // npm global with custom prefix
+			`${home}/.bun/bin`, // Bun runtime and package manager
 			`${home}/bin`, // User bin directory
 			`${home}/.claude/local`, // Claude local install location
 			`${home}/.opencode/bin`, // OpenCode installer default location

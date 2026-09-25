@@ -1,17 +1,14 @@
 /**
- * Tests for fileExplorerStore — File explorer UI state management
+ * Tests for fileExplorerStore - File explorer UI state management
  *
- * Tests file tree UI state, file preview loading, flat file list,
- * and document graph view state. Covers functional updaters,
- * atomic graph actions, and non-React access helpers.
+ * Tests file tree UI state, flat file list, and document graph view state.
+ * Covers functional updaters, atomic graph actions, and non-React access
+ * helpers.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import {
-	useFileExplorerStore,
-	getFileExplorerState,
-	getFileExplorerActions,
-} from '../../../renderer/stores/fileExplorerStore';
+import { useFileExplorerStore } from '../../../renderer/stores/fileExplorerStore';
+import { useModalStore } from '../../../renderer/stores/modalStore';
 import type { FlatTreeNode } from '../../../renderer/utils/fileExplorer';
 
 // ============================================================================
@@ -33,7 +30,6 @@ function resetStore() {
 		selectedFileIndex: 0,
 		fileTreeFilter: '',
 		fileTreeFilterOpen: false,
-		filePreviewLoading: null,
 		flatFileList: [],
 		isGraphViewOpen: false,
 		graphFocusFilePath: undefined,
@@ -60,7 +56,6 @@ describe('fileExplorerStore', () => {
 			expect(state.selectedFileIndex).toBe(0);
 			expect(state.fileTreeFilter).toBe('');
 			expect(state.fileTreeFilterOpen).toBe(false);
-			expect(state.filePreviewLoading).toBeNull();
 			expect(state.flatFileList).toEqual([]);
 			expect(state.isGraphViewOpen).toBe(false);
 			expect(state.graphFocusFilePath).toBeUndefined();
@@ -100,28 +95,6 @@ describe('fileExplorerStore', () => {
 			useFileExplorerStore.getState().setFileTreeFilterOpen(false);
 			useFileExplorerStore.getState().setFileTreeFilterOpen((prev) => !prev);
 			expect(useFileExplorerStore.getState().fileTreeFilterOpen).toBe(true);
-		});
-	});
-
-	describe('file preview loading', () => {
-		it('sets loading state with name and path', () => {
-			useFileExplorerStore.getState().setFilePreviewLoading({
-				name: 'index.ts',
-				path: '/project/src/index.ts',
-			});
-			expect(useFileExplorerStore.getState().filePreviewLoading).toEqual({
-				name: 'index.ts',
-				path: '/project/src/index.ts',
-			});
-		});
-
-		it('clears loading state with null', () => {
-			useFileExplorerStore.getState().setFilePreviewLoading({
-				name: 'file.ts',
-				path: '/path/file.ts',
-			});
-			useFileExplorerStore.getState().setFilePreviewLoading(null);
-			expect(useFileExplorerStore.getState().filePreviewLoading).toBeNull();
 		});
 	});
 
@@ -209,6 +182,36 @@ describe('fileExplorerStore', () => {
 			expect(useFileExplorerStore.getState().lastGraphFocusFilePath).toBe('important.ts');
 		});
 
+		it('openGraphScope records where closing the graph should return to', () => {
+			useFileExplorerStore
+				.getState()
+				.openGraphScope({ directory: '', rootPath: '/memory', returnTo: 'memoryViewer' });
+
+			expect(useFileExplorerStore.getState().graphReturnTo).toBe('memoryViewer');
+		});
+
+		it('leaves graphReturnTo unset for a graph opened in place', () => {
+			// Only a caller that CLOSED itself to make room has somewhere to hand
+			// control back to; the ordinary graph must not reopen anything.
+			useFileExplorerStore.getState().openGraphScope({ directory: 'docs' });
+
+			expect(useFileExplorerStore.getState().graphReturnTo).toBeUndefined();
+		});
+
+		it('clears graphReturnTo on close, so the next graph does not inherit it', () => {
+			useFileExplorerStore
+				.getState()
+				.openGraphScope({ directory: '', rootPath: '/memory', returnTo: 'memoryViewer' });
+			useFileExplorerStore.getState().closeGraphView();
+
+			expect(useFileExplorerStore.getState().graphReturnTo).toBeUndefined();
+
+			// A focus-rooted graph opened afterwards must be clean too - a stale
+			// target would pop the Memories viewer over an unrelated graph.
+			useFileExplorerStore.getState().focusFileInGraph('README.md');
+			expect(useFileExplorerStore.getState().graphReturnTo).toBeUndefined();
+		});
+
 		it('setIsGraphViewOpen directly sets the boolean', () => {
 			useFileExplorerStore.getState().setIsGraphViewOpen(true);
 			expect(useFileExplorerStore.getState().isGraphViewOpen).toBe(true);
@@ -244,32 +247,31 @@ describe('fileExplorerStore', () => {
 	});
 
 	describe('non-React access', () => {
-		it('getFileExplorerState returns current state', () => {
+		it('useFileExplorerStore.getState() returns current state', () => {
 			useFileExplorerStore.getState().setFileTreeFilter('search');
-			const state = getFileExplorerState();
+			const state = useFileExplorerStore.getState();
 			expect(state.fileTreeFilter).toBe('search');
 		});
 
-		it('getFileExplorerActions returns action functions', () => {
-			const actions = getFileExplorerActions();
-			expect(typeof actions.setSelectedFileIndex).toBe('function');
-			expect(typeof actions.setFileTreeFilter).toBe('function');
-			expect(typeof actions.setFileTreeFilterOpen).toBe('function');
-			expect(typeof actions.setFilePreviewLoading).toBe('function');
-			expect(typeof actions.setFlatFileList).toBe('function');
-			expect(typeof actions.focusFileInGraph).toBe('function');
-			expect(typeof actions.openLastDocumentGraph).toBe('function');
-			expect(typeof actions.closeGraphView).toBe('function');
-			expect(typeof actions.setIsGraphViewOpen).toBe('function');
+		it('useFileExplorerStore.getState() exposes action functions', () => {
+			const state = useFileExplorerStore.getState();
+			expect(typeof state.setSelectedFileIndex).toBe('function');
+			expect(typeof state.setFileTreeFilter).toBe('function');
+			expect(typeof state.setFileTreeFilterOpen).toBe('function');
+			expect(typeof state.setFlatFileList).toBe('function');
+			expect(typeof state.focusFileInGraph).toBe('function');
+			expect(typeof state.openLastDocumentGraph).toBe('function');
+			expect(typeof state.closeGraphView).toBe('function');
+			expect(typeof state.setIsGraphViewOpen).toBe('function');
 		});
 
-		it('actions from getFileExplorerActions update state', () => {
-			const actions = getFileExplorerActions();
+		it('actions from useFileExplorerStore.getState() update state', () => {
+			const actions = useFileExplorerStore.getState();
 			actions.setSelectedFileIndex(10);
 			actions.setFileTreeFilter('test');
 			actions.focusFileInGraph('via-actions.ts');
 
-			const state = getFileExplorerState();
+			const state = useFileExplorerStore.getState();
 			expect(state.selectedFileIndex).toBe(10);
 			expect(state.fileTreeFilter).toBe('test');
 			expect(state.graphFocusFilePath).toBe('via-actions.ts');
@@ -284,7 +286,6 @@ describe('fileExplorerStore', () => {
 			store.setSelectedFileIndex(99);
 			store.setFileTreeFilter('search');
 			store.setFileTreeFilterOpen(true);
-			store.setFilePreviewLoading({ name: 'f', path: '/f' });
 			store.setFlatFileList([createFlatTreeNode()]);
 			store.focusFileInGraph('some/path.ts');
 
@@ -295,11 +296,50 @@ describe('fileExplorerStore', () => {
 			expect(state.selectedFileIndex).toBe(0);
 			expect(state.fileTreeFilter).toBe('');
 			expect(state.fileTreeFilterOpen).toBe(false);
-			expect(state.filePreviewLoading).toBeNull();
 			expect(state.flatFileList).toEqual([]);
 			expect(state.isGraphViewOpen).toBe(false);
 			expect(state.graphFocusFilePath).toBeUndefined();
 			expect(state.lastGraphFocusFilePath).toBeUndefined();
+		});
+	});
+	describe('destination surfaces (one at a time)', () => {
+		beforeEach(() => {
+			useModalStore.setState({ modals: new Map(), promptComposerFullscreen: false });
+		});
+
+		it('opening the graph closes the destination modal that was up', () => {
+			useModalStore.getState().openModal('usageDashboard');
+
+			useFileExplorerStore.getState().focusFileInGraph('docs/a.md');
+
+			expect(useFileExplorerStore.getState().isGraphViewOpen).toBe(true);
+			expect(useModalStore.getState().isOpen('usageDashboard')).toBe(false);
+		});
+
+		it('a scoped graph also takes the window over', () => {
+			useModalStore.getState().openModal('directorNotes');
+
+			useFileExplorerStore.getState().openGraphScope({ directory: 'docs' });
+
+			expect(useFileExplorerStore.getState().isGraphViewOpen).toBe(true);
+			expect(useModalStore.getState().isOpen('directorNotes')).toBe(false);
+		});
+
+		it('opening a destination modal closes the graph', () => {
+			useFileExplorerStore.getState().focusFileInGraph('docs/a.md');
+
+			useModalStore.getState().openModal('settings');
+
+			expect(useFileExplorerStore.getState().isGraphViewOpen).toBe(false);
+			expect(useModalStore.getState().isOpen('settings')).toBe(true);
+		});
+
+		it('a layered dialog leaves the graph open', () => {
+			useFileExplorerStore.getState().focusFileInGraph('docs/a.md');
+
+			useModalStore.getState().openModal('confirm', { message: 'Sure?', onConfirm: () => {} });
+
+			expect(useFileExplorerStore.getState().isGraphViewOpen).toBe(true);
 		});
 	});
 });

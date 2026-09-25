@@ -5,10 +5,10 @@
  * Enables clickable OS notifications and external app integrations.
  *
  * URL scheme:
- *   maestro://focus                            — bring window to foreground
- *   maestro://session/{sessionId}              — navigate to agent
- *   maestro://session/{sessionId}/tab/{tabId}  — navigate to agent + tab
- *   maestro://group/{groupId}                  — expand group, focus first session
+ *   maestro://focus                            - bring window to foreground
+ *   maestro://session/{sessionId}              - navigate to agent
+ *   maestro://session/{sessionId}/tab/{tabId}  - navigate to agent + tab
+ *   maestro://group/{groupId}                  - expand group, focus first session
  *
  * Platform behavior:
  *   macOS:         app.on('open-url') delivers the URL
@@ -21,6 +21,8 @@ import { app, BrowserWindow } from 'electron';
 import { logger } from './utils/logger';
 import { isWebContentsAvailable } from './utils/safe-send';
 import type { ParsedDeepLink } from '../shared/types';
+import { parseMaestroDeepLink } from '../shared/deep-link-urls';
+import { captureException } from './utils/sentry';
 
 // ============================================================================
 // Constants
@@ -33,7 +35,7 @@ const IPC_CHANNEL = 'app:deepLink';
 // State
 // ============================================================================
 
-/** URL received before the window was ready — flushed after createWindow() */
+/** URL received before the window was ready - flushed after createWindow() */
 let pendingDeepLinkUrl: string | null = null;
 
 // ============================================================================
@@ -43,37 +45,19 @@ let pendingDeepLinkUrl: string | null = null;
 /**
  * Parse a maestro:// URL into a structured deep link object.
  * Returns null for malformed or unrecognized URLs.
+ *
+ * Wraps the pure shared parser with Sentry/log instrumentation so we keep
+ * visibility into malformed URLs reaching the main process.
  */
 export function parseDeepLink(url: string): ParsedDeepLink | null {
 	try {
-		// Normalize: strip protocol prefix (handles both maestro:// and maestro: on Windows)
-		const normalized = url.replace(/^maestro:\/\//, '').replace(/^maestro:/, '');
-		const parts = normalized.split('/').filter(Boolean);
-
-		if (parts.length === 0) return { action: 'focus' };
-
-		const [resource, id, sub, subId] = parts;
-
-		if (resource === 'focus') return { action: 'focus' };
-
-		if (resource === 'session' && id) {
-			if (sub === 'tab' && subId) {
-				return {
-					action: 'session',
-					sessionId: decodeURIComponent(id),
-					tabId: decodeURIComponent(subId),
-				};
-			}
-			return { action: 'session', sessionId: decodeURIComponent(id) };
+		const parsed = parseMaestroDeepLink(url);
+		if (!parsed) {
+			logger.warn(`Unrecognized deep link URL: ${url}`, 'DeepLink');
 		}
-
-		if (resource === 'group' && id) {
-			return { action: 'group', groupId: decodeURIComponent(id) };
-		}
-
-		logger.warn(`Unrecognized deep link resource: ${resource}`, 'DeepLink');
-		return null;
+		return parsed;
 	} catch (error) {
+		void captureException(error);
 		logger.error('Failed to parse deep link URL', 'DeepLink', { url, error: String(error) });
 		return null;
 	}
@@ -94,7 +78,7 @@ function processDeepLink(url: string, getMainWindow: () => BrowserWindow | null)
 
 	const win = getMainWindow();
 	if (!win) {
-		// Window not ready yet — buffer for later
+		// Window not ready yet - buffer for later
 		pendingDeepLinkUrl = url;
 		logger.debug('Window not ready, buffering deep link', 'DeepLink');
 		return;
@@ -165,7 +149,7 @@ export function setupDeepLinkHandling(getMainWindow: () => BrowserWindow | null)
 	// with the URL in argv, and second-instance event fires in the primary instance
 	const gotTheLock = app.requestSingleInstanceLock();
 	if (!gotTheLock) {
-		// Another instance is running — it will receive our argv via second-instance
+		// Another instance is running - it will receive our argv via second-instance
 		logger.info('Another instance is running, quitting', 'DeepLink');
 		return false;
 	}
@@ -178,7 +162,7 @@ export function setupDeepLinkHandling(getMainWindow: () => BrowserWindow | null)
 		if (deepLinkUrl) {
 			processDeepLink(deepLinkUrl, getMainWindow);
 		} else {
-			// No deep link, but user tried to open a second instance — bring existing window to front
+			// No deep link, but user tried to open a second instance - bring existing window to front
 			const win = getMainWindow();
 			if (win) {
 				if (win.isMinimized()) win.restore();

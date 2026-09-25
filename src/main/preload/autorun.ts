@@ -8,6 +8,7 @@
  */
 
 import { ipcRenderer } from 'electron';
+import type { PlaybookStatus } from '../../shared/types';
 
 /**
  * Playbook document configuration
@@ -35,6 +36,7 @@ export interface Playbook {
 	loopEnabled: boolean;
 	maxLoops?: number | null;
 	prompt: string;
+	taskSelectionMode?: 'task' | 'document';
 	worktreeSettings?: WorktreeSettings;
 }
 
@@ -73,6 +75,14 @@ export function createAutorunApi() {
 
 		deleteImage: (folderPath: string, relativePath: string, sshRemoteId?: string) =>
 			ipcRenderer.invoke('autorun:deleteImage', folderPath, relativePath, sshRemoteId),
+
+		replaceImage: (
+			folderPath: string,
+			relativePath: string,
+			base64Data: string,
+			sshRemoteId?: string
+		) =>
+			ipcRenderer.invoke('autorun:replaceImage', folderPath, relativePath, base64Data, sshRemoteId),
 
 		listImages: (folderPath: string, docName: string, sshRemoteId?: string) =>
 			ipcRenderer.invoke('autorun:listImages', folderPath, docName, sshRemoteId),
@@ -120,6 +130,34 @@ export function createAutorunApi() {
 				loopNumber,
 				sshRemoteId
 			),
+
+		// Watch .maestro/STATUS.json for live playbook progress. Returns the
+		// current status (if the file already exists) so the panel can populate
+		// immediately; subsequent updates arrive via onStatusChanged.
+		watchStatus: (
+			projectPath: string,
+			subscriberId: string,
+			isRemote?: boolean
+		): Promise<{
+			status: PlaybookStatus | null;
+			watching: boolean;
+			isRemote?: boolean;
+			message?: string;
+		}> => ipcRenderer.invoke('autorun:watchStatus', projectPath, subscriberId, isRemote),
+
+		unwatchStatus: (projectPath: string, subscriberId: string): Promise<Record<string, never>> =>
+			ipcRenderer.invoke('autorun:unwatchStatus', projectPath, subscriberId),
+
+		onStatusChanged: (
+			handler: (data: { projectPath: string; status: PlaybookStatus | null }) => void
+		) => {
+			const wrappedHandler = (
+				_event: Electron.IpcRendererEvent,
+				data: { projectPath: string; status: PlaybookStatus | null }
+			) => handler(data);
+			ipcRenderer.on('autorun:statusChanged', wrappedHandler);
+			return () => ipcRenderer.removeListener('autorun:statusChanged', wrappedHandler);
+		},
 	};
 }
 

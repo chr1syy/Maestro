@@ -1,5 +1,5 @@
 /**
- * TriggerConfig — Event-type-specific configuration fields for trigger nodes.
+ * TriggerConfig - Event-type-specific configuration fields for trigger nodes.
  *
  * Renders form fields based on the trigger's event type (heartbeat, scheduled,
  * file change, agent completed, GitHub PR/issue, task pending).
@@ -8,9 +8,20 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Theme } from '../../../../types';
 import type { PipelineNode, TriggerNodeData } from '../../../../../shared/cue-pipeline-types';
+import { CUE_COLOR } from '../../../../../shared/cue-pipeline-types';
+import { normalizeWebhookPath } from '../../../../../shared/cue';
 import { useDebouncedCallback } from '../../../../hooks/utils';
+import { registerPendingEdit } from '../../../../hooks/cue/pendingEditsRegistry';
 import { getInputStyle, getLabelStyle } from './triggerConfigStyles';
 import { CueSelect } from '../CueSelect';
+
+/** Sentinel value matching `cue-github-poller.UNLIMITED_NOTIFICATIONS`. */
+const UNLIMITED_NOTIFICATIONS = 0;
+const DEFAULT_MAX_NOTIFICATIONS = 10;
+/** Inclusive bounds for the per-item cap slider. Values outside this range
+ *  remain valid in YAML - the slider just clamps for visual display. */
+const MAX_NOTIFICATIONS_SLIDER_MIN = 1;
+const MAX_NOTIFICATIONS_SLIDER_MAX = 25;
 
 interface TriggerConfigProps {
 	node: PipelineNode;
@@ -34,15 +45,39 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 		setLocalCustomLabel(data.customLabel ?? '');
 	}, [data.customLabel]);
 
-	const { debouncedCallback: debouncedUpdate } = useDebouncedCallback((...args: unknown[]) => {
-		const config = args[0] as TriggerNodeData['config'];
-		onUpdateNode(node.id, { config } as Partial<TriggerNodeData>);
-	}, 300);
+	const { debouncedCallback: debouncedUpdate, flush: flushConfig } = useDebouncedCallback(
+		(...args: unknown[]) => {
+			const config = args[0] as TriggerNodeData['config'];
+			onUpdateNode(node.id, { config } as Partial<TriggerNodeData>);
+		},
+		300
+	);
 
-	const { debouncedCallback: debouncedUpdateLabel } = useDebouncedCallback((...args: unknown[]) => {
-		const customLabel = (args[0] as string) || undefined;
-		onUpdateNode(node.id, { customLabel } as Partial<TriggerNodeData>);
-	}, 300);
+	const { debouncedCallback: debouncedUpdateLabel, flush: flushLabel } = useDebouncedCallback(
+		(...args: unknown[]) => {
+			const customLabel = (args[0] as string) || undefined;
+			onUpdateNode(node.id, { customLabel } as Partial<TriggerNodeData>);
+		},
+		300
+	);
+
+	// Flush pending debounced edits on unmount AND register with the
+	// pending-edits registry so `handleSave` can flush before reading
+	// pipelineState. Without this, toggling a checkbox (or editing the
+	// custom label) and immediately closing the panel or saving inside
+	// the 300ms window silently drops the edit - the user-visible
+	// "re-trigger toggle won't stick across restarts" symptom.
+	useEffect(() => {
+		const unregister = registerPendingEdit(() => {
+			flushConfig();
+			flushLabel();
+		});
+		return () => {
+			flushConfig();
+			flushLabel();
+			unregister();
+		};
+	}, [flushConfig, flushLabel]);
 
 	const handleCustomLabelChange = useCallback(
 		(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -55,6 +90,58 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 	const updateConfig = useCallback(
 		(key: string, value: string | number) => {
 			const updated = { ...localConfig, [key]: value };
+			setLocalConfig(updated);
+			debouncedUpdate(updated);
+		},
+		[localConfig, debouncedUpdate]
+	);
+
+	/**
+	 * Parse the comma-separated `gh_labels` text box into the string array the
+	 * schema stores. Blank input drops the key entirely so the runtime reads it
+	 * as "fire on any label" rather than "fire on the empty label".
+	 */
+	const updateLabelList = useCallback(
+		(raw: string) => {
+			const labels = Array.from(
+				new Set(
+					raw
+						.split(',')
+						.map((entry) => entry.trim())
+						.filter(Boolean)
+				)
+			);
+			const next = { ...localConfig };
+			if (labels.length === 0) {
+				delete next.gh_labels;
+			} else {
+				next.gh_labels = labels;
+			}
+			setLocalConfig(next);
+			debouncedUpdate(next);
+		},
+		[localConfig, debouncedUpdate]
+	);
+
+	/**
+	 * Handle numeric input changes that need to support a blank state. Empty
+	 * input drops the key from config (so the runtime falls back to its
+	 * default), otherwise stores the parsed integer. Non-numeric junk is
+	 * ignored entirely so transient typing states don't clobber the value.
+	 * The keys here match TriggerNodeData['config'] entries; the cast keeps
+	 * the index signature happy without enumerating each one.
+	 */
+	const updateNumericConfig = useCallback(
+		(key: keyof TriggerNodeData['config'], raw: string) => {
+			const next = { ...localConfig } as Record<string, unknown>;
+			if (raw === '') {
+				delete next[key as string];
+			} else {
+				const parsed = parseInt(raw, 10);
+				if (!Number.isFinite(parsed)) return;
+				next[key as string] = parsed;
+			}
+			const updated = next as TriggerNodeData['config'];
 			setLocalConfig(updated);
 			debouncedUpdate(updated);
 		},
@@ -97,7 +184,7 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 							type="number"
 							min={1}
 							value={localConfig.interval_minutes ?? ''}
-							onChange={(e) => updateConfig('interval_minutes', parseInt(e.target.value) || 1)}
+							onChange={(e) => updateNumericConfig('interval_minutes', e.target.value)}
 							placeholder="30"
 							style={themedInputStyle}
 						/>
@@ -206,7 +293,8 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 				</div>
 			);
 		case 'github.pull_request':
-		case 'github.issue':
+		case 'github.issue': {
+			const retriggerEnabled = localConfig.retrigger_on_comments === true;
 			return (
 				<div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
 					{nameField}
@@ -226,13 +314,109 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 							type="number"
 							min={1}
 							value={localConfig.poll_minutes ?? ''}
-							onChange={(e) => updateConfig('poll_minutes', parseInt(e.target.value) || 5)}
+							onChange={(e) => updateNumericConfig('poll_minutes', e.target.value)}
 							placeholder="5"
 							style={themedInputStyle}
 						/>
 					</label>
+					<label
+						style={{
+							...themedLabelStyle,
+							display: 'flex',
+							flexDirection: 'row',
+							alignItems: 'center',
+							gap: 6,
+							cursor: 'pointer',
+						}}
+					>
+						<input
+							type="checkbox"
+							checked={retriggerEnabled}
+							onChange={(e) => {
+								const next = {
+									...localConfig,
+									retrigger_on_comments: e.target.checked,
+								};
+								// Drop max_notifications when the toggle goes off so the
+								// YAML stays clean - the cap is meaningless without it.
+								if (!e.target.checked) delete next.max_notifications;
+								setLocalConfig(next);
+								debouncedUpdate(next);
+							}}
+							style={{ accentColor: CUE_COLOR }}
+						/>
+						<span>Re-trigger on new activity (comments, edits, reviews)</span>
+					</label>
+					{retriggerEnabled && (
+						<MaxNotificationsControl
+							key={node.id}
+							entityLabel={data.eventType === 'github.pull_request' ? 'PR' : 'issue'}
+							stored={localConfig.max_notifications}
+							theme={theme}
+							onChange={(value) => updateConfig('max_notifications', value)}
+							labelStyle={themedLabelStyle}
+						/>
+					)}
 				</div>
 			);
+		}
+		case 'github.label': {
+			const labelTarget = localConfig.gh_label_target ?? 'both';
+			return (
+				<div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+					{nameField}
+					<label style={themedLabelStyle}>
+						Repository
+						<input
+							type="text"
+							value={localConfig.repo ?? ''}
+							onChange={(e) => updateConfig('repo', e.target.value)}
+							placeholder="owner/repo"
+							style={themedInputStyle}
+						/>
+					</label>
+					<label style={themedLabelStyle} htmlFor="cue-label-target-select">
+						Watch
+					</label>
+					<CueSelect
+						id="cue-label-target-select"
+						value={labelTarget}
+						options={[
+							{ value: 'both', label: 'Pull requests and issues' },
+							{ value: 'pr', label: 'Pull requests only' },
+							{ value: 'issue', label: 'Issues only' },
+						]}
+						onChange={(v) => updateConfig('gh_label_target', v)}
+						theme={theme}
+					/>
+					<label style={themedLabelStyle}>
+						Labels (comma-separated, blank = any label)
+						<input
+							type="text"
+							value={(localConfig.gh_labels ?? []).join(', ')}
+							onChange={(e) => updateLabelList(e.target.value)}
+							placeholder="needs-review, bug"
+							style={themedInputStyle}
+						/>
+					</label>
+					<label style={themedLabelStyle}>
+						Poll every N minutes
+						<input
+							type="number"
+							min={1}
+							value={localConfig.poll_minutes ?? ''}
+							onChange={(e) => updateNumericConfig('poll_minutes', e.target.value)}
+							placeholder="5"
+							style={themedInputStyle}
+						/>
+					</label>
+					<div style={{ color: theme.colors.textDim, fontSize: 12, fontStyle: 'italic' }}>
+						Fires once per label that lands on a PR or issue, within one poll interval. Labels
+						already present when the trigger is first saved do not fire.
+					</div>
+				</div>
+			);
+		}
 		case 'task.pending':
 			return (
 				<div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -258,7 +442,202 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 					</div>
 				</div>
 			);
+		case 'cli.trigger':
+			return (
+				<div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+					{nameField}
+					<div style={{ color: theme.colors.textDim, fontSize: 12, fontStyle: 'italic' }}>
+						Triggered manually via{' '}
+						<code>maestro-cli cue trigger "{data.customLabel || data.label || 'name'}"</code>.
+						Supports an optional <code>--prompt</code> override.
+					</div>
+				</div>
+			);
+		case 'webhook.received': {
+			// The path defaults to a slug of the subscription name, so show the
+			// resolved URL rather than an empty placeholder - otherwise the user
+			// has no way to know where to point the sending service.
+			const resolvedPath = normalizeWebhookPath(
+				localConfig.webhook_path || data.customLabel || data.label || ''
+			);
+			return (
+				<div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+					{nameField}
+					<label style={themedLabelStyle}>
+						URL path
+						<input
+							type="text"
+							value={localConfig.webhook_path ?? ''}
+							onChange={(e) => updateConfig('webhook_path', e.target.value)}
+							placeholder={resolvedPath || 'my-webhook'}
+							style={themedInputStyle}
+						/>
+					</label>
+					<div style={{ color: theme.colors.textDim, fontSize: 12 }}>
+						POST to <code>/cue/{resolvedPath || 'my-webhook'}</code> on Maestro's local webhook port
+						(default 17997, loopback only). Expose it to an external service with a tunnel or
+						reverse proxy.
+					</div>
+					<label style={themedLabelStyle}>
+						Secret environment variable
+						<input
+							type="text"
+							value={localConfig.webhook_secret_env ?? ''}
+							onChange={(e) => updateConfig('webhook_secret_env', e.target.value)}
+							placeholder="MY_WEBHOOK_SECRET"
+							style={themedInputStyle}
+						/>
+					</label>
+					{localConfig.webhook_secret && !localConfig.webhook_secret_env && (
+						<div style={{ color: theme.colors.textDim, fontSize: 12, fontStyle: 'italic' }}>
+							This trigger uses a literal secret written directly in cue.yaml. Set an environment
+							variable above to move it out of the committed file.
+						</div>
+					)}
+					<label style={themedLabelStyle}>
+						Signature header (optional)
+						<input
+							type="text"
+							value={localConfig.webhook_signature_header ?? ''}
+							onChange={(e) => updateConfig('webhook_signature_header', e.target.value)}
+							placeholder="X-Hub-Signature-256"
+							style={themedInputStyle}
+						/>
+					</label>
+					<div style={{ color: theme.colors.textDim, fontSize: 12 }}>
+						Set this for senders that sign the body (GitHub, GitLab). Leave blank and the sender
+						must present the secret via <code>X-Maestro-Cue-Secret</code> or{' '}
+						<code>Authorization: Bearer</code>.
+					</div>
+				</div>
+			);
+		}
 		default:
 			return null;
 	}
+}
+
+interface MaxNotificationsControlProps {
+	entityLabel: 'PR' | 'issue';
+	/** Current `max_notifications` value from the trigger config.
+	 *  - `undefined` → user hasn't set a value; default of 10 applies at runtime.
+	 *  - `0`         → infinite sentinel.
+	 *  - positive    → explicit cap. */
+	stored: number | undefined;
+	theme: Theme;
+	onChange: (value: number) => void;
+	labelStyle: React.CSSProperties;
+}
+
+/**
+ * Slider + "Infinite" checkbox for the per-item re-trigger cap.
+ *
+ * Mounted with `key={node.id}` so the local `lastFinite` memory resets when
+ * the user switches to a different trigger node, preventing one trigger's
+ * prior slider position from leaking into another.
+ *
+ * Values from YAML that fall outside [1, 25] (e.g. hand-edited `100`) display
+ * clamped on the slider track but are preserved in the count label until the
+ * user drags - at which point the slider value wins.
+ */
+function MaxNotificationsControl({
+	entityLabel,
+	stored,
+	theme,
+	onChange,
+	labelStyle,
+}: MaxNotificationsControlProps) {
+	const isInfinite = stored === UNLIMITED_NOTIFICATIONS;
+	const initialFinite =
+		stored === undefined || stored === UNLIMITED_NOTIFICATIONS
+			? DEFAULT_MAX_NOTIFICATIONS
+			: clampSliderValue(stored);
+	// `lastFinite` remembers the slider position so unchecking Infinite
+	// restores it instead of always snapping back to the default.
+	const [lastFinite, setLastFinite] = useState(initialFinite);
+	const sliderValue = isInfinite
+		? lastFinite
+		: clampSliderValue(stored ?? DEFAULT_MAX_NOTIFICATIONS);
+	// Display the raw stored value when it sits outside the slider's range so
+	// legacy hand-edited YAML doesn't appear to silently truncate.
+	const displayValue =
+		!isInfinite && stored !== undefined && stored > MAX_NOTIFICATIONS_SLIDER_MAX
+			? stored
+			: sliderValue;
+	const percent =
+		((sliderValue - MAX_NOTIFICATIONS_SLIDER_MIN) /
+			(MAX_NOTIFICATIONS_SLIDER_MAX - MAX_NOTIFICATIONS_SLIDER_MIN)) *
+		100;
+
+	return (
+		<div style={labelStyle}>
+			<div
+				style={{
+					display: 'flex',
+					justifyContent: 'space-between',
+					alignItems: 'baseline',
+					marginBottom: 4,
+				}}
+			>
+				<span>Max re-triggers per {entityLabel}</span>
+				<span
+					style={{
+						fontVariantNumeric: 'tabular-nums',
+						color: isInfinite ? theme.colors.accent : theme.colors.textMain,
+						fontSize: 14,
+					}}
+				>
+					{isInfinite ? '∞' : displayValue}
+				</span>
+			</div>
+			<input
+				type="range"
+				min={MAX_NOTIFICATIONS_SLIDER_MIN}
+				max={MAX_NOTIFICATIONS_SLIDER_MAX}
+				step={1}
+				value={sliderValue}
+				disabled={isInfinite}
+				onChange={(e) => {
+					const v = parseInt(e.target.value, 10);
+					setLastFinite(v);
+					onChange(v);
+				}}
+				style={{
+					width: '100%',
+					height: 4,
+					borderRadius: 4,
+					appearance: 'none',
+					accentColor: CUE_COLOR,
+					cursor: isInfinite ? 'not-allowed' : 'pointer',
+					opacity: isInfinite ? 0.35 : 1,
+					background: `linear-gradient(to right, ${CUE_COLOR} 0%, ${CUE_COLOR} ${percent}%, ${theme.colors.bgActivity} ${percent}%, ${theme.colors.bgActivity} 100%)`,
+				}}
+			/>
+			<label
+				style={{
+					display: 'flex',
+					alignItems: 'center',
+					gap: 6,
+					marginTop: 6,
+					cursor: 'pointer',
+					fontSize: 12,
+					color: theme.colors.textDim,
+				}}
+			>
+				<input
+					type="checkbox"
+					checked={isInfinite}
+					onChange={(e) => onChange(e.target.checked ? UNLIMITED_NOTIFICATIONS : lastFinite)}
+					style={{ accentColor: CUE_COLOR }}
+				/>
+				<span>Infinite</span>
+			</label>
+		</div>
+	);
+}
+
+function clampSliderValue(n: number): number {
+	if (n < MAX_NOTIFICATIONS_SLIDER_MIN) return MAX_NOTIFICATIONS_SLIDER_MIN;
+	if (n > MAX_NOTIFICATIONS_SLIDER_MAX) return MAX_NOTIFICATIONS_SLIDER_MAX;
+	return n;
 }

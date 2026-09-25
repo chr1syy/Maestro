@@ -141,6 +141,22 @@ describe('Agents Preload API', () => {
 		});
 	});
 
+	describe('getAllCapabilities', () => {
+		it('should invoke agents:getAllCapabilities with no arguments', async () => {
+			const mockAll = {
+				'claude-code': { supportsBatchMode: true },
+				opencode: { supportsBatchMode: true },
+				terminal: { supportsBatchMode: false },
+			};
+			mockInvoke.mockResolvedValue(mockAll);
+
+			const result = await api.getAllCapabilities();
+
+			expect(mockInvoke).toHaveBeenCalledWith('agents:getAllCapabilities');
+			expect(result).toEqual(mockAll);
+		});
+	});
+
 	describe('getConfig', () => {
 		it('should invoke agents:getConfig with agentId', async () => {
 			const mockConfig = { theme: 'dark', autoSave: true };
@@ -398,6 +414,54 @@ describe('Agents Preload API', () => {
 			const result = await api.discoverSlashCommands('unknown-agent', '/home/user/project');
 
 			expect(result).toBeNull();
+		});
+	});
+
+	describe('usage quota APIs', () => {
+		it('should invoke agents:getClaudeUsageAccountKeys', async () => {
+			const keys = ['/Users/me/.claude-work'];
+			mockInvoke.mockResolvedValue(keys);
+
+			const result = await api.getClaudeUsageAccountKeys();
+
+			expect(mockInvoke).toHaveBeenCalledWith('agents:getClaudeUsageAccountKeys');
+			expect(result).toEqual(keys);
+		});
+
+		it('should invoke agents:getCodexUsageAccountKeys', async () => {
+			const keys = ['/Users/me/.codex-work'];
+			mockInvoke.mockResolvedValue(keys);
+
+			const result = await api.getCodexUsageAccountKeys();
+
+			expect(mockInvoke).toHaveBeenCalledWith('agents:getCodexUsageAccountKeys');
+			expect(result).toEqual(keys);
+		});
+
+		it('should invoke agents:getKnownAuthDirs', async () => {
+			const dirs = {
+				claudeConfigDirs: ['/Users/me/.claude-work'],
+				codexHomes: ['/Users/me/.codex-work'],
+			};
+			mockInvoke.mockResolvedValue(dirs);
+
+			const result = await api.getKnownAuthDirs();
+
+			expect(mockInvoke).toHaveBeenCalledWith('agents:getKnownAuthDirs');
+			expect(result).toEqual(dirs);
+		});
+
+		it('should invoke agents:getKnownEnvVarKeys', async () => {
+			const envVarKeys = {
+				byProvider: { 'claude-code': ['CLAUDE_CONFIG_DIR'] },
+				global: ['HTTPS_PROXY'],
+			};
+			mockInvoke.mockResolvedValue(envVarKeys);
+
+			const result = await api.getKnownEnvVarKeys();
+
+			expect(mockInvoke).toHaveBeenCalledWith('agents:getKnownEnvVarKeys');
+			expect(result).toEqual(envVarKeys);
 		});
 	});
 });

@@ -31,6 +31,9 @@ import { createMergedSession, getActiveTab } from '../../utils/tabHelpers';
 import { generateId } from '../../utils/ids';
 import { useOperationStore, selectIsAnyMerging } from '../../stores/operationStore';
 import type { MergeState, TabMergeState } from '../../stores/operationStore';
+import { useSessionStore } from '../../stores/sessionStore';
+import { estimateTokensFromLogs } from '../../../shared/formatters';
+import { logger } from '../../utils/logger';
 
 // Re-export types from the canonical store location
 export type { MergeState, TabMergeState } from '../../stores/operationStore';
@@ -40,15 +43,6 @@ export type { MergeState, TabMergeState } from '../../stores/operationStore';
  * Default: 100,000 tokens (safe for most models)
  */
 const MAX_CONTEXT_TOKENS_WARNING = 100000;
-
-/**
- * Estimate token count from log entries
- * Uses a simple heuristic: ~4 characters per token (average for English text)
- */
-function estimateTokensFromLogs(logs: { text: string }[]): number {
-	const totalChars = logs.reduce((sum, log) => sum + (log.text?.length || 0), 0);
-	return Math.round(totalChars / 4);
-}
 
 /**
  * Request to merge two sessions/tabs
@@ -314,7 +308,7 @@ export function useMergeSession(activeTabId?: string): UseMergeSessionResult {
 			const estimatedMergedTokens = sourceTokens + targetTokens;
 
 			if (estimatedMergedTokens > MAX_CONTEXT_TOKENS_WARNING) {
-				console.warn(
+				logger.warn(
 					`Large context merge: ~${estimatedMergedTokens.toLocaleString()} tokens. ` +
 						`This may exceed some agents' context windows.`
 				);
@@ -546,8 +540,6 @@ export interface MergeSessionCreatedInfo {
  * Dependencies for the useMergeSessionWithSessions hook variant
  */
 export interface UseMergeSessionWithSessionsDeps {
-	/** All sessions in the app */
-	sessions: Session[];
 	/** Session setter for updating app state */
 	setSessions: React.Dispatch<React.SetStateAction<Session[]>>;
 	/** Active tab ID for per-tab state tracking */
@@ -590,7 +582,6 @@ export interface UseMergeSessionWithSessionsResult extends UseMergeSessionResult
  *   executeMerge,
  *   cancelMerge,
  * } = useMergeSessionWithSessions({
- *   sessions,
  *   setSessions,
  *   onSessionCreated: (id) => setActiveSessionId(id),
  * });
@@ -598,7 +589,7 @@ export interface UseMergeSessionWithSessionsResult extends UseMergeSessionResult
 export function useMergeSessionWithSessions(
 	deps: UseMergeSessionWithSessionsDeps
 ): UseMergeSessionWithSessionsResult {
-	const { sessions, setSessions, activeTabId, onSessionCreated, onMergeComplete } = deps;
+	const { setSessions, activeTabId, onSessionCreated, onMergeComplete } = deps;
 	const baseHook = useMergeSession(activeTabId);
 
 	/**
@@ -612,8 +603,11 @@ export function useMergeSessionWithSessions(
 			targetTabId: string | undefined,
 			options: MergeOptions
 		): Promise<MergeResult> => {
-			// Find target session
-			const targetSession = sessions.find((s) => s.id === targetSessionId);
+			// PERF: Resolve sessions at event time so App need not subscribe to the
+			// full array (streaming rebuilds would otherwise wake the console shell).
+			const targetSession = useSessionStore
+				.getState()
+				.sessions.find((s) => s.id === targetSessionId);
 			if (!targetSession) {
 				return {
 					success: false,
@@ -695,7 +689,7 @@ export function useMergeSessionWithSessions(
 							});
 						} catch (historyError) {
 							// Non-critical: log but don't fail the merge operation
-							console.warn('Failed to log merge operation to history:', historyError);
+							logger.warn('Failed to log merge operation to history:', undefined, historyError);
 						}
 
 						// Notify caller with session info for notification purposes
@@ -787,10 +781,10 @@ export function useMergeSessionWithSessions(
 							sessionName: getSessionDisplayName(targetSession),
 						});
 					} catch (historyError) {
-						console.warn('Failed to log merge operation to history:', historyError);
+						logger.warn('Failed to log merge operation to history:', undefined, historyError);
 					}
 
-					console.log('[MergeSession] Injected context into target tab:', {
+					logger.info('[MergeSession] Injected context into target tab:', undefined, {
 						targetSessionId: result.targetSessionId,
 						targetTabId: result.targetTabId,
 						sourceSession: getSessionDisplayName(sourceSession),
@@ -805,7 +799,7 @@ export function useMergeSessionWithSessions(
 
 			return result;
 		},
-		[sessions, setSessions, onSessionCreated, onMergeComplete, baseHook]
+		[setSessions, onSessionCreated, onMergeComplete, baseHook]
 	);
 
 	return {

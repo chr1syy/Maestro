@@ -6,7 +6,7 @@
  * and when understanding reaches 80%, submits a well-structured GitHub issue.
  *
  * Features:
- * - Provider selection (reuses agent configuration pattern)
+ * - Auto-picks the first available supported provider - no selection step
  * - Chat interface with progress bar
  * - Screenshot drag-and-drop
  * - Support package opt-in
@@ -16,8 +16,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
 	ImagePlus,
-	Loader2,
-	MessageSquareHeart,
 	Send,
 	X,
 	Package,
@@ -27,7 +25,13 @@ import {
 	PlusCircle,
 	Check,
 	Copy,
+	Save,
+	Gauge,
+	Terminal,
 } from 'lucide-react';
+import { formatSize } from '../../shared/formatters';
+import { useUIStore } from '../stores/uiStore';
+import { Spinner } from './ui/Spinner';
 import { safeClipboardWrite } from '../utils/clipboard';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { generateTerminalProseStyles } from '../utils/markdownConfig';
@@ -35,11 +39,15 @@ import type { Theme, Session, ToolType } from '../types';
 import {
 	FeedbackConversationManager,
 	getConfidenceColor,
+	type FeedbackDiagnostic,
 	type FeedbackMessage,
 	type FeedbackParsedResponse,
 } from '../services/feedbackConversation';
-import { isBetaAgent } from '../../shared/agentMetadata';
-import { ThemedSelect } from './shared/ThemedSelect';
+import { openUrl } from '../utils/openUrl';
+import { captureException } from '../utils/sentry';
+import { useFeedbackDraftStore, type FeedbackDraft } from '../stores/feedbackDraftStore';
+import { useAutosizeTextarea } from '../hooks/ui/useAutosizeTextarea';
+import { KEYSTROKE_TEXTAREA_MAX_HEIGHT } from '../utils/textareaSizing';
 
 // ============================================================================
 // Constants
@@ -101,6 +109,13 @@ interface FeedbackChatViewProps {
 	onSubmitSuccess: (sessionId: string) => void;
 	/** Called when the view's desired modal width changes */
 	onWidthChange?: (width: number) => void;
+	/** When set, hydrate the view from this persisted draft on mount */
+	resumeDraftId?: string | null;
+	/**
+	 * Minimize the modal (keeping the draft) so the user can reproduce an issue.
+	 * Invoked when a performance-trace recording starts.
+	 */
+	onRequestMinimize?: () => void;
 }
 
 // ============================================================================
@@ -118,32 +133,74 @@ interface ExistingIssue {
 	commentCount: number;
 }
 
-export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackChatViewProps) {
+export function FeedbackChatView({
+	theme,
+	onCancel,
+	onWidthChange,
+	resumeDraftId,
+	onRequestMinimize,
+}: FeedbackChatViewProps) {
+	// Resolve the draft to resume exactly once, at mount, so initial state can
+	// be seeded synchronously before the auto-start effect picks an agent.
+	const resumeDraftRef = useRef<FeedbackDraft | null>(
+		resumeDraftId
+			? (useFeedbackDraftStore.getState().drafts.find((d) => d.id === resumeDraftId) ?? null)
+			: null
+	);
+	const resumeDraft = resumeDraftRef.current;
+
 	// --- State ---
-	const [step, setStep] = useState<
-		'gh-check' | 'provider-select' | 'chat' | 'matching' | 'submitting' | 'done'
-	>('gh-check');
+	const [step, setStep] = useState<'gh-check' | 'chat' | 'matching' | 'submitting' | 'done'>(
+		'gh-check'
+	);
 	const [ghAuth, setGhAuth] = useState<{ checking: boolean; ok: boolean; message?: string }>({
 		checking: true,
 		ok: false,
 	});
-	const [selectedAgent, setSelectedAgent] = useState<ToolType>('claude-code');
+	const [selectedAgent, setSelectedAgent] = useState<ToolType>(
+		() => (resumeDraft?.agentType as ToolType) ?? 'claude-code'
+	);
 	const [detectedAgents, setDetectedAgents] = useState<Set<string>>(new Set());
-	const [messages, setMessages] = useState<FeedbackMessage[]>([]);
-	const [inputValue, setInputValue] = useState('');
+	const [agentsLoaded, setAgentsLoaded] = useState(false);
+	const [agentsDetectError, setAgentsDetectError] = useState<string | null>(null);
+	const [messages, setMessages] = useState<FeedbackMessage[]>(() => resumeDraft?.messages ?? []);
+	const [inputValue, setInputValue] = useState(() => resumeDraft?.inputDraft ?? '');
 	const [isLoading, setIsLoading] = useState(false);
-	const [confidence, setConfidence] = useState(0);
-	const [isReady, setIsReady] = useState(false);
-	const [lastResponse, setLastResponse] = useState<FeedbackParsedResponse | null>(null);
-	const [attachments, setAttachments] = useState<FeedbackAttachment[]>([]);
+	const [confidence, setConfidence] = useState(() => resumeDraft?.confidence ?? 0);
+	const [isReady, setIsReady] = useState(() => resumeDraft?.lastResponse?.ready ?? false);
+	const [lastResponse, setLastResponse] = useState<FeedbackParsedResponse | null>(
+		() => resumeDraft?.lastResponse ?? null
+	);
+	const [attachments, setAttachments] = useState<FeedbackAttachment[]>(
+		() => resumeDraft?.attachments ?? []
+	);
 	const [isDragging, setIsDragging] = useState(false);
-	const [includeDebugPackage, setIncludeDebugPackage] = useState(false);
+	const [includeDebugPackage, setIncludeDebugPackage] = useState(
+		() => resumeDraft?.includeDebugPackage ?? false
+	);
+	// --- Performance trace capture ---
+	const [isTracing, setIsTracing] = useState(false); // recording in flight
+	const [traceBusy, setTraceBusy] = useState(false); // stopping/bundling
+	const [tracePath, setTracePath] = useState<string | null>(null); // captured temp zip
+	const [traceSizeBytes, setTraceSizeBytes] = useState(0);
+	const [traceError, setTraceError] = useState('');
+	const setProfilingActive = useUIStore((s) => s.setProfilingActive);
 	const [submitError, setSubmitError] = useState('');
 	const [matchingIssues, setMatchingIssues] = useState<ExistingIssue[]>([]);
 	const [searchingIssues, setSearchingIssues] = useState(false);
 	const [subscribingTo, setSubscribingTo] = useState<number | null>(null);
 	const [createdIssueUrl, setCreatedIssueUrl] = useState<string | null>(null);
 	const [copiedUrl, setCopiedUrl] = useState(false);
+	const [isSavingDraft, setIsSavingDraft] = useState(false);
+	const [draftSaved, setDraftSaved] = useState(false);
+	// Subscribe so the live snapshot re-publishes with the freshly minted id
+	// after a save (preventing duplicate drafts) and so the editor can surface
+	// draft-save failures.
+	const activeDraftId = useFeedbackDraftStore((s) => s.activeDraftId);
+	const saveError = useFeedbackDraftStore((s) => s.saveError);
+	// Diagnostics the agent ran on this machine during the current turn. Cleared
+	// at the start of each send so the list always describes the turn in flight.
+	const [diagnostics, setDiagnostics] = useState<FeedbackDiagnostic[]>([]);
 	const lastSearchQueryRef = useRef<string | null>(null);
 	const searchAbortRef = useRef(0); // Monotonic counter to discard stale searches
 
@@ -152,11 +209,18 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	const startedRef = useRef(false);
+	// Mirror trace state into refs so the unmount cleanup (empty-dep effect) can
+	// stop an in-flight recording / drop an unsubmitted temp trace without
+	// re-subscribing. submittedRef flips true once the report is sent, so we
+	// don't discard a trace the submit handler already consumed.
+	const isTracingRef = useRef(false);
+	const tracePathRef = useRef<string | null>(null);
+	const submittedRef = useRef(false);
 
 	// --- Report desired width based on current step ---
 	useEffect(() => {
-		const isNarrow = step === 'gh-check' || step === 'provider-select';
-		onWidthChange?.(isNarrow ? 420 : 780);
+		onWidthChange?.(step === 'gh-check' ? 462 : 858);
 	}, [step, onWidthChange]);
 
 	// --- GH Auth Check ---
@@ -167,7 +231,6 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 				const result = await window.maestro.feedback.checkGhAuth();
 				if (mounted) {
 					setGhAuth({ checking: false, ok: result.authenticated, message: result.message });
-					if (result.authenticated) setStep('provider-select');
 				}
 			} catch {
 				if (mounted) {
@@ -189,12 +252,26 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 				if (mounted) {
 					const available = new Set<string>(agents.filter((a) => a.available).map((a) => a.id));
 					setDetectedAgents(available);
-					// Auto-select first available
+					// Auto-select the first available provider for a fresh editor. When
+					// resuming, keep the saved provider only if it is still available;
+					// otherwise fall back so submit/auto-start does not throw on a
+					// provider that is no longer installed.
 					const firstAvailable = AGENT_TILES.find((t) => t.supported && available.has(t.id));
-					if (firstAvailable) setSelectedAgent(firstAvailable.id);
+					if (firstAvailable && (!resumeDraft || !available.has(resumeDraft.agentType))) {
+						setSelectedAgent(firstAvailable.id);
+					}
+					setAgentsLoaded(true);
 				}
-			} catch {
-				// Ignore
+			} catch (error) {
+				// Report so we hear about IPC/runtime failures in production rather
+				// than misclassifying them as "no providers installed".
+				captureException(error, { extra: { source: 'FeedbackChatView.agentDetect' } });
+				if (mounted) {
+					setAgentsDetectError(
+						error instanceof Error ? error.message : 'Failed to detect AI providers.'
+					);
+					setAgentsLoaded(true);
+				}
 			}
 		})();
 		return () => {
@@ -202,13 +279,12 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 		};
 	}, []);
 
-	// --- Auto-resize textarea as content changes ---
-	useEffect(() => {
-		if (inputRef.current) {
-			inputRef.current.style.height = 'auto';
-			inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 176)}px`;
-		}
-	}, [inputValue]);
+	// --- Auto-resize textarea as content changes, keeping the caret visible ---
+	useAutosizeTextarea({
+		textareaRef: inputRef,
+		value: inputValue,
+		maxHeight: KEYSTROKE_TEXTAREA_MAX_HEIGHT,
+	});
 
 	// --- Scroll to bottom on new messages ---
 	useEffect(() => {
@@ -219,10 +295,49 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 	useEffect(() => {
 		return () => {
 			managerRef.current.cleanup();
+			useFeedbackDraftStore.getState().reset();
+			// Never leave a recording running or a large temp trace behind when the
+			// modal is torn down. If the report was submitted, the main process
+			// already consumed and deleted the trace zip, so skip that path.
+			if (isTracingRef.current) {
+				setProfilingActive(false);
+				void window.maestro.debug
+					.stopProfilingToFile()
+					.then((r) => {
+						if (r?.path) void window.maestro.debug.discardTrace(r.path);
+					})
+					.catch(() => {});
+			}
+			if (tracePathRef.current && !submittedRef.current) {
+				void window.maestro.debug.discardTrace(tracePathRef.current);
+			}
 		};
-	}, []);
+	}, [setProfilingActive]);
 
-	// --- Background issue search — fires after every agent response ---
+	// --- Resume bookkeeping: bind this editor to the resumed draft's id so
+	//     saves upsert (not duplicate), and consume the one-shot resume flag.
+	useEffect(() => {
+		if (!resumeDraft) return;
+		useFeedbackDraftStore.setState({ activeDraftId: resumeDraft.id });
+		useFeedbackDraftStore.getState().clearResume();
+	}, [resumeDraft]);
+
+	// --- Publish draft state so the sidebar Feedback button + close handler
+	//     know whether the user has work worth keeping. Closing parks a draft
+	//     rather than discarding it, so this counts anything the user would be
+	//     annoyed to retype: a sent message, text still sitting in the composer,
+	//     or staged screenshots. An in-flight recording or a captured-but-
+	//     unsubmitted trace counts too. Once the issue is submitted
+	//     (step === 'done') there's nothing left to keep.
+	useEffect(() => {
+		const hasSentMessage = messages.some((m) => m.role === 'user');
+		const hasUnsentWork = inputValue.trim().length > 0 || attachments.length > 0;
+		const hasTraceWork = isTracing || tracePath !== null;
+		const hasDraft = (hasSentMessage || hasUnsentWork || hasTraceWork) && step !== 'done';
+		useFeedbackDraftStore.getState().setHasDraft(hasDraft);
+	}, [messages, attachments, inputValue, step, isTracing, tracePath]);
+
+	// --- Background issue search - fires after every agent response ---
 	const runIssueSearch = useCallback(async (query: string) => {
 		if (!query || query === lastSearchQueryRef.current) return;
 		lastSearchQueryRef.current = query;
@@ -270,18 +385,38 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 	// --- Start conversation ---
 	const startConversation = useCallback(async () => {
 		try {
-			const { prompt } = await window.maestro.feedback.getConversationPrompt();
+			const { prompt, cwd } = await window.maestro.feedback.getConversationPrompt();
 			managerRef.current.start({
 				agentType: selectedAgent,
 				systemPrompt: prompt,
+				cwd,
 			});
 			setStep('chat');
-			// Focus input immediately — no auto-greeting, user speaks first
+			// Focus input immediately - no auto-greeting, user speaks first
 			requestAnimationFrame(() => inputRef.current?.focus());
 		} catch (error) {
+			// Surface IPC/runtime failures from getConversationPrompt() and
+			// managerRef.current.start() to Sentry so production breakage is
+			// visible - these are unexpected errors, not recoverable conditions.
+			captureException(error, { extra: { source: 'FeedbackChatView.startConversation' } });
+			// Release the auto-start latch so a future state change can retry,
+			// and surface the error in the boot screen with a Close action.
+			startedRef.current = false;
 			setSubmitError(error instanceof Error ? error.message : 'Failed to start conversation');
 		}
 	}, [selectedAgent]);
+
+	// --- Auto-start conversation once GH auth + agent detection are ready.
+	//     The previous "pick a provider" screen is gone (#766) - Maestro infers
+	//     the provider from the first detected supported agent.
+	useEffect(() => {
+		if (startedRef.current) return;
+		if (ghAuth.checking || !ghAuth.ok) return;
+		if (!agentsLoaded || agentsDetectError) return;
+		if (availableTiles.length === 0) return;
+		startedRef.current = true;
+		void startConversation();
+	}, [ghAuth, agentsLoaded, agentsDetectError, availableTiles, startConversation]);
 
 	// --- Send message ---
 	const sendMessage = useCallback(async () => {
@@ -293,9 +428,13 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 		setMessages(updatedMessages);
 		setInputValue('');
 		setIsLoading(true);
+		setDiagnostics([]);
 
 		try {
 			const response = await managerRef.current.sendMessage(text, updatedMessages, {
+				onDiagnostic: (diagnostic) => {
+					setDiagnostics((prev) => [...prev, diagnostic]);
+				},
 				onComplete: (r) => {
 					setConfidence(r.confidence);
 					setIsReady(r.ready);
@@ -314,12 +453,17 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 					summary: response.summary,
 				},
 			]);
-		} catch {
+		} catch (error) {
+			captureException(error, { extra: { source: 'FeedbackChatView.sendMessage' } });
+			const detail =
+				error instanceof Error && error.message
+					? error.message
+					: 'Something went wrong. Please try again.';
 			setMessages((prev) => [
 				...prev,
 				{
 					role: 'assistant',
-					content: 'Something went wrong. Please try again.',
+					content: detail,
 					timestamp: Date.now(),
 				},
 			]);
@@ -345,9 +489,13 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 				additionalContext: lastResponse.structured.additionalContext || undefined,
 				attachments: attachments.map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
 				includeDebugPackage,
+				performanceTracePath: tracePath ?? undefined,
 			});
 
 			if (result.success) {
+				// The main process consumed and deleted the temp trace on success;
+				// mark it so the unmount cleanup doesn't try to discard it again.
+				if (tracePath) submittedRef.current = true;
 				setCreatedIssueUrl(result.issueUrl ?? null);
 				setStep('done');
 			} else {
@@ -358,7 +506,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 			setSubmitError(error instanceof Error ? error.message : 'Submission failed.');
 			setStep('chat');
 		}
-	}, [lastResponse, attachments, includeDebugPackage]);
+	}, [lastResponse, attachments, includeDebugPackage, tracePath]);
 
 	// --- Submit: always search first, then show matches or create ---
 	const searchAndSubmit = useCallback(async () => {
@@ -377,14 +525,14 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 			return;
 		}
 
-		// Search hasn't run yet (race condition) — run it now
+		// Search hasn't run yet (race condition) - run it now
 		const query = lastResponse.summary || lastResponse.structured.expectedBehavior;
 		if (query) {
 			await runIssueSearch(query);
 			// After search: if matches were found, the matching UI is already showing them.
 			// If no matches, the auto-proceed useEffect will call createNewIssue.
 		} else {
-			// No query available — create directly
+			// No query available - create directly
 			await createNewIssue();
 		}
 	}, [lastResponse, isReady, matchingIssues, searchingIssues, runIssueSearch, createNewIssue]);
@@ -393,7 +541,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 	useEffect(() => {
 		if (step !== 'matching' || searchingIssues) return;
 		if (matchingIssues.length === 0) {
-			// Search finished with no matches — create issue directly
+			// Search finished with no matches - create issue directly
 			void createNewIssue();
 		}
 	}, [step, searchingIssues, matchingIssues, createNewIssue]);
@@ -471,6 +619,74 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 		setAttachments((prev) => prev.filter((a) => a.id !== id));
 	}, []);
 
+	// --- Performance trace capture ---
+	// Keep refs in sync so the unmount cleanup can act on the latest values.
+	useEffect(() => {
+		isTracingRef.current = isTracing;
+		tracePathRef.current = tracePath;
+	}, [isTracing, tracePath]);
+
+	// Reconcile with the main-process recording singleton on mount: a recording
+	// may already be running (started here before a minimize, or via Cmd+K), in
+	// which case the control should show "Stop" instead of "Start".
+	useEffect(() => {
+		let mounted = true;
+		(async () => {
+			try {
+				const status = await window.maestro.debug.getProfilingStatus();
+				if (mounted && status.active) setIsTracing(true);
+			} catch {
+				// best-effort reconcile
+			}
+		})();
+		return () => {
+			mounted = false;
+		};
+	}, []);
+
+	const startTrace = useCallback(async () => {
+		setTraceError('');
+		try {
+			await window.maestro.debug.startProfiling();
+			setIsTracing(true);
+			setProfilingActive(true);
+			// Minimize so the user can reproduce the slow behavior; the recording
+			// keeps running in the main process. Reopening reconciles the Stop state.
+			onRequestMinimize?.();
+		} catch (e) {
+			setTraceError(e instanceof Error ? e.message : 'Failed to start recording.');
+		}
+	}, [onRequestMinimize, setProfilingActive]);
+
+	const stopTrace = useCallback(async () => {
+		setTraceBusy(true);
+		setTraceError('');
+		try {
+			const result = await window.maestro.debug.stopProfilingToFile();
+			setIsTracing(false);
+			setProfilingActive(false);
+			if (result.success && result.path) {
+				setTracePath(result.path);
+				setTraceSizeBytes(result.bundleSizeBytes);
+			} else {
+				setTraceError(result.error || 'Failed to capture the trace.');
+			}
+		} catch (e) {
+			setIsTracing(false);
+			setProfilingActive(false);
+			setTraceError(e instanceof Error ? e.message : 'Failed to capture the trace.');
+		} finally {
+			setTraceBusy(false);
+		}
+	}, [setProfilingActive]);
+
+	const removeTrace = useCallback(() => {
+		const path = tracePath;
+		setTracePath(null);
+		setTraceSizeBytes(0);
+		if (path) void window.maestro.debug.discardTrace(path);
+	}, [tracePath]);
+
 	// --- Key handler ---
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
@@ -481,6 +697,64 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 		},
 		[sendMessage]
 	);
+
+	// --- Persisted draft helpers ---
+	const serializeDraft = useCallback((): FeedbackDraft => {
+		const firstUserMessage = messages.find((m) => m.role === 'user');
+		const rawName =
+			lastResponse?.summary || firstUserMessage?.content || inputValue || 'Untitled feedback';
+		const suggestedName = rawName.trim().slice(0, 60) || 'Untitled feedback';
+		const now = Date.now();
+		return {
+			id: activeDraftId ?? '',
+			suggestedName,
+			category: lastResponse?.category ?? 'general_feedback',
+			summary: lastResponse?.summary ?? '',
+			confidence,
+			agentType: selectedAgent,
+			messages,
+			attachments,
+			inputDraft: inputValue,
+			includeDebugPackage,
+			createdAt: now,
+			updatedAt: now,
+			lastResponse,
+		};
+	}, [
+		messages,
+		attachments,
+		inputValue,
+		lastResponse,
+		confidence,
+		selectedAgent,
+		includeDebugPackage,
+		activeDraftId,
+	]);
+
+	// Keep a live snapshot in the store so FeedbackModal can persist on
+	// minimize/close without reaching into this component's local state.
+	useEffect(() => {
+		const hasContent =
+			messages.some((m) => m.role === 'user') ||
+			attachments.length > 0 ||
+			inputValue.trim().length > 0;
+		useFeedbackDraftStore.getState().setActiveDraft(hasContent ? serializeDraft() : null);
+	}, [serializeDraft, messages, attachments, inputValue]);
+
+	const handleSaveDraft = useCallback(async () => {
+		setIsSavingDraft(true);
+		try {
+			const savedId = await useFeedbackDraftStore.getState().saveDraft(serializeDraft());
+			if (savedId !== null) {
+				setDraftSaved(true);
+				window.setTimeout(() => setDraftSaved(false), 2000);
+			}
+			// On failure the store sets `saveError`, surfaced as a banner below;
+			// do not flash "Saved" for a write that did not persist.
+		} finally {
+			setIsSavingDraft(false);
+		}
+	}, [serializeDraft]);
 
 	// ========================================================================
 	// Render
@@ -516,7 +790,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 	if (ghAuth.checking) {
 		return (
 			<div className="flex flex-col items-center gap-3 py-8 px-6">
-				<Loader2 className="w-6 h-6 animate-spin" style={{ color: theme.colors.accent }} />
+				<Spinner size={24} color={theme.colors.accent} />
 				<p className="text-xs" style={{ color: theme.colors.textDim }}>
 					Checking GitHub CLI...
 				</p>
@@ -524,69 +798,80 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 		);
 	}
 
-	// --- Provider Selection ---
-	if (step === 'provider-select') {
+	// --- Agent detection failed (IPC/runtime error, not "zero providers") ---
+	if (agentsDetectError) {
 		return (
-			<div className="flex flex-col gap-5 p-6">
-				<div className="flex items-center gap-4">
-					<div
-						className="w-20 h-20 rounded-xl flex items-center justify-center shrink-0"
-						style={{ backgroundColor: `${theme.colors.accent}20` }}
-					>
-						<MessageSquareHeart className="w-10 h-10" style={{ color: theme.colors.accent }} />
-					</div>
-					<p className="text-sm" style={{ color: theme.colors.textDim }}>
-						Thank you for taking the time to give us feedback! Whether you're reporting an issue or
-						recommending a feature, you'll work with an AI agent that will understand what you need
-						and create a GitHub issue for us to act on.
+			<div className="flex flex-col items-center gap-4 py-8 px-6 text-center">
+				<AlertCircle className="w-10 h-10" style={{ color: theme.colors.error }} />
+				<div>
+					<p className="text-sm font-semibold mb-1" style={{ color: theme.colors.textMain }}>
+						Could not detect AI providers
+					</p>
+					<p className="text-xs leading-relaxed max-w-sm" style={{ color: theme.colors.textDim }}>
+						{agentsDetectError}
 					</p>
 				</div>
+				<button
+					type="button"
+					onClick={onCancel}
+					className="px-4 py-2 rounded text-xs font-bold transition-colors hover:opacity-90"
+					style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
+				>
+					Close
+				</button>
+			</div>
+		);
+	}
 
-				<div className="flex flex-col gap-2">
-					<label className="text-xs font-bold" style={{ color: theme.colors.textMain }}>
-						Agent
-					</label>
-					<ThemedSelect
-						value={selectedAgent}
-						options={availableTiles.map((tile) => ({
-							value: tile.id,
-							label: `${tile.name}${isBetaAgent(tile.id) ? ' (Beta)' : ''}`,
-						}))}
-						onChange={(v) => setSelectedAgent(v as ToolType)}
-						theme={theme}
-					/>
-					{availableTiles.length === 0 && (
-						<p className="text-xs" style={{ color: theme.colors.warning }}>
-							No supported agents detected. Install Claude Code, Codex, or OpenCode.
-						</p>
-					)}
+	// --- No supported AI provider detected ---
+	if (agentsLoaded && availableTiles.length === 0) {
+		return (
+			<div className="flex flex-col items-center gap-4 py-8 px-6 text-center">
+				<AlertCircle className="w-10 h-10" style={{ color: theme.colors.warning }} />
+				<div>
+					<p className="text-sm font-semibold mb-1" style={{ color: theme.colors.textMain }}>
+						No supported AI providers detected
+					</p>
+					<p className="text-xs leading-relaxed max-w-sm" style={{ color: theme.colors.textDim }}>
+						Inline feedback uses an AI to shape your report into a well-structured GitHub issue.
+						Install Claude Code, Codex, or OpenCode and try again.
+					</p>
 				</div>
+				<button
+					type="button"
+					onClick={onCancel}
+					className="px-4 py-2 rounded text-xs font-bold transition-colors hover:opacity-90"
+					style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
+				>
+					Close
+				</button>
+			</div>
+		);
+	}
 
+	// --- Booting: GH ok, agent detection or conversation start in flight ---
+	if (step === 'gh-check') {
+		return (
+			<div className="flex flex-col items-center gap-3 py-8 px-6">
+				<Spinner size={24} color={theme.colors.accent} />
+				<p className="text-xs" style={{ color: theme.colors.textDim }}>
+					Starting feedback session...
+				</p>
 				{submitError && (
-					<p className="text-xs" style={{ color: theme.colors.warning }}>
-						{submitError}
-					</p>
+					<>
+						<p className="text-xs" style={{ color: theme.colors.warning }}>
+							{submitError}
+						</p>
+						<button
+							type="button"
+							onClick={onCancel}
+							className="px-4 py-2 rounded text-xs font-bold transition-colors hover:opacity-90"
+							style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
+						>
+							Close
+						</button>
+					</>
 				)}
-
-				<div className="flex justify-end gap-2">
-					<button
-						type="button"
-						onClick={onCancel}
-						className="px-4 py-2 rounded text-xs transition-colors hover:bg-white/5"
-						style={{ color: theme.colors.textDim }}
-					>
-						Cancel
-					</button>
-					<button
-						type="button"
-						onClick={startConversation}
-						disabled={availableTiles.length === 0}
-						className="px-4 py-2 rounded text-xs font-bold transition-colors hover:opacity-90 disabled:opacity-40"
-						style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
-					>
-						Start
-					</button>
-				</div>
 			</div>
 		);
 	}
@@ -645,7 +930,10 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 						</button>
 						<button
 							type="button"
-							onClick={() => window.maestro.shell.openExternal(createdIssueUrl)}
+							onClick={() => {
+								openUrl(createdIssueUrl);
+								onCancel();
+							}}
 							className="p-1 rounded transition-colors hover:bg-white/10 shrink-0"
 							style={{ color: theme.colors.textDim }}
 							title="Open in browser"
@@ -673,7 +961,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 			<div className="flex flex-col gap-4 p-6">
 				{searchingIssues ? (
 					<div className="flex flex-col items-center gap-3 py-8">
-						<Loader2 className="w-6 h-6 animate-spin" style={{ color: theme.colors.accent }} />
+						<Spinner size={24} color={theme.colors.accent} />
 						<p className="text-xs" style={{ color: theme.colors.textDim }}>
 							Searching for similar existing issues...
 						</p>
@@ -710,7 +998,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 										</p>
 										<div className="flex items-center gap-2 mt-0.5">
 											<span
-												className="text-[10px] px-1.5 py-0.5 rounded-full"
+												className="text-2xs px-1.5 py-0.5 rounded-full"
 												style={{
 													backgroundColor:
 														issue.state === 'OPEN'
@@ -722,7 +1010,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 											>
 												{issue.state === 'OPEN' ? 'Open' : 'Closed'}
 											</span>
-											<span className="text-[10px]" style={{ color: theme.colors.textDim }}>
+											<span className="text-2xs" style={{ color: theme.colors.textDim }}>
 												by {issue.author}
 											</span>
 										</div>
@@ -733,7 +1021,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 											className="p-1.5 rounded transition-colors hover:bg-white/5"
 											style={{ color: theme.colors.textDim }}
 											title="View on GitHub"
-											onClick={() => window.maestro.shell.openExternal(issue.url)}
+											onClick={() => openUrl(issue.url)}
 										>
 											<ExternalLink className="w-3.5 h-3.5" />
 										</button>
@@ -741,7 +1029,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 											type="button"
 											onClick={() => subscribeToIssue(issue)}
 											disabled={subscribingTo !== null}
-											className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold transition-colors hover:opacity-90 disabled:opacity-40"
+											className="flex items-center gap-1 px-2 py-1 rounded text-2xs font-bold transition-colors hover:opacity-90 disabled:opacity-40"
 											style={{
 												backgroundColor: theme.colors.accent,
 												color: theme.colors.accentForeground,
@@ -749,7 +1037,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 											title="Subscribe and add your feedback as a comment"
 										>
 											{subscribingTo === issue.number ? (
-												<Loader2 className="w-3 h-3 animate-spin" />
+												<Spinner size={12} />
 											) : (
 												<ThumbsUp className="w-3 h-3" />
 											)}
@@ -821,19 +1109,34 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 					{/* Search status indicator */}
 					{searchingIssues && (
 						<span
-							className="flex items-center gap-1 text-[10px]"
+							className="flex items-center gap-1 text-2xs"
 							style={{ color: theme.colors.textDim }}
 						>
-							<Loader2 className="w-3 h-3 animate-spin" />
+							<Spinner size={12} />
 							Checking for similar issues...
 						</span>
 					)}
 					{!searchingIssues && matchingIssues.length > 0 && (
-						<span className="text-[10px]" style={{ color: theme.colors.warning }}>
+						<span className="text-2xs" style={{ color: theme.colors.warning }}>
 							{matchingIssues.length} similar issue{matchingIssues.length !== 1 ? 's' : ''} found
 						</span>
 					)}
 					<div className="flex-1" />
+					<button
+						type="button"
+						onClick={handleSaveDraft}
+						disabled={isSavingDraft || step === 'submitting'}
+						className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold transition-colors hover:opacity-90 disabled:opacity-40 shrink-0 border"
+						style={{
+							backgroundColor: theme.colors.bgMain,
+							color: theme.colors.textDim,
+							borderColor: theme.colors.border,
+						}}
+						title="Save this feedback as a resumable draft"
+					>
+						{isSavingDraft ? <Spinner size={12} /> : <Save className="w-3 h-3" />}
+						{draftSaved ? 'Saved' : 'Save draft'}
+					</button>
 					{isReady && (
 						<button
 							type="button"
@@ -842,15 +1145,20 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 							className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold transition-colors hover:opacity-90 disabled:opacity-40 shrink-0"
 							style={{ backgroundColor: theme.colors.success, color: '#000' }}
 						>
-							{step === 'submitting' ? (
-								<Loader2 className="w-3 h-3 animate-spin" />
-							) : (
-								<Check className="w-3 h-3" />
-							)}
+							{step === 'submitting' ? <Spinner size={12} /> : <Check className="w-3 h-3" />}
 							Submit Feedback
 						</button>
 					)}
 				</div>
+				{saveError && (
+					<div
+						className="mt-1.5 text-2xs font-medium"
+						style={{ color: theme.colors.error }}
+						role="alert"
+					>
+						{saveError}
+					</div>
+				)}
 				<div
 					className="h-1.5 rounded-full overflow-hidden"
 					style={{ backgroundColor: theme.colors.border }}
@@ -895,18 +1203,43 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 				{isLoading && (
 					<div className="flex justify-start">
 						<div
-							className="px-3 py-2 rounded-lg"
+							className="px-3 py-2 rounded-lg max-w-[85%]"
 							style={{
 								backgroundColor: theme.colors.bgMain,
 								border: `1px solid ${theme.colors.border}`,
 							}}
 						>
-							<Loader2 className="w-4 h-4 animate-spin" style={{ color: theme.colors.accent }} />
+							<div className="flex items-center gap-2">
+								<Spinner size={16} color={theme.colors.accent} />
+								{diagnostics.length > 0 && (
+									<span className="text-xs-plus" style={{ color: theme.colors.textDim }}>
+										Checking your system...
+									</span>
+								)}
+							</div>
+							{/* Diagnostics run on the user's own machine are shown, never hidden.
+							    Read-only, but they still deserve to see what was inspected. */}
+							{diagnostics.length > 0 && (
+								<ul className="mt-1.5 space-y-1">
+									{diagnostics.map((diagnostic, i) => (
+										<li
+											key={`${diagnostic.timestamp}-${i}`}
+											className="flex items-start gap-1.5 text-xs-plus font-mono"
+											style={{ color: theme.colors.textDim }}
+										>
+											<Terminal className="w-3 h-3 mt-0.5 shrink-0" />
+											<span className="truncate" title={diagnostic.command || diagnostic.toolName}>
+												{diagnostic.command || diagnostic.toolName}
+											</span>
+										</li>
+									))}
+								</ul>
+							)}
 						</div>
 					</div>
 				)}
 
-				{/* Inline similar issues card — appears during chat when matches are found */}
+				{/* Inline similar issues card - appears during chat when matches are found */}
 				{step === 'chat' && !searchingIssues && matchingIssues.length > 0 && (
 					<div
 						className="rounded-lg border px-3 py-3"
@@ -916,7 +1249,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 						}}
 					>
 						<p className="text-xs font-semibold mb-2" style={{ color: theme.colors.textMain }}>
-							Similar existing issues found — does any of these match?
+							Similar existing issues found - does any of these match?
 						</p>
 						<div className="flex flex-col gap-1.5">
 							{matchingIssues.slice(0, 5).map((issue) => (
@@ -926,7 +1259,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 									style={{ border: `1px solid ${theme.colors.border}` }}
 								>
 									<span
-										className="text-[10px] px-1 py-0.5 rounded-full shrink-0"
+										className="text-2xs px-1 py-0.5 rounded-full shrink-0"
 										style={{
 											backgroundColor:
 												issue.state === 'OPEN'
@@ -946,7 +1279,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 									</span>
 									<button
 										type="button"
-										onClick={() => window.maestro.shell.openExternal(issue.url)}
+										onClick={() => openUrl(issue.url)}
 										className="p-1 rounded transition-colors hover:bg-white/10 shrink-0"
 										style={{ color: theme.colors.textDim }}
 										title="View on GitHub"
@@ -957,7 +1290,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 										type="button"
 										onClick={() => subscribeToIssue(issue)}
 										disabled={subscribingTo !== null}
-										className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold transition-colors hover:opacity-90 disabled:opacity-40 shrink-0"
+										className="flex items-center gap-1 px-2 py-0.5 rounded text-2xs font-bold transition-colors hover:opacity-90 disabled:opacity-40 shrink-0"
 										style={{
 											backgroundColor: theme.colors.accent,
 											color: theme.colors.accentForeground,
@@ -965,7 +1298,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 										title="Subscribe and add your feedback as a comment"
 									>
 										{subscribingTo === issue.number ? (
-											<Loader2 className="w-3 h-3 animate-spin" />
+											<Spinner size={12} />
 										) : (
 											<ThumbsUp className="w-3 h-3" />
 										)}
@@ -977,10 +1310,10 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 						<button
 							type="button"
 							onClick={() => setMatchingIssues([])}
-							className="mt-2 text-[10px] transition-colors hover:underline"
+							className="mt-2 text-2xs transition-colors hover:underline"
 							style={{ color: theme.colors.textDim }}
 						>
-							None of these match — I have a new issue
+							None of these match - I have a new issue
 						</button>
 					</div>
 				)}
@@ -1050,7 +1383,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 								<p className="text-xs font-semibold" style={{ color: theme.colors.textDim }}>
 									Drag screenshots here or click to browse
 								</p>
-								<p className="text-[10px]" style={{ color: theme.colors.textDim, opacity: 0.7 }}>
+								<p className="text-2xs" style={{ color: theme.colors.textDim, opacity: 0.7 }}>
 									PNG, JPG, GIF, or WebP. Up to {MAX_ATTACHMENTS} images, 10 MB each.
 								</p>
 							</div>
@@ -1070,9 +1403,12 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 					/>
 				</div>
 
-				{/* Support package + error */}
-				<div className="pb-2 flex items-center gap-3">
-					<label className="flex items-center gap-1.5 cursor-pointer select-none shrink-0">
+				{/* Support package + performance trace + error */}
+				<div className="pb-2 flex items-center gap-3 flex-wrap">
+					<label
+						className="flex items-center gap-1.5 cursor-pointer select-none shrink-0"
+						title="Attaches diagnostics to the public issue. No conversations, secrets, file paths, project names, username, or computer name are included."
+					>
 						<input
 							type="checkbox"
 							checked={includeDebugPackage}
@@ -1081,20 +1417,83 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 							style={{ accentColor: theme.colors.accent }}
 						/>
 						<Package className="w-3 h-3" style={{ color: theme.colors.textDim }} />
-						<span className="text-[10px]" style={{ color: theme.colors.textDim }}>
+						<span className="text-2xs" style={{ color: theme.colors.textDim }}>
 							Include support package
 						</span>
 					</label>
-					{submitError && (
-						<p
-							className="text-[10px] truncate"
-							style={{ color: theme.colors.error }}
-							title={submitError}
+
+					{/* Performance trace: record -> reproduce -> stop -> attach */}
+					{tracePath ? (
+						<span
+							className="flex items-center gap-1.5 shrink-0 px-2 py-1 rounded"
+							style={{
+								backgroundColor: `${theme.colors.success}18`,
+								color: theme.colors.textMain,
+							}}
+							title="A performance trace is attached to this report"
 						>
-							{submitError}
+							<Gauge className="w-3 h-3" style={{ color: theme.colors.success }} />
+							<span className="text-2xs">Performance trace ({formatSize(traceSizeBytes)})</span>
+							<button
+								type="button"
+								onClick={removeTrace}
+								className="p-0.5 rounded hover:opacity-70"
+								aria-label="Remove performance trace"
+								title="Remove performance trace"
+							>
+								<X className="w-3 h-3" style={{ color: theme.colors.textDim }} />
+							</button>
+						</span>
+					) : isTracing ? (
+						<button
+							type="button"
+							onClick={stopTrace}
+							disabled={traceBusy}
+							className="flex items-center gap-1.5 shrink-0 px-2 py-1 rounded border disabled:opacity-50"
+							style={{ borderColor: theme.colors.error, color: theme.colors.error }}
+							title="Stop recording and attach the trace"
+						>
+							{traceBusy ? (
+								<Spinner size={12} />
+							) : (
+								<span
+									className="w-2 h-2 rounded-full animate-pulse"
+									style={{ backgroundColor: theme.colors.error }}
+								/>
+							)}
+							<span className="text-2xs font-semibold">
+								{traceBusy ? 'Saving trace...' : 'Stop recording'}
+							</span>
+						</button>
+					) : (
+						<button
+							type="button"
+							onClick={startTrace}
+							disabled={step === 'submitting'}
+							className="flex items-center gap-1.5 shrink-0 px-2 py-1 rounded border disabled:opacity-40"
+							style={{ borderColor: theme.colors.border, color: theme.colors.textDim }}
+							title="Record a performance trace, then reproduce the slow behavior"
+						>
+							<Gauge className="w-3 h-3" />
+							<span className="text-2xs">Record performance trace</span>
+						</button>
+					)}
+
+					{(traceError || submitError) && (
+						<p
+							className="text-2xs truncate"
+							style={{ color: theme.colors.error }}
+							title={traceError || submitError}
+						>
+							{traceError || submitError}
 						</p>
 					)}
 				</div>
+				{isTracing && !traceBusy && (
+					<p className="pb-2 text-2xs" style={{ color: theme.colors.textDim, opacity: 0.8 }}>
+						Recording... reproduce the issue, then reopen this window and click Stop recording.
+					</p>
+				)}
 
 				{/* Text input + send + submit */}
 				<div>
@@ -1115,7 +1514,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 							className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed overflow-y-auto"
 							style={{ color: theme.colors.textMain }}
 						/>
-						{/* Send message button — always available */}
+						{/* Send message button - always available */}
 						<button
 							type="button"
 							onClick={sendMessage}
@@ -1124,13 +1523,9 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 							style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
 							title="Send message"
 						>
-							{isLoading ? (
-								<Loader2 className="w-4 h-4 animate-spin" />
-							) : (
-								<Send className="w-4 h-4" />
-							)}
+							{isLoading ? <Spinner size={16} /> : <Send className="w-4 h-4" />}
 						</button>
-						{/* Submit button — appears when ready */}
+						{/* Submit button - appears when ready */}
 						{isReady && (
 							<button
 								type="button"
@@ -1140,11 +1535,7 @@ export function FeedbackChatView({ theme, onCancel, onWidthChange }: FeedbackCha
 								style={{ backgroundColor: theme.colors.success, color: '#000' }}
 								title="Submit feedback as GitHub issue"
 							>
-								{step === 'submitting' ? (
-									<Loader2 className="w-3.5 h-3.5 animate-spin" />
-								) : (
-									<Check className="w-3.5 h-3.5" />
-								)}
+								{step === 'submitting' ? <Spinner size={14} /> : <Check className="w-3.5 h-3.5" />}
 								Submit
 							</button>
 						)}

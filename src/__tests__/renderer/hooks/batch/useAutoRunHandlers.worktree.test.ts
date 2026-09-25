@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useAutoRunHandlers } from '../../../../renderer/hooks';
 import type { Session, BatchRunConfig } from '../../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../../helpers/mockSession';
 import { useSessionStore } from '../../../../renderer/stores/sessionStore';
 import { useSettingsStore } from '../../../../renderer/stores/settingsStore';
 
@@ -33,12 +34,20 @@ vi.mock('../../../../renderer/stores/notificationStore', async () => {
 	return { ...actual, notifyToast: vi.fn() };
 });
 
-// Mock worktreeDedup
-vi.mock('../../../../renderer/utils/worktreeDedup', () => ({
-	markWorktreePathAsRecentlyCreated: vi.fn(),
-	clearRecentlyCreatedWorktreePath: vi.fn(),
-	isRecentlyCreatedWorktreePath: vi.fn().mockReturnValue(false),
-}));
+// Mock worktreeDedup - stub the side-effecting Set helpers, but keep the
+// pure path-matching helpers (normalizePath, sessionMatchesWorktreeRoot) real
+// so the hook's lookup logic actually runs against the test fixtures.
+vi.mock('../../../../renderer/utils/worktreeDedup', async () => {
+	const actual = await vi.importActual<typeof import('../../../../renderer/utils/worktreeDedup')>(
+		'../../../../renderer/utils/worktreeDedup'
+	);
+	return {
+		...actual,
+		markWorktreePathAsRecentlyCreated: vi.fn(),
+		clearRecentlyCreatedWorktreePath: vi.fn(),
+		isRecentlyCreatedWorktreePath: vi.fn().mockReturnValue(false),
+	};
+});
 
 import { gitService } from '../../../../renderer/services/git';
 import { notifyToast } from '../../../../renderer/stores/notificationStore';
@@ -51,42 +60,39 @@ import {
 // Helpers
 // ============================================================================
 
+// Thin wrapper: seeds a worktree parent with auto run content so batch
+// handlers can exercise worktree creation.
 const createMockSession = (overrides: Partial<Session> = {}): Session =>
-	({
+	baseCreateMockSession({
 		id: 'parent-session-1',
 		name: 'Parent Agent',
-		toolType: 'claude-code',
-		state: 'idle',
 		cwd: '/projects/my-repo',
 		fullPath: '/projects/my-repo',
 		projectRoot: '/projects/my-repo',
-		aiLogs: [],
-		shellLogs: [],
-		workLog: [],
-		contextUsage: 0,
-		inputMode: 'ai',
-		aiPid: 0,
-		terminalPid: 0,
-		port: 0,
-		isLive: false,
-		changedFiles: [],
 		isGitRepo: true,
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
-		executionQueue: [],
-		activeTimeMs: 0,
-		aiTabs: [],
-		activeTabId: 'tab-1',
-		closedTabHistory: [],
 		autoRunFolderPath: '/projects/autorun-docs',
 		autoRunSelectedFile: 'Phase 1',
 		autoRunContent: '# Phase 1',
 		autoRunContentVersion: 1,
 		autoRunMode: 'edit',
-		worktreeConfig: { basePath: '/projects/worktrees' },
+		worktreeConfig: { basePath: '/projects/worktrees', watchEnabled: false },
 		...overrides,
-	}) as Session;
+	});
+
+/** Seed useSessionStore so handlers resolve Session via selectActiveSession(getState()). */
+function seedActiveSession(session: Session | null, extraSessions: Session[] = []) {
+	if (!session) {
+		useSessionStore.setState({ sessions: [], activeSessionId: null } as any);
+		return;
+	}
+	const byId = new Map<string, Session>();
+	for (const s of extraSessions) byId.set(s.id, s);
+	byId.set(session.id, session);
+	useSessionStore.setState({
+		sessions: Array.from(byId.values()),
+		activeSessionId: session.id,
+	} as any);
+}
 
 const createMockDeps = () => ({
 	setSessions: vi.fn(),
@@ -111,7 +117,7 @@ const baseDocuments = [
 // Tests
 // ============================================================================
 
-describe('handleStartBatchRun — worktree dispatch integration', () => {
+describe('handleStartBatchRun - worktree dispatch integration', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		vi.useFakeTimers();
@@ -141,7 +147,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				loopEnabled: false,
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -168,7 +175,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				loopEnabled: false,
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -210,7 +218,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -252,7 +260,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -289,7 +297,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -319,7 +327,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -368,7 +377,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -416,7 +425,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -458,7 +467,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -495,7 +504,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -531,7 +540,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -567,7 +576,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -577,7 +587,47 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				'/projects/my-repo',
 				'/projects/worktrees/auto-run-main-0222',
 				'auto-run-main-0222',
-				undefined // no SSH
+				undefined, // no SSH
+				'main' // baseBranch propagated from worktreeTarget
+			);
+		});
+
+		it('sanitizes branch names that contain spaces or other illegal characters', async () => {
+			// Regression: typing "Cue Dashboard" used to flow straight to git, which
+			// rejected it with "fatal: 'Cue Dashboard' is not a valid branch name".
+			const session = createMockSession();
+			const deps = createMockDeps();
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({
+				success: true,
+			});
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'Cue Dashboard',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			expect(window.maestro.git.worktreeSetup).toHaveBeenCalledWith(
+				'/projects/my-repo',
+				'/projects/worktrees/Cue-Dashboard',
+				'Cue-Dashboard',
+				undefined,
+				'main'
 			);
 		});
 
@@ -602,7 +652,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -638,7 +689,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -679,7 +731,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -689,6 +742,275 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 			const sessions = useSessionStore.getState().sessions;
 			const parent = sessions.find((s) => s.id === 'parent-session-1');
 			expect(parent?.worktreesExpanded).toBe(true);
+		});
+
+		it('uses existingPath and dispatches when branch is already attached to a worktree', async () => {
+			const session = createMockSession();
+			const deps = createMockDeps();
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({
+				success: true,
+				created: false,
+				alreadyExisted: true,
+				existingPath: '/projects/other/already-attached',
+				currentBranch: 'already-attached',
+				requestedBranch: 'already-attached',
+				branchMismatch: false,
+			});
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'already-attached',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			// Session was added against the resolved existing path, not the requested one
+			const sessions = useSessionStore.getState().sessions;
+			const newSession = sessions.find((s) => s.worktreeBranch === 'already-attached');
+			expect(newSession).toBeDefined();
+			expect(newSession!.cwd).toBe('/projects/other/already-attached');
+
+			// Batch run was dispatched against the new session, not blocked
+			expect(deps.startBatchRun).toHaveBeenCalledOnce();
+			expect(notifyToast).toHaveBeenCalledWith(
+				expect.objectContaining({
+					type: 'info',
+					title: 'Worktree Already Existed',
+				})
+			);
+		});
+
+		it('reuses existing session when alreadyExisted path matches an open session', async () => {
+			const session = createMockSession();
+			const deps = createMockDeps();
+
+			const existingChild = {
+				...session,
+				id: 'wt-existing',
+				cwd: '/projects/other/feat',
+				worktreeBranch: 'feat',
+				parentSessionId: session.id,
+			};
+			useSessionStore.setState({
+				sessions: [session, existingChild as any],
+				activeSessionId: session.id,
+			} as any);
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({
+				success: true,
+				created: false,
+				alreadyExisted: true,
+				existingPath: '/projects/other/feat',
+				currentBranch: 'feat',
+				requestedBranch: 'feat',
+				branchMismatch: false,
+			});
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'feat',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			// No new session was added - count stays at 2
+			expect(useSessionStore.getState().sessions.length).toBe(2);
+			// Batch run dispatched against the existing session
+			expect(deps.startBatchRun).toHaveBeenCalledOnce();
+			expect(deps.startBatchRun.mock.calls[0][0]).toBe('wt-existing');
+		});
+
+		it('aborts dispatch when reused session is busy or connecting', async () => {
+			const session = createMockSession();
+			const deps = createMockDeps();
+
+			// Existing worktree session is mid-run (state === 'busy').
+			const busyChild = {
+				...session,
+				id: 'wt-busy',
+				cwd: '/projects/other/feat',
+				projectRoot: '/projects/other/feat',
+				worktreeBranch: 'feat',
+				parentSessionId: session.id,
+				state: 'busy',
+			};
+			useSessionStore.setState({
+				sessions: [session, busyChild as any],
+				activeSessionId: session.id,
+			} as any);
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({
+				success: true,
+				created: false,
+				alreadyExisted: true,
+				existingPath: '/projects/other/feat',
+				currentBranch: 'feat',
+				requestedBranch: 'feat',
+				branchMismatch: false,
+			});
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'feat',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			// No dispatch - busy guard fired.
+			expect(deps.startBatchRun).not.toHaveBeenCalled();
+			expect(notifyToast).toHaveBeenCalledWith(
+				expect.objectContaining({
+					type: 'warning',
+					title: 'Target Agent Busy',
+				})
+			);
+			// No new session built either.
+			expect(useSessionStore.getState().sessions.length).toBe(2);
+		});
+
+		it('reuses existing session via projectRoot match even when child cwd has drifted into a subdir', async () => {
+			const session = createMockSession();
+			const deps = createMockDeps();
+
+			// Child session has cd'd into a subdirectory of the worktree, so its
+			// cwd no longer matches the worktree root. projectRoot still does.
+			const existingChild = {
+				...session,
+				id: 'wt-existing',
+				cwd: '/projects/other/feat/src/components',
+				projectRoot: '/projects/other/feat',
+				worktreeBranch: 'feat',
+				parentSessionId: session.id,
+			};
+			useSessionStore.setState({
+				sessions: [session, existingChild as any],
+				activeSessionId: session.id,
+			} as any);
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({
+				success: true,
+				created: false,
+				alreadyExisted: true,
+				existingPath: '/projects/other/feat',
+				currentBranch: 'feat',
+				requestedBranch: 'feat',
+				branchMismatch: false,
+			});
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'feat',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			// projectRoot match should reuse the existing session - no duplicate.
+			expect(useSessionStore.getState().sessions.length).toBe(2);
+			expect(deps.startBatchRun).toHaveBeenCalledOnce();
+			expect(deps.startBatchRun.mock.calls[0][0]).toBe('wt-existing');
+		});
+
+		it('reuses existing session when paths differ only by trailing slash / duplicate separators', async () => {
+			const session = createMockSession();
+			const deps = createMockDeps();
+
+			// Open child session has a trailing slash + duplicate separator that
+			// raw equality wouldn't match against the resolved existingPath.
+			const existingChild = {
+				...session,
+				id: 'wt-existing',
+				cwd: '/projects/other//feat/',
+				worktreeBranch: 'feat',
+				parentSessionId: session.id,
+			};
+			useSessionStore.setState({
+				sessions: [session, existingChild as any],
+				activeSessionId: session.id,
+			} as any);
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({
+				success: true,
+				created: false,
+				alreadyExisted: true,
+				existingPath: '/projects/other/feat',
+				currentBranch: 'feat',
+				requestedBranch: 'feat',
+				branchMismatch: false,
+			});
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'feat',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			// Normalized comparison should find the existing session - no duplicate.
+			expect(useSessionStore.getState().sessions.length).toBe(2);
+			expect(deps.startBatchRun).toHaveBeenCalledOnce();
+			expect(deps.startBatchRun.mock.calls[0][0]).toBe('wt-existing');
 		});
 	});
 
@@ -718,7 +1040,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -754,7 +1077,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -784,7 +1108,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -820,7 +1145,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -849,7 +1175,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -884,14 +1211,18 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
 			});
 
 			const sessions = useSessionStore.getState().sessions;
-			expect(sessions).toHaveLength(0);
+			// Parent must be seeded for the handler; failure must not spawn a worktree child.
+			expect(sessions).toHaveLength(1);
+			expect(sessions[0].id).toBe(session.id);
+			expect(sessions[0].parentSessionId).toBeUndefined();
 		});
 
 		it('handles unexpected exception from worktreeSetup gracefully', async () => {
@@ -913,7 +1244,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -952,13 +1284,14 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
 			});
 
-			// Should NOT call worktreeSetup — worktree already exists on disk
+			// Should NOT call worktreeSetup - worktree already exists on disk
 			expect(window.maestro.git.worktreeSetup).not.toHaveBeenCalled();
 
 			// Should have dispatched to a new session
@@ -990,7 +1323,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1021,7 +1355,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1053,13 +1388,14 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
 			});
 
-			// Should still dispatch — git info is nice-to-have
+			// Should still dispatch - git info is nice-to-have
 			expect(deps.startBatchRun).toHaveBeenCalledOnce();
 
 			// Session should still exist with path-derived branch
@@ -1094,7 +1430,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1116,7 +1453,7 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 	// -----------------------------------------------------------------------
 
 	describe('worktree dedup (prevents duplicate sessions)', () => {
-		it('marks path as recently created BEFORE calling worktreeSetup for create-new', async () => {
+		it('marks the path before AND after worktreeSetup for create-new (re-mark covers the slow getBranches window)', async () => {
 			const session = createMockSession();
 			const deps = createMockDeps();
 
@@ -1142,16 +1479,23 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
 			});
 
-			// Mark must happen before worktreeSetup
-			expect(callOrder).toEqual(['mark', 'worktreeSetup']);
+			// First mark guards against an immediate addDir; the second restarts the
+			// TTL from after the (potentially slow) `git worktree add` so the mark is
+			// still live when chokidar's debounced discovery fires during the
+			// getBranches/buildWorktreeSession window below. Both use the long setup
+			// TTL (60s) so a slow worktree add / getBranches on SSH or a large repo
+			// can't let the mark lapse mid-flight. See PR #946.
+			expect(callOrder).toEqual(['mark', 'worktreeSetup', 'mark']);
 			expect(markWorktreePathAsRecentlyCreated).toHaveBeenCalledWith(
-				'/projects/worktrees/dedup-test'
+				'/projects/worktrees/dedup-test',
+				60000
 			);
 		});
 
@@ -1175,7 +1519,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1203,7 +1548,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1241,7 +1587,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1251,7 +1598,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				'/projects/my-repo',
 				'/projects/worktrees/remote-branch',
 				'remote-branch',
-				'remote-host-1'
+				'remote-host-1',
+				'main'
 			);
 		});
 
@@ -1284,7 +1632,8 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				},
 			};
 
-			const { result } = renderHook(() => useAutoRunHandlers(session, deps));
+			seedActiveSession(session);
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
 
 			await act(async () => {
 				await result.current.handleStartBatchRun(config);
@@ -1294,8 +1643,118 @@ describe('handleStartBatchRun — worktree dispatch integration', () => {
 				'/projects/my-repo',
 				'/projects/worktrees/fallback-branch',
 				'fallback-branch',
-				'fallback-host'
+				'fallback-host',
+				'main'
 			);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// Dispatch from a worktree child session
+	// -----------------------------------------------------------------------
+
+	describe('dispatch originating from a worktree child', () => {
+		it('create-new resolves parent basePath and cwd when active session is a child', async () => {
+			const parent = createMockSession();
+			const child = baseCreateMockSession({
+				id: 'child-session-1',
+				name: 'child-worktree',
+				cwd: '/projects/worktrees/existing-child',
+				fullPath: '/projects/worktrees/existing-child',
+				projectRoot: '/projects/worktrees/existing-child',
+				isGitRepo: true,
+				parentSessionId: parent.id,
+				worktreeBranch: 'existing-child',
+				// Child inherits autoRunFolderPath from parent at build time.
+				autoRunFolderPath: parent.autoRunFolderPath,
+			});
+			const deps = createMockDeps();
+
+			useSessionStore.setState({
+				sessions: [parent, child],
+				activeSessionId: child.id,
+			} as any);
+
+			vi.mocked(window.maestro.git.worktreeSetup).mockResolvedValue({ success: true });
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'create-new',
+					newBranchName: 'from-child',
+					baseBranch: 'main',
+					createPROnCompletion: false,
+				},
+			};
+
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			// basePath comes from parent's worktreeConfig, cwd comes from parent repo.
+			expect(window.maestro.git.worktreeSetup).toHaveBeenCalledWith(
+				'/projects/my-repo',
+				'/projects/worktrees/from-child',
+				'from-child',
+				undefined,
+				'main'
+			);
+
+			const sessions = useSessionStore.getState().sessions;
+			const newSession = sessions.find((s) => s.worktreeBranch === 'from-child');
+			expect(newSession).toBeDefined();
+			// New session should be parented to the real parent, not the child.
+			expect(newSession!.parentSessionId).toBe(parent.id);
+		});
+
+		it('existing-closed parents the new session to the resolved parent when active is a child', async () => {
+			const parent = createMockSession();
+			const child = baseCreateMockSession({
+				id: 'child-session-2',
+				name: 'child-worktree',
+				cwd: '/projects/worktrees/existing-child',
+				fullPath: '/projects/worktrees/existing-child',
+				projectRoot: '/projects/worktrees/existing-child',
+				isGitRepo: true,
+				parentSessionId: parent.id,
+				worktreeBranch: 'existing-child',
+				autoRunFolderPath: parent.autoRunFolderPath,
+			});
+			const deps = createMockDeps();
+
+			useSessionStore.setState({
+				sessions: [parent, child],
+				activeSessionId: child.id,
+			} as any);
+
+			vi.mocked(gitService.getBranches).mockResolvedValue(['main', 'sibling']);
+
+			const config: BatchRunConfig = {
+				documents: baseDocuments,
+				prompt: 'Go',
+				loopEnabled: false,
+				worktreeTarget: {
+					mode: 'existing-closed',
+					worktreePath: '/projects/worktrees/sibling',
+					createPROnCompletion: false,
+				},
+			};
+
+			const { result } = renderHook(() => useAutoRunHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleStartBatchRun(config);
+			});
+
+			const sessions = useSessionStore.getState().sessions;
+			const newSession = sessions.find((s) => s.cwd === '/projects/worktrees/sibling');
+			expect(newSession).toBeDefined();
+			expect(newSession!.parentSessionId).toBe(parent.id);
 		});
 	});
 });

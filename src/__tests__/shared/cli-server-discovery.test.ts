@@ -29,12 +29,15 @@ import * as os from 'os';
 import * as path from 'path';
 
 import {
-	CliServerInfo,
 	writeCliServerInfo,
 	readCliServerInfo,
 	deleteCliServerInfo,
 	isCliServerRunning,
 } from '../../shared/cli-server-discovery';
+
+// Local type alias mirroring the (now-internal) CliServerInfo shape
+// expected by writeCliServerInfo. Kept in sync with shared/cli-server-discovery.ts.
+type CliServerInfo = Parameters<typeof writeCliServerInfo>[0];
 
 // Type assertions for mocked modules
 const mockFs = {
@@ -59,8 +62,15 @@ describe('cli-server-discovery', () => {
 		startedAt: 1700000000000,
 	};
 
+	let savedUserDataEnv: string | undefined;
+
 	beforeEach(() => {
 		vi.clearAllMocks();
+
+		// Ensure MAESTRO_USER_DATA from the test runner's environment doesn't
+		// leak into platform-default tests; individual tests opt in by setting it.
+		savedUserDataEnv = process.env.MAESTRO_USER_DATA;
+		delete process.env.MAESTRO_USER_DATA;
 
 		// Default mock implementations
 		mockOs.platform.mockReturnValue('darwin');
@@ -75,6 +85,11 @@ describe('cli-server-discovery', () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		if (savedUserDataEnv === undefined) {
+			delete process.env.MAESTRO_USER_DATA;
+		} else {
+			process.env.MAESTRO_USER_DATA = savedUserDataEnv;
+		}
 	});
 
 	describe('getConfigDir (internal via path construction)', () => {
@@ -180,6 +195,56 @@ describe('cli-server-discovery', () => {
 					delete process.env.XDG_CONFIG_HOME;
 				} else {
 					process.env.XDG_CONFIG_HOME = originalXdg;
+				}
+			}
+		});
+
+		it('should honor MAESTRO_USER_DATA override over platform default', () => {
+			mockOs.platform.mockReturnValue('darwin');
+			mockOs.homedir.mockReturnValue('/Users/testuser');
+			const originalUserData = process.env.MAESTRO_USER_DATA;
+			process.env.MAESTRO_USER_DATA = '/Users/testuser/Library/Application Support/maestro-dev';
+
+			try {
+				readCliServerInfo();
+
+				expect(mockFs.readFileSync).toHaveBeenCalledWith(
+					// Product resolves MAESTRO_USER_DATA with path.resolve, which prepends the
+					// current drive letter on Windows; mirror that here so the expectation matches
+					// on Windows while remaining a no-op on POSIX.
+					path.join(
+						path.resolve('/Users/testuser/Library/Application Support/maestro-dev'),
+						'cli-server.json'
+					),
+					'utf-8'
+				);
+			} finally {
+				if (originalUserData === undefined) {
+					delete process.env.MAESTRO_USER_DATA;
+				} else {
+					process.env.MAESTRO_USER_DATA = originalUserData;
+				}
+			}
+		});
+
+		it('should resolve relative MAESTRO_USER_DATA to absolute path', () => {
+			mockOs.platform.mockReturnValue('darwin');
+			mockOs.homedir.mockReturnValue('/Users/testuser');
+			const originalUserData = process.env.MAESTRO_USER_DATA;
+			process.env.MAESTRO_USER_DATA = './relative-data-dir';
+
+			try {
+				readCliServerInfo();
+
+				expect(mockFs.readFileSync).toHaveBeenCalledWith(
+					path.join(path.resolve('./relative-data-dir'), 'cli-server.json'),
+					'utf-8'
+				);
+			} finally {
+				if (originalUserData === undefined) {
+					delete process.env.MAESTRO_USER_DATA;
+				} else {
+					process.env.MAESTRO_USER_DATA = originalUserData;
 				}
 			}
 		});
@@ -348,13 +413,29 @@ describe('cli-server-discovery', () => {
 
 			const originalKill = process.kill;
 			process.kill = vi.fn().mockImplementation(() => {
-				throw new Error('ESRCH: No such process');
+				throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
 			}) as unknown as typeof process.kill;
 
 			try {
 				const result = isCliServerRunning();
 
 				expect(result).toBe(false);
+			} finally {
+				process.kill = originalKill;
+			}
+		});
+
+		it('should treat EPERM as alive so the authenticated connection can decide reachability', () => {
+			mockFs.readFileSync.mockReturnValue(JSON.stringify(sampleInfo));
+
+			const originalKill = process.kill;
+			process.kill = vi.fn().mockImplementation(() => {
+				throw Object.assign(new Error('Operation not permitted'), { code: 'EPERM' });
+			}) as unknown as typeof process.kill;
+
+			try {
+				expect(isCliServerRunning()).toBe(true);
+				expect(process.kill).toHaveBeenCalledWith(12345, 0);
 			} finally {
 				process.kill = originalKill;
 			}

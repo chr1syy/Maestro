@@ -11,8 +11,10 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import type { AgentConfig } from '../../types';
 import type { SshRemoteConfig, AgentSshRemoteConfig } from '../../../shared/types';
+import { logger } from '../../utils/logger';
 
 declare const window: Window & {
 	maestro: {
@@ -45,6 +47,14 @@ export interface UseAgentConfigurationOptions {
 		customPath?: string;
 		customArgs?: string;
 		customEnvVars?: Record<string, string>;
+		/** Env vars switched off in the editor: parked, never spawned with. */
+		customEnvVarsDisabled?: Record<string, string>;
+		/** Claude token-source: legacy Adaptive opt-in (off => pure API). */
+		enableMaestroP?: boolean;
+		/** Refines `enableMaestroP`: 'interactive' always TUI, 'dynamic' auto-switch. */
+		maestroPMode?: 'interactive' | 'dynamic';
+		/** Optional override path to the maestro-p binary. */
+		maestroPPath?: string;
 	};
 }
 
@@ -70,6 +80,20 @@ export interface UseAgentConfigurationReturn {
 	setCustomArgs: (args: string) => void;
 	customEnvVars: Record<string, string>;
 	setCustomEnvVars: (vars: Record<string, string>) => void;
+	/**
+	 * Env vars the user switched off. Held separately from `customEnvVars` so a
+	 * parked var never reaches a spawn - see Session.customEnvVarsDisabled.
+	 */
+	customEnvVarsDisabled: Record<string, string>;
+	setCustomEnvVarsDisabled: Dispatch<SetStateAction<Record<string, string>>>;
+
+	// Claude token source (maestro-p TUI vs `claude --print` API)
+	enableMaestroP: boolean;
+	setEnableMaestroP: (enabled: boolean) => void;
+	maestroPMode: 'interactive' | 'dynamic';
+	setMaestroPMode: (mode: 'interactive' | 'dynamic') => void;
+	maestroPPath: string;
+	setMaestroPPath: (path: string) => void;
 
 	// Agent config (model, context window, etc.)
 	agentConfig: Record<string, any>;
@@ -132,6 +156,16 @@ export function useAgentConfiguration(
 	const [customEnvVars, setCustomEnvVars] = useState<Record<string, string>>(
 		initialValues?.customEnvVars ?? {}
 	);
+	const [customEnvVarsDisabled, setCustomEnvVarsDisabled] = useState<Record<string, string>>(
+		initialValues?.customEnvVarsDisabled ?? {}
+	);
+
+	// Claude token source (maestro-p TUI vs `claude --print` API)
+	const [enableMaestroP, setEnableMaestroP] = useState(initialValues?.enableMaestroP ?? false);
+	const [maestroPMode, setMaestroPMode] = useState<'interactive' | 'dynamic'>(
+		initialValues?.maestroPMode ?? 'dynamic'
+	);
+	const [maestroPPath, setMaestroPPath] = useState(initialValues?.maestroPPath ?? '');
 
 	// Agent config
 	const [agentConfig, setAgentConfig] = useState<Record<string, any>>({});
@@ -166,6 +200,9 @@ export function useAgentConfiguration(
 		setCustomPath('');
 		setCustomArgs('');
 		setCustomEnvVars({});
+		setEnableMaestroP(false);
+		setMaestroPMode('dynamic');
+		setMaestroPPath('');
 		setAgentConfig({});
 		agentConfigRef.current = {};
 		setAvailableModels([]);
@@ -191,7 +228,7 @@ export function useAgentConfiguration(
 				setSelectedAgent(filtered[0].id);
 			}
 		} catch (error) {
-			console.error('Failed to detect agents:', error);
+			logger.error('Failed to detect agents:', undefined, error);
 		} finally {
 			setIsDetecting(false);
 		}
@@ -216,7 +253,7 @@ export function useAgentConfiguration(
 					if (latestLoadRequestRef.current !== requestId) return; // stale
 					setAvailableModels(models);
 				} catch (err) {
-					console.error('Failed to load models:', err);
+					logger.error('Failed to load models:', undefined, err);
 				} finally {
 					if (latestLoadRequestRef.current === requestId) {
 						setLoadingModels(false);
@@ -269,7 +306,7 @@ export function useAgentConfiguration(
 			const models = await window.maestro.agents.getModels(selectedAgent, true);
 			setAvailableModels(models);
 		} catch (err) {
-			console.error('Failed to refresh models:', err);
+			logger.error('Failed to refresh models:', undefined, err);
 		} finally {
 			setLoadingModels(false);
 		}
@@ -285,13 +322,13 @@ export function useAgentConfiguration(
 				: agents.filter((a: AgentConfig) => a.available && !a.hidden);
 			setDetectedAgents(filtered);
 		} catch (error) {
-			console.error('Failed to refresh agents:', error);
+			logger.error('Failed to refresh agents:', undefined, error);
 		} finally {
 			setRefreshingAgent(false);
 		}
 	}, [agentFilter]);
 
-	// Handle agent selection change — resets customizations and agent-scoped state
+	// Handle agent selection change - resets customizations and agent-scoped state
 	const handleAgentChange = useCallback(
 		(agentId: string) => {
 			// Invalidate any in-flight loadAgentConfig requests
@@ -301,6 +338,9 @@ export function useAgentConfiguration(
 			setCustomPath('');
 			setCustomArgs('');
 			setCustomEnvVars({});
+			setEnableMaestroP(false);
+			setMaestroPMode('dynamic');
+			setMaestroPPath('');
 			setAgentConfig({});
 			agentConfigRef.current = {};
 			setAvailableModels([]);
@@ -336,7 +376,7 @@ export function useAgentConfiguration(
 						setSshRemotes(configsResult.configs);
 					}
 				} catch (error) {
-					console.error('Failed to load SSH remotes:', error);
+					logger.error('Failed to load SSH remotes:', undefined, error);
 				}
 			})();
 		}
@@ -373,6 +413,16 @@ export function useAgentConfiguration(
 		setCustomArgs,
 		customEnvVars,
 		setCustomEnvVars,
+		customEnvVarsDisabled,
+		setCustomEnvVarsDisabled,
+
+		// Claude token source
+		enableMaestroP,
+		setEnableMaestroP,
+		maestroPMode,
+		setMaestroPMode,
+		maestroPPath,
+		setMaestroPPath,
 
 		// Agent config
 		agentConfig,

@@ -2,14 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
 import { TypingIndicator } from '../../../../../renderer/components/Wizard/shared/TypingIndicator';
 
-const mockTheme = {
-	colors: {
-		bgActivity: '#1a1a2e',
-		accent: '#00d4ff',
-		textMain: '#ffffff',
-		textDim: '#888888',
-	},
-} as any;
+import { mockTheme } from '../../../../helpers/mockTheme';
 
 describe('TypingIndicator', () => {
 	let rafCallbacks: ((timestamp: number) => void)[];
@@ -116,10 +109,10 @@ describe('TypingIndicator', () => {
 			/>
 		);
 
-		// Type out "AB" — need enough ticks to complete
+		// Type out "AB" - need enough ticks to complete
 		act(() => flushRaf(100));
 		act(() => flushRaf(130)); // 'A'
-		act(() => flushRaf(160)); // 'B' — typing complete, sets isTypingComplete
+		act(() => flushRaf(160)); // 'B' - typing complete, sets isTypingComplete
 
 		// Flush any pending rAF from the completion render
 		act(() => flushRaf(190));

@@ -1,10 +1,15 @@
 import * as crypto from 'crypto';
 export type {
+	CueAction,
+	CueCommand,
+	CueCommandCliCall,
+	CueCommandMode,
 	CueConfig,
 	CueEvent,
 	CueEventType,
 	CueGitHubState,
 	CueGraphSession,
+	CueNotifyConfig,
 	CueRunResult,
 	CueRunStatus,
 	CueScheduleDay,
@@ -30,6 +35,17 @@ export interface AgentCompletionData {
 	triggeredBy?: string;
 	/** Tracks how many chained hops have occurred to prevent infinite loops */
 	chainDepth?: number;
+	/** Outputs from upstream agents that should be forwarded through this agent
+	 *  to downstream agents. Keyed by source session name. */
+	forwardedOutputs?: Record<string, string>;
+	/** Phase 01 - chain lineage carriers for stats. The completing run's own
+	 *  `runId` (becomes the next event's `parentEventId`) and its `chainRootId`
+	 *  (which the next event inherits, or falls back to `parentRunId` if the
+	 *  parent was itself a root). Both are absent for non-Cue completions
+	 *  (e.g. exit-listener-driven user session completes), in which case the
+	 *  downstream dispatch becomes a new chain root. */
+	parentRunId?: string;
+	chainRootId?: string;
 }
 
 /** Create a CueEvent with auto-generated id and timestamp */

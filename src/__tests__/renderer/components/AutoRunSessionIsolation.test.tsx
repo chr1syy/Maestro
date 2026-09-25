@@ -6,7 +6,7 @@
  * 1. Editing a document in Session A doesn't affect Session B's document
  * 2. Content changes are properly isolated per-session
  * 3. Session/document switches properly reset local state
- * 4. contentVersion forcing sync works correctly
+ * 4. contentVersion syncs disk changes without discarding unsaved drafts
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -14,7 +14,9 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import React from 'react';
 import { AutoRun, AutoRunHandle } from '../../../renderer/components/AutoRun';
 import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
-import type { Theme, BatchRunState } from '../../../renderer/types';
+import type { BatchRunState } from '../../../renderer/types';
+
+import { createMockTheme } from '../../helpers/mockTheme';
 
 // Helper to wrap component in LayerStackProvider with custom rerender
 const renderWithProviders = (ui: React.ReactElement) => {
@@ -27,6 +29,13 @@ const renderWithProviders = (ui: React.ReactElement) => {
 };
 
 // Mock the external dependencies
+// CodeMirror cannot lay itself out in jsdom, so the Auto Run source editor is
+// swapped for the shared textarea double (it still implements the editor handle).
+vi.mock('../../../renderer/components/FilePreview/markdownEditor', async () => {
+	const { markdownEditorModuleMock } = await import('../../helpers/mockMarkdownEditor');
+	return markdownEditorModuleMock();
+});
+
 vi.mock('react-markdown', () => ({
 	default: ({ children }: { children: string }) => (
 		<div data-testid="react-markdown">{children}</div>
@@ -125,27 +134,6 @@ vi.mock('../../../renderer/hooks/input/useTemplateAutocomplete', () => ({
 vi.mock('../../../renderer/components/TemplateAutocompleteDropdown', () => ({
 	TemplateAutocompleteDropdown: React.forwardRef(() => null),
 }));
-
-// Create a mock theme for testing
-const createMockTheme = (): Theme => ({
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgActivity: '#2d2d2d',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		highlight: '#0066ff33',
-		success: '#00aa00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-	},
-});
 
 // Setup window.maestro mock
 const setupMaestroMock = () => {
@@ -356,7 +344,7 @@ describe('AutoRun Session Isolation', () => {
 	});
 
 	describe('contentVersion Force Sync', () => {
-		it('contentVersion change forces content sync even without session/document change', async () => {
+		it('contentVersion change syncs a clean editor without session/document change, never a draft', async () => {
 			const originalContent = 'Original content';
 			const externallyModifiedContent = 'Externally modified by file watcher';
 
@@ -379,8 +367,13 @@ describe('AutoRun Session Isolation', () => {
 			// External change detected (file watcher) - contentVersion incremented
 			rerender(<AutoRun {...props} content={externallyModifiedContent} contentVersion={2} />);
 
-			// Content should sync to the external change, overwriting local edits
-			expect(textarea).toHaveValue(externallyModifiedContent);
+			// Unsaved edits are never overwritten by a disk change
+			expect(textarea).toHaveValue('Local edits');
+
+			// Once the draft is discarded, the next external change syncs straight in
+			fireEvent.change(textarea, { target: { value: externallyModifiedContent } });
+			rerender(<AutoRun {...props} content="Second external change" contentVersion={3} />);
+			expect(textarea).toHaveValue('Second external change');
 		});
 
 		it('contentVersion without change does not overwrite local edits', async () => {

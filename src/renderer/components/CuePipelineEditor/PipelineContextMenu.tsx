@@ -1,5 +1,5 @@
 /**
- * PipelineContextMenu — Right-click context menu for pipeline nodes.
+ * PipelineContextMenu - Right-click context menu for pipeline nodes.
  *
  * Purely presentational: renders Configure, Duplicate (triggers only), and Delete actions.
  */
@@ -13,7 +13,7 @@ export interface ContextMenuState {
 	y: number;
 	nodeId: string;
 	pipelineId: string;
-	nodeType: 'trigger' | 'agent';
+	nodeType: 'trigger' | 'agent' | 'cli_output';
 }
 
 export interface PipelineContextMenuProps {
@@ -48,7 +48,11 @@ export const PipelineContextMenu = React.memo(function PipelineContextMenu({
 		return () => document.removeEventListener('keydown', handleKeyDown);
 	}, [onDismiss]);
 
-	const { left, top, ready } = useContextMenuPosition(menuRef, contextMenu.x, contextMenu.y);
+	const { left, top, maxHeight, ready } = useContextMenuPosition(
+		menuRef,
+		contextMenu.x,
+		contextMenu.y
+	);
 
 	useEffect(() => {
 		menuRef.current?.focus();
@@ -62,18 +66,24 @@ export const PipelineContextMenu = React.memo(function PipelineContextMenu({
 			style={{
 				left,
 				top,
+				// A menu taller than the viewport pins to the top edge and runs off
+				// the bottom; the container is overflow-hidden, so those items are
+				// simply unreachable. Scroll instead of clipping.
+				maxHeight,
+				overflowY: 'auto',
 				zIndex: 10000,
 				opacity: ready ? 1 : 0,
 			}}
 		>
 			<div
+				className="whitespace-nowrap"
 				style={{
 					backgroundColor: theme.colors.bgSidebar,
 					border: `1px solid ${theme.colors.border}`,
 					borderRadius: 6,
 					boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
 					padding: '4px 0',
-					minWidth: 140,
+					minWidth: '8.75rem',
 				}}
 			>
 				<button

@@ -4,7 +4,7 @@
  * Tests:
  *   - handleQuickActionsToggleReadOnlyMode: toggles readOnlyMode on active AI tab, no-op in terminal mode, no-op with no active tab
  *   - handleQuickActionsToggleTabShowThinking: cycles off→on→sticky→off, clears thinking/tool logs on off, no-op in terminal mode, no-op with no active tab
- *   - handleQuickActionsRefreshGitFileState: calls refreshGitFileState, calls mainPanelRef.refreshGitInfo, sets and clears flash notification
+ *   - handleQuickActionsRefreshGitFileState: calls refreshGitFileState, calls mainPanelRef.refreshGitInfo, reloads the previewed file from disk (unless it has unsaved edits, the terminal is showing, or the tab id is stale), sets and clears flash notification
  *   - handleQuickActionsDebugReleaseQueuedItem: removes first item from queue and calls processQueuedItem, no-op with empty queue, no-op with no active session
  *   - handleQuickActionsToggleMarkdownEditMode: toggles markdownEditMode when file tab active, toggles chatRawTextMode when no file tab
  *   - handleQuickActionsSummarizeAndContinue: delegates to handleSummarizeAndContinue
@@ -19,7 +19,8 @@ import { useQuickActionsHandlers } from '../../../renderer/hooks/modal/useQuickA
 import type { UseQuickActionsHandlersDeps } from '../../../renderer/hooks/modal/useQuickActionsHandlers';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
-import { useUIStore } from '../../../renderer/stores/uiStore';
+import { useCenterFlashStore } from '../../../renderer/stores/centerFlashStore';
+import { createMockFileTab } from '../../helpers/mockTab';
 
 // ============================================================================
 // Helpers
@@ -92,15 +93,16 @@ function createDeps(
 ): UseQuickActionsHandlersDeps {
 	return {
 		refreshGitFileState: vi.fn().mockResolvedValue(undefined),
+		refreshWorktreeState: vi.fn().mockResolvedValue(undefined),
 		mainPanelRef: { current: { refreshGitInfo: vi.fn().mockResolvedValue(undefined) } as any },
 		rightPanelRef: { current: { openAutoRunResetTasksModal: vi.fn() } as any },
 		handleSummarizeAndContinue: vi.fn(),
 		processQueuedItem: vi.fn().mockResolvedValue(undefined),
 		handleCloseCurrentTab: vi.fn(),
-		handleUnifiedTabReorder: vi.fn(),
 		handleCopyContext: vi.fn(),
 		handleExportHtml: vi.fn().mockResolvedValue(undefined),
 		handlePublishTabGist: vi.fn(),
+		handleReloadFileTab: vi.fn().mockResolvedValue(undefined),
 		...overrides,
 	};
 }
@@ -123,9 +125,7 @@ beforeEach(() => {
 		chatRawTextMode: false,
 	} as any);
 
-	useUIStore.setState({
-		successFlashNotification: null,
-	} as any);
+	useCenterFlashStore.getState().setActive(null);
 });
 
 afterEach(() => {
@@ -388,7 +388,7 @@ describe('useQuickActionsHandlers', () => {
 			expect(updatedTab.showThinking).toBe('on');
 		});
 
-		it('clears thinking and tool logs when cycling to off', () => {
+		it('clears thinking logs but keeps tool logs (render-gated) when cycling to off', () => {
 			const tab = createTab({
 				id: 'tab-1',
 				showThinking: 'sticky',
@@ -416,8 +416,10 @@ describe('useQuickActionsHandlers', () => {
 
 			const updatedTab = useSessionStore.getState().sessions[0].aiTabs[0];
 			const sources = updatedTab.logs.map((l: any) => l.source);
+			// Thinking logs are storage-gated; tool logs are always recorded and hidden
+			// only at render, so they must survive a thinking-off toggle.
 			expect(sources).not.toContain('thinking');
-			expect(sources).not.toContain('tool');
+			expect(sources).toContain('tool');
 			expect(sources).toContain('user');
 			expect(sources).toContain('ai');
 		});
@@ -593,7 +595,7 @@ describe('useQuickActionsHandlers', () => {
 			expect(deps.mainPanelRef.current?.refreshGitInfo).toHaveBeenCalledTimes(1);
 		});
 
-		it('sets successFlashNotification to the expected message', async () => {
+		it('fires the expected center flash message', async () => {
 			const session = createSession({ id: 'sess-1' });
 			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
 
@@ -604,10 +606,11 @@ describe('useQuickActionsHandlers', () => {
 				await result.current.handleQuickActionsRefreshGitFileState();
 			});
 
-			expect(useUIStore.getState().successFlashNotification).toBe('Files, Git, History Refreshed');
+			expect(useCenterFlashStore.getState().active?.message).toBe('Files, Git, History Refreshed');
+			expect(useCenterFlashStore.getState().active?.color).toBe('theme');
 		});
 
-		it('clears successFlashNotification after 2000ms', async () => {
+		it('center flash auto-dismisses on its own timer', async () => {
 			vi.useFakeTimers();
 
 			const session = createSession({ id: 'sess-1' });
@@ -620,13 +623,14 @@ describe('useQuickActionsHandlers', () => {
 				await result.current.handleQuickActionsRefreshGitFileState();
 			});
 
-			expect(useUIStore.getState().successFlashNotification).toBe('Files, Git, History Refreshed');
+			expect(useCenterFlashStore.getState().active?.message).toBe('Files, Git, History Refreshed');
 
+			// Advance well past the default center-flash duration
 			act(() => {
-				vi.advanceTimersByTime(2000);
+				vi.advanceTimersByTime(5000);
 			});
 
-			expect(useUIStore.getState().successFlashNotification).toBeNull();
+			expect(useCenterFlashStore.getState().active).toBeNull();
 
 			vi.useRealTimers();
 		});
@@ -655,7 +659,7 @@ describe('useQuickActionsHandlers', () => {
 				await result.current.handleQuickActionsRefreshGitFileState();
 			});
 
-			expect(useUIStore.getState().successFlashNotification).toBeNull();
+			expect(useCenterFlashStore.getState().active).toBeNull();
 		});
 
 		it('handles a null mainPanelRef.current gracefully', async () => {
@@ -674,6 +678,159 @@ describe('useQuickActionsHandlers', () => {
 			).resolves.not.toThrow();
 
 			expect(deps.refreshGitFileState).toHaveBeenCalledWith('sess-1');
+		});
+
+		it('calls refreshWorktreeState alongside refreshGitFileState', async () => {
+			const session = createSession({ id: 'sess-1' });
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.refreshWorktreeState).toHaveBeenCalledTimes(1);
+		});
+
+		it('reloads the previewed file from disk when a file tab is active', async () => {
+			const session = createSession({
+				id: 'sess-1',
+				filePreviewTabs: [createMockFileTab({ id: 'file-1' })],
+				activeFileTabId: 'file-1',
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.handleReloadFileTab).toHaveBeenCalledWith('file-1');
+			expect(useCenterFlashStore.getState().active?.message).toBe(
+				'File Reloaded, Files, Git, History Refreshed'
+			);
+		});
+
+		it('does not reload the previewed file when it has unsaved edits', async () => {
+			const session = createSession({
+				id: 'sess-1',
+				filePreviewTabs: [
+					createMockFileTab({ id: 'file-1', content: 'on disk', editContent: 'edited' }),
+				],
+				activeFileTabId: 'file-1',
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.handleReloadFileTab).not.toHaveBeenCalled();
+			expect(useCenterFlashStore.getState().active?.message).toBe(
+				'Files, Git, History Refreshed - Unsaved Edits Kept'
+			);
+		});
+
+		it('does not reload a file tab while the terminal is the active view', async () => {
+			const session = createSession({
+				id: 'sess-1',
+				inputMode: 'terminal',
+				filePreviewTabs: [createMockFileTab({ id: 'file-1' })],
+				activeFileTabId: 'file-1',
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.handleReloadFileTab).not.toHaveBeenCalled();
+			expect(useCenterFlashStore.getState().active?.message).toBe('Files, Git, History Refreshed');
+		});
+
+		it('does not reload when no file tab is open', async () => {
+			const session = createSession({ id: 'sess-1' });
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.handleReloadFileTab).not.toHaveBeenCalled();
+		});
+
+		// The rest of the app calls a file tab modified on `editContent !== undefined`
+		// alone (the TabBar badge, the close-tab confirm). This handler deliberately
+		// compares against `content` instead, matching FilePreview's own Save-button
+		// test: a draft that is byte-identical to disk is not work worth protecting,
+		// so refreshing it is safe. Locked here so a later pass toward the other
+		// convention has to be a decision rather than an accident.
+		it('reloads when an edit draft is byte-identical to what is on disk', async () => {
+			const session = createSession({
+				id: 'sess-1',
+				filePreviewTabs: [
+					createMockFileTab({ id: 'file-1', content: 'same', editContent: 'same' }),
+				],
+				activeFileTabId: 'file-1',
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.handleReloadFileTab).toHaveBeenCalledWith('file-1');
+		});
+
+		it('survives an activeFileTabId that no longer has a tab behind it', async () => {
+			// A closed tab can leave the id pointing at nothing. The refresh still has
+			// to do the git and file-tree half of its job rather than throw.
+			const session = createSession({
+				id: 'sess-1',
+				filePreviewTabs: [],
+				activeFileTabId: 'file-gone',
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.handleReloadFileTab).not.toHaveBeenCalled();
+			expect(deps.refreshGitFileState).toHaveBeenCalledWith('sess-1');
+			expect(useCenterFlashStore.getState().active?.message).toBe('Files, Git, History Refreshed');
+		});
+
+		it('does not call refreshWorktreeState when there is no active session', async () => {
+			useSessionStore.setState({ sessions: [], activeSessionId: '' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			await act(async () => {
+				await result.current.handleQuickActionsRefreshGitFileState();
+			});
+
+			expect(deps.refreshWorktreeState).not.toHaveBeenCalled();
 		});
 	});
 
@@ -1109,7 +1266,13 @@ describe('useQuickActionsHandlers', () => {
 	});
 
 	describe('handleQuickActionsMoveTabToFirst', () => {
-		it('reorders active tab to index 0', () => {
+		/** The active session's unified tab order, as plain "type:id" keys. */
+		const orderKeys = () =>
+			(useSessionStore.getState().sessions[0].unifiedTabOrder ?? []).map(
+				(r) => `${r.type}:${r.id}`
+			);
+
+		it('moves the active tab to the first slot', () => {
 			const tab1 = createTab({ id: 'tab-1' });
 			const tab2 = createTab({ id: 'tab-2' });
 			const session = createSession({
@@ -1129,7 +1292,7 @@ describe('useQuickActionsHandlers', () => {
 				result.current.handleQuickActionsMoveTabToFirst();
 			});
 
-			expect(deps.handleUnifiedTabReorder).toHaveBeenCalledWith(1, 0);
+			expect(orderKeys()).toEqual(['ai:tab-2', 'ai:tab-1']);
 		});
 
 		it('is a no-op when active tab is already first', () => {
@@ -1147,12 +1310,52 @@ describe('useQuickActionsHandlers', () => {
 				result.current.handleQuickActionsMoveTabToFirst();
 			});
 
-			expect(deps.handleUnifiedTabReorder).not.toHaveBeenCalled();
+			expect(orderKeys()).toEqual(['ai:tab-1']);
+		});
+
+		it('moves the active browser tab to the first slot', () => {
+			const tab1 = createTab({ id: 'tab-1' });
+			const session = createSession({
+				activeTabId: 'tab-1',
+				aiTabs: [tab1],
+				activeBrowserTabId: 'browser-1',
+				browserTabs: [
+					{
+						id: 'browser-1',
+						url: 'https://example.com',
+						title: 'Example',
+						createdAt: Date.now(),
+						canGoBack: false,
+						canGoForward: false,
+						isLoading: false,
+					},
+				],
+				unifiedTabOrder: [
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'browser' as const, id: 'browser-1' },
+				],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			act(() => {
+				result.current.handleQuickActionsMoveTabToFirst();
+			});
+
+			expect(orderKeys()).toEqual(['browser:browser-1', 'ai:tab-1']);
 		});
 	});
 
 	describe('handleQuickActionsMoveTabToLast', () => {
-		it('reorders active tab to last index', () => {
+		/** The active session's unified tab order, as plain "type:id" keys. */
+		const orderKeys = () =>
+			(useSessionStore.getState().sessions[0].unifiedTabOrder ?? []).map(
+				(r) => `${r.type}:${r.id}`
+			);
+
+		it('moves the active tab to the last slot', () => {
 			const tab1 = createTab({ id: 'tab-1' });
 			const tab2 = createTab({ id: 'tab-2' });
 			const tab3 = createTab({ id: 'tab-3' });
@@ -1174,7 +1377,7 @@ describe('useQuickActionsHandlers', () => {
 				result.current.handleQuickActionsMoveTabToLast();
 			});
 
-			expect(deps.handleUnifiedTabReorder).toHaveBeenCalledWith(0, 2);
+			expect(orderKeys()).toEqual(['ai:tab-2', 'ai:tab-3', 'ai:tab-1']);
 		});
 
 		it('is a no-op when active tab is already last', () => {
@@ -1183,6 +1386,10 @@ describe('useQuickActionsHandlers', () => {
 			const session = createSession({
 				activeTabId: 'tab-2',
 				aiTabs: [tab1, tab2],
+				unifiedTabOrder: [
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'ai' as const, id: 'tab-2' },
+				],
 			});
 			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
 
@@ -1193,7 +1400,43 @@ describe('useQuickActionsHandlers', () => {
 				result.current.handleQuickActionsMoveTabToLast();
 			});
 
-			expect(deps.handleUnifiedTabReorder).not.toHaveBeenCalled();
+			expect(orderKeys()).toEqual(['ai:tab-1', 'ai:tab-2']);
+		});
+
+		it('moves the active browser tab to the last slot', () => {
+			const tab1 = createTab({ id: 'tab-1' });
+			const tab2 = createTab({ id: 'tab-2' });
+			const session = createSession({
+				activeTabId: 'tab-1',
+				aiTabs: [tab1, tab2],
+				activeBrowserTabId: 'browser-1',
+				browserTabs: [
+					{
+						id: 'browser-1',
+						url: 'https://example.com',
+						title: 'Example',
+						createdAt: Date.now(),
+						canGoBack: false,
+						canGoForward: false,
+						isLoading: false,
+					},
+				],
+				unifiedTabOrder: [
+					{ type: 'browser' as const, id: 'browser-1' },
+					{ type: 'ai' as const, id: 'tab-1' },
+					{ type: 'ai' as const, id: 'tab-2' },
+				],
+			});
+			useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-1' });
+
+			const deps = createDeps();
+			const { result } = renderHook(() => useQuickActionsHandlers(deps));
+
+			act(() => {
+				result.current.handleQuickActionsMoveTabToLast();
+			});
+
+			expect(orderKeys()).toEqual(['ai:tab-1', 'ai:tab-2', 'browser:browser-1']);
 		});
 	});
 

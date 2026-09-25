@@ -49,9 +49,9 @@ import {
 	updateGroupChat,
 	addParticipantToChat,
 	removeParticipantFromChat,
+	removeParticipantFromChatWithResult,
 	getParticipant,
 	updateParticipant,
-	getGroupChatsDir,
 	addGroupChatHistoryEntry,
 	getGroupChatHistory,
 	deleteGroupChatHistoryEntry,
@@ -122,6 +122,44 @@ describe('group-chat-storage', () => {
 			await deleteGroupChat(chat.id);
 		});
 
+		it('defaults to only engaging agents that are free', async () => {
+			const chat = await createGroupChat('Default Idle Chat', 'claude-code');
+
+			expect(chat.requireIdleParticipants).toBe(true);
+			expect((await loadGroupChat(chat.id))?.requireIdleParticipants).toBe(true);
+
+			await deleteGroupChat(chat.id);
+		});
+
+		it('persists an explicit opt-out of the idle requirement', async () => {
+			const chat = await createGroupChat('Opted Out Chat', 'claude-code', undefined, false);
+
+			expect(chat.requireIdleParticipants).toBe(false);
+			expect((await loadGroupChat(chat.id))?.requireIdleParticipants).toBe(false);
+
+			await deleteGroupChat(chat.id);
+		});
+
+		it('preserves special characters in the name (e.g. slashes)', async () => {
+			// The on-disk directory is keyed by UUID, not the name, so names may
+			// contain filesystem-invalid characters just like regular agent names.
+			const chat = await createGroupChat('feat/login <v2>', 'claude-code');
+
+			expect(chat.name).toBe('feat/login <v2>');
+
+			// Clean up
+			await deleteGroupChat(chat.id);
+		});
+
+		it('strips control characters and falls back when empty', async () => {
+			const chat = await createGroupChat('\x00\x07  \x1f', 'claude-code');
+
+			expect(chat.name).toBe('Untitled Chat');
+
+			// Clean up
+			await deleteGroupChat(chat.id);
+		});
+
 		it('creates chat with correct timestamps', async () => {
 			const beforeTime = Date.now();
 			const chat = await createGroupChat('Timestamp Test', 'claude-code');
@@ -149,6 +187,29 @@ describe('group-chat-storage', () => {
 			const chat = await createGroupChat('Session Test', 'claude-code');
 
 			expect(chat.moderatorSessionId).toBe('');
+
+			// Clean up
+			await deleteGroupChat(chat.id);
+		});
+
+		it('round-trips Claude token-source fields in moderatorConfig', async () => {
+			const chat = await createGroupChat('Token Source Test', 'claude-code', {
+				enableMaestroP: true,
+				maestroPMode: 'interactive',
+				maestroPPath: '/x',
+			});
+
+			// Present on the returned object
+			expect(chat.moderatorConfig?.enableMaestroP).toBe(true);
+			expect(chat.moderatorConfig?.maestroPMode).toBe('interactive');
+			expect(chat.moderatorConfig?.maestroPPath).toBe('/x');
+
+			// Survives a reload from disk (no field stripping in the storage layer)
+			const loaded = await loadGroupChat(chat.id);
+			expect(loaded).not.toBeNull();
+			expect(loaded!.moderatorConfig?.enableMaestroP).toBe(true);
+			expect(loaded!.moderatorConfig?.maestroPMode).toBe('interactive');
+			expect(loaded!.moderatorConfig?.maestroPPath).toBe('/x');
 
 			// Clean up
 			await deleteGroupChat(chat.id);
@@ -338,6 +399,19 @@ describe('group-chat-storage', () => {
 			await deleteGroupChat(chat.id);
 		});
 
+		it('preserves special characters when renaming', async () => {
+			const chat = await createGroupChat('Original', 'claude-code');
+			const updated = await updateGroupChat(chat.id, { name: 'ops/deploy <hotfix>' });
+
+			expect(updated.name).toBe('ops/deploy <hotfix>');
+
+			const loaded = await loadGroupChat(chat.id);
+			expect(loaded!.name).toBe('ops/deploy <hotfix>');
+
+			// Clean up
+			await deleteGroupChat(chat.id);
+		});
+
 		it('updates updatedAt timestamp', async () => {
 			const chat = await createGroupChat('Timestamp Update', 'claude-code');
 			const originalUpdatedAt = chat.updatedAt;
@@ -414,7 +488,7 @@ describe('group-chat-storage', () => {
 		it('serializes concurrent updateGroupChat calls without data loss', async () => {
 			const chat = await createGroupChat('Concurrent Test', 'claude-code');
 
-			// Fire 10 concurrent updates — without serialization these would race
+			// Fire 10 concurrent updates - without serialization these would race
 			const promises = Array.from({ length: 10 }, (_, i) =>
 				updateGroupChat(chat.id, { name: `Update-${i}` })
 			);
@@ -523,7 +597,7 @@ describe('group-chat-storage', () => {
 		it('waits for pending writes before deleting', async () => {
 			const chat = await createGroupChat('Delete Race', 'claude-code');
 
-			// Fire an update and a delete concurrently — delete should wait
+			// Fire an update and a delete concurrently - delete should wait
 			const updatePromise = updateGroupChat(chat.id, { name: 'About to delete' });
 			const deletePromise = deleteGroupChat(chat.id);
 
@@ -545,7 +619,7 @@ describe('group-chat-storage', () => {
 				addedAt: Date.now(),
 			});
 
-			// Fire participant update then delete — both serialize through the queue
+			// Fire participant update then delete - both serialize through the queue
 			const updatePromise = updateParticipant(chat.id, 'Worker', { tokenCount: 999 });
 			const deletePromise = deleteGroupChat(chat.id);
 
@@ -644,6 +718,50 @@ describe('group-chat-storage', () => {
 			await deleteGroupChat(chat.id);
 		});
 
+		it('persists removal from a large participant list', async () => {
+			const chat = await createGroupChat('Large Remove Test', 'claude-code');
+			const targetName = 'Agent-137';
+			const participants = Array.from({ length: 250 }, (_, i) => ({
+				name: `Agent-${i}`,
+				agentId: i % 2 === 0 ? 'claude-code' : 'opencode',
+				sessionId: `ses-${i}`,
+				addedAt: Date.now() + i,
+				tokenCount: i * 100,
+				messageCount: i,
+			}));
+			await updateGroupChat(chat.id, { participants });
+
+			const updated = await removeParticipantFromChat(chat.id, targetName);
+			expect(updated.participants).toHaveLength(249);
+			expect(updated.participants.some((p) => p.name === targetName)).toBe(false);
+
+			const loaded = await loadGroupChat(chat.id);
+			expect(loaded).not.toBeNull();
+			expect(loaded!.participants).toHaveLength(249);
+			expect(loaded!.participants.some((p) => p.name === targetName)).toBe(false);
+
+			await deleteGroupChat(chat.id);
+		});
+
+		it('reports large-list removal from the serialized metadata transaction', async () => {
+			const chat = await createGroupChat('Large Remove Result Test', 'claude-code');
+			const targetName = 'Agent-137';
+			const participants = Array.from({ length: 250 }, (_, i) => ({
+				name: `Agent-${i}`,
+				agentId: i % 2 === 0 ? 'claude-code' : 'opencode',
+				sessionId: `ses-${i}`,
+				addedAt: Date.now() + i,
+			}));
+			await updateGroupChat(chat.id, { participants });
+
+			const result = await removeParticipantFromChatWithResult(chat.id, targetName);
+			expect(result.removed).toBe(true);
+			expect(result.chat.participants).toHaveLength(249);
+			expect(result.chat.participants.some((p) => p.name === targetName)).toBe(false);
+
+			await deleteGroupChat(chat.id);
+		});
+
 		it('removing non-existent participant is a no-op (keeps others)', async () => {
 			const chat = await createGroupChat('Remove NoOp', 'claude-code');
 			await addParticipantToChat(chat.id, {
@@ -656,6 +774,24 @@ describe('group-chat-storage', () => {
 			const updated = await removeParticipantFromChat(chat.id, 'NonExistent');
 			expect(updated.participants).toHaveLength(1);
 			expect(updated.participants[0].name).toBe('Alice');
+
+			await deleteGroupChat(chat.id);
+		});
+
+		it('reports no-op removals without rewriting metadata', async () => {
+			const chat = await createGroupChat('Remove NoOp Result', 'claude-code');
+			await addParticipantToChat(chat.id, {
+				name: 'Alice',
+				agentId: 'claude-code',
+				sessionId: 'ses-a',
+				addedAt: Date.now(),
+			});
+			const before = await loadGroupChat(chat.id);
+
+			const result = await removeParticipantFromChatWithResult(chat.id, 'NonExistent');
+			expect(result.removed).toBe(false);
+			expect(result.chat.participants).toHaveLength(1);
+			expect(result.chat.updatedAt).toBe(before!.updatedAt);
 
 			await deleteGroupChat(chat.id);
 		});

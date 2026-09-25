@@ -15,15 +15,17 @@
  */
 
 import { ipcMain, BrowserWindow } from 'electron';
+import type { ClaudeSessionOrigin, ClaudeSessionOriginsData } from '../../stores/types';
+import { setClaudeSessionOrigin } from '../../storage/claude-session-origins';
 import path from 'path';
 import os from 'os';
 import fs from 'fs/promises';
 import Store from 'electron-store';
 import { logger } from '../../utils/logger';
 import { withIpcErrorLogging } from '../../utils/ipcHandler';
-import { isWebContentsAvailable } from '../../utils/safe-send';
+import { createSafeSend } from '../../utils/safe-send';
 import { CLAUDE_SESSION_PARSE_LIMITS } from '../../constants';
-import { calculateClaudeCost } from '../../utils/pricing';
+import { calculateModelCost, computeClaudeUsageCost } from '../../utils/pricing';
 import {
 	encodeClaudeProjectPath,
 	loadStatsCache,
@@ -32,6 +34,12 @@ import {
 	STATS_CACHE_VERSION,
 } from '../../utils/statsCache';
 import { app } from 'electron';
+import { captureException } from '../../utils/sentry';
+import { isExpectedSessionReadError } from '../../utils/session-read-errors';
+import {
+	snapshotStarredTranscript,
+	releaseTranscriptMirror,
+} from '../../storage/starred-transcript-mirror';
 
 /**
  * Legacy global stats cache structure for deprecated claude:getGlobalStats handler.
@@ -48,6 +56,8 @@ interface LegacyGlobalStatsCache {
 			cacheCreationTokens: number;
 			sizeBytes: number;
 			fileMtimeMs: number;
+			/** Per-model cost (USD) at parse time; absent for pre-existing cache entries. */
+			costUsd?: number;
 		}
 	>;
 	totals: {
@@ -91,6 +101,7 @@ async function saveLegacyGlobalStatsCache(cache: LegacyGlobalStatsCache): Promis
 		await fs.mkdir(cacheDir, { recursive: true });
 		await fs.writeFile(cachePath, JSON.stringify(cache), 'utf-8');
 	} catch (error) {
+		void captureException(error);
 		logger.warn('Failed to save legacy global stats cache', LOG_CONTEXT, { error });
 	}
 }
@@ -106,21 +117,7 @@ function handlerOpts(operation: string, context: string = LOG_CONTEXT) {
 	return { context, operation, logSuccess: false };
 }
 
-/**
- * Claude session origin types
- */
-type ClaudeSessionOrigin = 'user' | 'auto';
-
-interface ClaudeSessionOriginInfo {
-	origin: ClaudeSessionOrigin;
-	sessionName?: string;
-	starred?: boolean;
-	contextUsage?: number;
-}
-
-interface ClaudeSessionOriginsData {
-	origins: Record<string, Record<string, ClaudeSessionOrigin | ClaudeSessionOriginInfo>>;
-}
+// ClaudeSessionOriginInfo and ClaudeSessionOriginsData imported from stores/types
 
 /**
  * Dependencies required for Claude handlers
@@ -153,6 +150,7 @@ function extractTextFromContent(content: unknown): string {
  */
 export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 	const { claudeSessionOriginsStore, getMainWindow } = deps;
+	const safeSend = createSafeSend(getMainWindow);
 
 	// ============ List Sessions ============
 
@@ -175,6 +173,8 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 				await fs.access(projectDir);
 				logger.info(`Claude sessions directory exists: ${projectDir}`, LOG_CONTEXT);
 			} catch (err) {
+				// Expected first-run state: project has no Claude history yet.
+				// Don't send to Sentry - the other fs.access catches in this file also omit it.
 				logger.info(
 					`No Claude sessions directory found for project: ${projectPath} (tried: ${projectDir}), error: ${err}`,
 					LOG_CONTEXT
@@ -237,33 +237,14 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 							}
 						}
 
-						// Fast regex-based token extraction
-						let totalInputTokens = 0;
-						let totalOutputTokens = 0;
-						let totalCacheReadTokens = 0;
-						let totalCacheCreationTokens = 0;
-
-						const inputMatches = content.matchAll(/"input_tokens"\s*:\s*(\d+)/g);
-						for (const m of inputMatches) totalInputTokens += parseInt(m[1], 10);
-
-						const outputMatches = content.matchAll(/"output_tokens"\s*:\s*(\d+)/g);
-						for (const m of outputMatches) totalOutputTokens += parseInt(m[1], 10);
-
-						const cacheReadMatches = content.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g);
-						for (const m of cacheReadMatches) totalCacheReadTokens += parseInt(m[1], 10);
-
-						const cacheCreationMatches = content.matchAll(
-							/"cache_creation_input_tokens"\s*:\s*(\d+)/g
-						);
-						for (const m of cacheCreationMatches) totalCacheCreationTokens += parseInt(m[1], 10);
-
-						// Calculate cost estimate
-						const costUsd = calculateClaudeCost(
-							totalInputTokens,
-							totalOutputTokens,
-							totalCacheReadTokens,
-							totalCacheCreationTokens
-						);
+						// Per-model token + cost extraction (a session may mix models).
+						const {
+							inputTokens: totalInputTokens,
+							outputTokens: totalOutputTokens,
+							cacheReadTokens: totalCacheReadTokens,
+							cacheCreationTokens: totalCacheCreationTokens,
+							costUsd,
+						} = computeClaudeUsageCost(content);
 
 						// Extract last timestamp for duration
 						let lastTimestamp = timestamp;
@@ -307,6 +288,7 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 							durationSeconds,
 						};
 					} catch (error) {
+						void captureException(error);
 						logger.error(`Error reading session file: ${filename}`, LOG_CONTEXT, error);
 						return null;
 					}
@@ -453,33 +435,14 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 								}
 							}
 
-							// Token extraction
-							let totalInputTokens = 0;
-							let totalOutputTokens = 0;
-							let totalCacheReadTokens = 0;
-							let totalCacheCreationTokens = 0;
-
-							const inputMatches = content.matchAll(/"input_tokens"\s*:\s*(\d+)/g);
-							for (const m of inputMatches) totalInputTokens += parseInt(m[1], 10);
-
-							const outputMatches = content.matchAll(/"output_tokens"\s*:\s*(\d+)/g);
-							for (const m of outputMatches) totalOutputTokens += parseInt(m[1], 10);
-
-							const cacheReadMatches = content.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g);
-							for (const m of cacheReadMatches) totalCacheReadTokens += parseInt(m[1], 10);
-
-							const cacheCreationMatches = content.matchAll(
-								/"cache_creation_input_tokens"\s*:\s*(\d+)/g
-							);
-							for (const m of cacheCreationMatches) totalCacheCreationTokens += parseInt(m[1], 10);
-
-							// Calculate cost
-							const costUsd = calculateClaudeCost(
-								totalInputTokens,
-								totalOutputTokens,
-								totalCacheReadTokens,
-								totalCacheCreationTokens
-							);
+							// Per-model token + cost extraction (a session may mix models).
+							const {
+								inputTokens: totalInputTokens,
+								outputTokens: totalOutputTokens,
+								cacheReadTokens: totalCacheReadTokens,
+								cacheCreationTokens: totalCacheCreationTokens,
+								costUsd,
+							} = computeClaudeUsageCost(content);
 
 							// Extract last timestamp for duration
 							let lastTimestamp = timestamp;
@@ -531,6 +494,7 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 								sessionName,
 							};
 						} catch (error) {
+							void captureException(error);
 							logger.error(`Error reading session file: ${fileInfo.filename}`, LOG_CONTEXT, error);
 							return null;
 						}
@@ -560,8 +524,6 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 	ipcMain.handle(
 		'claude:getProjectStats',
 		withIpcErrorLogging(handlerOpts('getProjectStats'), async (projectPath: string) => {
-			const mainWindow = getMainWindow();
-
 			// Helper to send progressive updates to renderer
 			const sendUpdate = (stats: {
 				totalSessions: number;
@@ -573,9 +535,7 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 				processedCount?: number;
 				isComplete: boolean;
 			}) => {
-				if (isWebContentsAvailable(mainWindow)) {
-					mainWindow.webContents.send('claude:projectStatsUpdate', { projectPath, ...stats });
-				}
+				safeSend('claude:projectStatsUpdate', { projectPath, ...stats });
 			};
 
 			// Helper to parse a single session file
@@ -584,29 +544,8 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 				const assistantMessageCount = (content.match(/"type"\s*:\s*"assistant"/g) || []).length;
 				const messages = userMessageCount + assistantMessageCount;
 
-				let inputTokens = 0;
-				let outputTokens = 0;
-				let cacheReadTokens = 0;
-				let cacheCreationTokens = 0;
-
-				const inputMatches = content.matchAll(/"input_tokens"\s*:\s*(\d+)/g);
-				for (const m of inputMatches) inputTokens += parseInt(m[1], 10);
-
-				const outputMatches = content.matchAll(/"output_tokens"\s*:\s*(\d+)/g);
-				for (const m of outputMatches) outputTokens += parseInt(m[1], 10);
-
-				const cacheReadMatches = content.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g);
-				for (const m of cacheReadMatches) cacheReadTokens += parseInt(m[1], 10);
-
-				const cacheCreationMatches = content.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g);
-				for (const m of cacheCreationMatches) cacheCreationTokens += parseInt(m[1], 10);
-
-				const costUsd = calculateClaudeCost(
-					inputTokens,
-					outputTokens,
-					cacheReadTokens,
-					cacheCreationTokens
-				);
+				// Per-model token + cost extraction (a session may mix models).
+				const { inputTokens, outputTokens, costUsd } = computeClaudeUsageCost(content);
 
 				let oldestTimestamp: string | null = null;
 				const lines = content.split('\n').filter((l) => l.trim());
@@ -769,7 +708,16 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 						isComplete: processedCount >= sessionsToProcess.length,
 					});
 				} catch (error) {
-					logger.error(`Error parsing session file: ${filename}`, LOG_CONTEXT, error);
+					// A transcript we merely discovered under `~/.claude/projects` can be
+					// unreadable or gone by the time we read it - environmental, not a
+					// Maestro fault, so warn locally and keep it out of Sentry
+					// (MAESTRO-YJ). Everything else still reports.
+					if (isExpectedSessionReadError(error)) {
+						logger.warn(`Session file not readable: ${filename}`, LOG_CONTEXT, { error });
+					} else {
+						void captureException(error);
+						logger.error(`Error parsing session file: ${filename}`, LOG_CONTEXT, error);
+					}
 				}
 			}
 
@@ -847,8 +795,6 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 	ipcMain.handle(
 		'claude:getGlobalStats',
 		withIpcErrorLogging(handlerOpts('getGlobalStats'), async () => {
-			const mainWindow = getMainWindow();
-
 			// Helper to send progressive updates
 			const sendUpdate = (stats: {
 				totalSessions: number;
@@ -861,9 +807,7 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 				totalSizeBytes: number;
 				isComplete: boolean;
 			}) => {
-				if (isWebContentsAvailable(mainWindow)) {
-					mainWindow.webContents.send('claude:globalStatsUpdate', stats);
-				}
+				safeSend('claude:globalStatsUpdate', stats);
 			};
 
 			const homeDir = os.homedir();
@@ -977,11 +921,19 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 					totalSizeBytes += stats.sizeBytes;
 				}
 
-				const totalCostUsd = calculateClaudeCost(
-					totalInputTokens,
-					totalOutputTokens,
-					totalCacheReadTokens,
-					totalCacheCreationTokens
+				// Prefer the per-model cost stored at parse time; fall back to flat-rate
+				// pricing for cache entries written before per-model cost was tracked.
+				const totalCostUsd = Object.values(c.sessions).reduce(
+					(sum, stats) =>
+						sum +
+						(stats.costUsd ??
+							calculateModelCost({
+								inputTokens: stats.inputTokens,
+								outputTokens: stats.outputTokens,
+								cacheReadTokens: stats.cacheReadTokens,
+								cacheCreationTokens: stats.cacheCreationTokens,
+							})),
+					0
 				);
 
 				return {
@@ -1007,24 +959,9 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 					const assistantMessageCount = (content.match(/"type"\s*:\s*"assistant"/g) || []).length;
 					const messages = userMessageCount + assistantMessageCount;
 
-					let inputTokens = 0;
-					let outputTokens = 0;
-					let cacheReadTokens = 0;
-					let cacheCreationTokens = 0;
-
-					const inputMatches = content.matchAll(/"input_tokens"\s*:\s*(\d+)/g);
-					for (const m of inputMatches) inputTokens += parseInt(m[1], 10);
-
-					const outputMatches = content.matchAll(/"output_tokens"\s*:\s*(\d+)/g);
-					for (const m of outputMatches) outputTokens += parseInt(m[1], 10);
-
-					const cacheReadMatches = content.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g);
-					for (const m of cacheReadMatches) cacheReadTokens += parseInt(m[1], 10);
-
-					const cacheCreationMatches = content.matchAll(
-						/"cache_creation_input_tokens"\s*:\s*(\d+)/g
-					);
-					for (const m of cacheCreationMatches) cacheCreationTokens += parseInt(m[1], 10);
+					// Per-model token + cost extraction (a session may mix models).
+					const { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd } =
+						computeClaudeUsageCost(content);
 
 					newCache.sessions[sessionKey] = {
 						fileMtimeMs: mtimeMs,
@@ -1034,6 +971,7 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 						cacheReadTokens,
 						cacheCreationTokens,
 						sizeBytes: fileStat.size,
+						costUsd,
 					};
 
 					processedCount++;
@@ -1042,7 +980,13 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 					const currentTotals = calculateGlobalTotals(newCache);
 					sendUpdate({ ...currentTotals, isComplete: processedCount >= sessionsToProcess.length });
 				} catch (error) {
-					logger.error(`Error parsing global session file: ${sessionKey}`, LOG_CONTEXT, error);
+					// See the per-project loop above (MAESTRO-YJ).
+					if (isExpectedSessionReadError(error)) {
+						logger.warn(`Global session file not readable: ${sessionKey}`, LOG_CONTEXT, { error });
+					} else {
+						void captureException(error);
+						logger.error(`Error parsing global session file: ${sessionKey}`, LOG_CONTEXT, error);
+					}
 				}
 			}
 
@@ -1601,6 +1545,14 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 					source: 'project' | 'user';
 				}> = [];
 
+				// Only treat "missing entry" filesystem errors as "no skill here";
+				// propagate permission/IO errors to the outer IPC handler so
+				// Sentry captures them instead of silently dropping skills.
+				const isMissingEntryError = (error: unknown): boolean => {
+					const code = (error as NodeJS.ErrnoException | undefined)?.code;
+					return code === 'ENOENT' || code === 'ENOTDIR';
+				};
+
 				/**
 				 * Parses a skill.md file to extract name, description, and token count.
 				 * Skills use YAML frontmatter with 'name' and 'description' fields.
@@ -1656,28 +1608,37 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 						const tokenCount = Math.round(content.length / 4);
 
 						return { name, description, tokenCount, source };
-					} catch {
-						return null;
+					} catch (error) {
+						if (isMissingEntryError(error)) return null;
+						throw error;
 					}
 				};
 
 				/**
-				 * Scans a skills directory for skill.md files
+				 * Scans a skills directory for SKILL.md files. Claude Code writes the
+				 * canonical uppercase name; on case-insensitive filesystems
+				 * (Windows NTFS, default macOS APFS) `skill.md` happens to match,
+				 * but on case-sensitive filesystems (Linux, WSL) it does not - so
+				 * try the canonical name first and fall back to lowercase.
 				 */
 				const scanSkillsDir = async (dir: string, source: 'project' | 'user') => {
+					let entries;
 					try {
-						const entries = await fs.readdir(dir, { withFileTypes: true });
-						for (const entry of entries) {
-							if (entry.isDirectory()) {
-								const skillPath = path.join(dir, entry.name, 'skill.md');
-								const skill = await parseSkillFile(skillPath, entry.name, source);
-								if (skill) {
-									skills.push(skill);
-								}
+						entries = await fs.readdir(dir, { withFileTypes: true });
+					} catch (error) {
+						if (isMissingEntryError(error)) return;
+						throw error;
+					}
+					for (const entry of entries) {
+						if (!entry.isDirectory()) continue;
+						for (const candidate of ['SKILL.md', 'skill.md']) {
+							const skillPath = path.join(dir, entry.name, candidate);
+							const skill = await parseSkillFile(skillPath, entry.name, source);
+							if (skill) {
+								skills.push(skill);
+								break;
 							}
 						}
-					} catch {
-						// Directory doesn't exist or isn't readable
 					}
 				};
 
@@ -1710,12 +1671,14 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 				origin: 'user' | 'auto',
 				sessionName?: string
 			) => {
-				const origins = claudeSessionOriginsStore.get('origins', {});
-				if (!origins[projectPath]) {
-					origins[projectPath] = {};
-				}
-				origins[projectPath][agentSessionId] = sessionName ? { origin, sessionName } : origin;
-				claudeSessionOriginsStore.set('origins', origins);
+				// Called on every turn, so it must merge: replacing the record wipes
+				// the tab name and star other paths wrote.
+				setClaudeSessionOrigin(
+					claudeSessionOriginsStore,
+					projectPath,
+					agentSessionId,
+					sessionName ? { origin, sessionName } : { origin }
+				);
 				logger.debug(
 					`Registered Claude session origin: ${agentSessionId} = ${origin}${sessionName ? ` (name: ${sessionName})` : ''}`,
 					ORIGINS_LOG_CONTEXT,
@@ -1731,19 +1694,9 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 		withIpcErrorLogging(
 			handlerOpts('updateSessionName', ORIGINS_LOG_CONTEXT),
 			async (projectPath: string, agentSessionId: string, sessionName: string) => {
-				const origins = claudeSessionOriginsStore.get('origins', {});
-				if (!origins[projectPath]) {
-					origins[projectPath] = {};
-				}
-				const existing = origins[projectPath][agentSessionId];
-				if (typeof existing === 'string') {
-					origins[projectPath][agentSessionId] = { origin: existing, sessionName };
-				} else if (existing) {
-					origins[projectPath][agentSessionId] = { ...existing, sessionName };
-				} else {
-					origins[projectPath][agentSessionId] = { origin: 'user', sessionName };
-				}
-				claudeSessionOriginsStore.set('origins', origins);
+				setClaudeSessionOrigin(claudeSessionOriginsStore, projectPath, agentSessionId, {
+					sessionName,
+				});
 				logger.debug(
 					`Updated Claude session name: ${agentSessionId} = ${sessionName}`,
 					ORIGINS_LOG_CONTEXT,
@@ -1759,24 +1712,32 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 		withIpcErrorLogging(
 			handlerOpts('updateSessionStarred', ORIGINS_LOG_CONTEXT),
 			async (projectPath: string, agentSessionId: string, starred: boolean) => {
-				const origins = claudeSessionOriginsStore.get('origins', {});
-				if (!origins[projectPath]) {
-					origins[projectPath] = {};
-				}
-				const existing = origins[projectPath][agentSessionId];
-				if (typeof existing === 'string') {
-					origins[projectPath][agentSessionId] = { origin: existing, starred };
-				} else if (existing) {
-					origins[projectPath][agentSessionId] = { ...existing, starred };
-				} else {
-					origins[projectPath][agentSessionId] = { origin: 'user', starred };
-				}
-				claudeSessionOriginsStore.set('origins', origins);
+				const starEntry = setClaudeSessionOrigin(
+					claudeSessionOriginsStore,
+					projectPath,
+					agentSessionId,
+					{ starred }
+				);
 				logger.debug(
 					`Updated Claude session starred: ${agentSessionId} = ${starred}`,
 					ORIGINS_LOG_CONTEXT,
 					{ projectPath }
 				);
+
+				// Mirror the transcript on star / drop it on unstar so the conversation
+				// survives provider-side deletion. Fire-and-forget - see the generic
+				// agentSessions:setSessionStarred handler for the rationale.
+				const starSessionName = typeof starEntry === 'object' ? starEntry.sessionName : undefined;
+				if (starred) {
+					void snapshotStarredTranscript({
+						agentId: 'claude-code',
+						projectPath,
+						sessionId: agentSessionId,
+						sessionName: starSessionName,
+					});
+				} else {
+					void releaseTranscriptMirror({ agentId: 'claude-code', sessionId: agentSessionId });
+				}
 				return true;
 			}
 		)
@@ -1787,19 +1748,9 @@ export function registerClaudeHandlers(deps: ClaudeHandlerDependencies): void {
 		withIpcErrorLogging(
 			handlerOpts('updateSessionContextUsage', ORIGINS_LOG_CONTEXT),
 			async (projectPath: string, agentSessionId: string, contextUsage: number) => {
-				const origins = claudeSessionOriginsStore.get('origins', {});
-				if (!origins[projectPath]) {
-					origins[projectPath] = {};
-				}
-				const existing = origins[projectPath][agentSessionId];
-				if (typeof existing === 'string') {
-					origins[projectPath][agentSessionId] = { origin: existing, contextUsage };
-				} else if (existing) {
-					origins[projectPath][agentSessionId] = { ...existing, contextUsage };
-				} else {
-					origins[projectPath][agentSessionId] = { origin: 'user', contextUsage };
-				}
-				claudeSessionOriginsStore.set('origins', origins);
+				setClaudeSessionOrigin(claudeSessionOriginsStore, projectPath, agentSessionId, {
+					contextUsage,
+				});
 				// Don't log - this updates frequently and would spam logs
 				return true;
 			}

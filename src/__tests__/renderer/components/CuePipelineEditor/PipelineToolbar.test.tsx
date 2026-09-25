@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import React from 'react';
+import { mockTheme } from '../../../helpers/mockTheme';
 import {
 	PipelineToolbar,
 	PipelineToolbarProps,
@@ -10,18 +11,6 @@ vi.mock('../../../../renderer/components/CuePipelineEditor/PipelineSelector', ()
 	PipelineSelector: (props: any) => <div data-testid="pipeline-selector" />,
 }));
 
-const mockTheme = {
-	name: 'test',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgActivity: '#16213e',
-		border: '#333',
-		textMain: '#e4e4e7',
-		textDim: '#a1a1aa',
-		accent: '#06b6d4',
-	},
-} as any;
-
 function buildProps(overrides: Partial<PipelineToolbarProps> = {}): PipelineToolbarProps {
 	return {
 		theme: mockTheme,
@@ -30,8 +19,6 @@ function buildProps(overrides: Partial<PipelineToolbarProps> = {}): PipelineTool
 		setTriggerDrawerOpen: vi.fn(),
 		agentDrawerOpen: false,
 		setAgentDrawerOpen: vi.fn(),
-		showSettings: false,
-		setShowSettings: vi.fn(),
 		pipelines: [],
 		selectedPipelineId: null,
 		selectPipeline: vi.fn(),
@@ -82,14 +69,10 @@ describe('PipelineToolbar', () => {
 		expect(typeof setAgentDrawerOpen.mock.calls[0][0]).toBe('function');
 	});
 
-	it('calls setShowSettings when Settings button is clicked', () => {
-		const setShowSettings = vi.fn();
-		const props = buildProps({ setShowSettings });
+	it('does not render a Settings gear button (moved to Settings → Encore Features → Maestro Cue)', () => {
+		const props = buildProps();
 		render(<PipelineToolbar {...props} />);
-		const settingsBtn = screen.getByTitle('Global Cue settings');
-		fireEvent.click(settingsBtn);
-		expect(setShowSettings).toHaveBeenCalledTimes(1);
-		expect(typeof setShowSettings.mock.calls[0][0]).toBe('function');
+		expect(screen.queryByTitle('Global Cue settings')).not.toBeInTheDocument();
 	});
 
 	it('renders Discard button when isDirty is true', () => {

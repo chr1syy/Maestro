@@ -7,6 +7,7 @@
 
 import path from 'path';
 import * as os from 'node:os';
+import { DEFAULT_MODEL_PRICING } from '../shared/modelPricing';
 
 // ============================================================================
 // Pre-compiled Regex Patterns (Performance Optimization)
@@ -22,7 +23,7 @@ import * as os from 'node:os';
 // contain literal "-participant-" substrings; the old greedy capture would
 // backtrack to the LAST occurrence and parse to the wrong (groupChatId,
 // participantName) pair, which could cause output chunks buffered in
-// group-chat/output-buffer.ts to be flushed against the wrong owner — the
+// group-chat/output-buffer.ts to be flushed against the wrong owner - the
 // suspected root cause for group-chat content leaking into Cue pipeline output.
 const UUID_PATTERN = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 
@@ -76,27 +77,13 @@ export const MAX_GROUP_CHAT_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB
 // ============================================================================
 // Debug logs in hot paths (data handlers) are disabled in production to avoid
 // performance overhead from string interpolation and console I/O on every data chunk.
-export const DEBUG_GROUP_CHAT =
+const DEBUG_GROUP_CHAT =
 	process.env.NODE_ENV === 'development' || process.env.DEBUG_GROUP_CHAT === '1';
 
 /** Log debug message only in development mode. Avoids overhead in production. */
 export function debugLog(prefix: string, message: string, ...args: unknown[]): void {
 	if (DEBUG_GROUP_CHAT) {
 		console.log(`[${prefix}] ${message}`, ...args);
-	}
-}
-
-/**
- * Lazy debug logging - accepts a callback to avoid string construction costs in production.
- * Use this for expensive string operations (e.g., JSON.stringify, template literals with computations).
- *
- * @example
- * // Instead of: debugLog('Parser', `Parsed ${items.length} items: ${JSON.stringify(items)}`)
- * // Use: debugLogLazy('Parser', () => `Parsed ${items.length} items: ${JSON.stringify(items)}`)
- */
-export function debugLogLazy(prefix: string, messageFn: () => string, ...args: unknown[]): void {
-	if (DEBUG_GROUP_CHAT) {
-		console.log(`[${prefix}] ${messageFn()}`, ...args);
 	}
 }
 
@@ -133,12 +120,10 @@ export const CLAUDE_SESSION_PARSE_LIMITS = {
 } as const;
 
 /**
- * Claude API pricing (per million tokens) - Sonnet 4 pricing
- * Used for cost estimation in session statistics
+ * Default Claude API pricing (per million tokens), flat Sonnet-tier fallback.
+ *
+ * @deprecated Per-model pricing now lives in `src/shared/modelPricing.ts`. This
+ * re-export is the unknown-model default; prefer `resolveModelPricing(modelId)`
+ * or `calculateModelCost(tokens, modelId)` for accurate per-model cost.
  */
-export const CLAUDE_PRICING = {
-	INPUT_PER_MILLION: 3,
-	OUTPUT_PER_MILLION: 15,
-	CACHE_READ_PER_MILLION: 0.3,
-	CACHE_CREATION_PER_MILLION: 3.75,
-} as const;
+export const CLAUDE_PRICING = DEFAULT_MODEL_PRICING;

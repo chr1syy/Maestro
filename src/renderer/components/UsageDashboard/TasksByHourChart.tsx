@@ -13,48 +13,21 @@
 
 import { memo, useState, useEffect, useMemo, useCallback } from 'react';
 import type { Theme } from '../../types';
-import type { StatsTimeRange } from '../../hooks/stats/useStats';
+import type { StatsTimeRange, AutoRunTask } from '../../../shared/stats-types';
 import { captureException } from '../../utils/sentry';
-
-/**
- * Auto Run task data shape from the API
- */
-interface AutoRunTask {
-	id: string;
-	autoRunSessionId: string;
-	sessionId: string;
-	agentType: string;
-	taskIndex: number;
-	taskContent?: string;
-	startTime: number;
-	duration: number;
-	success: boolean;
-}
+import {
+	buildHourlyTaskData,
+	formatHourFull,
+	formatHourShort,
+	getMaxHourlyTaskCount,
+	getPeakHours,
+} from './tasksByHourUtils';
 
 interface TasksByHourChartProps {
 	/** Current time range for filtering */
 	timeRange: StatsTimeRange;
 	/** Current theme for styling */
 	theme: Theme;
-}
-
-/**
- * Format hour number (0-23) to short format
- */
-function formatHourShort(hour: number): string {
-	if (hour === 0) return '12a';
-	if (hour === 12) return '12p';
-	if (hour < 12) return `${hour}a`;
-	return `${hour - 12}p`;
-}
-
-/**
- * Format hour number (0-23) to full format
- */
-function formatHourFull(hour: number): string {
-	const suffix = hour >= 12 ? 'PM' : 'AM';
-	const displayHour = hour % 12 || 12;
-	return `${displayHour}:00 ${suffix}`;
 }
 
 export const TasksByHourChart = memo(function TasksByHourChart({
@@ -102,36 +75,17 @@ export const TasksByHourChart = memo(function TasksByHourChart({
 
 	// Group tasks by hour
 	const hourlyData = useMemo(() => {
-		const hours: Array<{ hour: number; count: number; successCount: number }> = [];
-
-		// Initialize all 24 hours
-		for (let i = 0; i < 24; i++) {
-			hours.push({ hour: i, count: 0, successCount: 0 });
-		}
-
-		// Count tasks per hour
-		tasks.forEach((task) => {
-			const hour = new Date(task.startTime).getHours();
-			hours[hour].count++;
-			if (task.success) {
-				hours[hour].successCount++;
-			}
-		});
-
-		return hours;
+		return buildHourlyTaskData(tasks);
 	}, [tasks]);
 
 	// Find max count for scaling
 	const maxCount = useMemo(() => {
-		return Math.max(...hourlyData.map((h) => h.count), 1);
+		return getMaxHourlyTaskCount(hourlyData);
 	}, [hourlyData]);
 
 	// Find peak hours (top 3)
 	const peakHours = useMemo(() => {
-		return [...hourlyData]
-			.sort((a, b) => b.count - a.count)
-			.slice(0, 3)
-			.map((h) => h.hour);
+		return getPeakHours(hourlyData);
 	}, [hourlyData]);
 
 	// Total tasks
@@ -140,7 +94,10 @@ export const TasksByHourChart = memo(function TasksByHourChart({
 	if (loading) {
 		return (
 			<div className="p-4 rounded-lg" style={{ backgroundColor: theme.colors.bgMain }}>
-				<h3 className="text-sm font-medium mb-4" style={{ color: theme.colors.textMain }}>
+				<h3
+					className="text-sm font-medium mb-4"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
 					Tasks by Time of Day
 				</h3>
 				<div
@@ -156,7 +113,10 @@ export const TasksByHourChart = memo(function TasksByHourChart({
 	if (error) {
 		return (
 			<div className="p-4 rounded-lg" style={{ backgroundColor: theme.colors.bgMain }}>
-				<h3 className="text-sm font-medium mb-4" style={{ color: theme.colors.textMain }}>
+				<h3
+					className="text-sm font-medium mb-4"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
 					Tasks by Time of Day
 				</h3>
 				<div
@@ -182,7 +142,10 @@ export const TasksByHourChart = memo(function TasksByHourChart({
 	if (totalTasks === 0) {
 		return (
 			<div className="p-4 rounded-lg" style={{ backgroundColor: theme.colors.bgMain }}>
-				<h3 className="text-sm font-medium mb-4" style={{ color: theme.colors.textMain }}>
+				<h3
+					className="text-sm font-medium mb-4"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
 					Tasks by Time of Day
 				</h3>
 				<div
@@ -260,10 +223,7 @@ export const TasksByHourChart = memo(function TasksByHourChart({
 				</div>
 
 				{/* X-axis labels */}
-				<div
-					className="flex justify-between mt-2 text-[10px]"
-					style={{ color: theme.colors.textDim }}
-				>
+				<div className="flex justify-between mt-2 text-2xs" style={{ color: theme.colors.textDim }}>
 					<span>{formatHourShort(0)}</span>
 					<span>{formatHourShort(6)}</span>
 					<span>{formatHourShort(12)}</span>

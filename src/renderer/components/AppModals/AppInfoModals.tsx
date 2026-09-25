@@ -16,6 +16,7 @@ import { AboutModal } from '../AboutModal';
 import { FeedbackModal } from '../FeedbackModal';
 import { ShortcutsHelpModal } from '../ShortcutsHelpModal';
 import { UpdateCheckModal } from '../UpdateCheckModal';
+import { getModalActions } from '../../stores/modalStore';
 
 // Lazy-loaded heavy modals (rarely used, loaded on-demand)
 const ProcessMonitor = lazy(() =>
@@ -23,6 +24,9 @@ const ProcessMonitor = lazy(() =>
 );
 const UsageDashboardModal = lazy(() =>
 	import('../UsageDashboard').then((m) => ({ default: m.UsageDashboardModal }))
+);
+const AgentRunDashboardModal = lazy(() =>
+	import('../AgentRunDashboard').then((m) => ({ default: m.AgentRunDashboardModal }))
 );
 
 /**
@@ -73,6 +77,9 @@ export interface AppInfoModalsProps {
 	defaultStatsTimeRange?: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'all';
 	/** Enable colorblind-friendly colors for dashboard charts */
 	colorBlindMode?: boolean;
+	// AgentRun Dashboard Modal
+	agentRunDashboardOpen: boolean;
+	onCloseAgentRunDashboard: () => void;
 }
 
 /**
@@ -125,6 +132,9 @@ export const AppInfoModals = memo(function AppInfoModals({
 	onCloseUsageDashboard,
 	defaultStatsTimeRange,
 	colorBlindMode,
+	// AgentRun Dashboard Modal
+	agentRunDashboardOpen,
+	onCloseAgentRunDashboard,
 }: AppInfoModalsProps) {
 	return (
 		<>
@@ -137,6 +147,12 @@ export const AppInfoModals = memo(function AppInfoModals({
 					onClose={onCloseShortcutsHelp}
 					hasNoAgents={hasNoAgents}
 					keyboardMasteryStats={keyboardMasteryStats}
+					onOpenShortcutSettings={() => {
+						// Close the overlay first: Settings opens on top of it otherwise,
+						// leaving the user to dismiss two surfaces to get back to work.
+						onCloseShortcutsHelp();
+						getModalActions().openSettings('shortcuts');
+					}}
 				/>
 			)}
 
@@ -192,6 +208,22 @@ export const AppInfoModals = memo(function AppInfoModals({
 						defaultTimeRange={defaultStatsTimeRange}
 						colorBlindMode={colorBlindMode}
 						sessions={sessions}
+						autoRunStats={autoRunStats}
+						usageStats={usageStats}
+						handsOnTimeMs={handsOnTimeMs}
+						leaderboardRegistration={leaderboardRegistration}
+					/>
+				</Suspense>
+			)}
+
+			{/* --- AGENTRUN DASHBOARD MODAL (lazy-loaded) --- */}
+			{agentRunDashboardOpen && (
+				<Suspense fallback={null}>
+					<AgentRunDashboardModal
+						isOpen={agentRunDashboardOpen}
+						onClose={onCloseAgentRunDashboard}
+						theme={theme}
+						onNavigateToSession={onNavigateToSession}
 					/>
 				</Suspense>
 			)}

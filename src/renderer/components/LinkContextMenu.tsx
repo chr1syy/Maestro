@@ -5,10 +5,12 @@
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { Copy, ExternalLink } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Copy, ExternalLink, Globe } from 'lucide-react';
 import type { Theme } from '../types';
 import { useContextMenuPosition } from '../hooks/ui/useContextMenuPosition';
 import { safeClipboardWrite } from '../utils/clipboard';
+import { openInMaestroBrowser, openInSystemBrowser } from '../utils/openUrl';
 
 export interface LinkContextMenuState {
 	x: number;
@@ -27,11 +29,16 @@ export function LinkContextMenu({ menu, theme, onDismiss }: LinkContextMenuProps
 	const onDismissRef = useRef(onDismiss);
 	onDismissRef.current = onDismiss;
 
-	const { left, top, ready } = useContextMenuPosition(menuRef, menu.x, menu.y);
+	const { left, top, maxHeight, ready } = useContextMenuPosition(menuRef, menu.x, menu.y);
 
-	// Dismiss on click outside or Escape
+	// Dismiss on click outside or Escape. The menu is portaled to document.body,
+	// so a click inside it doesn't reach this listener via the React tree - guard
+	// with an explicit contains() check instead of relying on stopPropagation.
 	useEffect(() => {
-		const handleMouseDown = () => onDismissRef.current();
+		const handleMouseDown = (e: MouseEvent) => {
+			if (menuRef.current?.contains(e.target as Node)) return;
+			onDismissRef.current();
+		};
 		const handleKey = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') onDismissRef.current();
 		};
@@ -48,24 +55,34 @@ export function LinkContextMenu({ menu, theme, onDismiss }: LinkContextMenuProps
 		onDismiss();
 	}, [menu.url, onDismiss]);
 
-	const handleOpen = useCallback(() => {
-		if (/^https?:\/\/|^mailto:/.test(menu.url)) {
-			window.maestro.shell.openExternal(menu.url);
-		}
-		onDismiss();
-	}, [menu.url, onDismiss]);
+	const isOpenable = /^https?:\/\/|^mailto:/.test(menu.url);
 
-	return (
+	const handleOpenMaestro = useCallback(() => {
+		if (isOpenable) openInMaestroBrowser(menu.url);
+		onDismiss();
+	}, [menu.url, isOpenable, onDismiss]);
+
+	const handleOpenSystem = useCallback(() => {
+		if (isOpenable) openInSystemBrowser(menu.url);
+		onDismiss();
+	}, [menu.url, isOpenable, onDismiss]);
+
+	return createPortal(
 		<div
 			ref={menuRef}
-			className="fixed z-[10000] py-1 rounded-md shadow-xl border"
+			className="fixed z-[10000] py-1 rounded-md shadow-xl border whitespace-nowrap"
 			style={{
 				left,
 				top,
+				// A menu taller than the viewport pins to the top edge and runs off
+				// the bottom; the container is overflow-hidden, so those items are
+				// simply unreachable. Scroll instead of clipping.
+				maxHeight,
+				overflowY: 'auto',
 				opacity: ready ? 1 : 0,
 				backgroundColor: theme.colors.bgSidebar,
 				borderColor: theme.colors.border,
-				minWidth: '160px',
+				minWidth: '12.5rem',
 			}}
 			onMouseDown={(e) => e.stopPropagation()}
 		>
@@ -78,13 +95,22 @@ export function LinkContextMenu({ menu, theme, onDismiss }: LinkContextMenuProps
 				Copy Link
 			</button>
 			<button
-				onClick={handleOpen}
+				onClick={handleOpenMaestro}
+				className="w-full text-left px-3 py-1.5 text-xs hover:bg-white/5 transition-colors flex items-center gap-2"
+				style={{ color: theme.colors.textMain }}
+			>
+				<Globe className="w-3.5 h-3.5" />
+				Open in Maestro Browser
+			</button>
+			<button
+				onClick={handleOpenSystem}
 				className="w-full text-left px-3 py-1.5 text-xs hover:bg-white/5 transition-colors flex items-center gap-2"
 				style={{ color: theme.colors.textMain }}
 			>
 				<ExternalLink className="w-3.5 h-3.5" />
-				Open in Browser
+				Open in System Browser
 			</button>
-		</div>
+		</div>,
+		document.body
 	);
 }

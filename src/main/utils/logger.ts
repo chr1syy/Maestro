@@ -76,11 +76,47 @@ class Logger extends EventEmitter {
 		this.logFilePath = getLogFilePath();
 		this.currentLogDate = getTodayDateString();
 
-		// Enable file logging on Windows by default for debugging
-		// Users can also enable it on other platforms via enableFileLogging()
-		if (isWindows()) {
+		// Enable file logging in the Windows desktop main process by default.
+		// CLI bundles also import this module, but process.type is undefined when
+		// Electron runs as Node; initializing the desktop logger there pollutes
+		// command output such as `maestro-cli --version`.
+		if (isWindows() && process.type === 'browser') {
 			this.enableFileLogging();
 		}
+	}
+
+	private createLogFileStream(filePath: string): fs.WriteStream {
+		const fd = fs.openSync(filePath, 'a');
+		let stream: fs.WriteStream;
+
+		try {
+			stream = fs.createWriteStream(filePath, { fd, autoClose: true });
+		} catch (error) {
+			fs.closeSync(fd);
+			throw error;
+		}
+
+		stream.on('error', (error) => {
+			if (this.logFileStream === stream) {
+				const fileLogEnabled = this.fileLogEnabled;
+				const logFilePath = this.logFilePath;
+
+				void import('./sentry')
+					.then(({ captureException }) =>
+						captureException(error, {
+							fileLogEnabled,
+							logFilePath,
+						})
+					)
+					.catch(() => {});
+
+				this.logFileStream = null;
+				this.fileLogEnabled = false;
+				console.error('[Logger] File log stream error:', error);
+			}
+		});
+
+		return stream;
 	}
 
 	/**
@@ -115,11 +151,11 @@ class Logger extends EventEmitter {
 
 					if (!fs.existsSync(targetPath)) {
 						fs.renameSync(legacyPath, targetPath);
-						console.log(`[Logger] Migrated legacy log file to maestro-debug-${mtimeDate}.log`);
+						console.error(`[Logger] Migrated legacy log file to maestro-debug-${mtimeDate}.log`);
 					} else {
 						// Target dated file already exists; remove the legacy file to prevent orphans
 						fs.unlinkSync(legacyPath);
-						console.log(`[Logger] Removed legacy log file (dated file already exists)`);
+						console.error(`[Logger] Removed legacy log file (dated file already exists)`);
 					}
 				}
 			} catch (migrationError) {
@@ -127,7 +163,7 @@ class Logger extends EventEmitter {
 			}
 
 			// Open log file in append mode
-			this.logFileStream = fs.createWriteStream(this.logFilePath, { flags: 'a' });
+			this.logFileStream = this.createLogFileStream(this.logFilePath);
 			this.fileLogEnabled = true;
 
 			// Write a startup marker
@@ -137,7 +173,7 @@ class Logger extends EventEmitter {
 			// Clean up old log files
 			this.cleanOldLogs();
 
-			console.log(`[Logger] File logging enabled: ${this.logFilePath}`);
+			console.error(`[Logger] File logging enabled: ${this.logFilePath}`);
 		} catch (error) {
 			console.error(`[Logger] Failed to enable file logging:`, error);
 		}
@@ -181,7 +217,7 @@ class Logger extends EventEmitter {
 			}
 
 			// Open new log file in append mode
-			this.logFileStream = fs.createWriteStream(nextLogFilePath, { flags: 'a' });
+			this.logFileStream = this.createLogFileStream(nextLogFilePath);
 			this.logFilePath = nextLogFilePath;
 			this.currentLogDate = todayDate;
 
@@ -225,7 +261,7 @@ class Logger extends EventEmitter {
 				if (ageInDays > 7) {
 					try {
 						fs.unlinkSync(path.join(logsDir, file));
-						console.log(`[Logger] Cleaned up old log file: ${file}`);
+						console.error(`[Logger] Cleaned up old log file: ${file}`);
 					} catch (deleteError) {
 						console.error(`[Logger] Failed to delete old log file ${file}:`, deleteError);
 					}

@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import React from 'react';
 import { WorktreeRunSection } from '../../../renderer/components/WorktreeRunSection';
-import type { Theme, Session } from '../../../renderer/types';
+import type { Session } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 import { gitService } from '../../../renderer/services/git';
+
+import { createMockTheme } from '../../helpers/mockTheme';
 
 // Mock gitService
 vi.mock('../../../renderer/services/git', () => ({
@@ -34,32 +37,22 @@ function createMockTheme(): Theme {
 		},
 	};
 }
-
+// Thin wrapper: configures a worktree parent session with matching cwd and
+// worktreeConfig so the WorktreeRunSection has state to render.
 function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
+	return baseCreateMockSession({
 		id: 'parent-1',
 		name: 'Test Agent',
-		toolType: 'claude-code',
 		cwd: '/project',
 		fullPath: '/project',
 		projectRoot: '/project',
-		state: 'idle',
-		tabs: [],
-		activeTabIndex: 0,
 		isGitRepo: true,
-		isLive: false,
-		changedFiles: [],
-		fileTree: [],
-		fileExplorerExpanded: [],
-		fileExplorerScrollPos: 0,
 		worktreeConfig: {
 			basePath: '/project/worktrees',
 			watchEnabled: false,
 		},
-		terminalTabs: [],
-		activeTerminalTabId: null,
 		...overrides,
-	} as Session;
+	});
 }
 
 function createWorktreeChild(overrides: Partial<Session> = {}): Session {
@@ -540,14 +533,14 @@ describe('WorktreeRunSection', () => {
 		) as HTMLOptionElement;
 		expect(busyOption).toBeTruthy();
 		expect(busyOption.disabled).toBe(true);
-		expect(busyOption.textContent).toContain('— busy');
+		expect(busyOption.textContent).toContain('- busy');
 
 		const idleOption = options.find(
 			(o) => (o as HTMLOptionElement).value === 'child-idle'
 		) as HTMLOptionElement;
 		expect(idleOption).toBeTruthy();
 		expect(idleOption.disabled).toBe(false);
-		expect(idleOption.textContent).not.toContain('— busy');
+		expect(idleOption.textContent).not.toContain('- busy');
 	});
 
 	it('shows base branch dropdown and branch name input when Create New Worktree is selected', async () => {
@@ -679,7 +672,7 @@ describe('WorktreeRunSection', () => {
 			/>
 		);
 
-		// Click toggle to turn on — this sets internal selectedValue
+		// Click toggle to turn on - this sets internal selectedValue
 		const toggle = screen.getByText('Dispatch to a separate worktree');
 		await act(async () => {
 			fireEvent.click(toggle);
@@ -813,7 +806,7 @@ describe('WorktreeRunSection', () => {
 			/>
 		);
 
-		// Click the toggle to turn on — no children exist
+		// Click the toggle to turn on - no children exist
 		const toggle = screen.getByText('Dispatch to a separate worktree');
 		fireEvent.click(toggle);
 
@@ -972,6 +965,50 @@ describe('WorktreeRunSection', () => {
 
 		// Should show validation message
 		expect(screen.getByText('Branch name is required')).toBeTruthy();
+	});
+
+	it('keeps incomplete branch suffixes while typing a new worktree branch name', async () => {
+		const session = createMockSession();
+		const scanMock = vi.fn().mockResolvedValue({ gitSubdirs: [] });
+		(window.maestro.git as Record<string, unknown>).scanWorktreeDirectory = scanMock;
+		vi.mocked(gitService.getBranches).mockResolvedValue(['main']);
+
+		render(
+			<WorktreeRunSection
+				theme={theme}
+				activeSession={session}
+				worktreeChildren={[]}
+				worktreeTarget={{ mode: 'create-new', createPROnCompletion: false }}
+				onWorktreeTargetChange={mockOnWorktreeTargetChange}
+				onOpenWorktreeConfig={mockOnOpenWorktreeConfig}
+			/>
+		);
+
+		const select = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
+		await act(async () => {
+			fireEvent.change(select, { target: { value: '__create_new__' } });
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText('Worktree Branch Name')).toBeTruthy();
+		});
+
+		const branchInput = screen.getByDisplayValue(/auto-run-/) as HTMLInputElement;
+
+		await act(async () => {
+			fireEvent.change(branchInput, { target: { value: 'cue-' } });
+		});
+		expect(branchInput.value).toBe('cue-');
+
+		await act(async () => {
+			fireEvent.change(branchInput, { target: { value: 'feature/' } });
+		});
+		expect(branchInput.value).toBe('feature/');
+
+		await act(async () => {
+			fireEvent.change(branchInput, { target: { value: 'release/v1.' } });
+		});
+		expect(branchInput.value).toBe('release/v1.');
 	});
 
 	// -----------------------------------------------------------------------

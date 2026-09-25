@@ -10,6 +10,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Theme } from '../../shared/theme-types';
+import type { UsageStats as BaseUsageStats } from '../../shared/types';
 import { buildWebSocketUrl as buildWsUrl, getCurrentSessionId } from '../utils/config';
 import { webLogger } from '../utils/logger';
 
@@ -24,17 +25,9 @@ export type WebSocketState =
 	| 'authenticated';
 
 /**
- * Usage stats for session cost/token tracking
+ * Usage stats for session cost/token tracking (all fields optional in web context)
  */
-export interface UsageStats {
-	inputTokens?: number;
-	outputTokens?: number;
-	cacheReadInputTokens?: number;
-	cacheCreationInputTokens?: number;
-	totalCostUsd?: number;
-	contextWindow?: number;
-	reasoningTokens?: number; // Separate reasoning tokens (Codex o3/o4-mini)
-}
+export type UsageStats = Partial<BaseUsageStats>;
 
 /**
  * AI Tab data for multi-tab support within a Maestro session
@@ -86,6 +79,12 @@ export interface SessionData {
 	// Worktree subagent support
 	parentSessionId?: string | null; // If this is a worktree child, links to parent session
 	worktreeBranch?: string | null; // Git branch for this worktree child
+	// Run-in-Worktree support (mobile AutoRun launch)
+	isGitRepo?: boolean; // Whether the session's cwd is a git repo
+	worktreeBasePath?: string | null; // Base path where worktrees are stored (parent session config)
+	// The session's configured Auto Run folder (null/undefined when not yet set).
+	// Used by the mobile/web folder picker to highlight the current selection.
+	autoRunFolderPath?: string | null;
 }
 
 /**
@@ -102,6 +101,20 @@ export interface AutoRunState {
 	currentDocumentIndex?: number; // Current document being processed (0-based)
 	totalTasksAcrossAllDocs?: number; // Total tasks across all documents
 	completedTasksAcrossAllDocs?: number; // Completed tasks across all documents
+	// Error pause fields (Phase 5.10) - present when batch is paused awaiting resolution
+	errorPaused?: boolean;
+	errorMessage?: string;
+	errorType?: string;
+	errorRecoverable?: boolean;
+	errorDocumentIndex?: number;
+	errorTaskDescription?: string;
+	// Goal-Driven mode fields - present when the run pursues a free-text goal
+	// instead of documents. The web client shows goal percent + iteration in
+	// place of task counts when goalMode is true.
+	goalMode?: boolean;
+	goalProgress?: number; // 0-100 self-reported progress
+	goalRationale?: string; // One-line rationale for the latest progress report
+	goalIteration?: number; // 1-based iteration the goal loop is on
 }
 
 /**
@@ -123,6 +136,7 @@ export type ServerMessageType =
 	| 'session_offline'
 	| 'user_input'
 	| 'theme'
+	| 'bionify_reading_mode'
 	| 'custom_commands'
 	| 'autorun_state'
 	| 'autorun_docs_changed'
@@ -130,6 +144,7 @@ export type ServerMessageType =
 	| 'settings_changed'
 	| 'groups_changed'
 	| 'tabs_changed'
+	| 'rename_tab_result'
 	| 'group_chat_message'
 	| 'group_chat_state_change'
 	| 'context_operation_progress'
@@ -275,6 +290,14 @@ export interface ThemeMessage extends ServerMessage {
 }
 
 /**
+ * Bionify reading-mode message from server
+ */
+export interface BionifyReadingModeMessage extends ServerMessage {
+	type: 'bionify_reading_mode';
+	enabled: boolean;
+}
+
+/**
  * Custom AI command definition
  */
 export interface CustomCommand {
@@ -352,6 +375,10 @@ export interface SettingsChangedMessage extends ServerMessage {
 		audioFeedbackEnabled: boolean;
 		colorBlindMode: string;
 		conductorProfile: string;
+		/** Max agent output lines per message before truncation. `null` = All (Infinity serialized). */
+		maxOutputLines: number | null;
+		/** User-customized keyboard shortcut overrides (sparse; unset = use default). */
+		shortcuts: Record<string, import('../../shared/shortcut-types').Shortcut>;
 	};
 }
 
@@ -362,6 +389,7 @@ export interface GroupData {
 	id: string;
 	name: string;
 	emoji: string | null;
+	parentGroupId?: string;
 	sessionIds: string[];
 }
 
@@ -383,6 +411,19 @@ export interface TabsChangedMessage extends ServerMessage {
 	sessionId: string;
 	aiTabs: AITabData[];
 	activeTabId: string;
+	activeTabChanged?: boolean;
+}
+
+/**
+ * Rename tab result message from server.
+ */
+export interface RenameTabResultMessage extends ServerMessage {
+	type: 'rename_tab_result';
+	success: boolean;
+	sessionId: string;
+	tabId: string;
+	newName: string;
+	error?: string;
 }
 
 /**
@@ -474,6 +515,7 @@ export type TypedServerMessage =
 	| SessionExitMessage
 	| UserInputMessage
 	| ThemeMessage
+	| BionifyReadingModeMessage
 	| CustomCommandsMessage
 	| AutoRunStateMessage
 	| AutoRunDocsChangedMessage
@@ -481,6 +523,7 @@ export type TypedServerMessage =
 	| SettingsChangedMessage
 	| GroupsChangedMessage
 	| TabsChangedMessage
+	| RenameTabResultMessage
 	| GroupChatMessageBroadcast
 	| GroupChatStateChangeBroadcast
 	| ToolEventMessage
@@ -520,6 +563,8 @@ export interface WebSocketEventHandlers {
 	onUserInput?: (sessionId: string, command: string, inputMode: 'ai' | 'terminal') => void;
 	/** Called when theme is received or updated */
 	onThemeUpdate?: (theme: Theme) => void;
+	/** Called when the global Bionify reading-mode setting is received or updated */
+	onBionifyReadingModeUpdate?: (enabled: boolean) => void;
 	/** Called when custom commands are received */
 	onCustomCommands?: (commands: CustomCommand[]) => void;
 	/** Called when AutoRun state changes (batch processing on desktop) */
@@ -540,7 +585,20 @@ export interface WebSocketEventHandlers {
 	/** Called when groups are changed (created, renamed, deleted, membership) */
 	onGroupsChanged?: (groups: GroupData[]) => void;
 	/** Called when tabs change in a session */
-	onTabsChanged?: (sessionId: string, aiTabs: AITabData[], activeTabId: string) => void;
+	onTabsChanged?: (
+		sessionId: string,
+		aiTabs: AITabData[],
+		activeTabId: string,
+		activeTabChanged?: boolean
+	) => void;
+	/** Called when a tab rename request completes */
+	onRenameTabResult?: (
+		sessionId: string,
+		tabId: string,
+		success: boolean,
+		newName: string,
+		error?: string
+	) => void;
 	/** Called when a group chat message is broadcast */
 	onGroupChatMessage?: (chatId: string, message: GroupChatMessage) => void;
 	/** Called when group chat state changes */
@@ -897,6 +955,12 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
 						break;
 					}
 
+					case 'bionify_reading_mode': {
+						const bionifyMsg = message as BionifyReadingModeMessage;
+						handlersRef.current?.onBionifyReadingModeUpdate?.(bionifyMsg.enabled);
+						break;
+					}
+
 					case 'custom_commands': {
 						const commandsMsg = message as CustomCommandsMessage;
 						handlersRef.current?.onCustomCommands?.(commandsMsg.commands);
@@ -959,7 +1023,20 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
 						handlersRef.current?.onTabsChanged?.(
 							tabsMsg.sessionId,
 							tabsMsg.aiTabs,
-							tabsMsg.activeTabId
+							tabsMsg.activeTabId,
+							tabsMsg.activeTabChanged
+						);
+						break;
+					}
+
+					case 'rename_tab_result': {
+						const renameMsg = message as RenameTabResultMessage;
+						handlersRef.current?.onRenameTabResult?.(
+							renameMsg.sessionId,
+							renameMsg.tabId,
+							renameMsg.success,
+							renameMsg.newName,
+							renameMsg.error
 						);
 						break;
 					}

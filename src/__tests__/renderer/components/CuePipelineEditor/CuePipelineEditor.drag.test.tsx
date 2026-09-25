@@ -25,7 +25,10 @@ vi.mock('reactflow', () => {
 			screenToFlowPosition: vi.fn((pos: any) => pos),
 			setViewport: vi.fn(),
 		}),
-		applyNodeChanges: (changes: any[], nodes: any[]) => nodes,
+		useNodesInitialized: () => false,
+		// The collision guard subscribes to measured node widths through the store.
+		useStore: (selector: any) => selector({ nodeInternals: new Map() }),
+		applyNodeChanges: (_changes: any[], nodes: any[]) => nodes,
 		Background: () => null,
 		Controls: () => null,
 		MiniMap: () => null,
@@ -53,113 +56,113 @@ vi.mock('../../../../renderer/components/CuePipelineEditor/PipelineContextMenu',
 const mockSetPipelineState = vi.fn();
 const mockPersistLayout = vi.fn();
 
+// IMPORTANT: hooks are called on every render; returning a fresh object literal
+// here makes `pipelineState.pipelines` a new reference each render, which kicks
+// the displayNodes resync effect into an infinite loop and OOMs the worker.
+// Keep the cached object stable across renders (mirrors the other editor tests).
+const stableStateHook = {
+	pipelineState: {
+		pipelines: [
+			{
+				id: 'p1',
+				name: 'Pipeline 1',
+				color: '#06b6d4',
+				nodes: [
+					{
+						id: 'trigger-1',
+						type: 'trigger',
+						position: { x: 0, y: 0 },
+						data: { eventType: 'time.heartbeat', label: 'Test', config: {} },
+					},
+					{
+						id: 'agent-1',
+						type: 'agent',
+						position: { x: 200, y: 0 },
+						data: { sessionId: 's1', sessionName: 'Agent', toolType: 'claude-code' },
+					},
+				],
+				edges: [{ id: 'e1', source: 'trigger-1', target: 'agent-1', mode: 'pass' }],
+			},
+		],
+		selectedPipelineId: 'p1',
+	},
+	setPipelineState: mockSetPipelineState,
+	isAllPipelinesView: false,
+	isDirty: false,
+	setIsDirty: vi.fn(),
+	saveStatus: 'idle',
+	validationErrors: [],
+	cueSettings: {
+		timeout_minutes: 30,
+		timeout_on_fail: 'break',
+		max_concurrent: 1,
+		queue_size: 10,
+	},
+	setCueSettings: vi.fn(),
+	runningPipelineIds: new Set<string>(),
+	persistLayout: mockPersistLayout,
+	pendingSavedViewportRef: { current: null },
+	handleSave: vi.fn(),
+	handleDiscard: vi.fn(),
+	createPipeline: vi.fn(),
+	deletePipeline: vi.fn(),
+	renamePipeline: vi.fn(),
+	selectPipeline: vi.fn(),
+	changePipelineColor: vi.fn(),
+	onUpdateNode: vi.fn(),
+	onUpdateEdgePrompt: vi.fn(),
+	onDeleteNode: vi.fn(),
+	onUpdateEdge: vi.fn(),
+	onDeleteEdge: vi.fn(),
+};
+
 vi.mock('../../../../renderer/hooks/cue/usePipelineState', () => ({
-	usePipelineState: () => ({
-		pipelineState: {
-			pipelines: [
-				{
-					id: 'p1',
-					name: 'Pipeline 1',
-					color: '#06b6d4',
-					nodes: [
-						{
-							id: 'trigger-1',
-							type: 'trigger',
-							position: { x: 0, y: 0 },
-							data: { eventType: 'time.heartbeat', label: 'Test', config: {} },
-						},
-						{
-							id: 'agent-1',
-							type: 'agent',
-							position: { x: 200, y: 0 },
-							data: { sessionId: 's1', sessionName: 'Agent', toolType: 'claude-code' },
-						},
-					],
-					edges: [{ id: 'e1', source: 'trigger-1', target: 'agent-1', mode: 'pass' }],
-				},
-			],
-			selectedPipelineId: 'p1',
-		},
-		setPipelineState: mockSetPipelineState,
-		isAllPipelinesView: false,
-		isDirty: false,
-		setIsDirty: vi.fn(),
-		saveStatus: 'idle',
-		validationErrors: [],
-		cueSettings: {
-			timeout_minutes: 30,
-			timeout_on_fail: 'break',
-			max_concurrent: 1,
-			queue_size: 10,
-		},
-		setCueSettings: vi.fn(),
-		showSettings: false,
-		setShowSettings: vi.fn(),
-		runningPipelineIds: new Set<string>(),
-		persistLayout: mockPersistLayout,
-		handleSave: vi.fn(),
-		handleDiscard: vi.fn(),
-		createPipeline: vi.fn(),
-		deletePipeline: vi.fn(),
-		renamePipeline: vi.fn(),
-		selectPipeline: vi.fn(),
-		changePipelineColor: vi.fn(),
-		onUpdateNode: vi.fn(),
-		onUpdateEdgePrompt: vi.fn(),
-		onDeleteNode: vi.fn(),
-		onUpdateEdge: vi.fn(),
-		onDeleteEdge: vi.fn(),
-	}),
+	usePipelineState: () => stableStateHook,
 	DEFAULT_TRIGGER_LABELS: {},
 	validatePipelines: vi.fn(),
 }));
 
+const stableSelectionHook = {
+	selectedNodeId: null,
+	setSelectedNodeId: vi.fn(),
+	selectedEdgeId: null,
+	setSelectedEdgeId: vi.fn(),
+	selectedNode: null,
+	selectedNodePipelineId: null,
+	selectedNodeHasOutgoingEdge: false,
+	hasIncomingAgentEdges: false,
+	incomingAgentEdgeCount: 0,
+	incomingTriggerEdges: [],
+	selectedEdge: null,
+	selectedEdgePipelineId: null,
+	selectedEdgePipelineColor: '#06b6d4',
+	edgeSourceNode: null,
+	edgeTargetNode: null,
+	onCanvasSessionIds: new Set<string>(),
+	onNodeClick: vi.fn(),
+	onEdgeClick: vi.fn(),
+	onPaneClick: vi.fn(),
+	handleConfigureNode: vi.fn(),
+};
+
 vi.mock('../../../../renderer/hooks/cue/usePipelineSelection', () => ({
-	usePipelineSelection: () => ({
-		selectedNodeId: null,
-		setSelectedNodeId: vi.fn(),
-		selectedEdgeId: null,
-		setSelectedEdgeId: vi.fn(),
-		selectedNode: null,
-		selectedNodePipelineId: null,
-		selectedNodeHasOutgoingEdge: false,
-		hasIncomingAgentEdges: false,
-		incomingAgentEdgeCount: 0,
-		incomingTriggerEdges: [],
-		selectedEdge: null,
-		selectedEdgePipelineId: null,
-		selectedEdgePipelineColor: '#06b6d4',
-		edgeSourceNode: null,
-		edgeTargetNode: null,
-		onCanvasSessionIds: new Set<string>(),
-		onNodeClick: vi.fn(),
-		onEdgeClick: vi.fn(),
-		onPaneClick: vi.fn(),
-		handleConfigureNode: vi.fn(),
-	}),
+	usePipelineSelection: () => stableSelectionHook,
 }));
 
 vi.mock('../../../../renderer/components/CuePipelineEditor/utils/pipelineGraph', () => ({
 	convertToReactFlowNodes: vi.fn(() => []),
 	convertToReactFlowEdges: vi.fn(() => []),
 	computePipelineYOffsets: vi.fn(() => new Map()),
+	// Footprint constants read at module-eval time by pipelineAutoArrange
+	// (imported transitively via CuePipelineEditor). Must be present on the mock
+	// or the import throws "No export is defined".
+	NODE_BG_WIDTH: 320,
+	NODE_BG_HEIGHT: 100,
 }));
 
 import { CuePipelineEditor } from '../../../../renderer/components/CuePipelineEditor/CuePipelineEditor';
 
-const mockTheme = {
-	name: 'test',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgActivity: '#16213e',
-		border: '#333',
-		textMain: '#e4e4e7',
-		textDim: '#a1a1aa',
-		accent: '#06b6d4',
-		accentForeground: '#fff',
-		success: '#22c55e',
-	},
-} as any;
+import { mockTheme } from '../../../helpers/mockTheme';
 
 describe('CuePipelineEditor drag logic', () => {
 	beforeEach(() => {

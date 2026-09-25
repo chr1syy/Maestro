@@ -1,5 +1,5 @@
 /**
- * Tests for shared/agentConstants.ts — Context windows and shared constants
+ * Tests for shared/agentConstants.ts - Context windows and shared constants
  */
 
 import { describe, it, expect } from 'vitest';
@@ -7,6 +7,7 @@ import {
 	DEFAULT_CONTEXT_WINDOWS,
 	FALLBACK_CONTEXT_WINDOW,
 	COMBINED_CONTEXT_AGENTS,
+	resilienceEnabled,
 } from '../../shared/agentConstants';
 import { AGENT_IDS } from '../../shared/agentIds';
 
@@ -27,6 +28,8 @@ describe('agentConstants', () => {
 			expect(DEFAULT_CONTEXT_WINDOWS['codex']).toBe(200000);
 			expect(DEFAULT_CONTEXT_WINDOWS['opencode']).toBe(128000);
 			expect(DEFAULT_CONTEXT_WINDOWS['factory-droid']).toBe(200000);
+			expect(DEFAULT_CONTEXT_WINDOWS['hermes']).toBe(200000);
+			expect(DEFAULT_CONTEXT_WINDOWS['pi']).toBe(200000);
 		});
 
 		it('should have terminal context window set to 0', () => {
@@ -57,6 +60,10 @@ describe('agentConstants', () => {
 			expect(COMBINED_CONTEXT_AGENTS.has('codex')).toBe(true);
 		});
 
+		it('should contain copilot-cli (Copilot CLI normalizes input reporting cumulative-style)', () => {
+			expect(COMBINED_CONTEXT_AGENTS.has('copilot-cli')).toBe(true);
+		});
+
 		it('should not contain claude-code (Claude uses separate limits)', () => {
 			expect(COMBINED_CONTEXT_AGENTS.has('claude-code')).toBe(false);
 		});
@@ -65,6 +72,20 @@ describe('agentConstants', () => {
 			for (const id of COMBINED_CONTEXT_AGENTS) {
 				expect(AGENT_IDS).toContain(id);
 			}
+		});
+	});
+
+	describe('resilienceEnabled', () => {
+		it('treats undefined as ON (read-time default, no migration for existing agents)', () => {
+			expect(resilienceEnabled(undefined)).toBe(true);
+		});
+
+		it('treats an explicit true as ON', () => {
+			expect(resilienceEnabled(true)).toBe(true);
+		});
+
+		it('only an explicit false opts out', () => {
+			expect(resilienceEnabled(false)).toBe(false);
 		});
 	});
 });

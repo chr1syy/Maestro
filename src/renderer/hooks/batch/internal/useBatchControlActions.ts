@@ -1,0 +1,268 @@
+import { useCallback } from 'react';
+import type { MutableRefObject } from 'react';
+import type { AgentError, BatchRunState } from '../../../types';
+import { isMirroredBatchRun, useBatchStore } from '../../../stores/batchStore';
+import { cancelPendingAutoResume, clearAutoResume } from '../../../stores/autoRunResumeStore';
+import type { BatchAction } from '../batchReducer';
+import type { UseTimeTrackingReturn } from '../useTimeTracking';
+
+export type ErrorResolutionAction = 'resume' | 'skip-document' | 'abort';
+
+export interface ErrorResolutionEntry {
+	promise: Promise<ErrorResolutionAction>;
+	resolve: (action: ErrorResolutionAction) => void;
+}
+
+export interface UseBatchControlActionsDeps {
+	broadcastAutoRunState: (sessionId: string, state: BatchRunState | null) => void;
+	dispatch: (action: BatchAction) => void;
+	errorResolutionRefs: MutableRefObject<Record<string, ErrorResolutionEntry>>;
+	stopRequestedRefs: MutableRefObject<Record<string, boolean>>;
+	isMountedRef: MutableRefObject<boolean>;
+	/** A paused run is not running: its clock stops until resume or skip. */
+	timeTracking: Pick<UseTimeTrackingReturn, 'pauseTracking' | 'resumeTracking'>;
+}
+
+export interface UseBatchControlActionsReturn {
+	stopBatchRun: (sessionId: string) => void;
+	pauseBatchOnError: (
+		sessionId: string,
+		error: AgentError,
+		documentIndex: number,
+		taskDescription?: string
+	) => void;
+	skipCurrentDocument: (sessionId: string) => void;
+	resumeAfterError: (sessionId: string) => void;
+	abortBatchOnError: (sessionId: string) => void;
+}
+
+/**
+ * External lifecycle controls: stop the run, or resolve the in-flight
+ * error-resolution promise that the runner awaits when an agent error
+ * pauses execution mid-task.
+ *
+ * All five actions share the `errorResolutionRefs` registry and dispatch
+ * `SET_STOPPING` / `SET_ERROR` / `CLEAR_ERROR` actions directly (not via
+ * the debounced UPDATE_PROGRESS path), so they live in one hook.
+ */
+export function useBatchControlActions({
+	broadcastAutoRunState,
+	dispatch,
+	errorResolutionRefs,
+	stopRequestedRefs,
+	isMountedRef,
+	timeTracking,
+}: UseBatchControlActionsDeps): UseBatchControlActionsReturn {
+	// Destructured: the tracker's callbacks are stable, its return object is not.
+	const { pauseTracking, resumeTracking } = timeTracking;
+
+	/**
+	 * Request to stop the batch run after the current task completes.
+	 * No `isMountedRef` check - stop requests should always be honoured.
+	 * All operations are safe: ref updates, reducer dispatch, broadcast.
+	 */
+	const stopBatchRun = useCallback(
+		(sessionId: string) => {
+			// A mirrored run belongs to another Maestro client: the loop that polls
+			// `stopRequestedRefs` and the promise `errorResolutionRefs` unblocks both
+			// live over there. Acting here would dispatch a local state change and
+			// re-broadcast it - overwriting the owner's state in main's tracker with
+			// a stop that never happens - so refuse. The controls are disabled too;
+			// this is the backstop for the CLI/remote entry points that reach these
+			// functions without passing through a button.
+			if (isMirroredBatchRun(sessionId)) return;
+			// The run is ending, so a pending auto-resume must not fire into it and
+			// the attempt count has served its purpose.
+			clearAutoResume(sessionId);
+			stopRequestedRefs.current[sessionId] = true;
+			const errorResolution = errorResolutionRefs.current[sessionId];
+			if (errorResolution) {
+				errorResolution.resolve('abort');
+				delete errorResolutionRefs.current[sessionId];
+			}
+			dispatch({ type: 'SET_STOPPING', sessionId });
+			const newState = useBatchStore.getState().batchRunStates[sessionId];
+			if (newState) {
+				broadcastAutoRunState(sessionId, { ...newState, isStopping: true });
+			}
+		},
+		[broadcastAutoRunState, dispatch, errorResolutionRefs, stopRequestedRefs]
+	);
+
+	/**
+	 * Pause the batch run due to an agent error. Idempotent - if a
+	 * resolution promise already exists for the session, it's reused.
+	 */
+	const pauseBatchOnError = useCallback(
+		(sessionId: string, error: AgentError, documentIndex: number, taskDescription?: string) => {
+			if (!isMountedRef.current) return;
+			// The owning client pauses its own run and broadcasts the pause; a
+			// mirroring client pausing locally would just be overwritten by the next
+			// frame, and would create an errorResolution promise nothing resolves.
+			if (isMirroredBatchRun(sessionId)) return;
+
+			window.maestro.logger.autorun(
+				`Auto Run paused due to ${error.type}: ${error.message}`,
+				sessionId,
+				{
+					errorType: error.type,
+					errorMessage: error.message,
+					recoverable: error.recoverable,
+					documentIndex,
+					taskDescription,
+					rawError: error.raw,
+				}
+			);
+
+			// Before SET_ERROR so the broadcast below already carries the frozen clock.
+			pauseTracking(sessionId);
+			dispatch({
+				type: 'SET_ERROR',
+				sessionId,
+				payload: { error, documentIndex, taskDescription },
+			});
+			const currentState = useBatchStore.getState().batchRunStates[sessionId];
+			if (currentState) {
+				broadcastAutoRunState(sessionId, {
+					...currentState,
+					error,
+					errorPaused: true,
+					errorDocumentIndex: documentIndex,
+					errorTaskDescription: taskDescription,
+				});
+			}
+
+			if (!errorResolutionRefs.current[sessionId]) {
+				let resolvePromise: ((action: ErrorResolutionAction) => void) | undefined;
+				const promise = new Promise<ErrorResolutionAction>((resolve) => {
+					resolvePromise = resolve;
+				});
+				errorResolutionRefs.current[sessionId] = {
+					promise,
+					resolve: resolvePromise as (action: ErrorResolutionAction) => void,
+				};
+			}
+		},
+		[broadcastAutoRunState, dispatch, errorResolutionRefs, isMountedRef, pauseTracking]
+	);
+
+	/**
+	 * Skip the current document that triggered an error.
+	 */
+	const skipCurrentDocument = useCallback(
+		(sessionId: string) => {
+			if (isMirroredBatchRun(sessionId)) return;
+			if (!isMountedRef.current) return;
+
+			window.maestro.logger.autorun(`Skipping document after error`, sessionId, {});
+
+			// The user resolved this pause themselves; a timer firing later would
+			// resume a loop that is already moving. The attempt count survives - a
+			// manual rescue does not buy the run a fresh ceiling.
+			cancelPendingAutoResume(sessionId);
+
+			resumeTracking(sessionId);
+			dispatch({ type: 'CLEAR_ERROR', sessionId });
+			const currentState = useBatchStore.getState().batchRunStates[sessionId];
+			if (currentState) {
+				broadcastAutoRunState(sessionId, {
+					...currentState,
+					error: undefined,
+					errorPaused: false,
+					errorDocumentIndex: undefined,
+					errorTaskDescription: undefined,
+				});
+			}
+
+			const errorResolution = errorResolutionRefs.current[sessionId];
+			if (errorResolution) {
+				errorResolution.resolve('skip-document');
+				delete errorResolutionRefs.current[sessionId];
+			}
+		},
+		[broadcastAutoRunState, dispatch, errorResolutionRefs, isMountedRef, resumeTracking]
+	);
+
+	/**
+	 * Resume the batch run after the user resolves an error.
+	 *
+	 * AUTO-RESUME (Phase 3): this is the resume entry point the auto-resume
+	 * coordinator calls for BOTH spec-driven and goal-driven limit pauses. The
+	 * runner parks on the in-memory `errorResolution` promise while paused (the
+	 * document/task loop in useBatchRunner and the iteration loop in useGoalRunner
+	 * both await `errorResolutionRefs.current[sessionId].promise`); resolving it
+	 * with `'resume'` here unblocks the loop with its state fully preserved - no
+	 * checkpoint reconstruction needed. Spec-driven already preserved resumable
+	 * state via `pauseBatchOnError` + this promise; no gap was found.
+	 */
+	const resumeAfterError = useCallback(
+		(sessionId: string) => {
+			if (isMirroredBatchRun(sessionId)) return;
+			if (!isMountedRef.current) return;
+
+			window.maestro.logger.autorun(`Resuming Auto Run after error resolution`, sessionId, {});
+
+			// Reached both by the user clicking Resume and by the auto-resume timer
+			// firing. Either way any OTHER pending timer must be dropped, and the
+			// attempt count must not be, so this stays `cancelPending` rather than
+			// `clear` - see autoRunResumeStore.
+			cancelPendingAutoResume(sessionId);
+
+			resumeTracking(sessionId);
+			dispatch({ type: 'CLEAR_ERROR', sessionId });
+			const currentState = useBatchStore.getState().batchRunStates[sessionId];
+			if (currentState) {
+				broadcastAutoRunState(sessionId, {
+					...currentState,
+					error: undefined,
+					errorPaused: false,
+					errorDocumentIndex: undefined,
+					errorTaskDescription: undefined,
+				});
+			}
+
+			const errorResolution = errorResolutionRefs.current[sessionId];
+			if (errorResolution) {
+				errorResolution.resolve('resume');
+				delete errorResolutionRefs.current[sessionId];
+			}
+		},
+		[broadcastAutoRunState, dispatch, errorResolutionRefs, isMountedRef, resumeTracking]
+	);
+
+	/**
+	 * Abort the run from a paused-error state. SET_STOPPING from PAUSED_ERROR
+	 * already clears all error fields in the reducer.
+	 */
+	const abortBatchOnError = useCallback(
+		(sessionId: string) => {
+			if (isMirroredBatchRun(sessionId)) return;
+			if (!isMountedRef.current) return;
+
+			window.maestro.logger.autorun(`Auto Run aborted due to error`, sessionId, {});
+
+			clearAutoResume(sessionId);
+			stopRequestedRefs.current[sessionId] = true;
+			const errorResolution = errorResolutionRefs.current[sessionId];
+			if (errorResolution) {
+				errorResolution.resolve('abort');
+				delete errorResolutionRefs.current[sessionId];
+			}
+
+			dispatch({ type: 'SET_STOPPING', sessionId });
+			const currentState = useBatchStore.getState().batchRunStates[sessionId];
+			if (currentState) {
+				broadcastAutoRunState(sessionId, currentState);
+			}
+		},
+		[broadcastAutoRunState, dispatch, errorResolutionRefs, isMountedRef, stopRequestedRefs]
+	);
+
+	return {
+		stopBatchRun,
+		pauseBatchOnError,
+		skipCurrentDocument,
+		resumeAfterError,
+		abortBatchOnError,
+	};
+}

@@ -60,6 +60,7 @@ describe('Exit Listener', () => {
 				routeModeratorResponse: vi.fn().mockResolvedValue(undefined),
 				routeAgentResponse: vi.fn().mockResolvedValue(undefined),
 				markParticipantResponded: vi.fn().mockResolvedValue(undefined),
+				settleGroupChatToIdle: vi.fn(),
 				spawnModeratorSynthesis: vi.fn().mockResolvedValue(undefined),
 				getGroupChatReadOnlyState: vi.fn().mockReturnValue(false),
 				respawnParticipantWithRecovery: vi.fn().mockResolvedValue(undefined),
@@ -126,7 +127,21 @@ describe('Exit Listener', () => {
 
 			handler?.('regular-session-123', 0);
 
-			expect(mockDeps.safeSend).toHaveBeenCalledWith('process:exit', 'regular-session-123', 0);
+			expect(mockDeps.safeSend).toHaveBeenCalledWith(
+				'process:exit',
+				'regular-session-123',
+				0,
+				undefined
+			);
+		});
+
+		it('should forward the kill signal to the renderer when the process was signalled', () => {
+			setupListener();
+			const handler = eventHandlers.get('exit');
+
+			handler?.('regular-session-123', 0, 9);
+
+			expect(mockDeps.safeSend).toHaveBeenCalledWith('process:exit', 'regular-session-123', 0, 9);
 		});
 
 		it('should remove power block for non-group-chat sessions', () => {
@@ -144,7 +159,7 @@ describe('Exit Listener', () => {
 	describe('Group Chat Cross-Domain Containment', () => {
 		// Regression: if a sessionId starts with GROUP_CHAT_PREFIX but does NOT
 		// match either the moderator branch or the participant-parse branch,
-		// the exit handler MUST drop it — never forwarding to process:exit,
+		// the exit handler MUST drop it - never forwarding to process:exit,
 		// never broadcasting to web clients, and never calling
 		// cueEngine.notifyAgentCompleted. Otherwise a mis-shaped group-chat
 		// sessionId leaks into the regular exit channel and fires Cue's
@@ -193,7 +208,12 @@ describe('Exit Listener', () => {
 
 			handler?.('plain-session-xyz', 0);
 
-			expect(mockDeps.safeSend).toHaveBeenCalledWith('process:exit', 'plain-session-xyz', 0);
+			expect(mockDeps.safeSend).toHaveBeenCalledWith(
+				'process:exit',
+				'plain-session-xyz',
+				0,
+				undefined
+			);
 			expect(notifyAgentCompleted).toHaveBeenCalledWith('plain-session-xyz', {
 				status: 'completed',
 				exitCode: 0,
@@ -268,6 +288,62 @@ describe('Exit Listener', () => {
 					'TestAgent'
 				);
 			});
+		});
+
+		// The room being finished and synthesis being able to run are two
+		// different facts. When they were gated on one condition, a missing
+		// process manager or agent detector skipped the state clear along with
+		// the spawn, and the room stayed on 'agent-working' forever - which the
+		// quit dialog then reported as a running group chat.
+		it('settles the room to idle when it is the last participant but synthesis cannot run', async () => {
+			(
+				mockDeps.groupChatRouter.markParticipantResponded as ReturnType<typeof vi.fn>
+			).mockReturnValue(true);
+			mockDeps.getAgentDetector = (() => undefined) as unknown as typeof mockDeps.getAgentDetector;
+
+			setupListener();
+			const handler = eventHandlers.get('exit');
+			handler?.('group-chat-test-chat-123-participant-TestAgent-abc123', 0);
+
+			await vi.waitFor(() => {
+				expect(mockDeps.groupChatRouter.settleGroupChatToIdle).toHaveBeenCalledWith(
+					'test-chat-123'
+				);
+			});
+			expect(mockDeps.groupChatRouter.spawnModeratorSynthesis).not.toHaveBeenCalled();
+		});
+
+		it('still spawns synthesis, and does not settle, when it can run', async () => {
+			(
+				mockDeps.groupChatRouter.markParticipantResponded as ReturnType<typeof vi.fn>
+			).mockReturnValue(true);
+
+			setupListener();
+			const handler = eventHandlers.get('exit');
+			handler?.('group-chat-test-chat-123-participant-TestAgent-abc123', 0);
+
+			await vi.waitFor(() => {
+				expect(mockDeps.groupChatRouter.spawnModeratorSynthesis).toHaveBeenCalled();
+			});
+			// Synthesis owns the room from here; settling now would clear the
+			// state while the moderator is about to start thinking.
+			expect(mockDeps.groupChatRouter.settleGroupChatToIdle).not.toHaveBeenCalled();
+		});
+
+		it('does not settle the room while other participants are still pending', async () => {
+			(
+				mockDeps.groupChatRouter.markParticipantResponded as ReturnType<typeof vi.fn>
+			).mockReturnValue(false);
+			mockDeps.getAgentDetector = (() => undefined) as unknown as typeof mockDeps.getAgentDetector;
+
+			setupListener();
+			const handler = eventHandlers.get('exit');
+			handler?.('group-chat-test-chat-123-participant-TestAgent-abc123', 0);
+
+			await vi.waitFor(() => {
+				expect(mockDeps.groupChatRouter.markParticipantResponded).toHaveBeenCalled();
+			});
+			expect(mockDeps.groupChatRouter.settleGroupChatToIdle).not.toHaveBeenCalled();
 		});
 
 		it('should clear output buffer after processing', async () => {

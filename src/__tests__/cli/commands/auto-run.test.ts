@@ -21,36 +21,29 @@ vi.mock('fs', () => ({
 // Mock maestro-client
 vi.mock('../../../cli/services/maestro-client', () => ({
 	withMaestroClient: vi.fn(),
-	resolveSessionId: vi.fn(),
-}));
-
-// Mock storage (for resolveAgentId)
-vi.mock('../../../cli/services/storage', () => ({
-	resolveAgentId: vi.fn(),
+	resolveTargetSessionId: vi.fn(),
 }));
 
 import { autoRun } from '../../../cli/commands/auto-run';
-import { withMaestroClient, resolveSessionId } from '../../../cli/services/maestro-client';
-import { resolveAgentId } from '../../../cli/services/storage';
+import { withMaestroClient, resolveTargetSessionId } from '../../../cli/services/maestro-client';
 import { existsSync } from 'fs';
+import path from 'path';
 
 describe('auto-run command', () => {
 	let consoleSpy: MockInstance;
 	let consoleErrorSpy: MockInstance;
-	let consoleWarnSpy: MockInstance;
 	let processExitSpy: MockInstance;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
 		consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 		consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		processExitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
 	});
 
 	it('should configure auto-run with valid document paths', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
 			const mockClient = {
 				sendCommand: vi.fn().mockResolvedValue({
@@ -63,7 +56,7 @@ describe('auto-run command', () => {
 
 		await autoRun(['/path/to/doc1.md', '/path/to/doc2.md'], { agent: 'agent-123' });
 
-		expect(resolveAgentId).toHaveBeenCalledWith('agent-123');
+		expect(resolveTargetSessionId).toHaveBeenCalledWith('agent-123');
 		expect(consoleSpy).toHaveBeenCalledWith(
 			expect.stringContaining('Auto-run configured with 2 documents')
 		);
@@ -101,7 +94,7 @@ describe('auto-run command', () => {
 
 	it('should send saveAsPlaybook when --save-as is provided', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 
 		let sentMessage: Record<string, unknown> | undefined;
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
@@ -129,7 +122,7 @@ describe('auto-run command', () => {
 
 	it('should send launch: true when --launch is provided', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 
 		let sentMessage: Record<string, unknown> | undefined;
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
@@ -156,7 +149,7 @@ describe('auto-run command', () => {
 
 	it('should send loop config when --loop is provided', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 
 		let sentMessage: Record<string, unknown> | undefined;
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
@@ -180,7 +173,7 @@ describe('auto-run command', () => {
 
 	it('should send loop config with --max-loops', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 
 		let sentMessage: Record<string, unknown> | undefined;
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
@@ -216,7 +209,7 @@ describe('auto-run command', () => {
 
 	it('should set resetOnCompletion on documents when flag is provided', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 
 		let sentMessage: Record<string, unknown> | undefined;
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
@@ -244,7 +237,7 @@ describe('auto-run command', () => {
 
 	it('should error gracefully when Maestro app is not running', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 		vi.mocked(withMaestroClient).mockRejectedValue(new Error('Maestro desktop app is not running'));
 
 		await autoRun(['/path/to/doc.md'], { agent: 'agent-123' });
@@ -255,9 +248,9 @@ describe('auto-run command', () => {
 		expect(processExitSpy).toHaveBeenCalledWith(1);
 	});
 
-	it('should use resolveAgentId when --agent is provided', async () => {
+	it('should resolve a partial agent id via resolveTargetSessionId when --agent is provided', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('full-agent-uuid-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('full-agent-uuid-123');
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
 			const mockClient = {
 				sendCommand: vi.fn().mockResolvedValue({
@@ -270,68 +263,316 @@ describe('auto-run command', () => {
 
 		await autoRun(['/path/to/doc.md'], { agent: 'full-ag' });
 
-		expect(resolveAgentId).toHaveBeenCalledWith('full-ag');
-		expect(resolveSessionId).not.toHaveBeenCalled();
+		expect(resolveTargetSessionId).toHaveBeenCalledWith('full-ag');
 		expect(consoleSpy).toHaveBeenCalledWith(
 			expect.stringContaining('Auto-run configured with 1 document')
 		);
 	});
 
-	it('should prefer --agent over --session when both provided', async () => {
+	it('should propagate resolution failures from resolveTargetSessionId', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-uuid-456');
-		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
-			const mockClient = {
-				sendCommand: vi.fn().mockResolvedValue({
-					type: 'configure_auto_run_result',
-					success: true,
-				}),
-			};
-			return action(mockClient as never);
-		});
-
-		await autoRun(['/path/to/doc.md'], { agent: 'agent-uuid', session: 'session-789' });
-
-		expect(resolveAgentId).toHaveBeenCalledWith('agent-uuid');
-		expect(resolveSessionId).not.toHaveBeenCalled();
-		// --session is still present, so deprecation warning should fire
-		expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('--session is deprecated'));
-	});
-
-	it('should show deprecation warning when --session is used', async () => {
-		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('session-123');
-		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
-			const mockClient = {
-				sendCommand: vi.fn().mockResolvedValue({
-					type: 'configure_auto_run_result',
-					success: true,
-				}),
-			};
-			return action(mockClient as never);
-		});
-
-		await autoRun(['/path/to/doc.md'], { session: 'session-123' });
-
-		expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('--session is deprecated'));
-		expect(resolveAgentId).toHaveBeenCalledWith('session-123');
-	});
-
-	it('should handle resolveAgentId throwing with clean error message', async () => {
-		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockImplementationOnce(() => {
+		// resolveTargetSessionId is the helper that owns the AGENT_NOT_FOUND
+		// branch + process.exit. Simulating it via mockImplementationOnce
+		// proves auto-run forwards the failure path without swallowing it.
+		vi.mocked(resolveTargetSessionId).mockImplementationOnce(() => {
 			throw new Error('Agent not found');
 		});
 
-		await autoRun(['/path/to/doc.md'], { agent: 'bad-id' });
+		await expect(autoRun(['/path/to/doc.md'], { agent: 'bad-id' })).rejects.toThrow(
+			'Agent not found'
+		);
+	});
 
-		expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Agent not found'));
+	it('should send worktree config when --worktree flags are provided', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		let sentMessage: Record<string, unknown> | undefined;
+		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
+			const mockClient = {
+				sendCommand: vi.fn().mockImplementation((msg) => {
+					sentMessage = msg;
+					return Promise.resolve({
+						type: 'configure_auto_run_result',
+						success: true,
+					});
+				}),
+			};
+			return action(mockClient as never);
+		});
+
+		await autoRun(['/path/to/doc.md'], {
+			agent: 'agent-123',
+			launch: true,
+			worktree: true,
+			branch: 'feature/auto',
+			worktreePath: '/tmp/wt',
+			createPr: true,
+			prTargetBranch: 'main',
+		});
+
+		expect(sentMessage).toBeDefined();
+		expect(sentMessage!.worktree).toEqual({
+			enabled: true,
+			path: path.resolve('/tmp/wt'),
+			branchName: 'feature/auto',
+			baseBranch: '', // --base-branch not supplied in this test
+			createPROnCompletion: true,
+			prTargetBranch: 'main',
+		});
+	});
+
+	it('should send baseBranch when --base-branch is provided', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		let sentMessage: Record<string, unknown> | undefined;
+		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
+			const mockClient = {
+				sendCommand: vi.fn().mockImplementation((msg) => {
+					sentMessage = msg;
+					return Promise.resolve({
+						type: 'configure_auto_run_result',
+						success: true,
+					});
+				}),
+			};
+			return action(mockClient as never);
+		});
+
+		await autoRun(['/path/to/doc.md'], {
+			agent: 'agent-123',
+			launch: true,
+			worktree: true,
+			branch: 'feature-from-rc',
+			baseBranch: 'rc',
+			worktreePath: '/tmp/wt',
+		});
+
+		expect(sentMessage).toBeDefined();
+		const wt = sentMessage!.worktree as Record<string, unknown>;
+		expect(wt.baseBranch).toBe('rc');
+		expect(wt.branchName).toBe('feature-from-rc');
+	});
+
+	it('should reject --base-branch without --worktree', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+		const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+			throw new Error('process.exit');
+		});
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		await expect(
+			autoRun(['/path/to/doc.md'], {
+				agent: 'agent-123',
+				baseBranch: 'rc',
+			})
+		).rejects.toThrow('process.exit');
+
+		expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('--base-branch'));
+		exitSpy.mockRestore();
+		errSpy.mockRestore();
+	});
+
+	it('should error when --worktree is used without --launch', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		await autoRun(['/path/to/doc.md'], {
+			agent: 'agent-123',
+			worktree: true,
+			branch: 'feature/x',
+			worktreePath: '/tmp/wt',
+		});
+
+		expect(consoleErrorSpy).toHaveBeenCalledWith(
+			expect.stringContaining('--worktree requires --launch')
+		);
 		expect(processExitSpy).toHaveBeenCalledWith(1);
+	});
+
+	it('should error when --worktree is used without --branch', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		await autoRun(['/path/to/doc.md'], {
+			agent: 'agent-123',
+			launch: true,
+			worktree: true,
+			worktreePath: '/tmp/wt',
+		});
+
+		expect(consoleErrorSpy).toHaveBeenCalledWith(
+			expect.stringContaining('--worktree requires --branch')
+		);
+		expect(processExitSpy).toHaveBeenCalledWith(1);
+	});
+
+	it('should error when --worktree is used without --worktree-path', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		await autoRun(['/path/to/doc.md'], {
+			agent: 'agent-123',
+			launch: true,
+			worktree: true,
+			branch: 'feature/x',
+		});
+
+		expect(consoleErrorSpy).toHaveBeenCalledWith(
+			expect.stringContaining('--worktree requires --worktree-path')
+		);
+		expect(processExitSpy).toHaveBeenCalledWith(1);
+	});
+
+	it('should error when worktree flags are provided without --worktree', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		await autoRun(['/path/to/doc.md'], {
+			agent: 'agent-123',
+			launch: true,
+			branch: 'feature/x',
+		});
+
+		expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('require --worktree'));
+		expect(processExitSpy).toHaveBeenCalledWith(1);
+	});
+
+	it('should omit worktree field when --worktree is not provided', async () => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+
+		let sentMessage: Record<string, unknown> | undefined;
+		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
+			const mockClient = {
+				sendCommand: vi.fn().mockImplementation((msg) => {
+					sentMessage = msg;
+					return Promise.resolve({
+						type: 'configure_auto_run_result',
+						success: true,
+					});
+				}),
+			};
+			return action(mockClient as never);
+		});
+
+		await autoRun(['/path/to/doc.md'], { agent: 'agent-123', launch: true });
+
+		expect(sentMessage).toBeDefined();
+		expect(sentMessage!.worktree).toBeUndefined();
+	});
+
+	describe('per-run model/effort override', () => {
+		/**
+		 * Wire up a client whose sendCommand captures the outgoing message, so a
+		 * test can assert on the `configure_auto_run` payload the CLI ships.
+		 */
+		const captureSentMessage = (): (() => Record<string, unknown> | undefined) => {
+			let sentMessage: Record<string, unknown> | undefined;
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
+			vi.mocked(withMaestroClient).mockImplementation(async (action) => {
+				const mockClient = {
+					sendCommand: vi.fn().mockImplementation((msg) => {
+						sentMessage = msg;
+						return Promise.resolve({
+							type: 'configure_auto_run_result',
+							success: true,
+						});
+					}),
+				};
+				return action(mockClient as never);
+			});
+			return () => sentMessage;
+		};
+
+		it('should send model and effort when --model and --effort are provided', async () => {
+			const getSent = captureSentMessage();
+
+			await autoRun(['/path/to/doc.md'], {
+				agent: 'agent-123',
+				launch: true,
+				model: 'opus',
+				effort: 'high',
+			});
+
+			const sentMessage = getSent();
+			expect(sentMessage).toBeDefined();
+			expect(sentMessage!.model).toBe('opus');
+			expect(sentMessage!.effort).toBe('high');
+		});
+
+		it('should omit model and effort entirely when the flags are not provided', async () => {
+			const getSent = captureSentMessage();
+
+			await autoRun(['/path/to/doc.md'], { agent: 'agent-123', launch: true });
+
+			const sentMessage = getSent();
+			expect(sentMessage).toBeDefined();
+			// Absent (not `undefined`) so an unset flag never serializes across the
+			// WebSocket boundary and the agent default stays in effect.
+			expect('model' in sentMessage!).toBe(false);
+			expect('effort' in sentMessage!).toBe(false);
+		});
+
+		it('should send ignoreModelHints when --ignore-model-hints is given', async () => {
+			const getSent = captureSentMessage();
+
+			await autoRun(['/path/to/doc.md'], {
+				agent: 'agent-123',
+				launch: true,
+				model: 'opus',
+				ignoreModelHints: true,
+			});
+
+			expect(getSent()!.ignoreModelHints).toBe(true);
+		});
+
+		it('should omit ignoreModelHints entirely when the flag is not given', async () => {
+			const getSent = captureSentMessage();
+
+			await autoRun(['/path/to/doc.md'], { agent: 'agent-123', launch: true });
+
+			expect('ignoreModelHints' in getSent()!).toBe(false);
+		});
+
+		it('should treat whitespace-only --model/--effort as unset', async () => {
+			const getSent = captureSentMessage();
+
+			await autoRun(['/path/to/doc.md'], {
+				agent: 'agent-123',
+				launch: true,
+				model: '   ',
+				effort: '\t',
+			});
+
+			const sentMessage = getSent();
+			expect(sentMessage).toBeDefined();
+			expect('model' in sentMessage!).toBe(false);
+			expect('effort' in sentMessage!).toBe(false);
+		});
+
+		it('should send model without effort when only --model is provided', async () => {
+			const getSent = captureSentMessage();
+
+			await autoRun(['/path/to/doc.md'], {
+				agent: 'agent-123',
+				launch: true,
+				model: 'sonnet',
+			});
+
+			const sentMessage = getSent();
+			expect(sentMessage).toBeDefined();
+			expect(sentMessage!.model).toBe('sonnet');
+			expect('effort' in sentMessage!).toBe(false);
+		});
 	});
 
 	it('should error when server returns failure', async () => {
 		vi.mocked(existsSync).mockReturnValue(true);
-		vi.mocked(resolveAgentId).mockReturnValue('agent-123');
+		vi.mocked(resolveTargetSessionId).mockReturnValue('agent-123');
 		vi.mocked(withMaestroClient).mockImplementation(async (action) => {
 			const mockClient = {
 				sendCommand: vi.fn().mockResolvedValue({

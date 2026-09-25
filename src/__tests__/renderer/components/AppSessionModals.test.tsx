@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { AppSessionModals } from '../../../renderer/components/AppModals';
 import type { Theme, Session } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
 // Mock all child modal components
 vi.mock('../../../renderer/components/NewInstanceModal', () => ({
@@ -35,7 +36,11 @@ vi.mock('../../../renderer/components/NewAgentChoiceModal', () => ({
 vi.mock('../../../renderer/utils/terminalTabHelpers', () => ({
 	getTerminalTabDisplayName: vi.fn(() => 'Terminal 1'),
 }));
-vi.mock('../../../renderer/stores/modalStore', () => {
+// Spread the real module so a new modalStore export cannot break this mock at
+// import time. `fileExplorerStore` calls `registerExternalDestination` at module
+// scope, and a factory mock that omits it throws before any test runs.
+vi.mock('../../../renderer/stores/modalStore', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../../../renderer/stores/modalStore')>();
 	const store = {
 		getState: () => ({
 			modals: new Map(),
@@ -47,8 +52,10 @@ vi.mock('../../../renderer/stores/modalStore', () => {
 		destroy: vi.fn(),
 	};
 	return {
+		...actual,
 		useModalStore: Object.assign((selector: any) => selector(store.getState()), store),
 		selectModalOpen: (id: string) => (state: any) => state.modals.get(id)?.open ?? false,
+		selectModalData: (id: string) => (state: any) => state.modals.get(id)?.data,
 		getModalActions: () => ({
 			setNewInstanceModalOpen: vi.fn(),
 			setDeleteAgentSession: vi.fn(),
@@ -76,17 +83,7 @@ const testTheme: Theme = {
 };
 
 function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: 'session-1',
-		name: 'Agent 1',
-		state: 'idle',
-		toolType: 'claude-code',
-		cwd: '/tmp',
-		terminalTabs: [],
-		activeTerminalTabId: null,
-		aiTabs: [],
-		...overrides,
-	} as Session;
+	return baseCreateMockSession({ name: 'Agent 1', cwd: '/tmp', ...overrides });
 }
 
 const defaultProps = {

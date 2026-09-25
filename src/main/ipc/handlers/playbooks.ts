@@ -4,7 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { createWriteStream } from 'fs';
 import archiver from 'archiver';
-import AdmZip from 'adm-zip';
+import { readZipArchive } from '../../utils/zip-archive';
 import { logger } from '../../utils/logger';
 import { createIpcHandler, CreateHandlerOptions } from '../../utils/ipcHandler';
 
@@ -98,7 +98,9 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 					name: string;
 					documents: any[];
 					loopEnabled: boolean;
+					maxLoops?: number | null;
 					prompt: string;
+					taskSelectionMode?: 'task' | 'document';
 					worktreeSettings?: {
 						branchNameTemplate: string;
 						createPROnCompletion: boolean;
@@ -117,7 +119,9 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 					updatedAt: number;
 					documents: any[];
 					loopEnabled: boolean;
+					maxLoops?: number | null;
 					prompt: string;
+					taskSelectionMode?: 'task' | 'document';
 					worktreeSettings?: {
 						branchNameTemplate: string;
 						createPROnCompletion: boolean;
@@ -130,7 +134,9 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 					updatedAt: now,
 					documents: playbook.documents,
 					loopEnabled: playbook.loopEnabled,
+					maxLoops: playbook.maxLoops,
 					prompt: playbook.prompt,
+					taskSelectionMode: playbook.taskSelectionMode,
 				};
 
 				// Include worktree settings if provided
@@ -160,7 +166,9 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 					name: string;
 					documents: any[];
 					loopEnabled: boolean;
+					maxLoops?: number | null;
 					prompt: string;
+					taskSelectionMode?: 'task' | 'document';
 					updatedAt: number;
 					worktreeSettings?: {
 						branchNameTemplate: string;
@@ -291,6 +299,7 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 					loopEnabled: playbook.loopEnabled,
 					maxLoops: playbook.maxLoops,
 					prompt: playbook.prompt,
+					taskSelectionMode: playbook.taskSelectionMode,
 					worktreeSettings: playbook.worktreeSettings,
 					exportedAt: Date.now(),
 				};
@@ -371,8 +380,7 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 
 				const zipPath = result.filePaths[0];
 
-				// Read ZIP file
-				const zip = new AdmZip(zipPath);
+				const zip = readZipArchive(zipPath);
 				const zipEntries = zip.getEntries();
 
 				// Find and parse manifest
@@ -435,6 +443,7 @@ export function registerPlaybooksHandlers(deps: PlaybooksHandlerDependencies): v
 					loopEnabled: manifest.loopEnabled ?? false,
 					maxLoops: manifest.maxLoops,
 					prompt: manifest.prompt || '',
+					taskSelectionMode: manifest.taskSelectionMode,
 					worktreeSettings: manifest.worktreeSettings,
 				};
 

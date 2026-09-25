@@ -16,10 +16,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { AutoRunExpandedModal } from '../../../renderer/components/AutoRun/AutoRunExpandedModal';
 import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
+import { useBatchStore } from '../../../renderer/stores/batchStore';
 import type { Theme, BatchRunState, SessionState, Shortcut } from '../../../renderer/types';
 import { formatShortcutKeys } from '../../../renderer/utils/shortcutFormatter';
 
+import { createMockTheme } from '../../helpers/mockTheme';
+
 // Mock createPortal to render in same container
+// CodeMirror cannot lay itself out in jsdom, so the Auto Run source editor is
+// swapped for the shared textarea double (it still implements the editor handle).
+vi.mock('../../../renderer/components/FilePreview/markdownEditor', async () => {
+	const { markdownEditorModuleMock } = await import('../../helpers/mockMarkdownEditor');
+	return markdownEditorModuleMock();
+});
+
 vi.mock('react-dom', async () => {
 	const actual = await vi.importActual('react-dom');
 	return {
@@ -102,6 +112,7 @@ vi.mock('../../../renderer/components/AutoRun/AutoRun', () => ({
 				<span data-testid="autorun-mode">{props.mode}</span>
 				<span data-testid="autorun-content">{props.content}</span>
 				<span data-testid="autorun-hidetopcontrols">{String(props.hideTopControls)}</span>
+				<span data-testid="autorun-showlinenumbers">{String(props.showLineNumbers)}</span>
 				<textarea
 					data-testid="autorun-textarea"
 					value={props.content}
@@ -125,28 +136,6 @@ vi.mock('../../../renderer/utils/shortcutFormatter', () => ({
 	}),
 	isMacOS: vi.fn(() => false),
 }));
-
-// Create a mock theme for testing
-const createMockTheme = (): Theme => ({
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgSidebar: '#252525',
-		bgPanel: '#2d2d2d',
-		bgActivity: '#333333',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		highlight: '#0066ff33',
-		success: '#00aa00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-	},
-});
 
 // Default props for AutoRunExpandedModal
 const createDefaultProps = (
@@ -212,6 +201,13 @@ describe('AutoRunExpandedModal', () => {
 			renderWithProvider(<AutoRunExpandedModal {...props} />);
 
 			expect(screen.getByTestId('autorun-hidetopcontrols')).toHaveTextContent('true');
+		});
+
+		it('should pass showLineNumbers=true to AutoRun (the expanded view has room for a gutter)', () => {
+			const props = createDefaultProps();
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			expect(screen.getByTestId('autorun-showlinenumbers')).toHaveTextContent('true');
 		});
 
 		it('should render Edit button', () => {
@@ -440,6 +436,50 @@ describe('AutoRunExpandedModal', () => {
 			const previewButton = screen.getByRole('button', { name: /preview/i });
 			expect(previewButton).toHaveClass('font-medium');
 		});
+
+		// A paused run is alive but idle: it is waiting on the user to fix an
+		// agent error or answer a MAESTRO:HITL gate, and answering usually means
+		// editing the document. `errorPaused` reaches the modal through the store,
+		// not the prop chain, so the state has to be seeded there.
+		describe('Paused run', () => {
+			const renderPaused = (
+				overrides: Partial<React.ComponentProps<typeof AutoRunExpandedModal>> = {}
+			) => {
+				const props = createDefaultProps({
+					batchRunState: { isRunning: true, isStopping: false } as BatchRunState,
+					...overrides,
+				});
+				useBatchStore.setState({
+					batchRunStates: {
+						[props.sessionId]: {
+							isRunning: true,
+							isStopping: false,
+							errorPaused: true,
+						} as BatchRunState,
+					},
+				});
+				renderWithProvider(<AutoRunExpandedModal {...props} />);
+				return props;
+			};
+
+			afterEach(() => {
+				useBatchStore.setState({ batchRunStates: {} });
+			});
+
+			it('should re-enable the Edit button while paused', () => {
+				renderPaused();
+
+				expect(screen.queryByTitle('Editing disabled while Auto Run active')).toBeNull();
+				expect(screen.getByTitle('Edit document')).toBeEnabled();
+			});
+
+			it('should still offer Stop while paused - a paused run is stoppable', () => {
+				renderPaused();
+
+				expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
+				expect(screen.queryByRole('button', { name: /^run$/i })).toBeNull();
+			});
+		});
 	});
 
 	describe('Dirty State and Save/Revert', () => {
@@ -507,7 +547,9 @@ describe('AutoRunExpandedModal', () => {
 			expect(autoRunRefMethods.revert).toHaveBeenCalled();
 		});
 
-		it('should not show Save/Revert in preview mode even if dirty', async () => {
+		it('should show Save/Revert in preview mode when dirty', async () => {
+			// Save/Revert is mode-agnostic so users editing in the source pane
+			// can still confirm a save from the preview pane without flipping back.
 			autoRunRefMethods.isDirty.mockReturnValue(true);
 
 			const props = createDefaultProps({ mode: 'preview' });
@@ -518,7 +560,8 @@ describe('AutoRunExpandedModal', () => {
 				vi.advanceTimersByTime(200);
 			});
 
-			expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument();
+			expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument();
+			expect(screen.getByRole('button', { name: /revert/i })).toBeInTheDocument();
 		});
 
 		it('should not show Save/Revert when locked even if dirty', async () => {
@@ -638,8 +681,8 @@ describe('AutoRunExpandedModal', () => {
 			const shortcuts: Record<string, Shortcut> = {
 				toggleAutoRunExpanded: {
 					id: 'toggleAutoRunExpanded',
-					name: 'Toggle Auto Run Expanded',
-					keys: ['Meta', 'Shift', 'A'],
+					name: 'Auto Run Expanded Preview',
+					keys: ['Meta', 'Shift', 'e'],
 				},
 			};
 
@@ -649,7 +692,7 @@ describe('AutoRunExpandedModal', () => {
 			const collapseButton = screen.getByRole('button', { name: /collapse/i });
 			expect(collapseButton).toHaveAttribute(
 				'title',
-				`Collapse (${formatShortcutKeys(['Meta', 'Shift', 'A'])})`
+				`Collapse (${formatShortcutKeys(['Meta', 'Shift', 'e'])})`
 			);
 		});
 
@@ -722,20 +765,20 @@ describe('AutoRunExpandedModal', () => {
 			expect(overlay).toHaveStyle({ backgroundColor: 'rgba(0,0,0,0.7)' });
 		});
 
-		it('should have 90vw width and 80vh height', () => {
+		it('should render a resizable modal shell', () => {
 			const props = createDefaultProps();
 			const { container } = renderWithProvider(<AutoRunExpandedModal {...props} />);
 
-			const modal = container.querySelector('.w-\\[90vw\\].h-\\[80vh\\]');
+			const modal = container.querySelector('[data-modal-resize-key="auto-run-expanded"]');
 			expect(modal).toBeInTheDocument();
 		});
 
-		it('should have max-w-5xl class', () => {
+		it('should clamp the resizable shell to the modal viewport ceiling', () => {
 			const props = createDefaultProps();
 			const { container } = renderWithProvider(<AutoRunExpandedModal {...props} />);
 
-			const modal = container.querySelector('.max-w-5xl');
-			expect(modal).toBeInTheDocument();
+			const modal = container.querySelector('[data-modal-resize-key="auto-run-expanded"]');
+			expect(modal).toHaveStyle({ maxWidth: '90vw', maxHeight: '90vh' });
 		});
 
 		it('should have rounded corners and border', () => {
@@ -921,6 +964,118 @@ describe('AutoRunExpandedModal', () => {
 			const shortcutHint = container.querySelector('span.opacity-0.group-hover\\:opacity-100');
 			expect(shortcutHint).toBeInTheDocument();
 			expect(shortcutHint).toHaveTextContent(formatShortcutKeys(['Meta', 's']));
+		});
+	});
+	describe('Cmd+E is claimed by the modal', () => {
+		/**
+		 * The bug: a second, fully mounted AutoRun lives in the right panel behind
+		 * this modal. The component's own React onKeyDown only fires when focus is
+		 * inside its subtree, so whenever focus was elsewhere (the body after a
+		 * nested dialog closed, a toolbar button) Cmd+E sailed past both AutoRuns
+		 * and reached the global handler, which toggled the main panel's markdown
+		 * mode. The modal looked like it ignored its own shortcut while something
+		 * changed behind it.
+		 */
+		function pressCmdE(target: EventTarget = document.body, init: KeyboardEventInit = {}) {
+			const event = new KeyboardEvent('keydown', {
+				key: 'e',
+				metaKey: true,
+				bubbles: true,
+				cancelable: true,
+				...init,
+			});
+			const preventDefault = vi.spyOn(event, 'preventDefault');
+			const stopPropagation = vi.spyOn(event, 'stopPropagation');
+			act(() => {
+				target.dispatchEvent(event);
+			});
+			return { event, preventDefault, stopPropagation };
+		}
+
+		it('toggles the modal from edit to preview', () => {
+			const props = createDefaultProps({ mode: 'edit' });
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			pressCmdE();
+
+			expect(autoRunRefMethods.switchMode).toHaveBeenCalledWith('preview');
+		});
+
+		it('toggles back from preview to edit', () => {
+			const props = createDefaultProps({ mode: 'preview' });
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			pressCmdE();
+
+			expect(autoRunRefMethods.switchMode).toHaveBeenCalledWith('edit');
+		});
+
+		it('handles the key even when focus is on the body', () => {
+			// This is the exact condition the old focus-scoped handler missed.
+			const props = createDefaultProps();
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+			(document.activeElement as HTMLElement | null)?.blur();
+
+			pressCmdE(document.body);
+
+			expect(autoRunRefMethods.switchMode).toHaveBeenCalled();
+		});
+
+		it('stops the event so nothing behind the modal sees it', () => {
+			const props = createDefaultProps();
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			const { preventDefault, stopPropagation } = pressCmdE();
+
+			expect(preventDefault).toHaveBeenCalled();
+			expect(stopPropagation).toHaveBeenCalled();
+		});
+
+		it('still swallows the key while locked, without toggling', () => {
+			// Editing is disabled during a run, but letting the key through would
+			// toggle the panel behind us - which is the leak being closed.
+			const props = createDefaultProps({
+				batchRunState: { isRunning: true } as BatchRunState,
+			});
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			const { preventDefault, stopPropagation } = pressCmdE();
+
+			expect(autoRunRefMethods.switchMode).not.toHaveBeenCalled();
+			expect(preventDefault).toHaveBeenCalled();
+			expect(stopPropagation).toHaveBeenCalled();
+		});
+
+		it('leaves Cmd+Shift+E alone - that is a different shortcut', () => {
+			const props = createDefaultProps();
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			const { stopPropagation } = pressCmdE(document.body, { shiftKey: true });
+
+			expect(autoRunRefMethods.switchMode).not.toHaveBeenCalled();
+			expect(stopPropagation).not.toHaveBeenCalled();
+		});
+
+		it('leaves Alt+Cmd+E alone - that is the image annotator', () => {
+			const props = createDefaultProps();
+			renderWithProvider(<AutoRunExpandedModal {...props} />);
+
+			const { stopPropagation } = pressCmdE(document.body, { altKey: true });
+
+			expect(autoRunRefMethods.switchMode).not.toHaveBeenCalled();
+			expect(stopPropagation).not.toHaveBeenCalled();
+		});
+
+		it('releases the key once the modal unmounts', () => {
+			// A listener that outlived the modal would break Cmd+E everywhere else.
+			const props = createDefaultProps();
+			const { unmount } = renderWithProvider(<AutoRunExpandedModal {...props} />);
+			unmount();
+
+			const { stopPropagation } = pressCmdE();
+
+			expect(autoRunRefMethods.switchMode).not.toHaveBeenCalled();
+			expect(stopPropagation).not.toHaveBeenCalled();
 		});
 	});
 });

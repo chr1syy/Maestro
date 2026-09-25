@@ -1,10 +1,31 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QuickActionsModal } from '../../../renderer/components/QuickActionsModal';
+import { useModalStore } from '../../../renderer/stores/modalStore';
 import { formatShortcutKeys } from '../../../renderer/utils/shortcutFormatter';
 import type { Session, Group, Theme, Shortcut } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 import { useUIStore } from '../../../renderer/stores/uiStore';
+import { useSessionStore } from '../../../renderer/stores/sessionStore';
+import { useCenterFlashStore } from '../../../renderer/stores/centerFlashStore';
 import { useFileExplorerStore } from '../../../renderer/stores/fileExplorerStore';
+import { useGroupChatStore } from '../../../renderer/stores/groupChatStore';
+import { mockTheme } from '../../helpers/mockTheme';
+import { Z_LAYERS } from '../../../renderer/constants/zLayers';
+
+/**
+ * The action rows, in render order. Scoped to `[data-action-label]` rather than
+ * `getAllByRole('button')` because the header also renders buttons (the ESC
+ * close pill), and an index into every button on screen breaks the moment one
+ * is added.
+ */
+function getActionRows(): HTMLElement[] {
+	return Array.from(document.querySelectorAll<HTMLElement>('[data-action-label]')).map(
+		(label) => label.closest('button') as HTMLElement
+	);
+}
+
 // Add missing window.maestro.devtools and debug mocks
 beforeAll(() => {
 	(window.maestro as any).devtools = {
@@ -63,8 +84,23 @@ vi.mock('../../../renderer/services/git', () => ({
 	},
 }));
 
+const refreshGitStatusMock = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../../renderer/contexts/GitStatusContext', () => ({
+	useGitDetail: () => ({
+		getFileDetails: () => undefined,
+		refreshGitStatus: refreshGitStatusMock,
+	}),
+	// useGitAgentActions (which now backs the palette's git entries) reads
+	// polled branch state from here.
+	useGitBranch: () => ({
+		getBranchInfo: () => ({ branch: 'main', remote: '', ahead: 0, behind: 0 }),
+	}),
+	useGitFileStatus: () => ({ getFileCount: () => 0 }),
+}));
+
 vi.mock('../../../renderer/utils/shortcutFormatter', () => ({
 	formatShortcutKeys: vi.fn((keys: string[]) => keys.join('+')),
+	formatMetaKey: vi.fn(() => 'Ctrl'),
 	isMacOS: vi.fn(() => false),
 }));
 
@@ -74,26 +110,6 @@ vi.mock('lucide-react', () => ({
 }));
 
 // Create mock theme
-const mockTheme: Theme = {
-	id: 'dark',
-	name: 'Dark',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a2e',
-		bgSidebar: '#16213e',
-		bgActivity: '#0f3460',
-		bgTerminal: '#1a1a2e',
-		textMain: '#eaeaea',
-		textDim: '#888',
-		accent: '#e94560',
-		accentForeground: '#ffffff',
-		error: '#ff6b6b',
-		border: '#333',
-		success: '#4ecdc4',
-		warning: '#ffd93d',
-		terminalCursor: '#e94560',
-	},
-};
 
 // Create mock shortcuts
 const mockShortcuts: Record<string, Shortcut> = {
@@ -112,32 +128,26 @@ const mockShortcuts: Record<string, Shortcut> = {
 	toggleMarkdownMode: { id: 'toggleMarkdownMode', keys: ['Cmd', 'M'], enabled: true },
 	createDebugPackage: { id: 'createDebugPackage', keys: ['Alt', 'Cmd', 'D'], enabled: true },
 	nextUnreadTab: { id: 'nextUnreadTab', keys: ['Alt', 'Meta', 'ArrowDown'], enabled: true },
+	previousUnreadTab: { id: 'previousUnreadTab', keys: [], enabled: true },
+	focusActiveTab: { id: 'focusActiveTab', keys: ['Alt', 'Meta', 'ArrowUp'], enabled: true },
+	navBack: { id: 'navBack', keys: ['Meta', 'Shift', ','], enabled: true },
+	navForward: { id: 'navForward', keys: ['Meta', 'Shift', '.'], enabled: true },
 };
 
-// Create mock session
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: 'session-1',
-	name: 'Test Session',
-	toolType: 'claude-code',
-	state: 'idle',
-	inputMode: 'ai',
-	cwd: '/home/user/project',
-	projectRoot: '/home/user/project',
-	aiPid: 1234,
-	terminalPid: 5678,
-	aiLogs: [],
-	shellLogs: [],
-	isGitRepo: true,
-	fileTree: [],
-	fileExplorerExpanded: [],
-	messageQueue: [],
-	aiTabs: [{ id: 'tab-1', name: 'Tab 1', logs: [] }],
-	activeTabId: 'tab-1',
-	closedTabHistory: [],
-	terminalTabs: [],
-	activeTerminalTabId: null,
-	...overrides,
-});
+// Thin wrapper: pre-populates an AI tab so the quick actions modal has
+// a tab to show in its menu.
+const createMockSession = (overrides: Partial<Session> = {}): Session =>
+	baseCreateMockSession({
+		cwd: '/home/user/project',
+		fullPath: '/home/user/project',
+		projectRoot: '/home/user/project',
+		aiPid: 1234,
+		terminalPid: 5678,
+		isGitRepo: true,
+		aiTabs: [{ id: 'tab-1', name: 'Tab 1', logs: [] }] as any,
+		activeTabId: 'tab-1',
+		...overrides,
+	});
 
 // Create mock group
 const createMockGroup = (overrides: Partial<Group> = {}): Group => ({
@@ -167,6 +177,8 @@ const createDefaultProps = (
 	setRenameGroupId: vi.fn(),
 	setRenameGroupValue: vi.fn(),
 	setRenameGroupEmoji: vi.fn(),
+	setRenameGroupIcon: vi.fn(),
+	setRenameGroupColor: vi.fn(),
 	setCreateGroupModalOpen: vi.fn(),
 	setLeftSidebarOpen: vi.fn(),
 	setRightPanelOpen: vi.fn(),
@@ -196,10 +208,22 @@ describe('QuickActionsModal', () => {
 			historySearchFilterOpen: false,
 			outputSearchOpen: false,
 			activeFocus: 'main',
+			showUnreadOnly: false,
+			showUnreadAgentsOnly: false,
 		});
 		// Reset fileExplorerStore state
 		useFileExplorerStore.setState({
 			fileTreeFilterOpen: false,
+		});
+		// The reveal half of a jump reads agents and groups straight from the
+		// session store (services/agentNavigation), not from props.
+		useSessionStore.setState({ sessions: [], groups: [] } as never);
+		// Reset group chat run state (drives the jumper's LIVE bucket)
+		useGroupChatStore.setState({
+			groupChatState: 'idle',
+			participantStates: new Map(),
+			groupChatStates: new Map(),
+			allGroupChatParticipantStates: new Map(),
 		});
 	});
 
@@ -306,6 +330,64 @@ describe('QuickActionsModal', () => {
 			).toBeInTheDocument();
 		});
 
+		it('renders Previous Unread Tab with the chord that actually reaches it', () => {
+			// previousUnreadTab ships unbound, so the entry borrows the Focus
+			// Active Tab chord - a second press of it is what fires this action.
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Previous Unread / Draft Tab')).toBeInTheDocument();
+			expect(
+				screen.getByText(formatShortcutKeys(mockShortcuts.focusActiveTab.keys))
+			).toBeInTheDocument();
+		});
+
+		it('names the state the Unread Only entry puts you in, not the one you are in', () => {
+			const props = createDefaultProps();
+			const { unmount } = render(<QuickActionsModal {...props} />);
+			expect(screen.getByText('Unread Only: On')).toBeInTheDocument();
+			unmount();
+
+			// Both filters on - the entry now offers the way back out.
+			useUIStore.setState({ showUnreadOnly: true, showUnreadAgentsOnly: true });
+			render(<QuickActionsModal {...props} />);
+			expect(screen.getByText('Unread Only: Off')).toBeInTheDocument();
+		});
+
+		it('drives both unread filters from the Unread Only entry', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Unread Only: On'));
+
+			const { showUnreadOnly, showUnreadAgentsOnly } = useUIStore.getState();
+			expect(showUnreadOnly).toBe(true);
+			expect(showUnreadAgentsOnly).toBe(true);
+		});
+
+		it('renders Navigate Back / Forward actions with shortcuts when handlers provided', () => {
+			const props = createDefaultProps({
+				onNavBack: vi.fn(),
+				onNavForward: vi.fn(),
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Navigate Back')).toBeInTheDocument();
+			expect(screen.getByText('Navigate Forward')).toBeInTheDocument();
+			expect(screen.getByText(formatShortcutKeys(mockShortcuts.navBack.keys))).toBeInTheDocument();
+			expect(
+				screen.getByText(formatShortcutKeys(mockShortcuts.navForward.keys))
+			).toBeInTheDocument();
+		});
+
+		it('omits Navigate Back / Forward actions when handlers are absent', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.queryByText('Navigate Back')).not.toBeInTheDocument();
+			expect(screen.queryByText('Navigate Forward')).not.toBeInTheDocument();
+		});
+
 		it('renders Settings action', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
@@ -328,6 +410,22 @@ describe('QuickActionsModal', () => {
 
 			expect(screen.getByText('BUSY')).toBeInTheDocument();
 		});
+
+		it('does not render Clear All Bookmarks when no sessions are bookmarked', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.queryByText('Clear All Bookmarks')).not.toBeInTheDocument();
+		});
+
+		it('renders Clear All Bookmarks when at least one session is bookmarked', () => {
+			const props = createDefaultProps({
+				sessions: [createMockSession({ bookmarked: true })],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Clear All Bookmarks')).toBeInTheDocument();
+		});
 	});
 
 	describe('Session actions', () => {
@@ -341,21 +439,71 @@ describe('QuickActionsModal', () => {
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
 
-		it('auto-expands collapsed group when jumping to session in group', () => {
+		it('auto-expands collapsed group when jumping to non-bookmarked session in group', () => {
 			const session = createMockSession({ groupId: 'group-1' });
 			const group = createMockGroup({ collapsed: true });
 			const props = createDefaultProps({
 				sessions: [session],
 				groups: [group],
 			});
+			useSessionStore.setState({ sessions: [session], groups: [group] } as never);
 			render(<QuickActionsModal {...props} />);
 
 			fireEvent.click(screen.getByText('Jump to: Test Session'));
 
-			expect(props.setGroups).toHaveBeenCalled();
-			const setGroupsFn = props.setGroups.mock.calls[0][0];
-			const result = setGroupsFn([group]);
-			expect(result[0].collapsed).toBe(false);
+			expect(useSessionStore.getState().groups[0].collapsed).toBe(false);
+		});
+
+		describe('bookmarked-agent jump routing', () => {
+			it('expands the bookmarks section (not the group) when both are collapsed', () => {
+				useUIStore.setState({ bookmarksCollapsed: true });
+
+				const session = createMockSession({ groupId: 'group-1', bookmarked: true });
+				const group = createMockGroup({ collapsed: true });
+				const props = createDefaultProps({ sessions: [session], groups: [group] });
+				useSessionStore.setState({ sessions: [session], groups: [group] } as never);
+				render(<QuickActionsModal {...props} />);
+
+				fireEvent.click(screen.getByText('Jump to: Test Session'));
+
+				expect(props.setActiveSessionId).toHaveBeenCalledWith('session-1');
+				expect(useUIStore.getState().bookmarksCollapsed).toBe(false);
+				// The group stays collapsed - the bookmark row is the lighter reveal.
+				expect(useSessionStore.getState().groups[0].collapsed).toBe(true);
+			});
+
+			it('leaves bookmarks collapsed when the parent group is already expanded', () => {
+				useUIStore.setState({ bookmarksCollapsed: true });
+
+				const session = createMockSession({ groupId: 'group-1', bookmarked: true });
+				const group = createMockGroup({ collapsed: false });
+				const props = createDefaultProps({ sessions: [session], groups: [group] });
+				useSessionStore.setState({ sessions: [session], groups: [group] } as never);
+				render(<QuickActionsModal {...props} />);
+
+				fireEvent.click(screen.getByText('Jump to: Test Session'));
+
+				expect(props.setActiveSessionId).toHaveBeenCalledWith('session-1');
+				expect(useUIStore.getState().bookmarksCollapsed).toBe(true);
+				expect(useSessionStore.getState().groups[0].collapsed).toBe(false);
+			});
+
+			it('does nothing extra when bookmarks section is already expanded', () => {
+				useUIStore.setState({ bookmarksCollapsed: false });
+
+				const session = createMockSession({ groupId: 'group-1', bookmarked: true });
+				const group = createMockGroup({ collapsed: true });
+				const props = createDefaultProps({ sessions: [session], groups: [group] });
+				useSessionStore.setState({ sessions: [session], groups: [group] } as never);
+				render(<QuickActionsModal {...props} />);
+
+				fireEvent.click(screen.getByText('Jump to: Test Session'));
+
+				expect(props.setActiveSessionId).toHaveBeenCalledWith('session-1');
+				expect(useUIStore.getState().bookmarksCollapsed).toBe(false);
+				// The group stays collapsed - the bookmark row is the lighter reveal.
+				expect(useSessionStore.getState().groups[0].collapsed).toBe(true);
+			});
 		});
 
 		it('handles Create New Agent action', () => {
@@ -408,6 +556,28 @@ describe('QuickActionsModal', () => {
 			expect(props.setRightPanelOpen).toHaveBeenCalled();
 		});
 
+		it('handles Navigate Back action', () => {
+			const onNavBack = vi.fn();
+			const props = createDefaultProps({ onNavBack });
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Navigate Back'));
+
+			expect(onNavBack).toHaveBeenCalled();
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('handles Navigate Forward action', () => {
+			const onNavForward = vi.fn();
+			const props = createDefaultProps({ onNavForward });
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Navigate Forward'));
+
+			expect(onNavForward).toHaveBeenCalled();
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
 		it('handles Switch AI/Shell Mode action', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
@@ -415,6 +585,20 @@ describe('QuickActionsModal', () => {
 			fireEvent.click(screen.getByText('Switch AI/Shell Mode'));
 
 			expect(props.toggleInputMode).toHaveBeenCalled();
+		});
+
+		it('toggles Bionify Emphasis globally', async () => {
+			const { useSettingsStore } = await import('../../../renderer/stores/settingsStore');
+			useSettingsStore.setState({ bionifyReadingMode: false });
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Turn On Bionify Emphasis'));
+
+			expect(useSettingsStore.getState().bionifyReadingMode).toBe(true);
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+
+			useSettingsStore.setState({ bionifyReadingMode: false });
 		});
 	});
 
@@ -522,7 +706,7 @@ describe('QuickActionsModal', () => {
 			render(<QuickActionsModal {...props} />);
 
 			expect(screen.getByText('Search: Agents')).toBeInTheDocument();
-			expect(screen.getByText('Search: Message History')).toBeInTheDocument();
+			expect(screen.getByText('Search: Messages (This Tab)')).toBeInTheDocument();
 			expect(screen.getByText('Search: Files')).toBeInTheDocument();
 			expect(screen.getByText('Search: History')).toBeInTheDocument();
 		});
@@ -545,18 +729,18 @@ describe('QuickActionsModal', () => {
 			vi.useRealTimers();
 		});
 
-		it('handles Search: Message History action', async () => {
+		it('handles Search: Messages (This Tab) action', async () => {
 			vi.useFakeTimers();
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('Search: Message History'));
+			fireEvent.click(screen.getByText('Search: Messages (This Tab)'));
 
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 			expect(useUIStore.getState().activeFocus).toBe('main');
 
 			vi.advanceTimersByTime(50);
-			expect(useUIStore.getState().outputSearchOpen).toBe(true);
+			expect(useUIStore.getState().outputSearchByKey['session-1::tab-1']?.open).toBe(true);
 
 			vi.useRealTimers();
 		});
@@ -605,7 +789,7 @@ describe('QuickActionsModal', () => {
 			fireEvent.change(input, { target: { value: 'search' } });
 
 			expect(screen.getByText('Search: Agents')).toBeInTheDocument();
-			expect(screen.getByText('Search: Message History')).toBeInTheDocument();
+			expect(screen.getByText('Search: Messages (This Tab)')).toBeInTheDocument();
 			expect(screen.getByText('Search: Files')).toBeInTheDocument();
 			expect(screen.getByText('Search: History')).toBeInTheDocument();
 		});
@@ -616,9 +800,9 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.getByText('View Git Diff')).toBeInTheDocument();
-			expect(screen.getByText('View Git Log')).toBeInTheDocument();
-			expect(screen.getByText('Open Repository in Browser')).toBeInTheDocument();
+			expect(screen.getByText('Git: View Diff')).toBeInTheDocument();
+			expect(screen.getByText('Git: View Log')).toBeInTheDocument();
+			expect(screen.getByText('Git: Open Repository in Browser')).toBeInTheDocument();
 		});
 
 		it('does not render git actions for non-git repo', () => {
@@ -627,8 +811,8 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.queryByText('View Git Diff')).not.toBeInTheDocument();
-			expect(screen.queryByText('View Git Log')).not.toBeInTheDocument();
+			expect(screen.queryByText('Git: View Diff')).not.toBeInTheDocument();
+			expect(screen.queryByText('Git: View Log')).not.toBeInTheDocument();
 		});
 
 		it('handles View Git Diff action', async () => {
@@ -636,13 +820,15 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Diff'));
+			fireEvent.click(screen.getByText('Git: View Diff'));
 
+			// The palette now routes through useGitAgentActions, which opens the
+			// viewer via the modal store rather than a prop setter.
 			await waitFor(() => {
 				expect(gitService.getDiff).toHaveBeenCalledWith('/home/user/project', undefined, undefined);
-				expect(props.setGitDiffPreview).toHaveBeenCalledWith('mock diff content');
-				expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+				expect(useModalStore.getState().getData('gitDiff')?.diff).toBe('mock diff content');
 			});
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
 
 		it('handles View Git Diff with SSH remote ID when session has SSH remote config enabled', async () => {
@@ -653,7 +839,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps({ sessions: [session] });
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Diff'));
+			fireEvent.click(screen.getByText('Git: View Diff'));
 
 			await waitFor(() => {
 				expect(gitService.getDiff).toHaveBeenCalledWith(
@@ -669,7 +855,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Diff'));
+			fireEvent.click(screen.getByText('Git: View Diff'));
 
 			await waitFor(() => {
 				expect(gitService.getDiff).toHaveBeenCalledWith('/home/user/project', undefined, undefined);
@@ -684,7 +870,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps({ sessions: [session] });
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Diff'));
+			fireEvent.click(screen.getByText('Git: View Diff'));
 
 			await waitFor(() => {
 				expect(gitService.getDiff).toHaveBeenCalledWith('/home/user/project', undefined, undefined);
@@ -698,7 +884,7 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Diff'));
+			fireEvent.click(screen.getByText('Git: View Diff'));
 
 			await waitFor(() => {
 				expect(gitService.getDiff).toHaveBeenCalledWith('/different/path', undefined, undefined);
@@ -709,9 +895,61 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Log'));
+			fireEvent.click(screen.getByText('Git: View Log'));
 
-			expect(props.setGitLogOpen).toHaveBeenCalledWith(true);
+			expect(useModalStore.getState().isOpen('gitLog')).toBe(true);
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('offers the full git action set, matching the pill and right-click menus', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Git: View Log')).toBeInTheDocument();
+			expect(screen.getByText('Git: View Diff')).toBeInTheDocument();
+			expect(screen.getByText('Git: Pull')).toBeInTheDocument();
+			expect(screen.getByText('Git: Push')).toBeInTheDocument();
+			expect(screen.getByText('Git: Change Branch')).toBeInTheDocument();
+			expect(screen.getByText('Git: Configure Worktrees')).toBeInTheDocument();
+		});
+
+		it('handles Git Pull action', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Git: Pull'));
+
+			expect(useModalStore.getState().getData('gitCommandRunner')?.operation).toBe('pull');
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('handles Git Push action', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Git: Push'));
+
+			expect(useModalStore.getState().getData('gitCommandRunner')?.operation).toBe('push');
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('handles Change Branch action', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Git: Change Branch'));
+
+			expect(useModalStore.getState().isOpen('branchSwitcher')).toBe(true);
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('handles Configure Worktrees action', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			fireEvent.click(screen.getByText('Git: Configure Worktrees'));
+
+			expect(useModalStore.getState().isOpen('worktreeConfig')).toBe(true);
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
 
@@ -720,7 +958,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('Open Repository in Browser'));
+			fireEvent.click(screen.getByText('Git: Open Repository in Browser'));
 
 			await waitFor(() => {
 				expect(gitService.getRemoteBrowserUrl).toHaveBeenCalledWith('/home/user/project');
@@ -805,7 +1043,7 @@ describe('QuickActionsModal', () => {
 			fireEvent.change(input, { target: { value: 'settings' } });
 
 			// Selected index should be reset to 0 - first button is selected
-			const buttons = screen.getAllByRole('button');
+			const buttons = getActionRows();
 			// First button should have accent background (selected)
 			expect(buttons[0]).toHaveStyle({ backgroundColor: mockTheme.colors.accent });
 		});
@@ -831,7 +1069,7 @@ describe('QuickActionsModal', () => {
 		});
 
 		it('handles Debug: Reset Busy State action', () => {
-			const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
@@ -847,7 +1085,7 @@ describe('QuickActionsModal', () => {
 		});
 
 		it('handles Debug: Reset Current Session action', () => {
-			const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
@@ -856,7 +1094,11 @@ describe('QuickActionsModal', () => {
 			fireEvent.click(screen.getByText('Debug: Reset Current Session'));
 
 			expect(props.setSessions).toHaveBeenCalled();
-			expect(consoleSpy).toHaveBeenCalledWith('[Debug] Reset busy state for session:', 'session-1');
+			expect(consoleSpy).toHaveBeenCalledWith(
+				'[Debug] Reset busy state for session:',
+				undefined,
+				'session-1'
+			);
 
 			consoleSpy.mockRestore();
 		});
@@ -902,6 +1144,19 @@ describe('QuickActionsModal', () => {
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
 
+		it('handles Debug: View Application Stats action', () => {
+			const setDebugApplicationStatsOpen = vi.fn();
+			const props = createDefaultProps({ setDebugApplicationStatsOpen });
+			render(<QuickActionsModal {...props} />);
+
+			const input = screen.getByPlaceholderText('Type a command or jump to agent...');
+			fireEvent.change(input, { target: { value: 'debug' } });
+			fireEvent.click(screen.getByText('Debug: View Application Stats'));
+
+			expect(setDebugApplicationStatsOpen).toHaveBeenCalledWith(true);
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
 		it('shows Debug: Release Next Queued Item when queue has items', () => {
 			const onDebugReleaseQueuedItem = vi.fn();
 			const props = createDefaultProps({
@@ -925,7 +1180,7 @@ describe('QuickActionsModal', () => {
 			const input = screen.getByPlaceholderText('Type a command or jump to agent...');
 			fireEvent.keyDown(input, { key: 'ArrowDown' });
 
-			const buttons = screen.getAllByRole('button');
+			const buttons = getActionRows();
 			// Second button should now be selected (first is at index 0)
 			expect(buttons[1]).toHaveStyle({ backgroundColor: mockTheme.colors.accent });
 		});
@@ -943,21 +1198,36 @@ describe('QuickActionsModal', () => {
 			// Move up
 			fireEvent.keyDown(input, { key: 'ArrowUp' });
 
-			const buttons = screen.getAllByRole('button');
+			const buttons = getActionRows();
 			expect(buttons[1]).toHaveStyle({ backgroundColor: mockTheme.colors.accent });
 		});
 
-		it('does not go below zero index', () => {
+		it('wraps to the last item when arrowing up from the first', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
 			const input = screen.getByPlaceholderText('Type a command or jump to agent...');
 
-			// Try to go up from zero
-			fireEvent.keyDown(input, { key: 'ArrowUp' });
+			// Up from index 0 lands on the last row
 			fireEvent.keyDown(input, { key: 'ArrowUp' });
 
-			const buttons = screen.getAllByRole('button');
+			const buttons = getActionRows();
+			expect(buttons[buttons.length - 1]).toHaveStyle({
+				backgroundColor: mockTheme.colors.accent,
+			});
+		});
+
+		it('wraps to the first item when arrowing down from the last', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			const input = screen.getByPlaceholderText('Type a command or jump to agent...');
+
+			// Up wraps to the end, down wraps back to the start
+			fireEvent.keyDown(input, { key: 'ArrowUp' });
+			fireEvent.keyDown(input, { key: 'ArrowDown' });
+
+			const buttons = getActionRows();
 			expect(buttons[0]).toHaveStyle({ backgroundColor: mockTheme.colors.accent });
 		});
 
@@ -1015,7 +1285,7 @@ describe('QuickActionsModal', () => {
 			fireEvent.click(screen.getByText('Move to Group...'));
 
 			expect(screen.getByText('← Back to main menu')).toBeInTheDocument();
-			expect(screen.getByText('📁 No Group (Root)')).toBeInTheDocument();
+			expect(screen.getByText('📁 No Group (Ungrouped)')).toBeInTheDocument();
 		});
 
 		it('shows groups in move-to-group mode', () => {
@@ -1064,7 +1334,7 @@ describe('QuickActionsModal', () => {
 			render(<QuickActionsModal {...props} />);
 
 			fireEvent.click(screen.getByText('Move to Group...'));
-			fireEvent.click(screen.getByText('📁 No Group (Root)'));
+			fireEvent.click(screen.getByText('📁 No Group (Ungrouped)'));
 
 			expect(props.setSessions).toHaveBeenCalled();
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
@@ -1130,6 +1400,8 @@ describe('QuickActionsModal', () => {
 			expect(props.setRenameGroupId).toHaveBeenCalledWith('group-1');
 			expect(props.setRenameGroupValue).toHaveBeenCalledWith('Test Group');
 			expect(props.setRenameGroupEmoji).toHaveBeenCalledWith('📁');
+			expect(props.setRenameGroupIcon).toHaveBeenCalledWith(undefined);
+			expect(props.setRenameGroupColor).toHaveBeenCalledWith(undefined);
 			expect(props.setRenameGroupModalOpen).toHaveBeenCalledWith(true);
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
@@ -1157,7 +1429,11 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps({ initialMode: 'move-to-group' });
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.getByText('← Back to main menu')).toBeInTheDocument();
+			// When initialMode is 'move-to-group' the "Back to main menu" action is
+			// suppressed (the user never saw the main menu), so assert on group-mode
+			// specific entries instead.
+			expect(screen.getByText('📁 No Group (Ungrouped)')).toBeInTheDocument();
+			expect(screen.getByText('+ Create New Group')).toBeInTheDocument();
 		});
 	});
 
@@ -1238,7 +1514,7 @@ describe('QuickActionsModal', () => {
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
 
-		it('does not show tab actions when not in AI mode', () => {
+		it('hides AI-only tab actions when not in AI mode, but keeps Tab Switcher available', () => {
 			const props = createDefaultProps({
 				isAiMode: false,
 				onOpenTabSwitcher: vi.fn(),
@@ -1247,7 +1523,10 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.queryByText('Tab Switcher')).not.toBeInTheDocument();
+			// Tab Switcher is now mode-agnostic: as long as the agent has aiTabs
+			// the command shows up so users can jump back into an AI tab even
+			// from terminal / file / browser modes.
+			expect(screen.getByText('Tab Switcher')).toBeInTheDocument();
 			expect(screen.queryByText('Rename Tab')).not.toBeInTheDocument();
 			expect(screen.queryByText('Toggle Read-Only Mode')).not.toBeInTheDocument();
 		});
@@ -1302,7 +1581,26 @@ describe('QuickActionsModal', () => {
 			render(<QuickActionsModal {...props} />);
 
 			expect(screen.getByText('Refresh Files, Git, History')).toBeInTheDocument();
-			expect(screen.getByText('Reload file tree, git status, and history')).toBeInTheDocument();
+			expect(
+				screen.getByText('Reload file tree, git status, history, and the previewed file')
+			).toBeInTheDocument();
+		});
+
+		it('displays the Refresh Files shortcut when one is bound', () => {
+			const props = createDefaultProps({
+				onRefreshGitFileState: vi.fn(),
+				shortcuts: {
+					...mockShortcuts,
+					refreshGitFileState: {
+						id: 'refreshGitFileState',
+						keys: ['Alt', 'Cmd', 'R'],
+						enabled: true,
+					},
+				},
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText(formatShortcutKeys(['Alt', 'Cmd', 'R']))).toBeInTheDocument();
 		});
 
 		it('handles Refresh Files action', async () => {
@@ -1381,7 +1679,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			const buttons = screen.getAllByRole('button');
+			const buttons = getActionRows();
 			expect(buttons[0]).toHaveStyle({ backgroundColor: mockTheme.colors.accent });
 		});
 
@@ -1389,7 +1687,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			const buttons = screen.getAllByRole('button');
+			const buttons = getActionRows();
 			// Non-selected items should not have accent background
 			expect(buttons[1]).not.toHaveStyle({ backgroundColor: mockTheme.colors.accent });
 		});
@@ -1434,15 +1732,20 @@ describe('QuickActionsModal', () => {
 		it('handles git diff with no diff content', async () => {
 			const { gitService } = await import('../../../renderer/services/git');
 			vi.mocked(gitService.getDiff).mockResolvedValueOnce({ diff: '' });
+			useCenterFlashStore.getState().setActive(null);
+			refreshGitStatusMock.mockClear();
 
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('View Git Diff'));
+			fireEvent.click(screen.getByText('Git: View Diff'));
 
 			await waitFor(() => {
 				expect(props.setGitDiffPreview).not.toHaveBeenCalled();
 				expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+				expect(useCenterFlashStore.getState().active?.message).toBe('No diff to examine');
+				// Stale widget stats triggered a re-poll
+				expect(refreshGitStatusMock).toHaveBeenCalledTimes(1);
 			});
 		});
 
@@ -1453,7 +1756,7 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('Open Repository in Browser'));
+			fireEvent.click(screen.getByText('Git: Open Repository in Browser'));
 
 			await waitFor(() => {
 				expect(window.maestro.shell.openExternal).not.toHaveBeenCalled();
@@ -1468,17 +1771,18 @@ describe('QuickActionsModal', () => {
 
 		it('handles error when opening repository in browser', async () => {
 			const { gitService } = await import('../../../renderer/services/git');
-			const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 			vi.mocked(gitService.getRemoteBrowserUrl).mockRejectedValueOnce(new Error('Network error'));
 
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('Open Repository in Browser'));
+			fireEvent.click(screen.getByText('Git: Open Repository in Browser'));
 
 			await waitFor(() => {
 				expect(consoleSpy).toHaveBeenCalledWith(
 					'Failed to open repository in browser:',
+					undefined,
 					expect.any(Error)
 				);
 				expect(mockNotifyToast).toHaveBeenCalledWith({
@@ -1496,17 +1800,12 @@ describe('QuickActionsModal', () => {
 			const props = createDefaultProps();
 			render(<QuickActionsModal {...props} />);
 
-			const buttons = screen.getAllByRole('button');
-			// Extract just the action label text (remove number badges and shortcut hints)
-			const labels = buttons
-				.map((b) => {
-					const text = b.textContent || '';
-					// Remove leading number badge (single digit)
-					const withoutNumber = text.replace(/^[0-9]/, '');
-					// Get just the main label (first part before subtext or shortcuts)
-					return withoutNumber.split(/Cmd\+|Currently/)[0].trim();
-				})
-				.filter(Boolean);
+			// Read labels off the dedicated attribute rather than parsing textContent:
+			// the old heuristic broke as soon as one label was a prefix of another
+			// ("Search: Messages (This Tab)" vs "Search: Messages (All Agent Tabs)").
+			const labels = Array.from(document.querySelectorAll<HTMLElement>('[data-action-label]')).map(
+				(el) => el.getAttribute('data-action-label') || ''
+			);
 
 			// All labels should be sorted (allowing for the number badge offset which affects visual order)
 			// The component sorts actions by localeCompare before rendering
@@ -1638,7 +1937,7 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.getByText('Create Worktree')).toBeInTheDocument();
+			expect(screen.getByText('Git: Create Worktree')).toBeInTheDocument();
 		});
 
 		it('calls onQuickCreateWorktree with active session and closes modal', () => {
@@ -1650,7 +1949,7 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('Create Worktree'));
+			fireEvent.click(screen.getByText('Git: Create Worktree'));
 
 			expect(onQuickCreateWorktree).toHaveBeenCalledWith(session);
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
@@ -1677,7 +1976,7 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			fireEvent.click(screen.getByText('Create Worktree'));
+			fireEvent.click(screen.getByText('Git: Create Worktree'));
 
 			// Should resolve to parent, not the child
 			expect(onQuickCreateWorktree).toHaveBeenCalledWith(parentSession);
@@ -1691,7 +1990,7 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.queryByText('Create Worktree')).not.toBeInTheDocument();
+			expect(screen.queryByText('Git: Create Worktree')).not.toBeInTheDocument();
 		});
 
 		it('does not show Create Worktree when callback is not provided', () => {
@@ -1700,7 +1999,7 @@ describe('QuickActionsModal', () => {
 			});
 			render(<QuickActionsModal {...props} />);
 
-			expect(screen.queryByText('Create Worktree')).not.toBeInTheDocument();
+			expect(screen.queryByText('Git: Create Worktree')).not.toBeInTheDocument();
 		});
 	});
 
@@ -1746,6 +2045,38 @@ describe('QuickActionsModal', () => {
 		});
 	});
 
+	describe('Maestro Cue action', () => {
+		it('displays the openCue shortcut keys on the Maestro Cue command', () => {
+			const props = createDefaultProps({
+				onOpenMaestroCue: vi.fn(),
+				shortcuts: {
+					...mockShortcuts,
+					openCue: { id: 'openCue', keys: ['Alt', 'q'], enabled: true },
+				},
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Maestro Cue')).toBeInTheDocument();
+			expect(screen.getByText(formatShortcutKeys(['Alt', 'q']))).toBeInTheDocument();
+		});
+	});
+
+	describe('Execution Queue action', () => {
+		it('displays the executionQueue shortcut keys on the View Execution Queue command', () => {
+			const props = createDefaultProps({
+				onOpenQueueBrowser: vi.fn(),
+				shortcuts: {
+					...mockShortcuts,
+					executionQueue: { id: 'executionQueue', keys: ['Cmd', 'Shift', 'X'], enabled: true },
+				},
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('View Execution Queue')).toBeInTheDocument();
+			expect(screen.getByText(formatShortcutKeys(['Cmd', 'Shift', 'X']))).toBeInTheDocument();
+		});
+	});
+
 	describe('Agent switcher mode (Cmd+O)', () => {
 		it('shows agent-specific placeholder when initialMode is agents', () => {
 			const props = createDefaultProps({ initialMode: 'agents' });
@@ -1783,6 +2114,48 @@ describe('QuickActionsModal', () => {
 			expect(screen.queryByText('Open Settings')).not.toBeInTheDocument();
 		});
 
+		it('hides the Pianola agent while its Encore flag is off', async () => {
+			// Pianola persists in the session store after the flag is switched off, so
+			// the palette has to apply the same visibility predicate the Left Bar does -
+			// otherwise it hands the user an agent with no row to come back to.
+			const { useSettingsStore } = await import('../../../renderer/stores/settingsStore');
+			useSettingsStore.setState({
+				encoreFeatures: { ...useSettingsStore.getState().encoreFeatures, pianola: false },
+			} as never);
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Agent Alpha' }),
+					{ ...createMockSession({ id: 'pianola-1', name: 'Pianola' }), isPianola: true },
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Agent Alpha')).toBeInTheDocument();
+			expect(screen.queryByText('Pianola')).not.toBeInTheDocument();
+		});
+
+		it('lists the Pianola agent once its Encore flag is on', async () => {
+			const { useSettingsStore } = await import('../../../renderer/stores/settingsStore');
+			useSettingsStore.setState({
+				encoreFeatures: { ...useSettingsStore.getState().encoreFeatures, pianola: true },
+			} as never);
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Agent Alpha' }),
+					{ ...createMockSession({ id: 'pianola-1', name: 'Pianola' }), isPianola: true },
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Pianola')).toBeInTheDocument();
+
+			useSettingsStore.setState({
+				encoreFeatures: { ...useSettingsStore.getState().encoreFeatures, pianola: false },
+			} as never);
+		});
+
 		it('filters agents by search text in agents mode', () => {
 			const props = createDefaultProps({
 				initialMode: 'agents',
@@ -1810,7 +2183,7 @@ describe('QuickActionsModal', () => {
 			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
 		});
 
-		it('sorts agents alphabetically with group chats at the bottom', () => {
+		it('sorts agents alphabetically and excludes idle group chats', () => {
 			const props = createDefaultProps({
 				initialMode: 'agents',
 				sessions: [
@@ -1826,15 +2199,307 @@ describe('QuickActionsModal', () => {
 			const buttons = screen.getAllByRole('button');
 			const labels = buttons.map((b) => b.textContent?.replace(/\d/, '').trim() ?? '');
 
-			// Agents alphabetically first, then group chats
 			const alphaIdx = labels.findIndex((l) => l.startsWith('Alpha'));
 			const mikeIdx = labels.findIndex((l) => l.startsWith('Mike'));
 			const zuluIdx = labels.findIndex((l) => l.startsWith('Zulu'));
-			const gcIdx = labels.findIndex((l) => l.startsWith('Design Review'));
 
 			expect(alphaIdx).toBeLessThan(mikeIdx);
 			expect(mikeIdx).toBeLessThan(zuluIdx);
-			expect(zuluIdx).toBeLessThan(gcIdx);
+
+			// An idle group chat is not "where work is happening", so it stays out
+			// of the jumper (it is still reachable from the main palette).
+			expect(screen.queryByText('Group Chat: Design Review')).not.toBeInTheDocument();
+		});
+
+		it('lists a running group chat in the LIVE bucket', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [createMockSession({ id: 'session-1', name: 'Alpha', state: 'idle' })],
+				groupChats: [
+					{ id: 'gc-1', name: 'Design Review', participants: ['a', 'b'] },
+					{ id: 'gc-2', name: 'Quiet Room', participants: ['a'] },
+				],
+				onOpenGroupChat: vi.fn(),
+			});
+			useGroupChatStore.setState({
+				groupChatStates: new Map([['gc-1', 'moderator-thinking' as const]]),
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByText('Group Chat: Design Review')).toBeInTheDocument();
+			expect(screen.getByText('Moderator thinking')).toBeInTheDocument();
+			expect(screen.queryByText('Group Chat: Quiet Room')).not.toBeInTheDocument();
+
+			// LIVE bucket, above the idle agent.
+			const dialog = screen.getByRole('dialog');
+			const text = dialog.textContent ?? '';
+			expect(text.indexOf('LIVE')).toBeLessThan(text.indexOf('Group Chat: Design Review'));
+			expect(text.indexOf('Group Chat: Design Review')).toBeLessThan(text.indexOf('IDLE'));
+
+			fireEvent.click(screen.getByText('Group Chat: Design Review'));
+			expect(props.onOpenGroupChat).toHaveBeenCalledWith('gc-1');
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('buckets running agents above idle ones, alphabetical within each bucket', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Zulu', state: 'idle' }),
+					createMockSession({ id: 'session-2', name: 'Alpha', state: 'idle' }),
+					createMockSession({ id: 'session-3', name: 'Mike', state: 'busy' }),
+					createMockSession({ id: 'session-4', name: 'Bravo', state: 'busy' }),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const buttons = screen.getAllByRole('button');
+			const labels = buttons.map((b) => b.textContent?.replace(/\d/, '').trim() ?? '');
+
+			const bravoIdx = labels.findIndex((l) => l.startsWith('Bravo'));
+			const mikeIdx = labels.findIndex((l) => l.startsWith('Mike'));
+			const alphaIdx = labels.findIndex((l) => l.startsWith('Alpha'));
+			const zuluIdx = labels.findIndex((l) => l.startsWith('Zulu'));
+
+			// Running bucket first (Bravo, Mike), then idle bucket (Alpha, Zulu).
+			expect(bravoIdx).toBeLessThan(mikeIdx);
+			expect(mikeIdx).toBeLessThan(alphaIdx);
+			expect(alphaIdx).toBeLessThan(zuluIdx);
+		});
+
+		it('renders LIVE and IDLE section headers in agents mode when both buckets exist', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Alpha', state: 'idle' }),
+					createMockSession({ id: 'session-2', name: 'Bravo', state: 'busy' }),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const dialog = screen.getByRole('dialog');
+			const liveIdx = dialog.textContent?.indexOf('LIVE') ?? -1;
+			const idleIdx = dialog.textContent?.indexOf('IDLE') ?? -1;
+			expect(liveIdx).toBeGreaterThanOrEqual(0);
+			expect(idleIdx).toBeGreaterThan(liveIdx);
+		});
+
+		it('suppresses both headers when all agents are idle (single bucket)', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Alpha', state: 'idle' }),
+					createMockSession({ id: 'session-2', name: 'Bravo', state: 'idle' }),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const dialog = screen.getByRole('dialog');
+			const headers = dialog.querySelectorAll('div[aria-hidden="true"]');
+			const headerTexts = Array.from(headers).map((h) => h.textContent?.trim() ?? '');
+			expect(headerTexts).not.toContain('LIVE');
+			expect(headerTexts).not.toContain('IDLE');
+		});
+
+		it('suppresses both headers when all agents are running (single bucket)', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Alpha', state: 'busy' }),
+					createMockSession({ id: 'session-2', name: 'Bravo', state: 'busy' }),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const dialog = screen.getByRole('dialog');
+			const headers = dialog.querySelectorAll('div[aria-hidden="true"]');
+			const headerTexts = Array.from(headers).map((h) => h.textContent?.trim() ?? '');
+			expect(headerTexts).not.toContain('LIVE');
+			expect(headerTexts).not.toContain('IDLE');
+		});
+
+		it('does not render LIVE/IDLE headers in main mode', () => {
+			const props = createDefaultProps({
+				sessions: [
+					createMockSession({ id: 'session-1', name: 'Alpha', state: 'idle' }),
+					createMockSession({ id: 'session-2', name: 'Bravo', state: 'busy' }),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const dialog = screen.getByRole('dialog');
+			// Main mode keeps the per-row state subtext and does not show section headers.
+			expect(dialog.textContent).not.toContain('LIVE');
+			// 'IDLE' may legitimately appear as the per-row state subtext in main mode,
+			// but never as a standalone section header - we assert via class lookup.
+			const headers = dialog.querySelectorAll('div[aria-hidden="true"]');
+			const headerTexts = Array.from(headers).map((h) => h.textContent ?? '');
+			expect(headerTexts.some((t) => t.trim() === 'LIVE')).toBe(false);
+			expect(headerTexts.some((t) => t.trim() === 'IDLE')).toBe(false);
+		});
+
+		it('dismisses modal when clicking the backdrop', () => {
+			const props = createDefaultProps({ initialMode: 'agents' });
+			render(<QuickActionsModal {...props} />);
+
+			const dialog = screen.getByRole('dialog');
+			const backdrop = dialog.parentElement;
+			expect(backdrop).not.toBeNull();
+			fireEvent.mouseDown(backdrop!);
+
+			expect(props.setQuickActionOpen).toHaveBeenCalledWith(false);
+		});
+
+		it('shows elapsed time, busy tab name, and queue count for running agents', () => {
+			const startedAt = Date.now() - 65_000; // 1m 5s ago
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({
+						id: 'session-1',
+						name: 'Bravo',
+						state: 'busy',
+						thinkingStartTime: startedAt,
+						aiTabs: [
+							{
+								id: 'tab-a',
+								agentSessionId: null,
+								name: 'fix login',
+								starred: false,
+								logs: [],
+								inputValue: '',
+								stagedImages: [],
+								createdAt: 0,
+								state: 'busy',
+								thinkingStartTime: startedAt,
+							},
+						],
+						activeTabId: 'tab-a',
+						executionQueue: [
+							{
+								id: 'q-1',
+								timestamp: 0,
+								tabId: 'tab-a',
+								type: 'message',
+								text: 'next',
+							},
+							{
+								id: 'q-2',
+								timestamp: 0,
+								tabId: 'tab-a',
+								type: 'message',
+								text: 'and another',
+							},
+						],
+					}),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const dialog = screen.getByRole('dialog');
+			expect(dialog.textContent).toMatch(/1m\s+5s/);
+			expect(dialog.textContent).toContain('fix login');
+			expect(dialog.textContent).toContain('2 queued');
+			// Idle-style "BUSY" subtext should not appear when we're showing rich info.
+			expect(dialog.textContent).not.toContain('BUSY');
+		});
+
+		it('omits queue count when there are no queued items', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({
+						id: 'session-1',
+						name: 'Bravo',
+						state: 'busy',
+						thinkingStartTime: Date.now() - 5_000,
+						executionQueue: [],
+					}),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			expect(screen.getByRole('dialog').textContent).not.toMatch(/queued/);
+		});
+
+		it('alphabetizes by skipping leading emojis', () => {
+			const props = createDefaultProps({
+				initialMode: 'agents',
+				sessions: [
+					createMockSession({ id: 's1', name: 'Charlie' }),
+					createMockSession({ id: 's2', name: '🚀 Atlas' }),
+					createMockSession({ id: 's3', name: '🎯 Bravo' }),
+				],
+			});
+			render(<QuickActionsModal {...props} />);
+
+			const buttons = screen.getAllByRole('button');
+			const labels = buttons.map((b) => b.textContent ?? '');
+			const atlasIdx = labels.findIndex((l) => l.includes('Atlas'));
+			const bravoIdx = labels.findIndex((l) => l.includes('Bravo'));
+			const charlieIdx = labels.findIndex((l) => l.includes('Charlie'));
+
+			expect(atlasIdx).toBeLessThan(bravoIdx);
+			expect(bravoIdx).toBeLessThan(charlieIdx);
+		});
+	});
+
+	describe('Move to First/Last Position with browser tabs', () => {
+		it('shows Move to First when browser tab is at last position', () => {
+			const session = createMockSession({
+				activeBrowserTabId: 'browser-1',
+				browserTabs: [{ id: 'browser-1', url: 'https://example.com', title: 'Example' }],
+				unifiedTabOrder: [
+					{ type: 'ai', id: 'tab-1' },
+					{ type: 'browser', id: 'browser-1' },
+				],
+			});
+			const onMoveTabToFirst = vi.fn();
+			const onMoveTabToLast = vi.fn();
+			const props = createDefaultProps({
+				sessions: [session],
+				onMoveTabToFirst,
+				onMoveTabToLast,
+			});
+			render(<QuickActionsModal {...props} />);
+
+			// Browser tab is at index 1 (last) - should show Move to First but not Move to Last
+			expect(screen.getByText('Move to First Position')).toBeInTheDocument();
+			expect(screen.queryByText('Move to Last Position')).not.toBeInTheDocument();
+		});
+
+		it('shows Move to Last when browser tab is at first position', () => {
+			const session = createMockSession({
+				activeBrowserTabId: 'browser-1',
+				browserTabs: [{ id: 'browser-1', url: 'https://example.com', title: 'Example' }],
+				unifiedTabOrder: [
+					{ type: 'browser', id: 'browser-1' },
+					{ type: 'ai', id: 'tab-1' },
+				],
+			});
+			const onMoveTabToFirst = vi.fn();
+			const onMoveTabToLast = vi.fn();
+			const props = createDefaultProps({
+				sessions: [session],
+				onMoveTabToFirst,
+				onMoveTabToLast,
+			});
+			render(<QuickActionsModal {...props} />);
+
+			// Browser tab is at index 0 (first) - should show Move to Last but not Move to First
+			expect(screen.queryByText('Move to First Position')).not.toBeInTheDocument();
+			expect(screen.getByText('Move to Last Position')).toBeInTheDocument();
+		});
+	});
+
+	describe('Layering', () => {
+		it('renders the backdrop above the toast layer so notifications cannot cover the palette', () => {
+			const props = createDefaultProps();
+			render(<QuickActionsModal {...props} />);
+
+			const backdrop = screen.getByRole('dialog').parentElement as HTMLElement;
+			expect(backdrop.style.zIndex).toBe(String(Z_LAYERS.QUICK_ACTIONS));
+			expect(Z_LAYERS.QUICK_ACTIONS).toBeGreaterThan(Z_LAYERS.TOAST);
 		});
 	});
 });

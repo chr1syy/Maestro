@@ -9,35 +9,16 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { CueHelpContent } from '../../../renderer/components/CueHelpModal';
-import type { Theme } from '../../../renderer/types';
 
+import { mockTheme } from '../../helpers/mockTheme';
 // Mock formatShortcutKeys to return predictable output
 vi.mock('../../../renderer/utils/shortcutFormatter', () => ({
 	formatShortcutKeys: (keys: string[]) => keys.join('+'),
+	formatMetaKey: () => 'Ctrl',
 	isMacOS: () => false,
 }));
 
 // Sample theme for testing
-const mockTheme: Theme = {
-	id: 'test-dark' as Theme['id'],
-	name: 'Test Dark',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgSidebar: '#252525',
-		bgActivity: '#2d2d2d',
-		border: '#444444',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#007acc',
-		accentDim: '#007acc40',
-		accentText: '#007acc',
-		accentForeground: '#ffffff',
-		error: '#ff4444',
-		success: '#44ff44',
-		warning: '#ffaa00',
-	},
-};
 
 describe('CueHelpContent', () => {
 	beforeEach(() => {
@@ -78,9 +59,9 @@ describe('CueHelpContent', () => {
 		});
 
 		it('should render event type codes', () => {
-			expect(screen.getByText('time.heartbeat')).toBeInTheDocument();
-			expect(screen.getByText('file.changed')).toBeInTheDocument();
-			expect(screen.getByText('agent.completed')).toBeInTheDocument();
+			expect(screen.getAllByText('time.heartbeat').length).toBeGreaterThanOrEqual(1);
+			expect(screen.getAllByText('file.changed').length).toBeGreaterThanOrEqual(1);
+			expect(screen.getAllByText('agent.completed').length).toBeGreaterThanOrEqual(1);
 		});
 
 		it('should render Template Variables section', () => {
@@ -108,22 +89,34 @@ describe('CueHelpContent', () => {
 			expect(screen.getByText('{{DATE}}')).toBeInTheDocument();
 		});
 
-		it('should render Multi-Agent Orchestration section', () => {
-			expect(screen.getByText('Multi-Agent Orchestration')).toBeInTheDocument();
-		});
-
-		it('should render fan-out and fan-in patterns', () => {
-			expect(screen.getByText(/Fan-Out:/)).toBeInTheDocument();
-			expect(screen.getByText(/Fan-In:/)).toBeInTheDocument();
-		});
-
 		it('should render Timeouts & Failure Handling section', () => {
 			expect(screen.getByText('Timeouts & Failure Handling')).toBeInTheDocument();
 			expect(screen.getByText(/Default timeout is 30 minutes/)).toBeInTheDocument();
 		});
 
-		it('should render Visual Pipeline Editor section', () => {
-			expect(screen.getByText('Visual Pipeline Editor')).toBeInTheDocument();
+		it('should render Pipeline Graph and Pipeline List section', () => {
+			expect(screen.getByText('Pipeline Graph and Pipeline List')).toBeInTheDocument();
+		});
+
+		it('should document canvas controls including Shift-drag pan', () => {
+			expect(screen.getByText('Canvas controls')).toBeInTheDocument();
+			expect(screen.getByText(/Shift \+ left-drag/)).toBeInTheDocument();
+			expect(screen.getByText(/Middle \/ right-drag/)).toBeInTheDocument();
+			expect(screen.getByText(/Hand mode - left-drag/)).toBeInTheDocument();
+			expect(screen.getByText(/Pointer mode - left-drag/)).toBeInTheDocument();
+		});
+
+		it('should document the All Pipelines view is read-only', () => {
+			expect(screen.getByText(/All Pipelines/)).toBeInTheDocument();
+			expect(screen.getByText(/read-only/)).toBeInTheDocument();
+		});
+
+		it('should document keyboard shortcuts for editor canvas', () => {
+			expect(screen.getByText('Keyboard shortcuts')).toBeInTheDocument();
+			const kbdTexts = Array.from(document.querySelectorAll('kbd')).map((k) => k.textContent ?? '');
+			['P', 'S', 'L', 'F', '+ / =', '-', 'Delete / Backspace', 'Escape'].forEach((key) => {
+				expect(kbdTexts).toContain(key);
+			});
 		});
 
 		it('should render Coordination Patterns section', () => {
@@ -131,12 +124,12 @@ describe('CueHelpContent', () => {
 		});
 
 		it('should render all coordination pattern names', () => {
-			expect(screen.getAllByText('Heartbeat').length).toBeGreaterThanOrEqual(1);
-			expect(screen.getAllByText('Scheduled').length).toBeGreaterThanOrEqual(1);
-			expect(screen.getByText('File Enrichment')).toBeInTheDocument();
-			expect(screen.getByText('Research Swarm')).toBeInTheDocument();
-			expect(screen.getByText('Sequential Chain')).toBeInTheDocument();
-			expect(screen.getByText('Debate')).toBeInTheDocument();
+			expect(screen.getByText('Sequential Pipeline')).toBeInTheDocument();
+			expect(screen.getByText('Fan-Out')).toBeInTheDocument();
+			expect(screen.getByText('Fan-In (Gather)')).toBeInTheDocument();
+			expect(screen.getByText('Swarm (Fan-Out + Fan-In)')).toBeInTheDocument();
+			expect(screen.getByText('Command Action')).toBeInTheDocument();
+			expect(screen.getByText('Task Queue')).toBeInTheDocument();
 		});
 
 		it('should render Event Filtering section', () => {

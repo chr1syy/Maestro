@@ -8,10 +8,11 @@
  */
 
 import { SshRemoteConfig } from '../../shared/types';
-import { shellEscape, buildShellCommand } from './shell-escape';
+import { shellEscape, buildShellCommand, shellEscapeRemotePath } from './shell-escape';
 import { expandTilde } from '../../shared/pathUtils';
 import { logger } from './logger';
 import { resolveSshPath } from './cliDetection';
+import { buildSshOptionArgs } from '../../shared/sshOptions';
 import { parseDataUrl, buildImagePromptPrefix } from '../process-manager/utils/imageUtils';
 
 /**
@@ -21,10 +22,16 @@ import { parseDataUrl, buildImagePromptPrefix } from '../process-manager/utils/i
 const BASE_SSH_PATH_DIRS = [
 	'$HOME/.local/bin',
 	'$HOME/.opencode/bin',
+	'$HOME/.claude/local',
 	'$HOME/bin',
 	'/usr/local/bin',
 	'/opt/homebrew/bin',
 	'$HOME/.cargo/bin',
+	'$HOME/go/bin',
+	'$HOME/.bun/bin',
+	'$HOME/.deno/bin',
+	'$HOME/.nix-profile/bin',
+	'/snap/bin',
 ];
 
 /**
@@ -144,6 +151,10 @@ export interface SshCommandResult {
 	stdinScript?: string;
 	/** Remote temp file paths created during image decoding (for informational/logging purposes) */
 	remoteTempImagePaths?: string[];
+	/** Human-readable remote command line (the actual agent invocation that runs on the
+	 *  remote host, without the PATH/version-manager bootstrap or the `exec` wrapper).
+	 *  Surfaced in the Process Details modal above the local SSH command. */
+	remoteCommandLine?: string;
 }
 
 /**
@@ -161,19 +172,6 @@ export interface RemoteCommandOptions {
 	/** Indicates the caller will send input via stdin to the remote command (optional) */
 	useStdin?: boolean;
 }
-
-/**
- * Default SSH options for all connections.
- * These options ensure non-interactive, key-based authentication.
- */
-const DEFAULT_SSH_OPTIONS: Record<string, string> = {
-	BatchMode: 'yes', // Disable password prompts (key-only)
-	StrictHostKeyChecking: 'accept-new', // Auto-accept new host keys
-	ConnectTimeout: '10', // Connection timeout in seconds
-	ClearAllForwardings: 'yes', // Disable port forwarding from SSH config (avoids "Address already in use" errors)
-	RequestTTY: 'no', // Default: do NOT request a TTY. We only force a TTY for specific remote modes (e.g., --print)
-	LogLevel: 'ERROR', // Suppress SSH warnings like "Pseudo-terminal will not be allocated..."
-};
 
 /**
  * Build the remote shell command string from command, args, cwd, and env.
@@ -203,9 +201,11 @@ export function buildRemoteCommand(options: RemoteCommandOptions): string {
 
 	const parts: string[] = [];
 
-	// Add cd command if working directory is specified
+	// Add cd command if working directory is specified. Tilde-aware, so a
+	// home-relative remote path expands on the remote instead of failing on
+	// a directory literally named `~`.
 	if (cwd) {
-		parts.push(`cd ${shellEscape(cwd)}`);
+		parts.push(`cd ${shellEscapeRemotePath(cwd)}`);
 	}
 
 	// Build environment variable exports
@@ -300,6 +300,8 @@ export async function buildSshCommandWithStdin(
 		images?: string[];
 		/** Function to build CLI args for each image path (e.g., (path) => ['-i', path]) */
 		imageArgs?: (imagePath: string) => string[];
+		/** Function to embed image references into the prompt/stdinInput (e.g., Copilot @mentions). */
+		imagePromptBuilder?: (imagePaths: string[]) => string;
 		/** When set to 'prompt-embed', embed image paths in the prompt/stdinInput instead of adding -i CLI args.
 		 * Used for resumed Codex sessions where the resume command doesn't support -i flag. */
 		imageResumeMode?: 'prompt-embed';
@@ -318,10 +320,10 @@ export async function buildSshCommandWithStdin(
 		args.push('-i', expandTilde(config.privateKeyPath));
 	}
 
-	// Default SSH options - but RequestTTY is always 'no' for stdin mode
-	for (const [key, value] of Object.entries(DEFAULT_SSH_OPTIONS)) {
-		args.push('-o', `${key}=${value}`);
-	}
+	// Default SSH options plus this remote's overrides. RequestTTY stays 'no'
+	// for stdin mode (a TTY would interfere with piping the script), which the
+	// reserved-key rule in sshOptions.ts guarantees no override can change.
+	args.push(...buildSshOptionArgs(config.sshOptions));
 
 	// Port specification
 	if (!config.useSshConfig || config.port !== 22) {
@@ -349,8 +351,9 @@ export async function buildSshCommandWithStdin(
 
 	// Change directory if specified
 	if (remoteOptions.cwd) {
-		// In the script context, we can use simple quoting
-		scriptLines.push(`cd ${shellEscape(remoteOptions.cwd)} || exit 1`);
+		// Tilde-aware: a `~/proj` cwd must reach the remote as `"$HOME/proj"`,
+		// or the script fails at its first line on a directory named `~`.
+		scriptLines.push(`cd ${shellEscapeRemotePath(remoteOptions.cwd)} || exit 1`);
 	}
 
 	// Merge environment variables
@@ -374,7 +377,11 @@ export async function buildSshCommandWithStdin(
 	const remoteImagePaths: string[] = [];
 	/** All remote temp file paths created during image decoding (for cleanup) */
 	const allRemoteTempPaths: string[] = [];
-	if (remoteOptions.images && remoteOptions.images.length > 0 && remoteOptions.imageArgs) {
+	if (
+		remoteOptions.images &&
+		remoteOptions.images.length > 0 &&
+		(remoteOptions.imageArgs || remoteOptions.imagePromptBuilder)
+	) {
 		const timestamp = Date.now();
 		for (let i = 0; i < remoteOptions.images.length; i++) {
 			const parsed = parseDataUrl(remoteOptions.images[i]);
@@ -388,10 +395,13 @@ export async function buildSshCommandWithStdin(
 			scriptLines.push(`base64 -d > ${shellEscape(remoteTempPath)} <<'MAESTRO_IMG_${i}_EOF'`);
 			scriptLines.push(parsed.base64);
 			scriptLines.push(`MAESTRO_IMG_${i}_EOF`);
-			if (remoteOptions.imageResumeMode === 'prompt-embed') {
+			if (remoteOptions.imagePromptBuilder || remoteOptions.imageResumeMode === 'prompt-embed') {
 				// Resume mode: collect paths for prompt embedding instead of CLI args
 				remoteImagePaths.push(remoteTempPath);
 			} else {
+				if (!remoteOptions.imageArgs) {
+					continue;
+				}
 				// Normal mode: add -i (or equivalent) CLI args
 				imageArgParts.push(
 					...remoteOptions.imageArgs(remoteTempPath).map((arg) => shellEscape(arg))
@@ -410,7 +420,9 @@ export async function buildSshCommandWithStdin(
 
 	// For prompt-embed mode (resumed sessions), prepend image paths to stdinInput/prompt
 	if (remoteImagePaths.length > 0) {
-		const imagePrefix = buildImagePromptPrefix(remoteImagePaths);
+		const imagePrefix = remoteOptions.imagePromptBuilder
+			? remoteOptions.imagePromptBuilder(remoteImagePaths)
+			: buildImagePromptPrefix(remoteImagePaths);
 		if (remoteOptions.stdinInput !== undefined) {
 			remoteOptions.stdinInput = imagePrefix + remoteOptions.stdinInput;
 		} else if (remoteOptions.prompt) {
@@ -432,6 +444,10 @@ export async function buildSshCommandWithStdin(
 	if (remoteOptions.prompt && !hasStdinInput) {
 		cmdParts.push(shellEscape(remoteOptions.prompt));
 	}
+
+	// Capture the bare agent invocation (command + args) for display in Process Details.
+	// This excludes the PATH bootstrap, the `exec` wrapper, and any temp-file cleanup.
+	const remoteCommandLine = cmdParts.join(' ');
 
 	// When remote temp files exist, don't use exec (which replaces the shell) so that
 	// cleanup commands can run after the agent exits. When no temp files, use exec for
@@ -474,6 +490,7 @@ export async function buildSshCommandWithStdin(
 		args,
 		stdinScript,
 		remoteTempImagePaths: allRemoteTempPaths.length > 0 ? allRemoteTempPaths : undefined,
+		remoteCommandLine,
 	};
 }
 
@@ -570,17 +587,11 @@ export async function buildSshCommand(
 		args.push('-i', expandTilde(config.privateKeyPath));
 	}
 
-	// Default SSH options for non-interactive operation
-	// These are always needed to ensure BatchMode behavior. If `forceTty` is true,
-	// override RequestTTY to `force` so SSH will allocate a TTY even in non-interactive contexts.
-	for (const [key, value] of Object.entries(DEFAULT_SSH_OPTIONS)) {
-		// If we will force a TTY for this command, override the RequestTTY option
-		if (key === 'RequestTTY' && forceTty) {
-			args.push('-o', `${key}=force`);
-		} else {
-			args.push('-o', `${key}=${value}`);
-		}
-	}
+	// Default SSH options for non-interactive operation, plus this remote's
+	// overrides. These are always needed to ensure BatchMode behavior. When
+	// `forceTty` is true RequestTTY becomes `force` so SSH allocates a TTY even
+	// in non-interactive contexts.
+	args.push(...buildSshOptionArgs(config.sshOptions, { forceTty }));
 
 	// Port specification - only add if not default and not using SSH config
 	// (when using SSH config, let SSH config handle the port)
@@ -626,10 +637,16 @@ export async function buildSshCommand(
 	// We prepend common binary locations to PATH:
 	// - ~/.local/bin: Claude Code, pip --user installs
 	// - ~/.opencode/bin: OpenCode installer default location
+	// - ~/.claude/local: Claude Code local-install layout (auto-update bundle)
 	// - ~/bin: User scripts
 	// - /usr/local/bin: Homebrew on Intel Mac, manual installs
 	// - /opt/homebrew/bin: Homebrew on Apple Silicon
 	// - ~/.cargo/bin: Rust tools
+	// - ~/go/bin: Go default GOBIN (Factory Droid and other Go-based CLIs)
+	// - ~/.bun/bin: Bun runtime + bunx-installed CLIs
+	// - ~/.deno/bin: Deno-installed CLIs
+	// - ~/.nix-profile/bin: Nix user profile binaries
+	// - /snap/bin: Linux snap-installed binaries
 	// Plus dynamic detection of Node version managers (nvm, fnm, volta, mise, asdf, n)
 	// to find npm-installed CLIs like codex, claude, etc.
 	//
@@ -652,6 +669,10 @@ export async function buildSshCommand(
 		port: config.port,
 		useSshConfig: config.useSshConfig,
 		privateKeyPath: config.privateKeyPath ? '***configured***' : '(using SSH config/agent)',
+		// Per-remote -o overrides run arbitrary local programs (ProxyCommand) and
+		// outlive the session that wrote them, so name them in the log rather than
+		// leaving them buried in the argv.
+		sshOptionOverrides: config.sshOptions,
 		remoteCommand,
 		wrappedCommand,
 		sshPath,
@@ -663,5 +684,8 @@ export async function buildSshCommand(
 	return {
 		command: sshPath,
 		args,
+		// Bare agent invocation (command + args) for display in Process Details,
+		// without the cd/env prefix or the bash PATH bootstrap wrapper.
+		remoteCommandLine: buildShellCommand(remoteOptions.command, remoteOptions.args),
 	};
 }

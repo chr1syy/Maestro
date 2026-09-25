@@ -28,7 +28,7 @@ Maestro features a conductor-themed achievement system that tracks your cumulati
 
 Since Auto Runs can execute in parallel across multiple Maestro sessions, achieving **Titan of the Baton** (Level 11) is technically feasible in less than 10 calendar years. Run 10 agents simultaneously with worktrees and you could theoretically hit that milestone in about a year of real time.
 
-But let's be real — getting to Level 11 is going to take some serious hacking. You'll need a well-orchestrated fleet of agents running around the clock, carefully crafted playbooks that loop indefinitely, and the infrastructure to keep it all humming. It's the ultimate test of your Maestro skills.
+But let's be real - getting to Level 11 is going to take some serious hacking. You'll need a well-orchestrated fleet of agents running around the clock, carefully crafted playbooks that loop indefinitely, and the infrastructure to keep it all humming. It's the ultimate test of your Maestro skills.
 
 The achievement panel shows your current rank, progress to the next level, and total accumulated time. Each rank includes flavor text and information about a legendary conductor who exemplifies that level of mastery.
 
@@ -60,7 +60,9 @@ The share image includes comprehensive usage statistics:
 | **Parallel Queries**  | Peak simultaneous AI queries in flight               |
 | **Queue Depth**       | Peak message queue depth reached                     |
 
-These peak usage stats are tracked automatically and persist across sessions. They represent your high-water marks — evidence of your most intensive Maestro orchestrations.
+These peak usage stats are tracked automatically and persist across sessions. They represent your high-water marks - evidence of your most intensive Maestro orchestrations.
+
+A peak only ever moves up. Nothing ages it out, prunes it, or recomputes it from your current setup, so a record you set months ago still stands even if you have since slimmed down to a handful of agents. Maestro enforces that when the value is written to disk rather than in the window that observed it, so a second window, or a window that is still starting up, cannot lower a record another one set.
 
 ## Keyboard Mastery
 
@@ -73,6 +75,8 @@ Separate from Conductor ranks, Maestro tracks your **keyboard mastery** based on
 |   2   | Performer        | 50-74%         |
 |   3   | Virtuoso         | 75-99%         |
 |   4   | Keyboard Maestro | 100%           |
+
+Mastery counts only the shortcuts that have a chord bound, so unassigned actions never hold you below 100%.
 
 Your current keyboard mastery level and progress are shown in the **Keyboard Shortcuts panel** (press `?` or `Cmd/Ctrl+/` to open). The panel displays which shortcuts you've used (marked with a checkmark) and which remain to be discovered. See [Keyboard Shortcuts](./keyboard-shortcuts) for the full shortcut reference.
 
@@ -90,3 +94,19 @@ The leaderboard tracks two competitive categories:
 | **Longest Single Auto Run**  | Personal record for longest continuous Auto Run  |
 
 Each entry shows the user's conductor badge level, social links, and ranking. Your stats sync across devices when you're signed in, so your achievements follow you wherever you use Maestro.
+
+Your leaderboard avatar is sourced from GitHub. Link your GitHub profile in the registration form, and update your picture on GitHub to change how it appears on the leaderboard.
+
+### If the leaderboard falls behind your local time
+
+Auto Run time is credited on your machine first and sent to the leaderboard as
+it is earned. When a submission cannot go through (you are offline, the server
+is unreachable, or you quit mid-run before the time was sent), Maestro keeps the
+unsent time in a queue and ships it on the next launch instead of dropping it.
+
+Occasionally time still goes missing - usually from a crash or a machine that
+was offline for a long stretch. The leaderboard adds up the time it receives, so
+it cannot backfill on its own: later runs only ever add their own time. When
+Maestro detects a gap, it warns you and the **Push Difference** button appears
+in the leaderboard panel next to **Pull Down**. Click it to send the missing
+time in one go, then **Pull Down** to confirm the new total.

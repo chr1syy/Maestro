@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
 	initializeOutputParsers,
-	ensureParsersInitialized,
 	getOutputParser,
 	hasOutputParser,
 	getAllOutputParsers,
@@ -9,6 +8,11 @@ import {
 	ClaudeOutputParser,
 	OpenCodeOutputParser,
 	CodexOutputParser,
+	CopilotOutputParser,
+	PiOutputParser,
+	OmpOutputParser,
+	QwenOutputParser,
+	GrokOutputParser,
 } from '../../../main/parsers';
 
 describe('parsers/index', () => {
@@ -49,41 +53,69 @@ describe('parsers/index', () => {
 			expect(hasOutputParser('factory-droid')).toBe(true);
 		});
 
-		it('should register exactly 4 parsers', () => {
+		it('should register Copilot parser', () => {
+			expect(hasOutputParser('copilot-cli')).toBe(false);
+
+			initializeOutputParsers();
+
+			expect(hasOutputParser('copilot-cli')).toBe(true);
+		});
+
+		it('should register Pi parser', () => {
+			expect(hasOutputParser('pi')).toBe(false);
+
+			initializeOutputParsers();
+
+			expect(hasOutputParser('pi')).toBe(true);
+		});
+
+		it('should register Qwen parser', () => {
+			expect(hasOutputParser('qwen3-coder')).toBe(false);
+
+			initializeOutputParsers();
+
+			expect(hasOutputParser('qwen3-coder')).toBe(true);
+		});
+
+		it('should register Omp parser', () => {
+			expect(hasOutputParser('omp')).toBe(false);
+
+			initializeOutputParsers();
+
+			expect(hasOutputParser('omp')).toBe(true);
+		});
+
+		it('should register Grok parser', () => {
+			expect(hasOutputParser('grok')).toBe(false);
+
+			initializeOutputParsers();
+
+			expect(hasOutputParser('grok')).toBe(true);
+		});
+
+		it('should register Antigravity parser', () => {
+			expect(hasOutputParser('antigravity')).toBe(false);
+
+			initializeOutputParsers();
+
+			expect(hasOutputParser('antigravity')).toBe(true);
+		});
+
+		it('should register exactly 10 parsers', () => {
 			initializeOutputParsers();
 
 			const parsers = getAllOutputParsers();
-			expect(parsers.length).toBe(4); // Claude, OpenCode, Codex, Factory Droid
+			expect(parsers.length).toBe(10);
 		});
 
 		it('should clear existing parsers before registering', () => {
 			// First initialization
 			initializeOutputParsers();
-			expect(getAllOutputParsers().length).toBe(4);
+			expect(getAllOutputParsers().length).toBe(10);
 
-			// Second initialization should still have exactly 4
+			// Second initialization should still have exactly 10
 			initializeOutputParsers();
-			expect(getAllOutputParsers().length).toBe(4);
-		});
-	});
-
-	describe('ensureParsersInitialized', () => {
-		it('should initialize parsers on first call', () => {
-			expect(getAllOutputParsers().length).toBe(0);
-
-			ensureParsersInitialized();
-
-			expect(getAllOutputParsers().length).toBe(4);
-		});
-
-		it('should be idempotent after first call', () => {
-			ensureParsersInitialized();
-			const first = getAllOutputParsers();
-
-			ensureParsersInitialized();
-			const second = getAllOutputParsers();
-
-			expect(first.length).toBe(second.length);
+			expect(getAllOutputParsers().length).toBe(10);
 		});
 	});
 
@@ -119,6 +151,35 @@ describe('parsers/index', () => {
 			const parser = getOutputParser('unknown');
 			expect(parser).toBeNull();
 		});
+
+		it('should return CopilotOutputParser for copilot', () => {
+			const parser = getOutputParser('copilot-cli');
+			expect(parser).not.toBeNull();
+			expect(parser).toBeInstanceOf(CopilotOutputParser);
+		});
+
+		it('should return PiOutputParser for pi', () => {
+			const parser = getOutputParser('pi');
+			expect(parser).not.toBeNull();
+			expect(parser).toBeInstanceOf(PiOutputParser);
+		});
+
+		it('should return OmpOutputParser for omp', () => {
+			const parser = getOutputParser('omp');
+			expect(parser).not.toBeNull();
+			expect(parser).toBeInstanceOf(OmpOutputParser);
+		});
+		it('should return QwenOutputParser for qwen3-coder', () => {
+			const parser = getOutputParser('qwen3-coder');
+			expect(parser).not.toBeNull();
+			expect(parser).toBeInstanceOf(QwenOutputParser);
+		});
+
+		it('should return GrokOutputParser for grok', () => {
+			const parser = getOutputParser('grok');
+			expect(parser).not.toBeNull();
+			expect(parser).toBeInstanceOf(GrokOutputParser);
+		});
 	});
 
 	describe('parser exports', () => {
@@ -135,6 +196,30 @@ describe('parsers/index', () => {
 		it('should export CodexOutputParser class', () => {
 			const parser = new CodexOutputParser();
 			expect(parser.agentId).toBe('codex');
+		});
+
+		it('should export CopilotOutputParser class', () => {
+			const parser = new CopilotOutputParser();
+			expect(parser.agentId).toBe('copilot-cli');
+		});
+
+		it('should export PiOutputParser class', () => {
+			const parser = new PiOutputParser();
+			expect(parser.agentId).toBe('pi');
+		});
+
+		it('should export OmpOutputParser class', () => {
+			const parser = new OmpOutputParser();
+			expect(parser.agentId).toBe('omp');
+		});
+		it('should export QwenOutputParser class', () => {
+			const parser = new QwenOutputParser();
+			expect(parser.agentId).toBe('qwen3-coder');
+		});
+
+		it('should export GrokOutputParser class', () => {
+			const parser = new GrokOutputParser();
+			expect(parser.agentId).toBe('grok');
 		});
 	});
 

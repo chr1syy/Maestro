@@ -1,16 +1,55 @@
 /**
- * Shared dedup mechanism for worktree paths.
+ * Shared dedup + path-matching helpers for worktree sessions.
  *
- * When creating a worktree, the path is marked here BEFORE the directory is
- * created on disk. The file watcher in useWorktreeHandlers checks this set
- * to avoid creating a duplicate session for a worktree that was just created
- * programmatically (e.g., by useAutoRunHandlers or useWorktreeHandlers).
- *
- * Module-level so both hooks can share the same Set without prop drilling.
+ * Two concerns live here so consumers don't reimplement them:
+ * 1. A TTL-bounded Set of recently-created worktree paths used by the file
+ *    watcher in useWorktreeHandlers to avoid duplicate session creation when
+ *    a worktree was just created programmatically.
+ * 2. Path-matching primitives (`normalizePath`, `sessionMatchesWorktreeRoot`)
+ *    used by both useWorktreeHandlers and useAutoRunHandlers to locate an
+ *    existing session for a given worktree root.
  */
 
-function normalizePath(p: string): string {
-	return p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+import type { Session } from '../types';
+import { normalizeWorktreePath } from '../../shared/worktreePaths';
+
+/** Normalize a file path for comparison: forward slashes, no duplicate or trailing slashes. */
+export const normalizePath = normalizeWorktreePath;
+
+/**
+ * Match a session against a worktree root path. We check both `projectRoot`
+ * (the stable worktree root captured at session creation) and `cwd` (which
+ * may drift if the user `cd`s into a subdirectory of the worktree). Without
+ * the projectRoot fallback, a child session that has navigated into a subdir
+ * is missed and the recovery flow builds a duplicate session for the same
+ * worktree.
+ */
+export function sessionMatchesWorktreeRoot(session: Session, normalizedRoot: string): boolean {
+	if (session.projectRoot && normalizePath(session.projectRoot) === normalizedRoot) return true;
+	if (session.cwd && normalizePath(session.cwd) === normalizedRoot) return true;
+	return false;
+}
+
+/**
+ * Whether `session` is a worktree child owned by `parentSession`, matched by the
+ * new-model `parentSessionId` link.
+ *
+ * Worktree reuse/dedup must be scoped to the launching parent: with the
+ * per-parent discovery model, a same-repo sibling agent can own its own child at
+ * the same cwd, so a global cwd match would let one parent's Auto Run adopt a
+ * sibling's child and reproduce the wrong-parent attribution these guards exist
+ * to prevent.
+ *
+ * Legacy sessions (which link via `worktreeParentPath`, the scanned worktree
+ * BASE directory rather than the parent's cwd) are intentionally NOT matched
+ * here: that path can be shared by several same-repo parents, so a cwd/base
+ * comparison would ambiguously match the wrong owner. Ownership requires an
+ * unambiguous `parentSessionId`; a legacy child simply falls through to having a
+ * fresh new-model child created for the launcher, which is safe (no
+ * misattribution) even if it means the legacy child is not reused.
+ */
+export function sessionOwnedByParent(session: Session, parentSession: Session): boolean {
+	return !!session.parentSessionId && session.parentSessionId === parentSession.id;
 }
 
 const recentlyCreatedPaths = new Set<string>();

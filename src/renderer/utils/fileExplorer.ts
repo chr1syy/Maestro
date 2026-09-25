@@ -3,7 +3,9 @@ import {
 	walkTreePartitioned,
 } from '../../shared/treeUtils';
 import { isImageFile } from '../../shared/gitUtils';
+import { isMediaFile } from '../../shared/mediaTypes';
 import { shouldIgnore, parseGitignoreContent, LOCAL_IGNORE_DEFAULTS } from '../../shared/globUtils';
+import { logger } from './logger';
 
 /**
  * Check if a file should be opened in external app based on extension
@@ -11,6 +13,13 @@ import { shouldIgnore, parseGitignoreContent, LOCAL_IGNORE_DEFAULTS } from '../.
 export function shouldOpenExternally(filename: string): boolean {
 	// Images that can be previewed inline should NOT open externally
 	if (isImageFile(filename)) {
+		return false;
+	}
+
+	// Same for audio/video Maestro can play itself. Only the containers Chromium
+	// can actually decode qualify, so the formats it cannot demux (mkv, avi, wmv,
+	// flv, wma) stay in the list below and keep opening in the system player.
+	if (isMediaFile(filename)) {
 		return false;
 	}
 
@@ -40,22 +49,13 @@ export function shouldOpenExternally(filename: string): boolean {
 		'sketch',
 		'fig',
 		'xd',
-		// Video
-		'mp4',
-		'mov',
+		// Video/audio Chromium cannot demux, so Maestro's own player can't help.
+		// Playable formats are handled by the isMediaFile check above and must not
+		// be listed here.
 		'avi',
 		'mkv',
-		'webm',
 		'wmv',
 		'flv',
-		'm4v',
-		// Audio
-		'mp3',
-		'wav',
-		'flac',
-		'aac',
-		'm4a',
-		'ogg',
 		'wma',
 		// Archives
 		'zip',
@@ -151,6 +151,39 @@ interface LoadingState {
 	ignorePatterns: string[];
 	/** Whether this is an SSH remote context */
 	isRemote: boolean;
+	/** Max file entries before we stop walking. Folders do not count. */
+	maxEntries: number;
+	/**
+	 * Files counted toward the entry cap. Files inside an always-visible subtree
+	 * (e.g. `.maestro`) are excluded so prioritized content can never starve
+	 * sibling directories of their budget.
+	 */
+	budgetUsed: number;
+	/** True once we've hit the entry cap and started skipping further files. */
+	truncated: boolean;
+	/** Optional abort signal - when aborted, the recursion stops issuing new readDir calls. */
+	signal?: AbortSignal;
+}
+
+/** Thrown when a file tree load is aborted via {@link AbortSignal}. */
+export class FileTreeAbortError extends Error {
+	constructor() {
+		super('File tree load aborted');
+		this.name = 'FileTreeAbortError';
+	}
+}
+
+/**
+ * Result returned by {@link loadFileTree}. Wraps the tree with metadata so
+ * callers can detect when the scan was truncated by the entry cap.
+ */
+export interface FileTreeLoadResult {
+	/** The loaded file tree (sorted, folders first). */
+	tree: FileTreeNode[];
+	/** True if the scan stopped early because the entry cap was reached. */
+	truncated: boolean;
+	/** Total file entries observed during the scan (may exceed maxEntries by the last batch). */
+	filesFound: number;
 }
 
 /** Files that should always appear in the file tree regardless of ignore patterns */
@@ -162,26 +195,124 @@ export interface LocalFileTreeOptions {
 	ignorePatterns?: string[];
 	/** Whether to parse and honor the root .gitignore file (default: false). */
 	honorGitignore?: boolean;
+	/**
+	 * Expanded folders (root-relative, `/`-joined) that are read past `maxDepth`,
+	 * so a folder the depth cap cut off shows its contents once it is opened.
+	 */
+	expandedPaths?: string[];
+}
+
+/** Find the node at a `/`-joined path relative to the tree root. */
+export function findTreeNode(
+	nodes: FileTreeNode[],
+	relativePath: string
+): FileTreeNode | undefined {
+	let level: FileTreeNode[] | undefined = nodes;
+	let node: FileTreeNode | undefined;
+	for (const segment of relativePath.split('/')) {
+		node = level?.find((n) => n.name === segment);
+		if (!node) return undefined;
+		level = node.children;
+	}
+	return node;
 }
 
 /**
- * Load file tree from directory recursively
+ * Whether the folder at `relativePath` may hold contents the scan never read
+ * because `maxDepth` stopped it there. The scan returns such a folder with no
+ * children, which draws exactly like an empty folder, so expanding it showed
+ * nothing at all. A genuinely empty folder at that depth matches too; reading
+ * it costs one directory listing and changes nothing.
+ */
+export function isDepthCappedFolder(
+	tree: FileTreeNode[],
+	relativePath: string,
+	maxDepth: number
+): boolean {
+	if (relativePath.split('/').length < maxDepth) return false;
+	const node = findTreeNode(tree, relativePath);
+	return node?.type === 'folder' && (node.children?.length ?? 0) === 0;
+}
+
+/** Return a copy of `nodes` with the folder at `segments` given `children`. */
+function withFolderChildren(
+	nodes: FileTreeNode[],
+	segments: string[],
+	children: FileTreeNode[]
+): FileTreeNode[] {
+	const [head, ...rest] = segments;
+	return nodes.map((node) =>
+		node.name !== head || node.type !== 'folder'
+			? node
+			: {
+					...node,
+					children: rest.length
+						? withFolderChildren(node.children ?? [], rest, children)
+						: children,
+				}
+	);
+}
+
+/**
+ * Load file tree from directory recursively.
+ *
+ * Applies two independent limits:
+ * - `maxDepth` - hard cap on recursion depth. Enforced the same way at every
+ *   level.
+ * - `maxEntries` - soft cap on the number of file entries (folders are not
+ *   counted). Once reached, further files are skipped and the returned result
+ *   is flagged `truncated`. Pass `Infinity` to disable.
+ *
+ * Entries listed in {@link ALWAYS_VISIBLE_FILES} (e.g. `.maestro`) are
+ * processed before other entries at every level and walked with an unlimited
+ * budget - their files do not count toward `maxEntries`. This guarantees that
+ * project-critical content survives even on SSH remotes where the cap has
+ * been reduced.
+ *
  * @param dirPath - The directory path to load
- * @param maxDepth - Maximum recursion depth (default: 10)
+ * @param maxDepth - Maximum recursion depth (default: 5)
  * @param currentDepth - Current recursion depth (internal use)
  * @param sshContext - Optional SSH context for remote file operations
  * @param onProgress - Optional callback for progress updates (useful for SSH)
  * @param localOptions - Optional configuration for local (non-SSH) scans
+ * @param maxEntries - Maximum number of file entries to load before truncating
+ *   (default: `Infinity`, meaning no cap). Callers that surface results to the
+ *   user should pass the `fileExplorerMaxEntries` setting.
  */
 export async function loadFileTree(
 	dirPath: string,
-	maxDepth = 10,
+	maxDepth = 5,
 	currentDepth = 0,
 	sshContext?: SshContext,
 	onProgress?: FileTreeProgressCallback,
-	localOptions?: LocalFileTreeOptions
-): Promise<FileTreeNode[]> {
+	localOptions?: LocalFileTreeOptions,
+	maxEntries: number = Number.POSITIVE_INFINITY,
+	signal?: AbortSignal
+): Promise<FileTreeLoadResult> {
 	const isRemote = Boolean(sshContext?.sshRemoteId);
+
+	// Local trees are walked in the main process in one round-trip. Recursing
+	// from here costs an IPC round-trip per directory, and on a large tree those
+	// round-trips are the whole load time - each one has to be scheduled on a
+	// renderer main thread that may be busy rendering a streaming transcript, so
+	// a walk worth ~100ms of disk work stretched into minutes of spinner.
+	if (!isRemote) {
+		if (signal?.aborted) throw new FileTreeAbortError();
+		const result = await window.maestro.fs.readDirTree(dirPath, {
+			maxDepth,
+			maxEntries: Number.isFinite(maxEntries) ? maxEntries : undefined,
+			ignorePatterns: localOptions?.ignorePatterns,
+			honorGitignore: localOptions?.honorGitignore,
+			expandedPaths: localOptions?.expandedPaths,
+		});
+		if (signal?.aborted) throw new FileTreeAbortError();
+		onProgress?.({
+			directoriesScanned: result.directoriesScanned,
+			filesFound: result.filesFound,
+			currentDirectory: dirPath,
+		});
+		return { tree: result.tree, truncated: result.truncated, filesFound: result.filesFound };
+	}
 
 	// Build effective ignore patterns
 	let ignorePatterns: string[] = [];
@@ -214,7 +345,7 @@ export async function loadFileTree(
 					ignorePatterns = [...ignorePatterns, ...parseGitignoreContent(content)];
 				}
 			} catch {
-				// .gitignore may not exist or be readable — not an error
+				// .gitignore may not exist or be readable - not an error
 			}
 		}
 	}
@@ -226,9 +357,14 @@ export async function loadFileTree(
 		onProgress,
 		ignorePatterns,
 		isRemote,
+		maxEntries: maxEntries > 0 ? maxEntries : Number.POSITIVE_INFINITY,
+		budgetUsed: 0,
+		truncated: false,
+		signal,
 	};
 
-	return loadFileTreeRecursive(dirPath, maxDepth, currentDepth, sshContext, state);
+	const tree = await loadFileTreeRecursive(dirPath, maxDepth, currentDepth, sshContext, state);
+	return { tree, truncated: state.truncated, filesFound: state.filesFound };
 }
 
 /**
@@ -251,18 +387,25 @@ async function fetchRemoteGitignorePatterns(
 
 /**
  * Internal recursive implementation with shared state for progress tracking.
+ *
+ * @param unlimitedBudget When true, the entry cap is bypassed for this subtree
+ *   and its descendants. Used to fully load always-visible directories like
+ *   `.maestro` even when the SSH-reduced cap has been reached elsewhere.
  */
 async function loadFileTreeRecursive(
 	dirPath: string,
 	maxDepth: number,
 	currentDepth: number,
 	sshContext: SshContext | undefined,
-	state: LoadingState
+	state: LoadingState,
+	unlimitedBudget: boolean = false
 ): Promise<FileTreeNode[]> {
 	if (currentDepth >= maxDepth) return [];
+	if (state.signal?.aborted) throw new FileTreeAbortError();
 
 	try {
 		const entries = await window.maestro.fs.readDir(dirPath, sshContext?.sshRemoteId);
+		if (state.signal?.aborted) throw new FileTreeAbortError();
 		const tree: FileTreeNode[] = [];
 
 		// Update progress: we've scanned a directory
@@ -281,10 +424,23 @@ async function loadFileTreeRecursive(
 		// where the OS or IPC layer returns the same entry more than once).
 		const seen = new Set<string>();
 
-		for (const entry of entries) {
+		// Process always-visible directories (e.g. `.maestro`) first so they're
+		// loaded ahead of bulk content - important on SSH where each dir is its
+		// own round-trip and the entry cap may be reduced.
+		const orderedEntries = [...entries].sort((a, b) => {
+			const aPriority = a.isDirectory && ALWAYS_VISIBLE_FILES.has(a.name) ? 0 : 1;
+			const bPriority = b.isDirectory && ALWAYS_VISIBLE_FILES.has(b.name) ? 0 : 1;
+			return aPriority - bPriority;
+		});
+
+		for (const entry of orderedEntries) {
 			const normalizedName = entry.name.normalize('NFC');
 			if (seen.has(normalizedName)) {
-				console.warn('[loadFileTree] readDir returned duplicate entry:', entry.name, 'in', dirPath);
+				logger.warn('[loadFileTree] readDir returned duplicate entry:', undefined, [
+					entry.name,
+					'in',
+					dirPath,
+				]);
 				continue;
 			}
 			seen.add(normalizedName);
@@ -294,21 +450,36 @@ async function loadFileTreeRecursive(
 				continue;
 			}
 
+			// Always-visible directories propagate unlimited-budget to descendants so
+			// e.g. all of `.maestro/playbooks/**` survives the cap.
+			const childUnlimited =
+				unlimitedBudget || (entry.isDirectory && ALWAYS_VISIBLE_FILES.has(entry.name));
+
 			if (entry.isDirectory) {
+				if (state.signal?.aborted) throw new FileTreeAbortError();
 				// Wrap child directory reads in try/catch so a single failing
 				// subdirectory (permissions, spaces in name over SSH, broken
 				// symlinks, etc.) doesn't kill the entire tree walk.
 				let children: FileTreeNode[] = [];
-				try {
-					children = await loadFileTreeRecursive(
-						`${dirPath}/${entry.name}`,
-						maxDepth,
-						currentDepth + 1,
-						sshContext,
-						state
-					);
-				} catch {
-					// Skip unreadable child directories — show them as empty folders
+				if (childUnlimited || state.budgetUsed < state.maxEntries) {
+					try {
+						children = await loadFileTreeRecursive(
+							`${dirPath}/${entry.name}`,
+							maxDepth,
+							currentDepth + 1,
+							sshContext,
+							state,
+							childUnlimited
+						);
+					} catch (childErr) {
+						// Re-throw aborts so the whole walk stops; skip unreadable child
+						// directories so a single failing subdir doesn't kill the walk.
+						if (childErr instanceof FileTreeAbortError) throw childErr;
+					}
+				} else {
+					// Cap hit before we could recurse: fold this in as an empty placeholder
+					// so the user still sees that the folder exists.
+					state.truncated = true;
 				}
 				tree.push({
 					name: entry.name,
@@ -316,6 +487,13 @@ async function loadFileTreeRecursive(
 					children,
 				});
 			} else if (entry.isFile) {
+				if (!unlimitedBudget && state.budgetUsed >= state.maxEntries) {
+					state.truncated = true;
+					// Stop adding files at this level; siblings in deeper dirs
+					// also short-circuit via the directory guard above.
+					continue;
+				}
+				if (!unlimitedBudget) state.budgetUsed++;
 				state.filesFound++;
 				tree.push({
 					name: entry.name,
@@ -340,7 +518,8 @@ async function loadFileTreeRecursive(
 			return a.name.localeCompare(b.name);
 		});
 	} catch (error) {
-		console.error('Error loading file tree:', error);
+		if (error instanceof FileTreeAbortError) throw error;
+		logger.error('Error loading file tree:', undefined, error);
 		throw error; // Propagate error to be caught by caller
 	}
 }
@@ -351,6 +530,319 @@ async function loadFileTreeRecursive(
  */
 export function getAllFolderPaths(nodes: FileTreeNode[], currentPath = ''): string[] {
 	return getAllFolderPathsShared(nodes, currentPath);
+}
+
+/**
+ * Build a hierarchical {@link FileTreeNode} array from flat lists of directory
+ * and file paths. Paths must be relative (no leading `/` or `./`) and use `/`
+ * as separator. Used by the SSH batched-find loader to assemble the tree from
+ * the flat output of `find`.
+ *
+ * Folders without an explicit parent in the directory list are attached to the
+ * root - this can happen when `excludePaths` prunes a parent or when the entry
+ * cap drops mid-tree files whose ancestor dirs are still listed.
+ */
+export function buildTreeFromPaths(directories: string[], files: string[]): FileTreeNode[] {
+	const folderMap = new Map<string, FileTreeNode>();
+	const root: FileTreeNode[] = [];
+
+	const basenameOf = (p: string): string => {
+		const i = p.lastIndexOf('/');
+		return i >= 0 ? p.slice(i + 1) : p;
+	};
+	const parentOf = (p: string): string => {
+		const i = p.lastIndexOf('/');
+		return i >= 0 ? p.slice(0, i) : '';
+	};
+
+	// Sort dirs by depth (path with fewer slashes first) so parents exist before
+	// children try to attach.
+	const sortedDirs = [...directories].sort((a, b) => {
+		const da = a.split('/').length;
+		const db = b.split('/').length;
+		if (da !== db) return da - db;
+		return a.localeCompare(b);
+	});
+
+	for (const dirPath of sortedDirs) {
+		if (!dirPath) continue;
+		if (folderMap.has(dirPath)) continue;
+		const node: FileTreeNode = {
+			name: basenameOf(dirPath).normalize('NFC'),
+			type: 'folder',
+			children: [],
+		};
+		folderMap.set(dirPath, node);
+
+		const parent = parentOf(dirPath);
+		if (parent === '') {
+			root.push(node);
+		} else {
+			const parentNode = folderMap.get(parent);
+			if (parentNode && parentNode.children) {
+				parentNode.children.push(node);
+			} else {
+				root.push(node);
+			}
+		}
+	}
+
+	for (const filePath of files) {
+		if (!filePath) continue;
+		const fileNode: FileTreeNode = {
+			name: basenameOf(filePath).normalize('NFC'),
+			type: 'file',
+		};
+		const parent = parentOf(filePath);
+		if (parent === '') {
+			root.push(fileNode);
+		} else {
+			const parentNode = folderMap.get(parent);
+			if (parentNode && parentNode.children) {
+				parentNode.children.push(fileNode);
+			} else {
+				root.push(fileNode);
+			}
+		}
+	}
+
+	const sortNodes = (nodes: FileTreeNode[]): FileTreeNode[] => {
+		nodes.sort((a, b) => {
+			if (a.type === 'folder' && b.type !== 'folder') return -1;
+			if (a.type !== 'folder' && b.type === 'folder') return 1;
+			return a.name.localeCompare(b.name);
+		});
+		for (const n of nodes) if (n.children) sortNodes(n.children);
+		return nodes;
+	};
+	return sortNodes(root);
+}
+
+/**
+ * Splice a `.maestro` subtree (loaded in its own phase) into the rest-of-tree
+ * result. The rest tree should have been loaded with `excludePaths: ['.maestro']`
+ * so it doesn't already contain `.maestro` - this helper guards against that
+ * anyway by filtering it out.
+ */
+export function spliceMaestroIntoTree(
+	restTree: FileTreeNode[],
+	maestroChildren: FileTreeNode[] | undefined
+): FileTreeNode[] {
+	const filtered = restTree.filter((n) => n.name !== '.maestro');
+	if (maestroChildren && maestroChildren.length > 0) {
+		filtered.push({
+			name: '.maestro',
+			type: 'folder',
+			children: maestroChildren,
+		});
+	}
+	return filtered.sort((a, b) => {
+		if (a.type === 'folder' && b.type !== 'folder') return -1;
+		if (a.type !== 'folder' && b.type === 'folder') return 1;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+/**
+ * Most depth-capped expanded folders a single remote load will list. Each one
+ * is its own SSH round-trip, and "Expand All" on a large remote tree can open
+ * thousands of them at once; without a bound every periodic refresh would pay
+ * for all of them. The shallowest folders are listed first.
+ */
+export const MAX_REMOTE_DEEP_FOLDER_LISTINGS = 20;
+
+/** Options for {@link loadFileTreeRemoteBatched}. */
+export interface RemoteBatchedLoadOptions {
+	/** Hard depth cap (passed to `find -maxdepth`). */
+	maxDepth: number;
+	/** Soft cap on file entries (folders are always complete to maxDepth). */
+	maxEntries: number;
+	/** Glob name patterns to prune server-side via `find -name`. */
+	ignorePatterns: string[];
+	/** Whether to fetch and merge the remote root `.gitignore`. */
+	honorGitignore: boolean;
+	/** Required SSH remote ID. */
+	sshRemoteId: string;
+	/**
+	 * Expanded folders (root-relative, `/`-joined). Any the depth cap cut off
+	 * get a one-level listing of their own, up to
+	 * {@link MAX_REMOTE_DEEP_FOLDER_LISTINGS} per load.
+	 */
+	expandedPaths?: string[];
+	/** Aborts pending phases when fired. */
+	signal?: AbortSignal;
+	/** Progress callback - fired at phase boundaries. */
+	onProgress?: FileTreeProgressCallback;
+	/**
+	 * Optional callback fired when an intermediate phase completes, so the
+	 * renderer can paint partial results before the final phase resolves.
+	 * Called with: ('maestro', maestroSubtree) and ('rest', restTree).
+	 */
+	onPhase?: (
+		phase: 'maestro' | 'rest',
+		partial: { maestro?: FileTreeNode[]; rest?: FileTreeNode[] }
+	) => void;
+}
+
+/**
+ * Load a remote file tree using batched `find` calls.
+ *
+ * Issues two SSH round-trips total:
+ *  1. **Maestro phase** - enumerate `<root>/.maestro` (unlimited budget). Loads
+ *     first because `.maestro` drives Cue, playbooks, and other features that
+ *     should be available as soon as possible.
+ *  2. **Rest phase** - enumerate the rest of the tree with the file cap and
+ *     `.maestro` pruned out (we already have it).
+ *
+ * Replaces the per-directory recursive `readDir` walk that issued one SSH call
+ * per remote directory (hundreds of calls on a moderately-sized project).
+ *
+ * The shallow top-level paint is **not** handled here - the caller fires that
+ * separately for instant first paint, then awaits this for the full result.
+ */
+export async function loadFileTreeRemoteBatched(
+	rootPath: string,
+	options: RemoteBatchedLoadOptions
+): Promise<FileTreeLoadResult> {
+	const {
+		maxDepth,
+		maxEntries,
+		ignorePatterns,
+		honorGitignore,
+		sshRemoteId,
+		expandedPaths,
+		signal,
+		onProgress,
+		onPhase,
+	} = options;
+
+	if (signal?.aborted) throw new FileTreeAbortError();
+
+	let effectiveIgnorePatterns = ignorePatterns;
+	if (honorGitignore) {
+		try {
+			const gitignorePatterns = await fetchRemoteGitignorePatterns(rootPath, sshRemoteId);
+			effectiveIgnorePatterns = [...effectiveIgnorePatterns, ...gitignorePatterns];
+		} catch {
+			// .gitignore may not exist or be readable - not an error
+		}
+	}
+
+	if (signal?.aborted) throw new FileTreeAbortError();
+
+	const partial: { maestro?: FileTreeNode[]; rest?: FileTreeNode[] } = {};
+
+	// Phase 1: .maestro subtree (unlimited budget). May fail benignly if the
+	// directory doesn't exist (most projects without Maestro state). The whole
+	// phase is best-effort: a missing or unreadable `.maestro` should not block
+	// the rest of the tree from loading.
+	if (onProgress) {
+		onProgress({
+			directoriesScanned: 0,
+			filesFound: 0,
+			currentDirectory: `${rootPath}/.maestro`,
+		});
+	}
+	let maestroChildren: FileTreeNode[] = [];
+	let maestroDirsScanned = 0;
+	let maestroFilesFound = 0;
+	try {
+		const maestroResult = await window.maestro.fs.listTreeRemote(
+			`${rootPath}/.maestro`,
+			sshRemoteId,
+			{
+				maxDepth,
+				ignorePatterns: [],
+				maxFiles: undefined,
+			}
+		);
+		if (signal?.aborted) throw new FileTreeAbortError();
+		maestroChildren = buildTreeFromPaths(maestroResult.directories, maestroResult.files);
+		maestroDirsScanned = maestroResult.directories.length;
+		maestroFilesFound = maestroResult.files.length;
+		partial.maestro = maestroChildren;
+		onPhase?.('maestro', partial);
+	} catch (err) {
+		if (err instanceof FileTreeAbortError) throw err;
+		// .maestro missing/unreadable - log and continue with empty subtree
+		logger.debug('[loadFileTreeRemoteBatched] .maestro phase failed:', undefined, err);
+	}
+
+	// Phase 2: rest of tree with .maestro pruned and file cap applied.
+	if (onProgress) {
+		onProgress({
+			directoriesScanned: maestroDirsScanned,
+			filesFound: maestroFilesFound,
+			currentDirectory: rootPath,
+		});
+	}
+	const restResult = await window.maestro.fs.listTreeRemote(rootPath, sshRemoteId, {
+		maxDepth,
+		ignorePatterns: effectiveIgnorePatterns,
+		excludePaths: ['.maestro'],
+		maxFiles: maxEntries > 0 && Number.isFinite(maxEntries) ? maxEntries : undefined,
+	});
+	if (signal?.aborted) throw new FileTreeAbortError();
+
+	const restTree = buildTreeFromPaths(restResult.directories, restResult.files);
+	partial.rest = restTree;
+	onPhase?.('rest', partial);
+
+	let finalTree = spliceMaestroIntoTree(restTree, maestroChildren);
+
+	// Phase 3: folders the user expanded past the depth cap. `find -maxdepth`
+	// lists such a folder but not its contents, so each gets a one-level listing
+	// of its own. Shallowest first, so a nested expanded folder finds its parent
+	// already filled in.
+	const deepFolders = [...(expandedPaths ?? [])].sort(
+		(a, b) => a.split('/').length - b.split('/').length
+	);
+	let deepListings = 0;
+	let deepDirsScanned = 0;
+	let deepFilesFound = 0;
+	for (const relPath of deepFolders) {
+		if (deepListings >= MAX_REMOTE_DEEP_FOLDER_LISTINGS) break;
+		if (!isDepthCappedFolder(finalTree, relPath, maxDepth)) continue;
+		deepListings++;
+		try {
+			const listing = await window.maestro.fs.listTreeRemote(
+				`${rootPath}/${relPath}`,
+				sshRemoteId,
+				{
+					maxDepth: 1,
+					// `.maestro` is never subject to ignore patterns, at any depth.
+					ignorePatterns:
+						relPath === '.maestro' || relPath.startsWith('.maestro/')
+							? []
+							: effectiveIgnorePatterns,
+				}
+			);
+			if (signal?.aborted) throw new FileTreeAbortError();
+			finalTree = withFolderChildren(
+				finalTree,
+				relPath.split('/'),
+				buildTreeFromPaths(listing.directories, listing.files)
+			);
+			deepDirsScanned += listing.directories.length;
+			deepFilesFound += listing.files.length;
+		} catch (err) {
+			if (err instanceof FileTreeAbortError) throw err;
+			// Unreadable or since-deleted folder: leave it empty, keep the tree.
+			logger.debug('[loadFileTreeRemoteBatched] expanded folder listing failed:', undefined, err);
+		}
+	}
+
+	const totalFiles = maestroFilesFound + restResult.files.length + deepFilesFound;
+
+	if (onProgress) {
+		onProgress({
+			directoriesScanned: maestroDirsScanned + restResult.directories.length + deepDirsScanned,
+			filesFound: totalFiles,
+			currentDirectory: rootPath,
+		});
+	}
+
+	return { tree: finalTree, truncated: restResult.truncated, filesFound: totalFiles };
 }
 
 export interface FlatTreeNode extends FileTreeNode {
@@ -388,6 +880,24 @@ export interface FileTreeChanges {
 }
 
 /**
+ * Path sets per tree array identity, for the root-level walk only.
+ *
+ * `compareFileTrees` runs on every auto-refresh tick and walks BOTH trees in
+ * full, but the "old" tree on tick N is the "new" tree from tick N-1 - already
+ * walked, and identical, because a tree array is never mutated in place. A
+ * field trace put the pair of walks at ~280ms of renderer main-thread time in a
+ * 58-second window; caching halves that outright. WeakMap, so a superseded
+ * tree's path sets are collected with the tree.
+ *
+ * Only the `currentPath === ''` case is cached: a prefixed walk produces
+ * different strings for the same nodes, and no caller passes one today.
+ */
+const rootPathSetsCache = new WeakMap<
+	FileTreeNode[],
+	{ files: Set<string>; folders: Set<string> }
+>();
+
+/**
  * Helper to collect all paths from a file tree
  * @see {@link walkTreePartitioned} from shared/treeUtils for the underlying implementation
  */
@@ -395,7 +905,14 @@ function collectPaths(
 	nodes: FileTreeNode[],
 	currentPath = ''
 ): { files: Set<string>; folders: Set<string> } {
-	return walkTreePartitioned(nodes, currentPath);
+	if (currentPath !== '') return walkTreePartitioned(nodes, currentPath);
+
+	const cached = rootPathSetsCache.get(nodes);
+	if (cached) return cached;
+
+	const paths = walkTreePartitioned(nodes, currentPath);
+	rootPathSetsCache.set(nodes, paths);
+	return paths;
 }
 
 /**

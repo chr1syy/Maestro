@@ -5,13 +5,16 @@
  * the session has active Cue subscriptions, with correct tooltip text.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { SessionItem } from '../../../renderer/components/SessionItem';
+import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import type { Session, Theme } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
 // Mock lucide-react icons
-vi.mock('lucide-react', () => ({
+vi.mock('lucide-react', async (importOriginal) => ({
+	...(await importOriginal()),
 	Activity: () => <span data-testid="icon-activity" />,
 	GitBranch: () => <span data-testid="icon-git-branch" />,
 	Bot: () => <span data-testid="icon-bot" />,
@@ -49,26 +52,18 @@ const defaultTheme: Theme = {
 	},
 };
 
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: 'session-1',
-	name: 'Test Session',
-	toolType: 'claude-code',
-	state: 'idle',
-	inputMode: 'ai',
-	cwd: '/home/user/project',
-	projectRoot: '/home/user/project',
-	aiPid: 12345,
-	terminalPid: 12346,
-	aiLogs: [],
-	shellLogs: [],
-	isGitRepo: true,
-	fileTree: [],
-	fileExplorerExpanded: [],
-	messageQueue: [],
-	contextUsage: 30,
-	activeTimeMs: 60000,
-	...overrides,
-});
+const createMockSession = (overrides: Partial<Session> = {}): Session =>
+	baseCreateMockSession({
+		cwd: '/home/user/project',
+		fullPath: '/home/user/project',
+		projectRoot: '/home/user/project',
+		aiPid: 12345,
+		terminalPid: 12346,
+		isGitRepo: true,
+		contextUsage: 30,
+		activeTimeMs: 60000,
+		...overrides,
+	});
 
 const defaultProps = {
 	variant: 'flat' as const,
@@ -87,6 +82,19 @@ const defaultProps = {
 };
 
 describe('SessionItem Cue Indicator', () => {
+	beforeEach(() => {
+		// CueIndicator is gated on both the Encore Feature flag and the
+		// per-user Left Bar toggle. Default settings have maestroCue=false,
+		// which would hide the indicator under test - enable both here.
+		useSettingsStore.setState({
+			encoreFeatures: {
+				...useSettingsStore.getState().encoreFeatures,
+				maestroCue: true,
+			},
+			showLeftPanelCueIndicator: true,
+		});
+	});
+
 	it('shows Zap icon when cueSubscriptionCount > 0', () => {
 		render(
 			<SessionItem {...defaultProps} session={createMockSession()} cueSubscriptionCount={3} />
@@ -223,5 +231,30 @@ describe('SessionItem Cue Indicator', () => {
 
 		// In editing mode, the name row is replaced by an input field
 		expect(screen.queryByTestId('icon-zap')).not.toBeInTheDocument();
+	});
+});
+
+describe('SessionItem AUTO Pill', () => {
+	// The AUTO pill (rendered when isInBatch is true) must remain static.
+	// A previous iteration animated it; the constant flicker drew the eye and
+	// fought with the status-dot pulse, so animation classes are forbidden here.
+	it('renders the AUTO pill when isInBatch is true', () => {
+		render(<SessionItem {...defaultProps} session={createMockSession()} isInBatch={true} />);
+
+		expect(screen.getByText('AUTO')).toBeInTheDocument();
+	});
+
+	it('does not apply any pulse animation class to the AUTO pill', () => {
+		render(<SessionItem {...defaultProps} session={createMockSession()} isInBatch={true} />);
+
+		const pill = screen.getByText('AUTO').closest('div');
+		expect(pill).not.toBeNull();
+		expect(pill?.className).not.toMatch(/animate-(pulse|status-pulse|ping|bounce|spin)/);
+	});
+
+	it('does not render the AUTO pill when isInBatch is false', () => {
+		render(<SessionItem {...defaultProps} session={createMockSession()} isInBatch={false} />);
+
+		expect(screen.queryByText('AUTO')).not.toBeInTheDocument();
 	});
 });

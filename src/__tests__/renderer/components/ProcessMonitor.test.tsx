@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ProcessMonitor } from '../../../renderer/components/ProcessMonitor';
 import type { Session, Group, Theme } from '../../../renderer/types';
@@ -207,6 +208,31 @@ describe('ProcessMonitor', () => {
 		mockRegisterLayer.mockClear();
 		mockUnregisterLayer.mockClear();
 		mockUpdateLayerHandler.mockClear();
+
+		// jsdom in this environment doesn't provide a working Storage on
+		// window.localStorage, so install a minimal in-memory mock that
+		// satisfies the Storage methods the component uses.
+		const store = new Map<string, string>();
+		Object.defineProperty(window, 'localStorage', {
+			configurable: true,
+			writable: true,
+			value: {
+				getItem: vi.fn((key: string) => (store.has(key) ? store.get(key)! : null)),
+				setItem: vi.fn((key: string, value: string) => {
+					store.set(key, String(value));
+				}),
+				removeItem: vi.fn((key: string) => {
+					store.delete(key);
+				}),
+				clear: vi.fn(() => {
+					store.clear();
+				}),
+				key: vi.fn((index: number) => Array.from(store.keys())[index] ?? null),
+				get length() {
+					return store.size;
+				},
+			},
+		});
 	});
 
 	afterEach(() => {
@@ -448,11 +474,9 @@ describe('ProcessMonitor', () => {
 			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
 
 			await waitFor(() => {
-				expect(screen.queryByText('Loading processes...')).not.toBeInTheDocument();
+				expect(screen.getByText('UNGROUPED AGENTS')).toBeInTheDocument();
+				expect(screen.getByText('Test Session')).toBeInTheDocument();
 			});
-
-			expect(screen.getByText('UNGROUPED AGENTS')).toBeInTheDocument();
-			expect(screen.getByText('Test Session')).toBeInTheDocument();
 		});
 
 		it('should display grouped sessions with processes', async () => {
@@ -467,11 +491,9 @@ describe('ProcessMonitor', () => {
 			);
 
 			await waitFor(() => {
-				expect(screen.queryByText('Loading processes...')).not.toBeInTheDocument();
+				expect(screen.getByText('Test Group')).toBeInTheDocument();
+				expect(screen.getByText('Test Session')).toBeInTheDocument();
 			});
-
-			expect(screen.getByText('Test Group')).toBeInTheDocument();
-			expect(screen.getByText('Test Session')).toBeInTheDocument();
 		});
 
 		it('should show session count in group', async () => {
@@ -535,7 +557,7 @@ describe('ProcessMonitor', () => {
 			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
 
 			await waitFor(() => {
-				expect(screen.getByText(/Session: abcdef12/)).toBeInTheDocument();
+				expect(screen.getByText('abcdef12')).toBeInTheDocument();
 			});
 		});
 	});
@@ -675,8 +697,8 @@ describe('ProcessMonitor', () => {
 				expect(screen.getByText('WIZARD PROCESSES')).toBeInTheDocument();
 				expect(screen.getByText('Wizard Conversation')).toBeInTheDocument();
 				expect(screen.getByText('Playbook Generation')).toBeInTheDocument();
-				expect(screen.getByText('PID: 11111')).toBeInTheDocument();
-				expect(screen.getByText('PID: 22222')).toBeInTheDocument();
+				expect(screen.getByText('PID 11111')).toBeInTheDocument();
+				expect(screen.getByText('PID 22222')).toBeInTheDocument();
 			});
 		});
 
@@ -688,21 +710,7 @@ describe('ProcessMonitor', () => {
 			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
 
 			await waitFor(() => {
-				expect(screen.getByText('PID: 99999')).toBeInTheDocument();
-			});
-		});
-
-		it('should display "Running" status badge', async () => {
-			const process = createActiveProcess();
-			getActiveProcessesMock().mockResolvedValue([process]);
-
-			const session = createSession();
-			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
-
-			await waitFor(() => {
-				// Footer also has "Running" text, so find the badge
-				const runningBadges = screen.getAllByText('Running');
-				expect(runningBadges.length).toBeGreaterThanOrEqual(1);
+				expect(screen.getByText('PID 99999')).toBeInTheDocument();
 			});
 		});
 	});
@@ -828,7 +836,7 @@ describe('ProcessMonitor', () => {
 	});
 
 	describe('SSH/Local indicator', () => {
-		it('should show "Local" badge on session row for local sessions', async () => {
+		it('should not render any locality badge on session row for local sessions', async () => {
 			const process = createActiveProcess({ sessionId: 'session-1-ai-tab-1' });
 			getActiveProcessesMock().mockResolvedValue([process]);
 
@@ -836,9 +844,13 @@ describe('ProcessMonitor', () => {
 			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
 
 			await waitFor(() => {
-				expect(screen.getByTitle('Running locally')).toBeInTheDocument();
-				expect(screen.getByText('Local')).toBeInTheDocument();
+				expect(
+					screen.getByText('Test Session - AI Agent (claude-code) - Tab 1')
+				).toBeInTheDocument();
 			});
+
+			expect(screen.queryByText('Local')).not.toBeInTheDocument();
+			expect(screen.queryByTitle('Running locally')).not.toBeInTheDocument();
 		});
 
 		it('should show SSH badge on session row for SSH sessions', async () => {
@@ -940,7 +952,45 @@ describe('ProcessMonitor', () => {
 			});
 		});
 
-		it('should collapse all when clicking collapse button', async () => {
+		it('should step through depth levels when clicking the collapse button', async () => {
+			const process = createActiveProcess();
+			getActiveProcessesMock().mockResolvedValue([process]);
+
+			const session = createSession({ groupId: 'group-1' });
+			const group = createGroup();
+
+			render(
+				<ProcessMonitor theme={theme} sessions={[session]} groups={[group]} onClose={onClose} />
+			);
+
+			// Initial state: fully expanded - process visible
+			await waitFor(() => {
+				expect(
+					screen.getByText('Test Session - AI Agent (claude-code) - Tab 1')
+				).toBeInTheDocument();
+			});
+			expect(screen.getByText('Test Session')).toBeInTheDocument();
+
+			const collapseButton = screen.getByTitle('Collapse one level');
+
+			// First click collapses the deepest level (sessions) - process hidden, session still visible
+			fireEvent.click(collapseButton);
+			await waitFor(() => {
+				expect(
+					screen.queryByText('Test Session - AI Agent (claude-code) - Tab 1')
+				).not.toBeInTheDocument();
+			});
+			expect(screen.getByText('Test Session')).toBeInTheDocument();
+
+			// Second click collapses the group level - only the group remains visible
+			fireEvent.click(collapseButton);
+			await waitFor(() => {
+				expect(screen.queryByText('Test Session')).not.toBeInTheDocument();
+			});
+			expect(screen.getByText('Test Group')).toBeInTheDocument();
+		});
+
+		it('should step through depth levels when clicking the expand button', async () => {
 			const process = createActiveProcess();
 			getActiveProcessesMock().mockResolvedValue([process]);
 
@@ -957,54 +1007,77 @@ describe('ProcessMonitor', () => {
 				).toBeInTheDocument();
 			});
 
-			// Click collapse all button
-			const collapseButton = screen.getByTitle('Collapse all');
+			// Fully collapse first by clicking collapse twice
+			const collapseButton = screen.getByTitle('Collapse one level');
+			fireEvent.click(collapseButton);
 			fireEvent.click(collapseButton);
 
-			// Process should no longer be visible
+			await waitFor(() => {
+				expect(screen.queryByText('Test Session')).not.toBeInTheDocument();
+			});
+
+			const expandButton = screen.getByTitle('Expand one level');
+
+			// First click expands group - session visible but process not
+			fireEvent.click(expandButton);
+			await waitFor(() => {
+				expect(screen.getByText('Test Session')).toBeInTheDocument();
+			});
+			expect(
+				screen.queryByText('Test Session - AI Agent (claude-code) - Tab 1')
+			).not.toBeInTheDocument();
+
+			// Second click expands session - process now visible
+			fireEvent.click(expandButton);
 			await waitFor(() => {
 				expect(
-					screen.queryByText('Test Session - AI Agent (claude-code) - Tab 1')
-				).not.toBeInTheDocument();
+					screen.getByText('Test Session - AI Agent (claude-code) - Tab 1')
+				).toBeInTheDocument();
 			});
 		});
 
-		it('should expand all when clicking expand button', async () => {
+		it('should persist the last expand/collapse level across renders', async () => {
 			const process = createActiveProcess();
 			getActiveProcessesMock().mockResolvedValue([process]);
 
 			const session = createSession({ groupId: 'group-1' });
 			const group = createGroup();
 
-			render(
+			const { unmount } = render(
 				<ProcessMonitor theme={theme} sessions={[session]} groups={[group]} onClose={onClose} />
 			);
 
+			// Initial render: fully expanded.
 			await waitFor(() => {
 				expect(
 					screen.getByText('Test Session - AI Agent (claude-code) - Tab 1')
 				).toBeInTheDocument();
 			});
 
-			// Collapse first
-			const collapseButton = screen.getByTitle('Collapse all');
-			fireEvent.click(collapseButton);
-
+			// Step down once - sessions visible, process hidden.
+			fireEvent.click(screen.getByTitle('Collapse one level'));
 			await waitFor(() => {
 				expect(
 					screen.queryByText('Test Session - AI Agent (claude-code) - Tab 1')
 				).not.toBeInTheDocument();
 			});
+			expect(screen.getByText('Test Session')).toBeInTheDocument();
 
-			// Then expand
-			const expandButton = screen.getByTitle('Expand all');
-			fireEvent.click(expandButton);
+			// Persisted level should be 1 (depth-0 group expanded only).
+			expect(window.localStorage.getItem('maestro.processMonitor.expandedLevel')).toBe('1');
+
+			// Tear down and re-render - should restore to the same level.
+			unmount();
+			render(
+				<ProcessMonitor theme={theme} sessions={[session]} groups={[group]} onClose={onClose} />
+			);
 
 			await waitFor(() => {
-				expect(
-					screen.getByText('Test Session - AI Agent (claude-code) - Tab 1')
-				).toBeInTheDocument();
+				expect(screen.getByText('Test Session')).toBeInTheDocument();
 			});
+			expect(
+				screen.queryByText('Test Session - AI Agent (claude-code) - Tab 1')
+			).not.toBeInTheDocument();
 		});
 	});
 
@@ -1068,14 +1141,13 @@ describe('ProcessMonitor', () => {
 				).toBeInTheDocument();
 			});
 
-			// Collapse first
-			const collapseButton = screen.getByTitle('Collapse all');
+			// Fully collapse first by stepping down twice (session, then group)
+			const collapseButton = screen.getByTitle('Collapse one level');
+			fireEvent.click(collapseButton);
 			fireEvent.click(collapseButton);
 
 			await waitFor(() => {
-				expect(
-					screen.queryByText('Test Session - AI Agent (claude-code) - Tab 1')
-				).not.toBeInTheDocument();
+				expect(screen.queryByText('Test Session')).not.toBeInTheDocument();
 			});
 
 			const dialog = screen.getByRole('dialog');
@@ -1258,7 +1330,7 @@ describe('ProcessMonitor', () => {
 		});
 
 		it('should handle fetch error gracefully', async () => {
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
 			getActiveProcessesMock().mockRejectedValue(new Error('Network error'));
 
 			render(<ProcessMonitor theme={theme} sessions={[]} groups={[]} onClose={onClose} />);
@@ -1266,6 +1338,7 @@ describe('ProcessMonitor', () => {
 			await waitFor(() => {
 				expect(consoleError).toHaveBeenCalledWith(
 					'Failed to fetch active processes:',
+					undefined,
 					expect.any(Error)
 				);
 			});
@@ -1427,9 +1500,18 @@ describe('ProcessMonitor', () => {
 
 			expect(screen.getByText('Kill Process?')).toBeInTheDocument();
 
-			// Press Escape
-			const confirmDialog = screen.getByText('Kill Process?').closest('div[tabindex="-1"]')!;
-			fireEvent.keyDown(confirmDialog, { key: 'Escape' });
+			// Escape is owned by the layer stack: KillConfirmDialog registers a
+			// CONFIRM-priority layer (1000) that wins over PROCESS_MONITOR (550).
+			// In the test the layer stack is mocked, so we drive Esc by finding
+			// the kill dialog's registered onEscape and invoking it directly -
+			// mirrors how a real Esc keypress reaches the topmost layer.
+			const killLayer = mockRegisterLayer.mock.calls
+				.map((call) => call[0] as { ariaLabel?: string; onEscape?: () => void })
+				.find((layer) => layer.ariaLabel === 'Kill Process');
+			expect(killLayer?.onEscape).toBeTypeOf('function');
+			act(() => {
+				killLayer?.onEscape?.();
+			});
 
 			await waitFor(() => {
 				expect(screen.queryByText('Kill Process?')).not.toBeInTheDocument();
@@ -1437,7 +1519,7 @@ describe('ProcessMonitor', () => {
 		});
 
 		it('should handle kill error gracefully', async () => {
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const consoleError = vi.spyOn(logger, 'error').mockImplementation(() => {});
 			killMock().mockRejectedValue(new Error('Kill failed'));
 
 			const process = createActiveProcess();
@@ -1460,7 +1542,11 @@ describe('ProcessMonitor', () => {
 			fireEvent.click(screen.getByText('Kill Process'));
 
 			await waitFor(() => {
-				expect(consoleError).toHaveBeenCalledWith('Failed to kill process:', expect.any(Error));
+				expect(consoleError).toHaveBeenCalledWith(
+					'Failed to kill process:',
+					undefined,
+					expect.any(Error)
+				);
 			});
 
 			consoleError.mockRestore();
@@ -1616,12 +1702,78 @@ describe('ProcessMonitor', () => {
 			expect(screen.getByText('↑↓ navigate • Enter view details • R refresh')).toBeInTheDocument();
 		});
 
-		it('should display running indicator', () => {
+		it('should not render the legacy "Running" footer legend', () => {
 			render(<ProcessMonitor theme={theme} sessions={[]} groups={[]} onClose={onClose} />);
 
-			// Should have a "Running" label in footer
-			const footerRunning = screen.getAllByText('Running');
-			expect(footerRunning.length).toBeGreaterThan(0);
+			// The footer Running legend was redundant with the per-row green dot and was removed.
+			expect(screen.queryByText('Running')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('Left alignment', () => {
+		it('group label should not push siblings to the right edge', async () => {
+			const process = createActiveProcess();
+			getActiveProcessesMock().mockResolvedValue([process]);
+
+			const session = createSession({ groupId: 'group-1' });
+			const group = createGroup();
+
+			render(
+				<ProcessMonitor theme={theme} sessions={[session]} groups={[group]} onClose={onClose} />
+			);
+
+			await waitFor(() => {
+				expect(screen.getByText('Test Group')).toBeInTheDocument();
+			});
+
+			const label = screen.getByText('Test Group');
+			expect(label.className).not.toMatch(/\bflex-1\b/);
+		});
+
+		it('session label should not push siblings to the right edge', async () => {
+			const process = createActiveProcess();
+			getActiveProcessesMock().mockResolvedValue([process]);
+
+			const session = createSession();
+			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Test Session')).toBeInTheDocument();
+			});
+
+			const label = screen.getByText('Test Session');
+			expect(label.className).not.toMatch(/\bflex-1\b/);
+		});
+
+		it('process action cluster should not be right-aligned with ml-auto', async () => {
+			const process = createActiveProcess({
+				sessionId: 'session-1-batch-1234567890',
+				isBatchMode: true,
+			});
+			getActiveProcessesMock().mockResolvedValue([process]);
+
+			const session = createSession();
+			render(<ProcessMonitor theme={theme} sessions={[session]} groups={[]} onClose={onClose} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('AUTO')).toBeInTheDocument();
+			});
+
+			// The AUTO badge lives inside the action cluster div. That cluster
+			// must not use `ml-auto` (which would push it to the right edge).
+			const autoBadge = screen.getByText('AUTO');
+			const actionCluster = autoBadge.parentElement;
+			expect(actionCluster?.className ?? '').not.toMatch(/\bml-auto\b/);
+		});
+
+		it('footer should not split content to opposite edges', async () => {
+			getActiveProcessesMock().mockResolvedValue([]);
+
+			render(<ProcessMonitor theme={theme} sessions={[]} groups={[]} onClose={onClose} />);
+
+			const hint = screen.getByText('↑↓ navigate • Enter view details • R refresh');
+			const footer = hint.parentElement;
+			expect(footer?.className ?? '').not.toMatch(/\bjustify-between\b/);
 		});
 	});
 

@@ -17,12 +17,25 @@
  */
 
 import type { Components } from 'react-markdown';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { getSyntaxStyle } from './syntaxTheme';
 import React from 'react';
 import type { Theme } from '../types';
 import { REMARK_GFM_PLUGINS } from '../../shared/markdownPlugins';
 import { extractHexColor } from '../../shared/hexColor';
+import { openUrl } from './openUrl';
+import { BionifyText, getBionifyReadingModeStyles } from './bionifyReadingMode';
+import { AlertCallout } from '../components/Markdown/components/AlertCallout';
+import { alertTypeFromClassName } from '../components/Markdown/remarkAlert';
+import { TaskCheckbox } from '../components/Markdown/components/TaskCheckbox';
+import { MarkerPill } from '../components/Markdown/components/MarkerPill';
+import {
+	INLINE_CODE_CLICK_PROPS,
+	INLINE_CODE_CLICK_STYLE,
+	buildInlineCodeHandlers,
+} from './inlineCodeCopy';
+import { COLORBLIND_DIFF_COLORS } from '../constants/colorblindPalettes';
+import { createMarkdownLink } from '../components/Markdown/components/MarkdownLink';
+import { createPrismCodeBlock } from '../components/Markdown/components/PrismCodeBlock';
+import { InlineCode } from '../components/Markdown/components/InlineCode';
 
 // ============================================================================
 // Types
@@ -51,7 +64,7 @@ export interface MarkdownComponentsOptions {
 	/** Callback when internal file link is clicked (maestro-file:// protocol) */
 	onFileClick?: (filePath: string, options?: { openInNewTab?: boolean }) => void;
 	/** Callback when external link is clicked - if not provided, uses default browser behavior */
-	onExternalLinkClick?: (href: string) => void;
+	onExternalLinkClick?: (href: string, options?: { ctrlKey?: boolean }) => void;
 	/** Callback when anchor link is clicked (same-page #section links) */
 	onAnchorClick?: (anchorId: string) => void;
 	/** Container ref for scrolling to anchors - if not provided, uses document.getElementById */
@@ -71,6 +84,20 @@ export interface MarkdownComponentsOptions {
 		borderRadius?: string;
 		backgroundColor?: string;
 	};
+	/** Apply Bionify reading-mode emphasis to readable prose nodes only */
+	enableBionifyReadingMode?: boolean;
+	/** Visual intensity for Bionify emphasis */
+	bionifyIntensity?: number;
+	/** Algorithm string controlling Bionify highlight lengths */
+	bionifyAlgorithm?: string;
+	/**
+	 * Makes rendered GFM task checkboxes clickable. Called with the 1-based
+	 * source line of the task's `- [ ]` marker; resolve false when the write did
+	 * not happen so the box reverts. Requires `rehypeSourceLine` in the caller's
+	 * rehype plugins - that is what stamps each box with its line. Omit the
+	 * option to keep the read-only checkboxes react-markdown emits by default.
+	 */
+	onTaskToggle?: (sourceLine: number) => Promise<boolean>;
 }
 
 /**
@@ -150,17 +177,18 @@ export function generateProseStyles(options: ProseStylesOptions): string {
     ${s} li::marker { color: ${colors.textMain}; }
     ${s} ol li::marker { font-variant-numeric: tabular-nums; font-weight: 400; }
     ${s} li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.5em; }
-    ${s} code { background-color: ${colors.bgActivity}; color: ${colors.textMain}; padding: 0.2em 0.4em; border-radius: 3px; font-size: 0.9em; }
+    ${s} code { background-color: ${colors.bgActivity}; color: ${colors.textMain}; padding: 0.2em 0.4em; border-radius: 3px; font-size: 0.9em; overflow-wrap: anywhere; }
     ${s} pre { background-color: ${colors.bgActivity}; color: ${colors.textMain}; padding: 1em; border-radius: 6px; overflow-x: auto; ${compactSpacing ? 'margin: 0.35em 0 !important;' : ''} }
     ${s} pre code { background: none; padding: 0; }
     ${s} blockquote { border-left: ${compactSpacing ? '3px' : '4px'} solid ${colors.border}; padding-left: ${compactSpacing ? '0.75em' : '1em'}; margin: ${compactSpacing ? '0.25em 0' : '0.5em 0'} !important; color: ${colors.textDim}; }
-    ${s} a { color: ${colors.accent}; text-decoration: underline; }
+    ${s} a { color: ${colors.accentText}; text-decoration: underline; }
     ${s} hr { border: none; border-top: ${compactSpacing ? '1px' : '2px'} solid ${colors.border}; margin: ${hrMargin} !important; }
     ${s} table { border-collapse: collapse; width: 100%; margin: ${compactSpacing ? '0.35em 0' : '0.5em 0'} !important; }
     ${s} th, ${s} td { border: 1px solid ${colors.border}; padding: ${compactSpacing ? '0.25em 0.5em' : '0.5em'}; text-align: left; }
     ${s} th { background-color: ${colors.bgActivity}; font-weight: bold; }
     ${s} strong { font-weight: bold; }
     ${s} em { font-style: italic; }
+    ${getBionifyReadingModeStyles(s, theme)}
   `.trim();
 
 	// Add checkbox styles if requested
@@ -326,6 +354,36 @@ function highlightSearchMatches(
 	return processChild(children, 0);
 }
 
+export function applyReadableTextTransforms(
+	children: React.ReactNode,
+	options: Pick<
+		MarkdownComponentsOptions,
+		'enableBionifyReadingMode' | 'searchHighlight' | 'bionifyIntensity' | 'bionifyAlgorithm'
+	> & {
+		theme: Theme;
+	}
+): React.ReactNode {
+	const {
+		theme,
+		searchHighlight,
+		enableBionifyReadingMode = false,
+		bionifyIntensity,
+		bionifyAlgorithm,
+	} = options;
+	const highlighted =
+		searchHighlight && searchHighlight.query.trim()
+			? highlightSearchMatches(children, searchHighlight, theme)
+			: children;
+
+	return React.createElement(BionifyText, {
+		enabled: enableBionifyReadingMode,
+		intensity: bionifyIntensity,
+		algorithm: bionifyAlgorithm,
+		theme,
+		children: highlighted,
+	});
+}
+
 export function createMarkdownComponents(options: MarkdownComponentsOptions): Partial<Components> {
 	const {
 		theme,
@@ -337,128 +395,87 @@ export function createMarkdownComponents(options: MarkdownComponentsOptions): Pa
 		containerRef,
 		searchHighlight,
 		codeBlockStyle,
+		enableBionifyReadingMode = false,
+		bionifyIntensity,
+		bionifyAlgorithm,
+		onTaskToggle,
 	} = options;
 
 	// Reset match counter at start of each render
 	globalMatchCounter = 0;
 
-	// Helper to wrap children with search highlighting
-	const withHighlight = (children: React.ReactNode): React.ReactNode => {
-		if (!searchHighlight || !searchHighlight.query.trim()) {
-			return children;
-		}
-		return highlightSearchMatches(children, searchHighlight, theme);
+	const withReadableTransforms = (children: React.ReactNode): React.ReactNode => {
+		return applyReadableTextTransforms(children, {
+			theme,
+			searchHighlight,
+			enableBionifyReadingMode,
+			bionifyIntensity,
+			bionifyAlgorithm,
+		});
 	};
 
 	const components: Partial<Components> = {
-		// Override paragraph to apply search highlighting
-		p: ({ children }: any) => React.createElement('p', null, withHighlight(children)),
+		// Override paragraph to apply search highlighting.
+		// Props are forwarded (minus `node`) so `rehypeSourceLine`'s
+		// `data-source-line` survives. Dropping it left HEADINGS as the only
+		// anchored blocks, so the preview -> edit toggle could not tell "the top
+		// of the document" from "the first heading" and jumped down to it.
+		p: ({ children, node: _node, ...props }: any) =>
+			React.createElement('p', props, withReadableTransforms(children)),
 
-		// Override headings to apply search highlighting (forward id/props for rehype-slug anchors)
+		// Override headings to apply readable transforms (search highlighting + Bionify)
+		// Forward id/props for rehype-slug anchors (rc) while piping through withReadableTransforms (main/Bionify)
 		h1: ({ children, node: _node, ...props }: any) =>
-			React.createElement('h1', props, withHighlight(children)),
+			React.createElement('h1', props, withReadableTransforms(children)),
 		h2: ({ children, node: _node, ...props }: any) =>
-			React.createElement('h2', props, withHighlight(children)),
+			React.createElement('h2', props, withReadableTransforms(children)),
 		h3: ({ children, node: _node, ...props }: any) =>
-			React.createElement('h3', props, withHighlight(children)),
+			React.createElement('h3', props, withReadableTransforms(children)),
 		h4: ({ children, node: _node, ...props }: any) =>
-			React.createElement('h4', props, withHighlight(children)),
+			React.createElement('h4', props, withReadableTransforms(children)),
 		h5: ({ children, node: _node, ...props }: any) =>
-			React.createElement('h5', props, withHighlight(children)),
+			React.createElement('h5', props, withReadableTransforms(children)),
 		h6: ({ children, node: _node, ...props }: any) =>
-			React.createElement('h6', props, withHighlight(children)),
+			React.createElement('h6', props, withReadableTransforms(children)),
 
-		// Override list items to apply search highlighting
-		li: ({ children }: any) => React.createElement('li', null, withHighlight(children)),
+		// Override list items to apply search highlighting. Props forwarded for
+		// the same reason as `p` - a long list between two headings is otherwise
+		// one unanchored run.
+		li: ({ children, node: _node, ...props }: any) =>
+			React.createElement('li', props, withReadableTransforms(children)),
 
 		// Override table cells to apply search highlighting
-		td: ({ children }: any) => React.createElement('td', null, withHighlight(children)),
-		th: ({ children }: any) => React.createElement('th', null, withHighlight(children)),
+		td: ({ children }: any) => React.createElement('td', null, withReadableTransforms(children)),
+		th: ({ children }: any) => React.createElement('th', null, withReadableTransforms(children)),
 
-		// Override blockquote to apply search highlighting
-		blockquote: ({ children }: any) =>
-			React.createElement('blockquote', null, withHighlight(children)),
-
-		// Override strong/em to apply search highlighting
-		strong: ({ children }: any) => React.createElement('strong', null, withHighlight(children)),
-		em: ({ children }: any) => React.createElement('em', null, withHighlight(children)),
-		// Block code: extract code element from <pre><code>...</code></pre> and render with SyntaxHighlighter
-		pre: ({ children }: any) => {
-			const codeElement = React.Children.toArray(children).find(
-				(child: any) => child?.type === 'code' || child?.props?.node?.tagName === 'code'
-			) as React.ReactElement<any> | undefined;
-
-			if (codeElement?.props) {
-				const { className, children: codeChildren } = codeElement.props;
-				const match = (className || '').match(/language-(\w+)/);
-				const language = match ? match[1] : 'text';
-				const codeContent = String(codeChildren).replace(/\n$/, '');
-
-				// Check for custom language renderer (e.g., mermaid)
-				if (customLanguageRenderers[language]) {
-					const CustomRenderer = customLanguageRenderers[language];
-					return React.createElement(CustomRenderer, { code: codeContent, theme });
-				}
-
-				// Standard syntax-highlighted code block
-				// Use light/dark base style depending on theme mode, then
-				// override text color & background so plain-text / unknown-language
-				// code blocks match inline code across all themes.
-				const baseStyle = getSyntaxStyle(theme.mode);
-				const themedStyle = {
-					...baseStyle,
-					'pre[class*="language-"]': {
-						...(baseStyle as any)['pre[class*="language-"]'],
-						color: theme.colors.textMain,
-						background: theme.colors.bgActivity,
-					},
-					'code[class*="language-"]': {
-						...(baseStyle as any)['code[class*="language-"]'],
-						color: theme.colors.textMain,
-					},
-				};
-				return React.createElement(SyntaxHighlighter, {
-					language,
-					style: themedStyle,
-					customStyle: {
-						margin: codeBlockStyle?.margin ?? '0.5em 0',
-						padding: codeBlockStyle?.padding ?? '1em',
-						background: codeBlockStyle?.backgroundColor ?? theme.colors.bgActivity,
-						fontSize: codeBlockStyle?.fontSize ?? '0.9em',
-						borderRadius: codeBlockStyle?.borderRadius ?? '6px',
-					},
-					PreTag: 'div',
-					children: codeContent,
+		// Override blockquote to apply search highlighting; render GitHub
+		// `[!NOTE]`-style callouts (tagged by remarkAlert) as styled AlertCallouts.
+		blockquote: ({ children, node: _node, className, ...props }: any) => {
+			const alertType = alertTypeFromClassName(className);
+			if (alertType) {
+				return React.createElement(AlertCallout, {
+					type: alertType,
+					theme,
+					children: withReadableTransforms(children),
 				});
 			}
+			return React.createElement(
+				'blockquote',
+				{ ...props, ...(className ? { className } : null) },
+				withReadableTransforms(children)
+			);
+		},
 
-			// Fallback: render as-is
-			return React.createElement('pre', null, children);
-		},
-		// Inline code only — block code is handled by the pre component above
-		code: ({ node: _node, className, children, ...props }: any) => {
-			const hexColor = extractHexColor(children);
-			if (hexColor) {
-				return React.createElement(
-					'code',
-					{ className, ...props },
-					React.createElement('span', {
-						style: {
-							display: 'inline-block',
-							width: '0.75em',
-							height: '0.75em',
-							backgroundColor: hexColor,
-							borderRadius: '2px',
-							marginRight: '0.35em',
-							verticalAlign: 'middle',
-							border: '1px solid rgba(128, 128, 128, 0.3)',
-						},
-					}),
-					children
-				);
-			}
-			return React.createElement('code', { className, ...props }, children);
-		},
+		// Override strong/em to apply search highlighting
+		strong: ({ children }: any) =>
+			React.createElement('strong', null, withReadableTransforms(children)),
+		em: ({ children }: any) => React.createElement('em', null, withReadableTransforms(children)),
+		// Block code: rendered via the shared Prism code-block leaf (custom
+		// language renderers like mermaid + theme-aware syntax highlighting).
+		pre: createPrismCodeBlock({ theme, customLanguageRenderers, codeBlockStyle }),
+		// Inline code only - block code is handled by the pre component above.
+		code: ({ node: _node, className, children, style, ...props }: any) =>
+			React.createElement(InlineCode, { className, style, passthrough: props, children }),
 	};
 
 	// Custom image renderer if provided
@@ -468,59 +485,43 @@ export function createMarkdownComponents(options: MarkdownComponentsOptions): Pa
 		};
 	}
 
-	// Link handler - supports internal file links, anchor links, and external links
+	// Link handler - supports internal file links, anchor links, and external
+	// links via the shared MarkdownLink leaf (document behavior).
 	if (onFileClick || onExternalLinkClick || onAnchorClick) {
-		components.a = ({ node: _node, href, children, ...props }: any) => {
-			// Check for maestro-file:// protocol OR data-maestro-file attribute
-			// (data attribute is fallback when rehype strips custom protocols)
-			const dataFilePath = props['data-maestro-file'];
-			const isMaestroFile = href?.startsWith('maestro-file://') || !!dataFilePath;
-			const filePath =
-				dataFilePath ||
-				(href?.startsWith('maestro-file://') ? href.replace('maestro-file://', '') : null);
+		components.a = createMarkdownLink({
+			theme,
+			linkColor: 'accent',
+			onFileClick,
+			onExternalLinkClick,
+			onAnchorClick,
+			containerRef,
+			behavior: { anchors: true, relativeAsFile: true, fileClickOptions: true },
+		});
+	}
 
-			// Check for anchor links (same-page navigation)
-			const isAnchorLink = href?.startsWith('#');
-			const anchorId = isAnchorLink ? href.slice(1) : null;
-
-			return React.createElement(
-				'a',
-				{
-					href,
-					...props,
-					onClick: (e: React.MouseEvent) => {
-						e.preventDefault();
-						if (isMaestroFile && filePath && onFileClick) {
-							onFileClick(filePath, { openInNewTab: e.metaKey || e.ctrlKey });
-						} else if (isAnchorLink && anchorId) {
-							// Handle anchor links - scroll to the target element
-							if (onAnchorClick) {
-								onAnchorClick(anchorId);
-							} else {
-								// Default behavior: find element by ID and scroll to it
-								const targetElement = containerRef?.current
-									? containerRef.current.querySelector(`#${CSS.escape(anchorId)}`)
-									: document.getElementById(anchorId);
-								if (targetElement) {
-									targetElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
-								}
-							}
-						} else if (href && onExternalLinkClick && /^https?:\/\/|^mailto:/.test(href)) {
-							onExternalLinkClick(href);
-						} else if (
-							href &&
-							onFileClick &&
-							!href.startsWith('mailto:') &&
-							!/^https?:\/\//.test(href)
-						) {
-							// Treat relative paths (e.g. LICENSE, ./README.md) as file links
-							onFileClick(href, { openInNewTab: e.metaKey || e.ctrlKey });
-						}
-					},
-					style: { color: theme.colors.accent, textDecoration: 'underline', cursor: 'pointer' },
-				},
-				children
-			);
+	// Clickable GFM task checkboxes. Without this react-markdown renders them
+	// `disabled`, so a document can only be ticked off in edit mode. The line
+	// comes from `rehypeSourceLine`, which stamps each box with the line its
+	// `- [ ]` marker lives on. Everything else (raw HTML inputs passed through by
+	// rehype-raw) stays inert - a preview is not a form.
+	if (onTaskToggle) {
+		components.input = ({ node: _node, type, checked, ...props }: any) => {
+			const line = Number(props['data-source-line']);
+			if (type === 'checkbox' && Number.isFinite(line)) {
+				return React.createElement(TaskCheckbox, {
+					line,
+					checked: !!checked,
+					theme,
+					onToggle: onTaskToggle,
+				});
+			}
+			return React.createElement('input', {
+				type,
+				checked,
+				disabled: true,
+				readOnly: true,
+				...props,
+			});
 		};
 	}
 
@@ -529,6 +530,32 @@ export function createMarkdownComponents(options: MarkdownComponentsOptions): Pa
 	// Fixes MAESTRO-8Q
 	components.details = ({ node: _node, onToggle: _onToggle, ...props }: any) =>
 		React.createElement('details', props);
+
+	// Auto Run markers, tagged by `remarkMaestroMarkers` (block markers become a
+	// div, inline ones a span). Only this DOCUMENT component map gets them: chat
+	// builds its own map, so an agent explaining the marker syntax in a message
+	// keeps rendering as prose rather than claiming something is configured.
+	//
+	// Both overrides fall through to a plain element when the attribute is
+	// absent, so they are inert on any surface that does not run the plugin.
+	const renderMarker = (tag: 'div' | 'span') => {
+		return ({ node: _node, children, ...props }: any) => {
+			const kind = props['data-maestro-marker'];
+			if (!kind) return React.createElement(tag, props, children);
+			return React.createElement(MarkerPill, {
+				kind,
+				status: props['data-maestro-marker-status'],
+				scope: props['data-maestro-marker-scope'],
+				label: props['data-maestro-marker-label'],
+				detail: props['data-maestro-marker-detail'],
+				artifact: props['data-maestro-marker-artifact'],
+				reason: props['data-maestro-marker-reason'],
+				theme,
+			});
+		};
+	};
+	components.div = renderMarker('div');
+	components.span = renderMarker('span');
 
 	return components;
 }
@@ -546,6 +573,7 @@ export function generateInlineWizardPreviewProseStyles(
 ): string {
 	const c = theme.colors;
 	const s = scopeSelector ? `${scopeSelector}.prose, ${scopeSelector} .prose` : '.prose';
+	const bionifySelector = scopeSelector ? `${scopeSelector} .prose` : '.prose';
 	const isStreaming = variant === 'streaming';
 
 	const heading1Size = isStreaming ? '1.75em' : '2em';
@@ -620,6 +648,7 @@ export function generateInlineWizardPreviewProseStyles(
       list-style-type: none;
       margin-left: -1.5em;
     }
+    ${getBionifyReadingModeStyles(bionifySelector, theme)}
   `;
 }
 
@@ -646,7 +675,9 @@ export function createWizardBubbleMarkdownComponents(theme: Theme): Partial<Comp
 					'code',
 					{
 						className: 'px-1 py-0.5 rounded text-xs font-mono',
-						style: { backgroundColor: `${theme.colors.bgMain}80` },
+						style: { backgroundColor: `${theme.colors.bgMain}80`, ...INLINE_CODE_CLICK_STYLE },
+						...INLINE_CODE_CLICK_PROPS,
+						...buildInlineCodeHandlers(children),
 					},
 					hexColor
 						? React.createElement('span', {
@@ -683,9 +714,9 @@ export function createWizardBubbleMarkdownComponents(theme: Theme): Partial<Comp
 					type: 'button',
 					className: 'underline',
 					style: { color: theme.colors.accent },
-					onClick: () => {
+					onClick: (e: React.MouseEvent) => {
 						if (href && /^https?:\/\/|^mailto:/.test(href)) {
-							window.maestro.shell.openExternal(href);
+							openUrl(href, { ctrlKey: e.metaKey || e.ctrlKey });
 						}
 					},
 				},
@@ -774,7 +805,10 @@ export function createReleaseNotesMarkdownComponents(theme: Theme): Partial<Comp
 					style: {
 						backgroundColor: theme.colors.bgMain,
 						color: theme.colors.accent,
+						...INLINE_CODE_CLICK_STYLE,
 					},
+					...INLINE_CODE_CLICK_PROPS,
+					...buildInlineCodeHandlers(children),
 				},
 				hexColor
 					? React.createElement('span', {
@@ -801,7 +835,7 @@ export function createReleaseNotesMarkdownComponents(theme: Theme): Partial<Comp
 					onClick: (e: React.MouseEvent) => {
 						e.preventDefault();
 						if (href && /^https?:\/\/|^mailto:/.test(href)) {
-							window.maestro.shell.openExternal(href);
+							openUrl(href, { ctrlKey: e.metaKey || e.ctrlKey });
 						}
 					},
 					className: 'hover:underline cursor-pointer',
@@ -856,7 +890,7 @@ export function generateTerminalProseStyles(theme: Theme, scopeSelector: string)
     ${s} p { color: ${c.textMain}; margin: 0 !important; line-height: 1.4; }
     ${s} p + p { margin-top: 0.5em !important; }
     ${s} p:empty { display: none; }
-    ${s} > ul, ${s} > ol { color: ${c.textMain}; margin: 0.25em 0 !important; padding-left: 2em; list-style-position: outside; }
+    ${s} ul, ${s} ol { color: ${c.textMain}; margin: 0.25em 0 !important; padding-left: 2em; list-style-position: outside; }
     ${s} li ul, ${s} li ol { margin: 0 !important; padding-left: 1.5em; list-style-position: outside; }
     ${s} li { margin: 0 !important; padding: 0; line-height: 1.4; display: list-item; }
     ${s} li > p:first-child { margin: 0 !important; display: inline; vertical-align: baseline; line-height: inherit; }
@@ -877,6 +911,7 @@ export function generateTerminalProseStyles(theme: Theme, scopeSelector: string)
     ${s} li > strong:first-child, ${s} li > b:first-child, ${s} li > em:first-child, ${s} li > code:first-child, ${s} li > a:first-child,
     ${s} li > p:first-child > strong:first-child, ${s} li > p:first-child > b:first-child, ${s} li > p:first-child > em:first-child, ${s} li > p:first-child > code:first-child, ${s} li > p:first-child > a:first-child { vertical-align: baseline; line-height: inherit; }
     ${s} li::marker { font-weight: normal; }
+    ${getBionifyReadingModeStyles(s, theme)}
   `;
 }
 
@@ -887,8 +922,19 @@ export function generateTerminalProseStyles(theme: Theme, scopeSelector: string)
  * @param theme Theme object with color values
  * @returns CSS string to be injected via <style> tag
  */
-export function generateDiffViewStyles(theme: Theme): string {
+export function generateDiffViewStyles(theme: Theme, colorBlindMode: boolean = false): string {
 	const c = theme.colors;
+
+	const insertGutter = colorBlindMode
+		? COLORBLIND_DIFF_COLORS.insertGutter
+		: 'rgba(34, 197, 94, 0.1)';
+	const insertCode = colorBlindMode ? COLORBLIND_DIFF_COLORS.insertCode : 'rgba(34, 197, 94, 0.15)';
+	const insertEdit = colorBlindMode ? 'rgba(0, 153, 136, 0.4)' : 'rgba(34, 197, 94, 0.3)';
+	const deleteGutter = colorBlindMode
+		? COLORBLIND_DIFF_COLORS.deleteGutter
+		: 'rgba(239, 68, 68, 0.1)';
+	const deleteCode = colorBlindMode ? COLORBLIND_DIFF_COLORS.deleteCode : 'rgba(239, 68, 68, 0.15)';
+	const deleteEdit = colorBlindMode ? 'rgba(204, 51, 17, 0.4)' : 'rgba(239, 68, 68, 0.3)';
 
 	return `
     .diff-gutter {
@@ -901,24 +947,24 @@ export function generateDiffViewStyles(theme: Theme): string {
       color: ${c.textMain} !important;
     }
     .diff-gutter-insert {
-      background-color: rgba(34, 197, 94, 0.1) !important;
+      background-color: ${insertGutter} !important;
     }
     .diff-code-insert {
-      background-color: rgba(34, 197, 94, 0.15) !important;
+      background-color: ${insertCode} !important;
       color: ${c.textMain} !important;
     }
     .diff-gutter-delete {
-      background-color: rgba(239, 68, 68, 0.1) !important;
+      background-color: ${deleteGutter} !important;
     }
     .diff-code-delete {
-      background-color: rgba(239, 68, 68, 0.15) !important;
+      background-color: ${deleteCode} !important;
       color: ${c.textMain} !important;
     }
     .diff-code-insert .diff-code-edit {
-      background-color: rgba(34, 197, 94, 0.3) !important;
+      background-color: ${insertEdit} !important;
     }
     .diff-code-delete .diff-code-edit {
-      background-color: rgba(239, 68, 68, 0.3) !important;
+      background-color: ${deleteEdit} !important;
     }
     .diff-hunk-header {
       background-color: ${c.bgActivity} !important;

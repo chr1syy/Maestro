@@ -1,8 +1,27 @@
 import React, { useCallback, memo, useMemo, useState, useEffect } from 'react';
-import { createPortal } from 'react-dom';
-import { Globe, X, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import {
+	Globe,
+	X,
+	ChevronsLeft,
+	Clock,
+	ChevronsRight,
+	Clipboard,
+	ArrowRightCircle,
+	Check,
+	Pencil,
+	RotateCcw,
+	VenetianMask,
+} from 'lucide-react';
 import type { BrowserTab, Theme } from '../../types';
 import { useTabHoverOverlay } from '../../hooks/tabs/useTabHoverOverlay';
+import { isCoarsePointer } from '../../utils/touch';
+import { safeClipboardWrite } from '../../utils/clipboard';
+import { LongPressable } from '../shared/LongPressable';
+import { TabOverlayPortal } from './TabOverlayPortal';
+import { getBrowserTabLabel } from '../../utils/browserTabPersistence';
+import { getTabKindColor } from './tabBarUtils';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { ShortcutHint, shortcutSuffix } from '../ui/ShortcutHint';
 
 export interface BrowserTabItemProps {
 	tab: BrowserTab;
@@ -10,6 +29,10 @@ export interface BrowserTabItemProps {
 	theme: Theme;
 	onSelect: (tabId: string) => void;
 	onClose: (tabId: string) => void;
+	/** Open the rename dialog for this tab. */
+	onRename?: (tabId: string) => void;
+	/** Clear the user-assigned name, letting the website set the title again. */
+	onResetName?: (tabId: string) => void;
 	onDragStart: (tabId: string, e: React.DragEvent) => void;
 	onDragOver: (tabId: string, e: React.DragEvent) => void;
 	onDragEnd: () => void;
@@ -17,6 +40,8 @@ export interface BrowserTabItemProps {
 	isDragging: boolean;
 	isDragOver: boolean;
 	registerRef?: (el: HTMLDivElement | null) => void;
+	/** Park this tab until a chosen moment. Omitted when snoozing is unavailable. */
+	onSnooze?: (tabId: string) => void;
 	onMoveToFirst?: (tabId: string) => void;
 	onMoveToLast?: (tabId: string) => void;
 	isFirstTab?: boolean;
@@ -24,23 +49,13 @@ export interface BrowserTabItemProps {
 	onCloseOtherTabs?: (tabId: string) => void;
 	onCloseTabsLeft?: (tabId: string) => void;
 	onCloseTabsRight?: (tabId: string) => void;
+	/** Copy the rendered text of the page to the clipboard. */
+	onCopyContent?: (tabId: string) => void;
+	/** Send the rendered text of the page to another agent. */
+	onSendContentToAgent?: (tabId: string) => void;
 	totalTabs?: number;
 	tabIndex?: number;
 	shortcutHint?: number | null;
-}
-
-function getBrowserTabLabel(tab: BrowserTab): string {
-	const title = tab.title?.trim();
-	if (title) return title;
-	const url = tab.url?.trim();
-	if (!url || url === 'about:blank') return 'New Tab';
-
-	try {
-		const parsed = new URL(url);
-		return parsed.host || parsed.href;
-	} catch {
-		return url;
-	}
 }
 
 function getBrowserTabHost(url: string): string | null {
@@ -60,6 +75,8 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 	theme,
 	onSelect,
 	onClose,
+	onRename,
+	onResetName,
 	onDragStart,
 	onDragOver,
 	onDragEnd,
@@ -67,6 +84,7 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 	isDragging,
 	isDragOver,
 	registerRef,
+	onSnooze,
 	onMoveToFirst,
 	onMoveToLast,
 	isFirstTab,
@@ -74,11 +92,14 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 	onCloseOtherTabs,
 	onCloseTabsLeft,
 	onCloseTabsRight,
+	onCopyContent,
+	onSendContentToAgent,
 	totalTabs,
 	tabIndex,
 	shortcutHint,
 }: BrowserTabItemProps) {
 	const [faviconFailed, setFaviconFailed] = useState(false);
+	const [urlCopied, setUrlCopied] = useState(false);
 	const {
 		isHovered,
 		overlayOpen,
@@ -87,12 +108,16 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 		setOverlayRef,
 		positionReady,
 		setTabRef,
+		openOverlay,
 		handleMouseEnter,
 		handleMouseLeave,
 		overlayMouseEnter,
 		overlayMouseLeave,
 		isOverOverlayRef,
 	} = useTabHoverOverlay({ registerRef });
+
+	const tabShortcuts = useSettingsStore((s) => s.tabShortcuts);
+	const showBrowserTabDomain = useSettingsStore((s) => s.showBrowserTabDomain);
 
 	const label = useMemo(() => getBrowserTabLabel(tab), [tab]);
 	const host = useMemo(() => getBrowserTabHost(tab.url), [tab.url]);
@@ -137,7 +162,31 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 		[onClose, tab.id]
 	);
 
-	const handleTabSelect = useCallback(() => onSelect(tab.id), [onSelect, tab.id]);
+	// A tap selects, on any tab. Touch has no hover, so the action overlay opens
+	// on a LONG-PRESS instead (the chip is a LongPressable below). Mouse/keyboard
+	// unchanged.
+	const handleTabSelect = useCallback(() => {
+		onSelect(tab.id);
+	}, [onSelect, tab.id]);
+	// Coarse pointer: long-press owns the gesture, so native drag is off.
+	const coarse = isCoarsePointer();
+	const handleDoubleClick = useCallback(() => onRename?.(tab.id), [onRename, tab.id]);
+	const handleRenameClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onRename?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onRename, tab.id, setOverlayOpen]
+	);
+	const handleResetNameClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onResetName?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onResetName, tab.id, setOverlayOpen]
+	);
 	const handleTabDragStart = useCallback(
 		(e: React.DragEvent) => onDragStart(tab.id, e),
 		[onDragStart, tab.id]
@@ -155,6 +204,15 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 		},
 		[onClose, tab.id]
 	);
+	const handleSnoozeClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onSnooze?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onSnooze, tab.id, setOverlayOpen]
+	);
+
 	const handleMoveToFirstClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
@@ -182,31 +240,66 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 	const handleCloseOtherTabsClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tab.id);
 			onCloseOtherTabs?.(tab.id);
 			setOverlayOpen(false);
 		},
-		[onCloseOtherTabs, tab.id, setOverlayOpen]
+		[onSelect, onCloseOtherTabs, tab.id, setOverlayOpen]
 	);
 	const handleCloseTabsLeftClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tab.id);
 			onCloseTabsLeft?.(tab.id);
 			setOverlayOpen(false);
 		},
-		[onCloseTabsLeft, tab.id, setOverlayOpen]
+		[onSelect, onCloseTabsLeft, tab.id, setOverlayOpen]
 	);
 	const handleCloseTabsRightClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tab.id);
 			onCloseTabsRight?.(tab.id);
 			setOverlayOpen(false);
 		},
-		[onCloseTabsRight, tab.id, setOverlayOpen]
+		[onSelect, onCloseTabsRight, tab.id, setOverlayOpen]
+	);
+	const handleCopyContentClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onCopyContent?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onCopyContent, tab.id, setOverlayOpen]
+	);
+	const handleSendContentToAgentClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onSendContentToAgent?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onSendContentToAgent, tab.id, setOverlayOpen]
+	);
+	const handleCopyUrlClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			const url = tab.url || 'about:blank';
+			void safeClipboardWrite(url).then((copied) => {
+				if (!copied) {
+					console.error('Failed to copy URL: clipboard unavailable');
+					return;
+				}
+				setUrlCopied(true);
+				setTimeout(() => setUrlCopied(false), 1500);
+			});
+		},
+		[tab.url]
 	);
 
 	return (
-		<div
-			ref={setTabRef}
+		<LongPressable
+			innerRef={setTabRef}
+			onLongPress={openOverlay}
 			data-tab-id={tab.id}
 			tabIndex={0}
 			role="tab"
@@ -220,6 +313,7 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 			style={tabStyle}
 			title={tab.url || label}
 			onClick={handleTabSelect}
+			onDoubleClick={handleDoubleClick}
 			onFocus={handleMouseEnter}
 			onBlur={() => {
 				if (isOverOverlayRef.current) return;
@@ -235,7 +329,7 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 			onMouseDown={handleMouseDown}
 			onMouseEnter={handleMouseEnter}
 			onMouseLeave={handleMouseLeave}
-			draggable
+			draggable={!coarse}
 			onDragStart={handleTabDragStart}
 			onDragOver={handleTabDragOver}
 			onDragEnd={onDragEnd}
@@ -243,7 +337,7 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 		>
 			{shortcutHint !== null && shortcutHint !== undefined && (
 				<span
-					className="w-4 h-4 flex items-center justify-center rounded text-[10px] font-medium shrink-0 opacity-50"
+					className="w-4 h-4 flex items-center justify-center rounded text-2xs font-medium shrink-0 opacity-50"
 					style={{ backgroundColor: theme.colors.border, color: theme.colors.textMain }}
 				>
 					{shortcutHint}
@@ -259,19 +353,32 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 					onError={() => setFaviconFailed(true)}
 				/>
 			) : (
-				<Globe className="w-3.5 h-3.5 shrink-0" style={{ color: theme.colors.textDim }} />
+				<Globe
+					className="w-3.5 h-3.5 shrink-0"
+					style={{ color: getTabKindColor('browser', theme) }}
+				/>
 			)}
 
 			<span
-				className={`text-xs font-medium ${isActive ? 'whitespace-nowrap' : 'truncate max-w-[140px]'}`}
+				data-tab-label
+				className="text-xs font-medium whitespace-nowrap"
 				style={{ color: isActive ? theme.colors.textMain : theme.colors.textDim }}
 			>
 				{label}
 			</span>
 
-			{host && host !== label && (
+			{tab.ephemeral && (
 				<span
-					className="px-1 rounded text-[9px] font-semibold leading-none shrink-0"
+					className="shrink-0 flex items-center"
+					title="Incognito tab - browsing data is kept in memory only and discarded when the app closes"
+				>
+					<VenetianMask className="w-3 h-3" style={{ color: theme.colors.textDim }} />
+				</span>
+			)}
+
+			{showBrowserTabDomain && host && host !== label && (
+				<span
+					className="px-1 rounded text-3xs font-semibold leading-none shrink-0"
 					style={{
 						backgroundColor: theme.colors.border,
 						color: theme.colors.textDim,
@@ -286,148 +393,243 @@ export const BrowserTabItem = memo(function BrowserTabItem({
 			{(isHovered || isActive) && (
 				<button
 					onClick={handleCloseClick}
+					data-tab-close
 					className="p-0.5 rounded hover:bg-white/10 transition-colors shrink-0"
-					title="Close tab"
+					title={`Close tab${shortcutSuffix(tabShortcuts.closeTab?.keys)}`}
 				>
 					<X className="w-3 h-3" style={{ color: theme.colors.textDim }} />
 				</button>
 			)}
 
-			{overlayOpen &&
-				overlayPosition &&
-				createPortal(
-					<div
-						ref={setOverlayRef}
-						className="fixed z-[100]"
-						style={{
-							top: overlayPosition.top,
-							left: overlayPosition.left,
-							opacity: positionReady ? 1 : 0,
-						}}
-						onClick={(e) => e.stopPropagation()}
-						onMouseEnter={overlayMouseEnter}
-						onMouseLeave={overlayMouseLeave}
-					>
-						<div
-							className="shadow-xl overflow-hidden"
-							style={{
-								backgroundColor: theme.colors.bgSidebar,
-								borderLeft: `1px solid ${theme.colors.border}`,
-								borderRight: `1px solid ${theme.colors.border}`,
-								borderBottom: `1px solid ${theme.colors.border}`,
-								borderBottomLeftRadius: '8px',
-								borderBottomRightRadius: '8px',
-								minWidth: '220px',
-							}}
-						>
-							<div className="px-3 py-2 border-b" style={{ borderColor: theme.colors.border }}>
-								<div
-									className="text-xs font-medium truncate"
-									style={{ color: theme.colors.textMain }}
-								>
-									{label}
-								</div>
-								<div
-									className="text-[11px] truncate mt-0.5"
-									style={{ color: theme.colors.textDim }}
-								>
-									{tab.url || 'about:blank'}
-								</div>
-							</div>
-
-							<div className="p-1">
-								{(onMoveToFirst || onMoveToLast) && (
-									<>
-										{onMoveToFirst && !isFirstTab && (
-											<button
-												onClick={handleMoveToFirstClick}
-												className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-												style={{ color: theme.colors.textMain }}
-											>
-												<ChevronsLeft
-													className="w-3.5 h-3.5"
-													style={{ color: theme.colors.textDim }}
-												/>
-												Move to First Position
-											</button>
-										)}
-										{onMoveToLast && !isLastTab && (
-											<button
-												onClick={handleMoveToLastClick}
-												className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-												style={{ color: theme.colors.textMain }}
-											>
-												<ChevronsRight
-													className="w-3.5 h-3.5"
-													style={{ color: theme.colors.textDim }}
-												/>
-												Move to Last Position
-											</button>
-										)}
-										<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
-									</>
+			{/* Hover / long-press overlay - a portal (anchored popover on desktop,
+			    bottom sheet on a phone) */}
+			<TabOverlayPortal
+				open={overlayOpen}
+				position={overlayPosition}
+				positionReady={positionReady}
+				setOverlayRef={setOverlayRef}
+				onMouseEnter={overlayMouseEnter}
+				onMouseLeave={overlayMouseLeave}
+				onClose={() => setOverlayOpen(false)}
+				theme={theme}
+			>
+				<div
+					className="shadow-xl overflow-hidden"
+					style={{
+						backgroundColor: theme.colors.bgSidebar,
+						borderLeft: `1px solid ${theme.colors.border}`,
+						borderRight: `1px solid ${theme.colors.border}`,
+						borderBottom: `1px solid ${theme.colors.border}`,
+						borderBottomLeftRadius: '8px',
+						borderBottomRightRadius: '8px',
+						minWidth: '13.75rem',
+						maxWidth: '20rem',
+					}}
+				>
+					<div className="px-3 py-2 border-b" style={{ borderColor: theme.colors.border }}>
+						<div className="text-xs font-medium truncate" style={{ color: theme.colors.textMain }}>
+							{label}
+						</div>
+						<div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+							<button
+								type="button"
+								onClick={handleCopyUrlClick}
+								className="shrink-0 p-0.5 rounded hover:bg-white/10 transition-colors"
+								title={urlCopied ? 'Copied!' : 'Copy URL'}
+								aria-label={urlCopied ? 'URL copied' : 'Copy URL'}
+							>
+								{urlCopied ? (
+									<Check
+										className="w-3 h-3"
+										style={{ color: theme.colors.success || theme.colors.textDim }}
+									/>
+								) : (
+									<Clipboard className="w-3 h-3" style={{ color: theme.colors.textDim }} />
 								)}
+							</button>
+							<button
+								type="button"
+								onClick={handleCopyUrlClick}
+								className="text-xs-plus truncate min-w-0 flex-1 text-left hover:underline"
+								style={{ color: theme.colors.textDim }}
+								title={urlCopied ? 'Copied!' : `${tab.url || 'about:blank'} (click to copy)`}
+							>
+								{tab.url || 'about:blank'}
+							</button>
+						</div>
+					</div>
 
-								<button
-									onClick={handleCloseTabClick}
-									className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-									style={{ color: theme.colors.textMain }}
-								>
-									<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-									Close Tab
-								</button>
+					<div className="p-1">
+						{onRename && (
+							<button
+								onClick={handleRenameClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Pencil className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Rename
+							</button>
+						)}
 
-								{onCloseOtherTabs && (
-									<button
-										onClick={handleCloseOtherTabsClick}
-										className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
-											totalTabs === 1 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
-										}`}
-										style={{ color: theme.colors.textMain }}
-										disabled={totalTabs === 1}
-									>
-										<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-										Close Other Tabs
-									</button>
+						{onResetName && tab.customTitle && (
+							<button
+								onClick={handleResetNameClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+								title="Clear the custom name and let the website set the tab title again"
+							>
+								<RotateCcw className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Reset Name
+							</button>
+						)}
+
+						{onRename && (
+							<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+						)}
+
+						{onSnooze && (
+							<button
+								onClick={handleSnoozeClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors hover:bg-white/10"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Clock className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Snooze Tab
+								{tabShortcuts.snoozeTab && (
+									<ShortcutHint keys={tabShortcuts.snoozeTab.keys} theme={theme} />
 								)}
+							</button>
+						)}
 
-								{onCloseTabsLeft && (
+						{(onMoveToFirst || onMoveToLast) && (
+							<>
+								{onMoveToFirst && !isFirstTab && (
 									<button
-										onClick={handleCloseTabsLeftClick}
-										className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
-											tabIndex === 0 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
-										}`}
+										onClick={handleMoveToFirstClick}
+										className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
 										style={{ color: theme.colors.textMain }}
-										disabled={tabIndex === 0}
 									>
 										<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-										Close Tabs to Left
+										Move to First Position
+										{tabShortcuts.moveTabToStart && (
+											<ShortcutHint keys={tabShortcuts.moveTabToStart.keys} theme={theme} />
+										)}
 									</button>
 								)}
-
-								{onCloseTabsRight && (
+								{onMoveToLast && !isLastTab && (
 									<button
-										onClick={handleCloseTabsRightClick}
-										className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
-											tabIndex === (totalTabs ?? 1) - 1
-												? 'opacity-40 cursor-default'
-												: 'hover:bg-white/10'
-										}`}
+										onClick={handleMoveToLastClick}
+										className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
 										style={{ color: theme.colors.textMain }}
-										disabled={tabIndex === (totalTabs ?? 1) - 1}
 									>
 										<ChevronsRight
 											className="w-3.5 h-3.5"
 											style={{ color: theme.colors.textDim }}
 										/>
-										Close Tabs to Right
+										Move to Last Position
+										{tabShortcuts.moveTabToEnd && (
+											<ShortcutHint keys={tabShortcuts.moveTabToEnd.keys} theme={theme} />
+										)}
 									</button>
 								)}
-							</div>
-						</div>
-					</div>,
-					document.body
-				)}
-		</div>
+								<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+							</>
+						)}
+
+						{/* Content actions - operate on the rendered text of the page */}
+						{onCopyContent && (
+							<button
+								onClick={handleCopyContentClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Clipboard className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Content: Copy to Clipboard
+							</button>
+						)}
+
+						{onSendContentToAgent && (
+							<button
+								onClick={handleSendContentToAgentClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<ArrowRightCircle className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Content: Send to Agent
+							</button>
+						)}
+
+						{(onCopyContent || onSendContentToAgent) && (
+							<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+						)}
+
+						<button
+							onClick={handleCloseTabClick}
+							className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+							style={{ color: theme.colors.textMain }}
+						>
+							<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+							Close Tab
+							{tabShortcuts.closeTab && (
+								<ShortcutHint keys={tabShortcuts.closeTab.keys} theme={theme} />
+							)}
+						</button>
+
+						{onCloseOtherTabs && (
+							<button
+								onClick={handleCloseOtherTabsClick}
+								className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
+									totalTabs === 1 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
+								}`}
+								style={{ color: theme.colors.textMain }}
+								disabled={totalTabs === 1}
+							>
+								<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Close Other Tabs
+								{tabShortcuts.closeOtherTabs && (
+									<ShortcutHint keys={tabShortcuts.closeOtherTabs.keys} theme={theme} />
+								)}
+							</button>
+						)}
+
+						{onCloseTabsLeft && (
+							<button
+								onClick={handleCloseTabsLeftClick}
+								className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
+									tabIndex === 0 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
+								}`}
+								style={{ color: theme.colors.textMain }}
+								disabled={tabIndex === 0}
+							>
+								<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Close Tabs to Left
+								{tabShortcuts.closeTabsLeft && (
+									<ShortcutHint keys={tabShortcuts.closeTabsLeft.keys} theme={theme} />
+								)}
+							</button>
+						)}
+
+						{onCloseTabsRight && (
+							<button
+								onClick={handleCloseTabsRightClick}
+								className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
+									tabIndex === (totalTabs ?? 1) - 1
+										? 'opacity-40 cursor-default'
+										: 'hover:bg-white/10'
+								}`}
+								style={{ color: theme.colors.textMain }}
+								disabled={tabIndex === (totalTabs ?? 1) - 1}
+							>
+								<ChevronsRight className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Close Tabs to Right
+								{tabShortcuts.closeTabsRight && (
+									<ShortcutHint keys={tabShortcuts.closeTabsRight.keys} theme={theme} />
+								)}
+							</button>
+						)}
+					</div>
+				</div>
+			</TabOverlayPortal>
+		</LongPressable>
 	);
 });

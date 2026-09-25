@@ -7,6 +7,12 @@ import {
 	remoteUrlToBrowserUrl,
 	parseGitStatusPorcelain,
 	parseGitNumstat,
+	isNotAGitRepositoryError,
+} from '../../shared/gitUtils';
+import type {
+	GitCommandOutputChunk,
+	GitRunCommandResult,
+	GitStreamingOperation,
 } from '../../shared/gitUtils';
 import { createIpcMethod } from './ipcWrapper';
 
@@ -16,6 +22,8 @@ export interface GitStatus {
 		status: string;
 	}>;
 	branch?: string;
+	/** Git reported the directory is not inside a repo (its `.git` is gone). */
+	notARepo?: boolean;
 }
 
 export interface GitDiff {
@@ -28,6 +36,21 @@ export interface GitNumstat {
 		additions: number;
 		deletions: number;
 	}>;
+}
+
+export interface GitGraphNode {
+	hash: string;
+	shortHash: string;
+	parents: string[];
+	author: string;
+	date: string;
+	refs: string[];
+	subject: string;
+}
+
+export interface GitSwitchResult {
+	success: boolean;
+	stderr: string;
 }
 
 /**
@@ -49,6 +72,39 @@ export const gitService = {
 	},
 
 	/**
+	 * Initialize a new git repository at the given directory.
+	 * @param cwd Working directory path
+	 * @param sshRemoteId Optional SSH remote ID for remote execution
+	 */
+	async init(cwd: string, sshRemoteId?: string): Promise<{ success: boolean; error?: string }> {
+		return createIpcMethod({
+			call: () => window.maestro.git.init(cwd, sshRemoteId),
+			errorContext: 'Git init',
+			defaultValue: { success: false, error: 'git init failed' },
+		});
+	},
+
+	/**
+	 * Stage all changes and commit them in one shot. A clean working tree is not
+	 * an error: it resolves `{ success: true, committed: false }`. Used by Auto
+	 * Run to checkpoint each iteration.
+	 * @param cwd Working directory path
+	 * @param message Commit message
+	 * @param sshRemoteId Optional SSH remote ID for remote execution
+	 */
+	async commitAll(
+		cwd: string,
+		message: string,
+		sshRemoteId?: string
+	): Promise<{ success: boolean; committed: boolean; commitHash?: string; error?: string }> {
+		return createIpcMethod({
+			call: () => window.maestro.git.commitAll(cwd, message, sshRemoteId),
+			errorContext: 'Git commitAll',
+			defaultValue: { success: false, committed: false, error: 'git commit failed' },
+		});
+	},
+
+	/**
 	 * Get git status (porcelain format) and current branch
 	 * @param cwd Working directory path
 	 * @param sshRemoteId Optional SSH remote ID for remote execution
@@ -63,8 +119,9 @@ export const gitService = {
 
 				const files = parseGitStatusPorcelain(statusResult.stdout || '');
 				const branch = branchResult.stdout?.trim() || undefined;
+				const notARepo = isNotAGitRepositoryError(statusResult.stderr);
 
-				return { files, branch };
+				return notARepo ? { files, branch, notARepo } : { files, branch };
 			},
 			errorContext: 'Git status',
 			defaultValue: { files: [], branch: undefined },
@@ -147,6 +204,67 @@ export const gitService = {
 	},
 
 	/**
+	 * Run a network git operation (pull/push/fetch), streaming its output.
+	 *
+	 * Subscribe with `onCommandOutput` BEFORE awaiting this: chunks start
+	 * arriving as soon as git writes them.
+	 */
+	async runCommand(options: {
+		runId: string;
+		operation: GitStreamingOperation;
+		cwd: string;
+		sshRemoteId?: string;
+		remoteCwd?: string;
+		setUpstream?: boolean;
+	}): Promise<GitRunCommandResult> {
+		return createIpcMethod({
+			call: () => window.maestro.git.runCommand(options),
+			errorContext: `Git ${options.operation}`,
+			defaultValue: {
+				success: false,
+				exitCode: 1,
+				cancelled: false,
+				error: `git ${options.operation} failed`,
+			},
+		});
+	},
+
+	/**
+	 * Subscribe to output streamed by `runCommand`. Returns an unsubscribe.
+	 */
+	onCommandOutput(callback: (data: GitCommandOutputChunk) => void): () => void {
+		return window.maestro.git.onCommandOutput(callback);
+	},
+
+	/**
+	 * Terminate an in-flight `runCommand`.
+	 */
+	async cancelCommand(runId: string): Promise<void> {
+		await createIpcMethod({
+			call: () => window.maestro.git.cancelCommand(runId),
+			errorContext: 'Git cancelCommand',
+			defaultValue: { success: false },
+		});
+	},
+
+	/**
+	 * Check out a branch in the working tree.
+	 * @param createTracking Check out a branch that only exists on origin
+	 */
+	async checkoutBranch(
+		cwd: string,
+		branch: string,
+		createTracking?: boolean,
+		sshRemoteId?: string
+	): Promise<{ success: boolean; output?: string; error?: string }> {
+		return createIpcMethod({
+			call: () => window.maestro.git.checkoutBranch(cwd, branch, createTracking, sshRemoteId),
+			errorContext: 'Git checkoutBranch',
+			defaultValue: { success: false, error: 'git checkout failed' },
+		});
+	},
+
+	/**
 	 * Get all tags
 	 * @param cwd Working directory path
 	 * @param sshRemoteId Optional SSH remote ID for remote execution
@@ -159,6 +277,53 @@ export const gitService = {
 			},
 			errorContext: 'Git tags',
 			defaultValue: [],
+		});
+	},
+
+	/**
+	 * Get topology graph nodes (commits with parent hashes) for graph rendering.
+	 * Throws on a main-process git error so the caller can render a real error
+	 * state instead of an indistinguishable empty list.
+	 */
+	async getGraph(
+		cwd: string,
+		options?: { limit?: number },
+		sshRemoteId?: string,
+		remoteCwd?: string
+	): Promise<GitGraphNode[]> {
+		return createIpcMethod({
+			call: async () => {
+				const result = await window.maestro.git.graph(cwd, options, sshRemoteId, remoteCwd);
+				if (result.error) throw new Error(result.error);
+				return result.nodes || [];
+			},
+			errorContext: 'Git graph',
+			rethrow: true,
+		});
+	},
+
+	/**
+	 * Switch to an existing branch in the current working tree.
+	 * Returns success=false with stderr text on failure (e.g., dirty working tree).
+	 */
+	async switchBranch(
+		cwd: string,
+		branchName: string,
+		sshRemoteId?: string,
+		remoteCwd?: string
+	): Promise<GitSwitchResult> {
+		return createIpcMethod({
+			call: async () => {
+				const result = await window.maestro.git.switchBranch(
+					cwd,
+					branchName,
+					sshRemoteId,
+					remoteCwd
+				);
+				return { success: result.success, stderr: result.stderr };
+			},
+			errorContext: 'Git switch',
+			defaultValue: { success: false, stderr: 'IPC call failed' },
 		});
 	},
 };

@@ -26,6 +26,7 @@ See [Performance Guidelines](#performance-guidelines) for specific practices.
 - [Common Development Tasks](#common-development-tasks)
 - [Encore Features (Feature Gating)](#encore-features-feature-gating)
 - [Adding a New AI Agent](#adding-a-new-ai-agent)
+- [Contributing Themes](#contributing-themes)
 - [Code Style](#code-style)
 - [Performance Guidelines](#performance-guidelines)
 - [Debugging Guide](#debugging-guide)
@@ -102,11 +103,11 @@ maestro/
 npm run dev            # Start dev server with hot reload (isolated data directory)
 npm run dev:prod-data  # Start dev server using production data (requires closing production app)
 npm run dev:demo       # Start in demo mode (fresh settings, isolated data)
-npm run dev:web        # Start web interface dev server
-npm run build          # Full production build (main + renderer + web + CLI)
+npm run dev:web-desktop # Start browser (web-desktop) build dev server
+npm run build          # Full production build (main + renderer + web-desktop + CLI)
 npm run build:main     # Build main process only
 npm run build:renderer # Build renderer only
-npm run build:web      # Build web interface only
+npm run build:web-desktop # Build browser (web-desktop) bundle only
 npm run build:cli      # Build CLI tool only
 npm start              # Start built application
 npm run clean          # Clean build artifacts
@@ -119,7 +120,7 @@ npm run package:linux  # Package for Linux
 
 ### Development Data Directories
 
-By default, `npm run dev` uses an isolated data directory (`~/Library/Application Support/maestro-dev/`) separate from production. This allows you to run both dev and production instances simultaneously—useful when using the production Maestro to work on the dev instance.
+By default, `npm run dev` uses an isolated data directory (`~/Library/Application Support/maestro-dev/`) separate from production. This allows you to run both dev and production instances simultaneously - useful when using the production Maestro to work on the dev instance.
 
 | Command                 | Data Directory          | Can Run Alongside Production?  |
 | ----------------------- | ----------------------- | ------------------------------ |
@@ -129,9 +130,9 @@ By default, `npm run dev` uses an isolated data directory (`~/Library/Applicatio
 
 **When to use each:**
 
-- **`npm run dev`** — Default for most development. Start fresh or use dev-specific test data.
-- **`npm run dev:prod-data`** — Test with your real sessions and settings. Must close production app first to avoid database lock conflicts.
-- **`npm run dev:demo`** — Screenshots, demos, or testing with completely fresh state.
+- **`npm run dev`** - Default for most development. Start fresh or use dev-specific test data.
+- **`npm run dev:prod-data`** - Test with your real sessions and settings. Must close production app first to avoid database lock conflicts.
+- **`npm run dev:demo`** - Screenshots, demos, or testing with completely fresh state.
 
 ### Demo Mode
 
@@ -158,19 +159,21 @@ MAESTRO_DEMO_DIR=~/Desktop/my-demo npm run dev
 When working with multiple git worktrees, you can run Maestro instances in parallel by specifying different ports using the `VITE_PORT` environment variable:
 
 ```bash
-# In the main worktree (uses default port 5173)
+# In the main worktree (uses default port 17173)
 npm run dev
 
 # In worktree 2 (in another directory and terminal)
-VITE_PORT=5174 npm run dev
+VITE_PORT=17174 npm run dev
 
 # In worktree 3
-VITE_PORT=5175 npm run dev
+VITE_PORT=17175 npm run dev
 ```
 
 This allows you to develop and test different branches simultaneously without port conflicts.
 
-**Note:** The web interface dev server (`npm run dev:web`) uses a separate port (default 5174) and can be configured with `VITE_WEB_PORT` if needed.
+**Note:** The browser (web-desktop) dev server (`npm run dev:web-desktop`) runs on its own fixed port (5176).
+
+**Pushing from a worktree whose `node_modules` may be reconciled in the background:** the `pre-push` hook runs `validate:push`, which invokes `prettier`, `tsc`, `eslint`, and `vitest` as bare commands resolved from `node_modules/.bin`. A package-manager install links those `.bin` shims last (after unpacking the package directories), so if an install is mid-flight the package exists but its shim is briefly absent and the push fails with a cryptic `command not found` (exit 127). The hook now preflights those four shims and fails with an actionable message instead, but the deterministic fix is to let the install settle first: run `npm ci`, confirm `ls node_modules/.bin/prettier` resolves, then push. Prefer that over hand-creating individual `.bin` symlinks, which masks a partial install rather than completing it.
 
 ## Testing
 
@@ -225,7 +228,7 @@ This project uses [Husky](https://typicode.github.io/husky/) and [lint-staged](h
 3. If there are unfixable errors, the commit is blocked
 4. Fixed files are automatically re-staged
 
-**Setup is automatic** — hooks are installed when you run `npm install` (via the `prepare` script).
+**Setup is automatic** - hooks are installed when you run `npm install` (via the `prepare` script).
 
 **Bypassing hooks (emergency only):**
 
@@ -241,9 +244,9 @@ npx lint-staged
 
 **Troubleshooting:**
 
-- **Hooks not running** — Check if `.husky/pre-commit` has executable permissions: `chmod +x .husky/pre-commit`
-- **Wrong tool version** — Ensure `npx` is using local `node_modules`: delete `node_modules` and run `npm install`
-- **Hook fails in CI/Docker** — The `prepare` script uses `husky || true` to gracefully skip in environments without `.git`
+- **Hooks not running** - Check if `.husky/pre-commit` has executable permissions: `chmod +x .husky/pre-commit`
+- **Wrong tool version** - Ensure `npx` is using local `node_modules`: delete `node_modules` and run `npm install`
+- **Hook fails in CI/Docker** - The `prepare` script uses `husky || true` to gracefully skip in environments without `.git`
 
 ### Manual Linting
 
@@ -375,16 +378,20 @@ For commands that need programmatic behavior (not just prompts), handle them in 
 
 Maestro bundles two spec-driven workflow systems. To add a similar bundled command set:
 
+<!-- doc-refs-ignore:start -->
+
 1. **Create prompts directory**: `src/prompts/my-workflow/`
 2. **Add command markdown files**: `my-workflow.command1.md`, `my-workflow.command2.md`
 3. **Create index.ts**: Export command definitions with IDs, slash commands, descriptions, and prompts
 4. **Create metadata.json**: Track source version, commit SHA, and last refreshed date
 5. **Create manager**: `src/main/my-workflow-manager.ts` (handles loading, saving, refreshing)
 6. **Add IPC handlers**: In `src/main/index.ts` for get/set/refresh operations
-7. **Add preload API**: In `src/main/preload.ts` to expose to renderer
+7. **Add preload API**: In a new module under `src/main/preload/` to expose to renderer
 8. **Create UI panel**: Similar to `OpenSpecCommandsPanel.tsx` or `SpecKitCommandsPanel.tsx`
 9. **Add to extraResources**: In `package.json` build config for all platforms
 10. **Create refresh script**: `scripts/refresh-my-workflow.mjs`
+
+<!-- doc-refs-ignore:end -->
 
 Reference the existing Spec-Kit (`src/prompts/speckit/`, `src/main/speckit-manager.ts`) and OpenSpec (`src/prompts/openspec/`, `src/main/openspec-manager.ts`) implementations.
 
@@ -430,7 +437,7 @@ Then add the ID to `ThemeId` type in `src/shared/theme-types.ts` and to the `isV
    });
    ```
 
-2. Expose in `src/main/preload.ts`:
+2. Expose in the matching module under `src/main/preload/`:
 
    ```typescript
    myNamespace: {
@@ -442,7 +449,9 @@ Then add the ID to `ThemeId` type in `src/shared/theme-types.ts` and to the `isV
 
 ## Encore Features (Feature Gating)
 
-Encore Features is Maestro's system for optional, user-toggled features. It serves as a precursor to a full plugin marketplace — features that are powerful but not essential for every user can be shipped as Encore Features, disabled by default.
+Encore Features is Maestro's system for optional, user-toggled features - powerful but not essential for every user, and disabled by default.
+
+They ship as **built-in (first-party) plugins**, listed in the same catalog as community plugins under the Settings tab labelled **Plugins**. The gating idea is unchanged and the flags below are still how a feature is turned on and off; what changed is that the tile, its description, and its settings body are declared in the plugin registry rather than hand-written into the settings modal. See [[CLAUDE-PLUGINS.md]] for the plugin system itself.
 
 ### When to Use Encore Features
 
@@ -453,7 +462,7 @@ Consider making your feature an Encore Feature when:
 - It's experimental or targeting a niche workflow
 - It would clutter the interface for users who don't want it
 
-**When disabled, an Encore Feature must be completely invisible** — no keyboard shortcuts, no menu items, no command palette entries.
+**When disabled, an Encore Feature must be completely invisible** - no keyboard shortcuts, no menu items, no command palette entries.
 
 ### Architecture
 
@@ -467,7 +476,10 @@ export interface EncoreFeatureFlags {
 }
 ```
 
-The flags live in `useSettings.ts` and persist via `window.maestro.settings`. The Encore Features panel in Settings (`SettingsModal.tsx`) provides toggle UI for each feature.
+The flags persist via `window.maestro.settings`, with defaults in `src/renderer/stores/settingsStore.ts`. The **Plugins** tab (`Settings/tabs/EncoreTab`, which renders the Extensions marketplace) draws one tile per feature from `FIRST_PARTY_PLUGIN_DEFINITIONS` in `src/shared/plugins/first-party.ts`; each tile's detail pane owns that feature's own settings, keyed by its Encore flag.
+
+> [!NOTE]
+> The tab's internal id is still `encore` (deep links and the persisted last-tab depend on it) even though it is labelled **Plugins** in the UI.
 
 ### Adding a New Encore Feature
 
@@ -480,7 +492,7 @@ The flags live in `useSettings.ts` and persist via `window.maestro.settings`. Th
    }
    ```
 
-2. **Set the default** in `useSettings.ts` — always default to `false`:
+2. **Set the default** in `DEFAULT_ENCORE_FEATURES` (`src/renderer/stores/settingsStore.ts`) - always default to `false`:
 
    ```typescript
    const DEFAULT_ENCORE_FEATURES: EncoreFeatureFlags = {
@@ -489,25 +501,43 @@ The flags live in `useSettings.ts` and persist via `window.maestro.settings`. Th
    };
    ```
 
-3. **Add toggle UI** in `SettingsModal.tsx` under the Encore Features tab. Follow the existing Director's Notes pattern — a clickable section with a toggle switch and feature-specific settings that only render when enabled.
+3. **Register the tile** by adding a `FirstPartyPluginDefinition` to `src/shared/plugins/first-party.ts` and listing it in `FIRST_PARTY_PLUGIN_DEFINITIONS`. Set `encoreFlag` to the flag from step 1 - that is what binds the tile's enable/disable control to your feature. Give it a `name`, `description`, `category`, and `releaseDate`; these are what the user reads in the catalog, so write the description for them rather than for the codebase. Declare any `permissions` and `backgroundServices` the feature actually uses.
 
-4. **Gate all access points** — the feature must be invisible when disabled:
+   If the feature needs its own options, render them into the tile's **Settings** sub-tab: add a section component under `Settings/tabs/EncoreTab/components/` and wire it into the `settingsBodies` map keyed by your Encore flag. Do not add a separate list entry to the settings modal - the marketplace tile is the only surface.
+
+4. **Gate all access points** - the feature must be invisible when disabled:
    - **Keyboard shortcuts** (`useMainKeyboardHandler.ts`): Guard with `ctx.encoreFeatures?.myFeature`
    - **App.tsx**: Conditionally pass callbacks and render modals based on `encoreFeatures.myFeature`
    - **SessionList hamburger menu**: Make the setter optional and conditionally render the menu item
    - **Quick Actions** (`QuickActionsModal.tsx`): Pass `undefined` for the handler when disabled
 
-5. **Update tests** in `SettingsModal.test.tsx` — add toggle and settings tests within the Encore Features describe block.
+5. **Update tests** - add a `src/__tests__/shared/plugins/<feature>-first-party*.test.ts` covering the definition (flag binding, declared permissions, background services), following the existing per-feature files there. Add rendering tests alongside the other marketplace tests if the feature contributes a settings body.
+
+6. **Document it** - add a row to the table in [docs/encore-features.md](docs/encore-features.md), and give the feature its own page if it has more than a paragraph of behavior worth explaining.
 
 ### Existing Encore Features
 
-| Feature          | Flag            | Description                                   |
-| ---------------- | --------------- | --------------------------------------------- |
-| Director's Notes | `directorNotes` | AI-generated synopsis of work across sessions |
+Nine features ship this way. `FIRST_PARTY_PLUGIN_DEFINITIONS` in `src/shared/plugins/first-party.ts` is the source of truth for the list, its display order, and each entry's description.
+
+| Feature          | Flag             | Description                                                                     |
+| ---------------- | ---------------- | ------------------------------------------------------------------------------- |
+| Usage & Stats    | `usageStats`     | Records query and Auto Run activity, and unlocks the Usage Dashboard            |
+| Director's Notes | `directorNotes`  | AI-generated synopsis of work across sessions                                   |
+| Maestro Cue      | `maestroCue`     | Event-driven automation on timers, file changes, and completions                |
+| Concerto         | `concerto`       | Agents answer with interactive views, plus always-on-top Cadenza HUD cards      |
+| Maestro Symphony | `symphony`       | Contribute to open source through curated repositories                          |
+| Groups+          | `groupsPlus`     | Group folders, icons, and label colors                                          |
+| Pianola          | `pianola`        | Autonomous manager agent that answers or escalates other agents' prompts        |
+| Coworking        | `coworking`      | Per-agent MCP server exposing terminal scrollback and browser tabs              |
+| OpenCode Server  | `opencodeServer` | Runs local OpenCode via a shared `opencode serve` process rather than per-spawn |
+
+<!-- Keep this table in sync with FIRST_PARTY_PLUGIN_DEFINITIONS and docs/encore-features.md. -->
+
+`plugins` is a flag in the same object but is not a feature tile: it turns on loading of **community** plugins. Built-in features work with it off.
 
 ## Adding a New AI Agent
 
-Maestro supports multiple AI coding agents. Each agent has different capabilities that determine which UI features are available. For detailed architecture, see [AGENT_SUPPORT.md](AGENT_SUPPORT.md).
+Maestro supports multiple AI coding agents. Each agent has different capabilities that determine which UI features are available. For detailed architecture, see [PROVIDER-SUPPORT.md](PROVIDER-SUPPORT.md).
 
 ### Agent Capability Checklist
 
@@ -530,7 +560,7 @@ Before implementing, investigate the agent's CLI to determine which capabilities
 
 #### 1. Add Agent Definition
 
-In `src/main/agent-detector.ts`, add to `AGENT_DEFINITIONS`:
+In `src/main/agents/definitions.ts`, add to `AGENT_DEFINITIONS`:
 
 ```typescript
 {
@@ -544,7 +574,7 @@ In `src/main/agent-detector.ts`, add to `AGENT_DEFINITIONS`:
 
 #### 2. Define Capabilities
 
-In `src/main/agent-capabilities.ts` (create if needed):
+In `src/main/agents/capabilities.ts`:
 
 ```typescript
 'my-agent': {
@@ -564,7 +594,7 @@ In `src/main/agent-capabilities.ts` (create if needed):
 
 #### 3. Implement Output Parser
 
-In `src/main/agent-output-parser.ts`, add a parser for the agent's JSON format:
+In `src/main/parsers/agent-output-parser.ts`, add a parser for the agent's JSON format:
 
 ```typescript
 class MyAgentOutputParser implements AgentOutputParser {
@@ -645,15 +675,26 @@ Based on capabilities, these UI features are automatically enabled/disabled:
 
 ### Supported Agents Reference
 
-| Agent         | Resume                | Read-Only                   | JSON | Images | Sessions                      | Cost             | Status      |
-| ------------- | --------------------- | --------------------------- | ---- | ------ | ----------------------------- | ---------------- | ----------- |
-| Claude Code   | ✅ `--resume`         | ✅ `--permission-mode plan` | ✅   | ✅     | ✅ `~/.claude/`               | ✅               | ✅ Complete |
-| Codex         | ✅ `exec resume`      | ✅ `--sandbox read-only`    | ✅   | ✅     | ✅ `~/.codex/`                | ❌ (tokens only) | ✅ Complete |
-| OpenCode      | ✅ `--session`        | ✅ `--agent plan`           | ✅   | ✅     | ✅ `~/.local/share/opencode/` | ✅               | ✅ Complete |
-| Factory Droid | ✅ `-s, --session-id` | ✅ (default mode)           | ✅   | ✅     | ✅ `~/.factory/`              | ❌ (tokens only) | ✅ Complete |
-| Gemini CLI    | TBD                   | TBD                         | TBD  | TBD    | TBD                           | ✅               | 📋 Planned  |
+| Agent         | Resume                       | Read-Only                   | JSON | Images | Sessions                       | Cost                    | Status      |
+| ------------- | ---------------------------- | --------------------------- | ---- | ------ | ------------------------------ | ----------------------- | ----------- |
+| Claude Code   | ✅ `--resume`                | ✅ `--permission-mode plan` | ✅   | ✅     | ✅ `~/.claude/`                | ✅                      | ✅ Complete |
+| Codex         | ✅ `exec resume`             | ✅ `--sandbox read-only`    | ✅   | ✅     | ✅ `~/.codex/`                 | ❌ (tokens only)        | ✅ Complete |
+| OpenCode      | ✅ `--session`               | ✅ `--agent plan`           | ✅   | ✅     | ✅ `~/.local/share/opencode/`  | ✅                      | ✅ Complete |
+| Factory Droid | ✅ `-s, --session-id`        | ✅ (default mode)           | ✅   | ✅     | ✅ `~/.factory/`               | ❌ (tokens only)        | ✅ Complete |
+| Copilot-CLI   | ✅ `--resume` / `--continue` | ✅ permission rules         | ✅   | ✅     | ✅ `~/.copilot/session-state/` | ❌ (not exposed by CLI) | 🧪 Beta     |
+| Gemini CLI    | TBD                          | TBD                         | TBD  | TBD    | TBD                            | ✅                      | 📋 Planned  |
 
-For detailed implementation guide, see [AGENT_SUPPORT.md](AGENT_SUPPORT.md).
+For detailed implementation guide, see [PROVIDER-SUPPORT.md](PROVIDER-SUPPORT.md).
+
+## Contributing Themes
+
+Theme definitions live in `src/shared/themes.ts` (colors and palettes) and
+`src/shared/theme-types.ts` (the `ThemeId` union). To add a theme, add the
+definition in both files and update `src/__tests__/renderer/constants/themes.test.ts`.
+
+For theme screenshots and the showcase workflow (launching the app against
+curated demo data, in a specific theme, at a screenshot-ready window size), see
+[THEMES.md - Showcase Mode](THEMES.md#showcase-mode).
 
 ## Code Style
 
@@ -742,12 +783,12 @@ npm install -g react-devtools
 npx react-devtools
 ```
 
-Then run `npm run dev` — the app auto-connects (connection script in `src/renderer/index.html`).
+Then run `npm run dev` - the app auto-connects (connection script in `src/renderer/index.html`).
 
 **Tabs:**
 
-- **Components** — Inspect React component tree, props, state, hooks
-- **Profiler** — Record and analyze render performance, identify unnecessary re-renders
+- **Components** - Inspect React component tree, props, state, hooks
+- **Profiler** - Record and analyze render performance, identify unnecessary re-renders
 
 **Profiler workflow:**
 
@@ -828,7 +869,7 @@ Example: `feat: add context usage visualization`
 
 PRs are automatically reviewed by two AI-powered tools:
 
-**[CodeRabbit](https://coderabbit.ai)** — Line-level code review. When you open or update a PR, CodeRabbit will:
+**[CodeRabbit](https://coderabbit.ai)** - Line-level code review. When you open or update a PR, CodeRabbit will:
 
 - Post a **PR summary** with a walkthrough of changes
 - Leave **inline review comments** on potential issues
@@ -841,9 +882,9 @@ PRs are automatically reviewed by two AI-powered tools:
 | `@coderabbitai resolve`       | Resolve all CodeRabbit review comments          |
 | `@coderabbitai configuration` | Show current repo settings                      |
 
-You can reply to any CodeRabbit comment to ask follow-up questions — it responds conversationally.
+You can reply to any CodeRabbit comment to ask follow-up questions - it responds conversationally.
 
-**[Greptile](https://greptile.com)** — Codebase-aware review with deeper architectural context. Greptile indexes the full repo and reviews PRs with understanding of how changes relate to the broader codebase.
+**[Greptile](https://greptile.com)** - Codebase-aware review with deeper architectural context. Greptile indexes the full repo and reviews PRs with understanding of how changes relate to the broader codebase.
 
 | Command     | Effect                                                        |
 | ----------- | ------------------------------------------------------------- |
@@ -855,20 +896,20 @@ Reply to Greptile comments the same way you would CodeRabbit.
 
 All PRs must pass these checks before review:
 
-1. **Linting passes** — Run both TypeScript and ESLint checks:
+1. **Linting passes** - Run both TypeScript and ESLint checks:
 
    ```bash
    npm run lint           # TypeScript type checking
    npm run lint:eslint    # ESLint code quality
    ```
 
-2. **Tests pass** — Run the full test suite:
+2. **Tests pass** - Run the full test suite:
 
    ```bash
    npm test
    ```
 
-3. **Manual testing** — Test affected features in the running app:
+3. **Manual testing** - Test affected features in the running app:
 
    ```bash
    npm run dev
@@ -932,11 +973,79 @@ Example timeline:
   rc:   0.16.0 → 0.16.1 → 0.16.2 → 0.16.3 (merge) → 0.18.0 (new rc cycle)
 ```
 
+### Branch Guards
+
+Two automated guards keep the in-soak `rc` line from reaching `main` outside of a
+planned release. They exist because on 2026-07-04 the routine `main` -> `rc` sync
+made `rc` a descendant of `main`, which silently made `main` **fast-forwardable**
+to `rc`. The next push moved `main` onto the `rc` line and shipped nothing, but
+left `main` carrying every in-soak feature for 19 days before anyone noticed.
+
+- `.husky/pre-push` blocks the push locally, before the test suite runs.
+- `.github/workflows/guard-main-not-rc.yml` is the backstop that `--no-verify`,
+  another machine, or a web-UI merge cannot skip.
+
+Each guard applies two checks to anything landing on `main`:
+
+| Check                                             | Bypassable?                     | Catches                                                            |
+| ------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------ |
+| 1. `package.json` must not be an `-RC` version    | **No, never**                   | An accidental fast-forward, which drags `rc`'s `-RC` version along |
+| 2. Must not add 10+ commits that `rc` already has | Yes, for the declared promotion | `rc` history being absorbed into `main`                            |
+
+Check 1 is what separates an accident from a release: an accidental sync carries
+`0.EVEN.x-RC`, while a real promotion has already been bumped to its GA version.
+
+**Merging `main` into `rc` is unaffected.** Only the `rc` -> `main` direction is
+guarded, so the usual "mirror safe fixes into rc" flow needs no special handling.
+
+### Cutting the Release Over (rc -> main)
+
+Run this when `rc` has soaked long enough to become the next stable release. The
+version bump comes **before** the merge, because guard check 1 is not bypassable.
+
+1. Branch off `rc` and bump to the GA version there:
+
+   ```bash
+   git checkout rc && git pull
+   git checkout -b release/0.ODD.0
+   # set package.json version to the next ODD minor, e.g. 0.18.5-RC -> 0.19.0
+   git commit -am "chore(version): set version to 0.19.0"
+   ```
+
+2. Open a PR from `release/0.ODD.0` into `main`. Put the marker
+   `[release-promotion]` in the merge commit message so guard check 2 lets the
+   `rc` history through. Without it CI fails with "rc reached main".
+
+3. If you push the promotion from your machine rather than merging in the web UI,
+   set the matching local override:
+
+   ```bash
+   MAESTRO_ALLOW_RC_TO_MAIN=1 git push origin main
+   ```
+
+4. Tag the GA release off `main`. Releases are tag-triggered, so nothing ships
+   until this step:
+
+   ```bash
+   git tag v0.19.0 && git push origin v0.19.0
+   ```
+
+5. Start the next RC cycle by bumping `rc` to the next EVEN minor:
+
+   ```bash
+   git checkout rc
+   # set package.json version to e.g. 0.20.0-RC
+   git commit -am "chore(version): set version to 0.20.0-RC"
+   ```
+
+From here the cycle repeats: aggressive work lands on `rc`, safe fixes land on
+`main` and get mirrored into `rc` via the normal `main` -> `rc` merge.
+
 ### PR Target Branch
 
 - **Bug fixes and small improvements**: Target `main` (cherry-pick to `rc` if relevant).
 - **New features and larger changes**: Target `rc`.
-- If unsure, target `rc` — it's easier to cherry-pick a stable change to `main` than to untangle a premature merge.
+- If unsure, target `rc` - it's easier to cherry-pick a stable change to `main` than to untangle a premature merge.
 
 ### Release Tags
 
@@ -975,11 +1084,11 @@ Place icons in `build/` directory:
 
 ### 2. Update Version
 
-Update in `package.json`. Use **odd** minor versions for `main` (stable) and **even** minor versions for `rc` (pre-release). See [Branching & Release Strategy](#branching--release-strategy).
+Update in `package.json`:
 
 ```json
 {
-	"version": "0.15.0"
+	"version": "X.Y.Z"
 }
 ```
 
@@ -999,16 +1108,11 @@ Output in `release/` directory.
 Create a release tag to trigger automated builds:
 
 ```bash
-# Stable release (from main)
-git tag v0.15.0
-git push origin v0.15.0
-
-# Release candidate (from rc) — use -RC suffix
-git tag v0.16.0-RC
-git push origin v0.16.0-RC
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-GitHub Actions will build for all platforms and create a release. Tags containing `-RC`, `-beta`, or `-alpha` are automatically marked as pre-releases on GitHub.
+GitHub Actions will build for all platforms and create a release.
 
 ## Documentation
 
@@ -1106,7 +1210,7 @@ All screenshots are stored in `docs/screenshots/` and referenced with relative p
 - Use **PNG format** for UI screenshots (better quality for text)
 - Capture at **standard resolution** (avoid Retina 2x for smaller file sizes, or use 2x for crisp details)
 - Use a **consistent theme** (Pedurple is used in most existing screenshots)
-- **Crop to relevant area** — don't include unnecessary whitespace or system UI
+- **Crop to relevant area** - don't include unnecessary whitespace or system UI
 - Keep file sizes reasonable (compress if over 1MB)
 
 ### Assets

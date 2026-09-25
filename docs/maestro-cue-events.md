@@ -1,10 +1,10 @@
 ---
 title: Cue Event Types
-description: Detailed reference for all eight Maestro Cue event types with configuration, payloads, and examples.
+description: Detailed reference for all eleven Maestro Cue event types with configuration, payloads, and examples.
 icon: calendar-check
 ---
 
-Cue supports eight event types. Each type watches for a different kind of activity and produces a payload that can be injected into prompts via [template variables](./maestro-cue-advanced#template-variables).
+Cue supports eleven event types. Each type watches for a different kind of activity and produces a payload that can be injected into prompts via [template variables](./maestro-cue-advanced#template-variables).
 
 ## app.startup
 
@@ -55,7 +55,7 @@ Fires on a periodic timer. The subscription triggers immediately when the engine
 **Behavior:**
 
 - Fires immediately on engine start (or when the subscription is first loaded)
-- Reconciles missed intervals after system sleep — if your machine sleeps through one or more intervals, Cue fires a catch-up event on wake
+- Reconciles missed intervals after system sleep - if your machine sleeps through one or more intervals, Cue fires a catch-up event on wake
 - The interval resets after each trigger, not after each run completes
 
 **Example:**
@@ -76,7 +76,7 @@ subscriptions:
 
 ## time.scheduled
 
-Fires at specific times and days of the week — a cron-like trigger for precise scheduling.
+Fires at specific times and days of the week - a cron-like trigger for precise scheduling.
 
 **Required fields:**
 
@@ -95,9 +95,9 @@ Fires at specific times and days of the week — a cron-like trigger for precise
 - Checks every 60 seconds if the current time matches any `schedule_times` entry
 - If `schedule_days` is set, the current day must also match
 - Does **not** fire immediately on engine start (unlike `time.heartbeat`)
-- Multiple times per day are supported — add multiple entries to `schedule_times`
+- Multiple times per day are supported - add multiple entries to `schedule_times`
 
-**Example — weekday standup:**
+**Example - weekday standup:**
 
 ```yaml
 subscriptions:
@@ -118,7 +118,7 @@ subscriptions:
       3. Summarize what was accomplished and what's next
 ```
 
-**Example — multiple times daily:**
+**Example - multiple times daily:**
 
 ```yaml
 subscriptions:
@@ -141,6 +141,100 @@ subscriptions:
 
 ---
 
+<Note>
+`time.scheduled` and `time.heartbeat` subscriptions are also **Scheduled Tasks**: they appear in the Cue modal's Scheduled Tasks tab and can be created, re-timed, paused, and cancelled with `maestro-cli cue schedule --daily-at` / `--every`, without hand-editing YAML.
+</Note>
+
+## time.once
+
+Fires exactly once at a specific wall-clock moment, then deletes itself from `cue.yaml`. This is the subsystem to reach for when a user says "in 20 minutes do X", "tomorrow at 9am email me a summary", "remind me at 4pm to push the rc branch", or "schedule a 1h check-in" - anything that maps to a single action tied to a clock.
+
+**Required fields:**
+
+| Field     | Type              | Description                                                                                                                                                         |
+| --------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fire_at` | string (ISO-8601) | The wall-clock moment to fire. **Must include a timezone offset** (`Z`, `±HH:MM`, or the colon-less `±HHMM`). Anything missing the offset is rejected at load time. |
+
+**Optional fields:**
+
+| Field                      | Type    | Default | Description                                                                                                                                                                                                                                                      |
+| -------------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `grace_minutes`            | number  | `360`   | Missed-fire grace window in minutes. If Maestro is closed when `fire_at` arrives, the sub fires on next startup as long as the current time is within this window of `fire_at`. Past the window, the sub is logged as expired and self-destructs without firing. |
+| `self_destruct_on_failure` | boolean | `true`  | Whether to remove the sub from `cue.yaml` on a `failed` or `timeout` outcome. Set `false` to keep the sub in place for post-mortem inspection.                                                                                                                   |
+
+**Behavior:**
+
+- Poll-based at roughly 30-second granularity
+- Fires once when the wall clock crosses `fire_at`
+- Self-destructs from `cue.yaml` after a successful run (status `completed`)
+- On `failed` or `timeout`, also self-destructs unless `self_destruct_on_failure: false`
+- Supports all standard `action` values: `prompt` (default, runs the configured agent with the rendered prompt), `notify` (surfaces a toast through the owning agent - clicking it jumps there), and `command` (shell or CLI invocation)
+- The CLI command `maestro-cli cue schedule` is the supported way to create `time.once` subs - it handles ISO formatting, timezone offsets, `target_node_key` generation, and writes directly to the owning agent's `.maestro/cue.yaml`. **Do not hand-author `time.once` subscriptions.**
+
+**Example - notify reminder:**
+
+```yaml
+subscriptions:
+  - name: tasks-once-push-rc-reminder
+    pipeline_name: Tasks
+    event: time.once
+    enabled: true
+    fire_at: '2026-05-22T16:00:00-05:00'
+    agent_id: <agent-uuid>
+    action: notify
+    notify:
+      message: 'Push rc branch - review the diff first'
+      sticky: true
+```
+
+**Example - prompt run:**
+
+```yaml
+subscriptions:
+  - name: tasks-once-20m-deploy-check
+    pipeline_name: Tasks
+    event: time.once
+    enabled: true
+    fire_at: '2026-05-22T14:20:00-05:00'
+    agent_id: <agent-uuid>
+    prompt: |
+      Check the status of the deploy I kicked off and summarize the result.
+```
+
+**Payload fields:**
+
+| Variable          | Description                                             | Example                     |
+| ----------------- | ------------------------------------------------------- | --------------------------- |
+| `{{CUE_FIRE_AT}}` | The originally-scheduled `fire_at` timestamp (ISO-8601) | `2026-05-22T16:00:00-05:00` |
+
+The standard `{{CUE_TRIGGER_NAME}}`, `{{CUE_EVENT_TYPE}}`, `{{CUE_EVENT_TIMESTAMP}}`, and `{{CUE_PIPELINE_NAME}}` variables are also available.
+
+**Creating, listing, and cancelling:**
+
+```bash
+# Schedule via relative offset
+maestro-cli cue schedule --in 20m --agent <agent-id> --prompt "Check the deploy status."
+
+# Schedule via absolute timestamp + notify-only
+maestro-cli cue schedule --at "2026-05-22 16:00" --agent <agent-id> --notify --sticky --message "Push rc branch"
+
+# List every scheduled task across agents (one-shot and repeating)
+maestro-cli cue schedule --list
+
+# Only the one-shots
+maestro-cli cue schedule --list --kind once
+
+# Move the fire time
+maestro-cli cue schedule --reschedule tasks-once-push-rc-reminder --at "2026-05-22 18:00"
+
+# Cancel a pending task by sub name
+maestro-cli cue schedule --cancel tasks-once-push-rc-reminder
+```
+
+The same tasks are listed and editable in the app under **Maestro Cue → Scheduled Tasks** (`maestro-cli open cue --tab scheduled`). The tab and the CLI share one module, so neither can drift from the YAML.
+
+---
+
 ## file.changed
 
 Fires when files matching a glob pattern are created, modified, or deleted.
@@ -154,7 +248,7 @@ Fires when files matching a glob pattern are created, modified, or deleted.
 **Behavior:**
 
 - Monitors for `add`, `change`, and `unlink` (delete) events
-- Debounces by 5 seconds per file — rapid saves to the same file produce a single event
+- Debounces by 5 seconds per file - rapid saves to the same file produce a single event
 - The glob is evaluated relative to the project root
 - Standard glob syntax: `*` matches within a directory, `**` matches across directories
 
@@ -188,7 +282,7 @@ The `changeType` field is also available in [filters](./maestro-cue-advanced#fil
 
 ## agent.completed
 
-Fires when another Maestro agent finishes a task. This is the foundation for agent chaining — building multi-step pipelines where one agent's completion triggers the next.
+Fires when another Maestro agent finishes a task. This is the foundation for agent chaining - building multi-step pipelines where one agent's completion triggers the next.
 
 **Required fields:**
 
@@ -203,7 +297,7 @@ Fires when another Maestro agent finishes a task. This is the foundation for age
 - The source agent's output is captured and available via `{{CUE_SOURCE_OUTPUT}}` (truncated to 5,000 characters)
 - Matches agent names as shown in the Left Bar
 
-**Example — single source:**
+**Example - single source:**
 
 ```yaml
 subscriptions:
@@ -219,7 +313,7 @@ subscriptions:
       Deploy to staging with `npm run deploy:staging`.
 ```
 
-**Example — fan-in (multiple sources):**
+**Example - fan-in (multiple sources):**
 
 ```yaml
 subscriptions:
@@ -317,7 +411,7 @@ Polls GitHub for new pull requests using the GitHub CLI (`gh`).
 **Behavior:**
 
 - Requires the [GitHub CLI](https://cli.github.com/) (`gh`) to be installed and authenticated
-- On first run, seeds the "seen" list with existing PRs — only **new** PRs trigger events
+- On first run, seeds the "seen" list with existing PRs - only **new** PRs trigger events
 - Tracks seen PRs in a local database with 30-day retention
 - Auto-detects the repository from the git remote if `repo` is not specified
 
@@ -377,7 +471,7 @@ Polls GitHub for new issues using the GitHub CLI (`gh`). Behaves identically to 
 
 **Behavior:**
 
-Same as `github.pull_request` — requires GitHub CLI, seeds on first run, tracks seen issues.
+Same as `github.pull_request` - requires GitHub CLI, seeds on first run, tracks seen issues.
 
 **Example:**
 
@@ -412,3 +506,220 @@ Same as `github.pull_request`, except:
 | `{{CUE_GH_ASSIGNEES}}` | Comma-separated assignee logins | `alice, bob` |
 
 The branch-specific variables (`{{CUE_GH_BRANCH}}`, `{{CUE_GH_BASE_BRANCH}}`) are not available for issues.
+
+---
+
+## github.label
+
+Fires the moment a label is added to a pull request or an issue. Applying a label becomes the button that starts the work: label a PR `ready-to-merge` and the agent picks it up on the next poll.
+
+Unlike `github.pull_request` / `github.issue`, which poll item lists and fire on discovery, this event reads GitHub's repo-wide issue-event feed. That feed reports the label add itself, with the label name and who applied it, so a label removed and re-added fires twice, and a label buried in an old issue still fires.
+
+**Optional fields:**
+
+| Field             | Type            | Default | Description                                                            |
+| ----------------- | --------------- | ------- | ---------------------------------------------------------------------- |
+| `repo`            | string          | auto    | GitHub repo in `owner/repo` format                                     |
+| `gh_label_target` | string          | `both`  | Which kind to watch: `pr`, `issue`, or `both`                          |
+| `gh_labels`       | string or array | any     | Labels that fire the trigger, matched case-insensitively. Omit for any |
+| `poll_minutes`    | number          | 5       | Minutes between polls (minimum 1)                                      |
+| `gh_state`        | string          | any     | Narrow to items that are `open`, `closed`, or `merged` when labeled    |
+
+**Behavior:**
+
+- Requires the GitHub CLI (`gh`), installed and authenticated
+- Seeds on first run: labels already present when the subscription is first saved never fire, only labels added afterwards
+- Fires once per label add, in the order the labels were applied
+- Polls immediately on system wake, so labels applied while the machine slept are picked up within seconds
+- Scans up to 300 repo events per poll. On a very busy repo, lower `poll_minutes` so a label add cannot be buried between polls (the log warns when it is at risk)
+
+**Example:**
+
+```yaml
+subscriptions:
+  - name: work-labeled-prs
+    event: github.label
+    gh_label_target: pr
+    gh_labels:
+      - ready-to-merge
+      - needs-rebase
+    poll_minutes: 2
+    prompt: |
+      {{CUE_GH_LABEL_ACTOR}} labeled PR #{{CUE_GH_NUMBER}} "{{CUE_GH_LABEL}}".
+
+      {{CUE_GH_TITLE}}
+      {{CUE_GH_URL}}
+
+      {{CUE_GH_BODY}}
+
+      Do what that label asks for.
+```
+
+**Payload fields:**
+
+The GitHub fields of `github.pull_request` / `github.issue` are all present, plus:
+
+| Variable                 | Description                                      | Example                |
+| ------------------------ | ------------------------------------------------ | ---------------------- |
+| `{{CUE_GH_LABEL}}`       | The label that was just added                    | `ready-to-merge`       |
+| `{{CUE_GH_LABEL_ACTOR}}` | Who applied it                                   | `pedramamini`          |
+| `{{CUE_GH_LABELED_AT}}`  | When it was applied (ISO 8601)                   | `2026-09-07T15:28:54Z` |
+| `{{CUE_GH_TYPE}}`        | `pull_request` or `issue`, whichever was labeled | `pull_request`         |
+
+The branch variables (`{{CUE_GH_BRANCH}}`, `{{CUE_GH_BASE_BRANCH}}`) are empty for this event: the label feed does not carry branch data. Fetch it in the prompt with `gh pr view {{CUE_GH_NUMBER}}` when you need it.
+
+---
+
+## cli.trigger
+
+Fires only when explicitly triggered from the command line via `maestro-cli cue trigger <name>`. Unlike other event types, `cli.trigger` has no background watcher or poller - it waits for a manual invocation.
+
+**No additional fields required** - just `name`, `event`, `prompt`, and optionally `enabled`.
+
+**Behavior:**
+
+- Does nothing on its own - only fires when you run `maestro-cli cue trigger <subscription-name>`
+- Supports an optional `--prompt` flag to override or supply the prompt at invocation time
+- The override text is available in the prompt template as `{{CUE_CLI_PROMPT}}`
+- Ideal for deployment scripts, CI/CD integration, on-demand reviews, or ad-hoc automation
+
+**Example:**
+
+```yaml
+subscriptions:
+  - name: deploy
+    event: cli.trigger
+    prompt: |
+      Run the deployment pipeline for the current branch.
+
+      Additional instructions: {{CUE_CLI_PROMPT}}
+    enabled: true
+```
+
+**Triggering from the command line:**
+
+```bash
+# Basic trigger - uses the configured prompt as-is
+maestro-cli cue trigger deploy
+
+# With a prompt override - {{CUE_CLI_PROMPT}} receives this text
+maestro-cli cue trigger deploy --prompt "Deploy to staging only"
+
+# JSON output for scripting
+maestro-cli cue trigger deploy --json
+```
+
+**Discovering available subscriptions:**
+
+```bash
+# List all subscriptions across agents
+maestro-cli cue list
+```
+
+**Payload fields:**
+
+| Variable               | Description                                 | Example             |
+| ---------------------- | ------------------------------------------- | ------------------- |
+| `{{CUE_CLI_PROMPT}}`   | Prompt text passed via `--prompt` flag      | `Deploy to staging` |
+| `{{CUE_TRIGGER_NAME}}` | Name of the subscription that was triggered | `deploy`            |
+| `{{CUE_EVENT_TYPE}}`   | Always `cli.trigger`                        | `cli.trigger`       |
+
+---
+
+## webhook.received
+
+Fires when an external service POSTs to Maestro's local webhook listener. This is the generic escape hatch: anything that can send an HTTP request - GitHub, GitLab, Slack, a CI system, a cron box, your own script - can drive a Cue pipeline, and the filter decides which payloads matter.
+
+**Required fields:**
+
+| Field     | Type   | Description                                |
+| --------- | ------ | ------------------------------------------ |
+| `webhook` | object | Listener config. See the sub-fields below. |
+
+**`webhook` sub-fields:**
+
+| Field              | Type   | Description                                                                                                          |
+| ------------------ | ------ | -------------------------------------------------------------------------------------------------------------------- |
+| `path`             | string | URL segment under `/cue/`. Defaults to a slug of the subscription name.                                              |
+| `secret_env`       | string | Name of an environment variable holding the shared secret. Preferred - keeps the value out of a committed cue.yaml.  |
+| `secret`           | string | Literal shared secret. Mutually exclusive with `secret_env`.                                                         |
+| `signature_header` | string | When set, authenticate by HMAC-SHA256 over the raw body using this header instead of presenting the secret directly. |
+
+A secret is mandatory. A webhook path with no authentication is a remote trigger for an AI agent running with your credentials, so a subscription without `secret` or `secret_env` fails config validation rather than quietly starting to listen.
+
+**The listener:**
+
+- One listener serves every webhook subscription across every agent. It starts when the first one loads and stops when the last one unloads.
+- Binds to `127.0.0.1:17997` by default. Override with `MAESTRO_CUE_WEBHOOK_PORT` and `MAESTRO_CUE_WEBHOOK_HOST`.
+- To take deliveries from the public internet, point a tunnel (ngrok, cloudflared) or a reverse proxy at the loopback port. Binding the listener itself to `0.0.0.0` is possible but puts an agent trigger directly on your network.
+- Only `POST` is accepted. Bodies over 1 MB are rejected with `413`.
+- Multiple subscriptions may share a `path`. Each authenticates independently, and every one that passes receives the delivery.
+
+**Authenticating a delivery:**
+
+Without `signature_header`, the sender presents the secret:
+
+```bash
+curl -X POST http://127.0.0.1:17997/cue/gh-pr \
+  -H "X-Maestro-Cue-Secret: $GH_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"opened","number":42}'
+```
+
+`Authorization: Bearer <secret>` works too.
+
+With `signature_header`, the sender signs the raw body with HMAC-SHA256 and sends the digest in that header. Both bare hex and the `sha256=<hex>` form GitHub and GitLab use are accepted - so pointing a GitHub webhook at Maestro with `signature_header: X-Hub-Signature-256` and the same secret works with no glue code.
+
+**Example:**
+
+```yaml
+subscriptions:
+  - name: pr-opened
+    event: webhook.received
+    webhook:
+      path: gh-pr
+      secret_env: GH_WEBHOOK_SECRET
+      signature_header: X-Hub-Signature-256
+    filter:
+      webhook_event: pull_request
+      body.action: opened
+    prompt: |
+      A pull request was just opened. Review it for correctness and test coverage.
+
+      {{CUE_WEBHOOK_BODY}}
+```
+
+**Filtering:**
+
+Filters read the event payload with dot-notation, so one endpoint can fan different payloads to different pipelines:
+
+```yaml
+filter:
+  webhook_event: pull_request # from X-GitHub-Event / X-GitLab-Event
+  body.action: opened # any field in the JSON body
+  headers.x-custom-source: ci # any request header
+```
+
+**Payload fields:**
+
+| Field           | Type   | Description                                                     |
+| --------------- | ------ | --------------------------------------------------------------- |
+| `path`          | string | Path segment the delivery arrived on                            |
+| `webhook_event` | string | Vendor event name from `X-GitHub-Event`, `X-GitLab-Event`, etc. |
+| `delivery_id`   | string | Vendor delivery id, or a locally generated UUID                 |
+| `received_at`   | string | ISO-8601 receipt timestamp                                      |
+| `headers`       | object | Request headers, with auth material stripped                    |
+| `body`          | object | Parsed JSON body, or `null` when the body was not JSON          |
+| `raw_body`      | string | Raw request body, truncated to 64 KB                            |
+
+**Template variables:**
+
+| Variable                      | Description                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------------- |
+| `{{CUE_WEBHOOK_BODY}}`        | Payload as pretty-printed JSON (raw text if not JSON), truncated to 10K chars |
+| `{{CUE_WEBHOOK_EVENT}}`       | Vendor event name                                                             |
+| `{{CUE_WEBHOOK_PATH}}`        | Path segment the delivery arrived on                                          |
+| `{{CUE_WEBHOOK_DELIVERY_ID}}` | Vendor delivery id                                                            |
+| `{{CUE_WEBHOOK_HEADERS}}`     | Request headers as `key: value` lines, secrets redacted                       |
+
+Secrets never reach the payload: the `Authorization`, `Cookie`, `X-Maestro-Cue-Secret`, and configured signature headers are stripped before the event is built, so they cannot leak into a prompt, the activity log, or the Cue database.

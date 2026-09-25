@@ -10,8 +10,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Trash2, BookOpen, FolderOpen, AlertTriangle, FileText } from 'lucide-react';
 import type { Theme } from '../../types';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
+import { ResizeHandles } from '../ui/ResizeHandles';
 
 interface ExistingAutoRunDocsModalProps {
 	theme: Theme;
@@ -30,8 +32,6 @@ export function ExistingAutoRunDocsModal({
 	onContinuePlanning,
 	onCancel,
 }: ExistingAutoRunDocsModalProps) {
-	const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-	const layerIdRef = useRef<string>();
 	const continueButtonRef = useRef<HTMLButtonElement>(null);
 	const [focusedButton, setFocusedButton] = useState<'continue' | 'fresh'>('continue');
 	const [isDeleting, setIsDeleting] = useState(false);
@@ -41,31 +41,11 @@ export function ExistingAutoRunDocsModal({
 		continueButtonRef.current?.focus();
 	}, []);
 
-	// Register layer on mount
-	useEffect(() => {
-		const id = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.EXISTING_AUTORUN_DOCS,
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			ariaLabel: 'Existing Playbook Documents Detected',
-			onEscape: onCancel,
-		});
-		layerIdRef.current = id;
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [registerLayer, unregisterLayer]);
-
-	// Update handler when dependencies change
-	useEffect(() => {
-		if (layerIdRef.current) {
-			updateLayerHandler(layerIdRef.current, onCancel);
-		}
-	}, [onCancel, updateLayerHandler]);
+	useModalLayer(
+		MODAL_PRIORITIES.EXISTING_AUTORUN_DOCS,
+		'Existing Playbook Documents Detected',
+		onCancel
+	);
 
 	// Handle keyboard navigation between buttons
 	const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -101,6 +81,11 @@ export function ExistingAutoRunDocsModal({
 
 	// Get folder name from path
 	const folderName = directoryPath.split('/').pop() || directoryPath;
+	const resizableModal = useResizableModal({
+		resizeKey: 'existing-auto-run-docs',
+		defaultSize: { width: 520, height: 620 },
+		minSize: { width: 360, height: 320 },
+	});
 
 	return (
 		<div
@@ -112,9 +97,22 @@ export function ExistingAutoRunDocsModal({
 			onKeyDown={handleKeyDown}
 		>
 			<div
-				className="w-[520px] border rounded-xl shadow-2xl overflow-hidden"
-				style={{ backgroundColor: theme.colors.bgSidebar, borderColor: theme.colors.border }}
+				ref={resizableModal.modalRef}
+				className="relative border rounded-xl shadow-2xl overflow-hidden flex flex-col"
+				style={{
+					...resizableModal.style,
+					backgroundColor: theme.colors.bgSidebar,
+					borderColor: theme.colors.border,
+				}}
+				data-modal-resize-key="existing-auto-run-docs"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div className="p-5 border-b" style={{ borderColor: theme.colors.border }}>
 					<div className="flex items-center gap-3">
@@ -136,7 +134,7 @@ export function ExistingAutoRunDocsModal({
 				</div>
 
 				{/* Content */}
-				<div className="p-5 space-y-4">
+				<div className="p-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
 					{/* Project info */}
 					<div
 						className="rounded-lg p-4 space-y-3"
@@ -243,21 +241,21 @@ export function ExistingAutoRunDocsModal({
 					<p className="text-center text-xs pt-2" style={{ color: theme.colors.textDim }}>
 						Press{' '}
 						<kbd
-							className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+							className="px-1.5 py-0.5 rounded text-2xs font-mono"
 							style={{ backgroundColor: theme.colors.bgActivity }}
 						>
 							Tab
 						</kbd>{' '}
 						to switch,{' '}
 						<kbd
-							className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+							className="px-1.5 py-0.5 rounded text-2xs font-mono"
 							style={{ backgroundColor: theme.colors.bgActivity }}
 						>
 							Enter
 						</kbd>{' '}
 						to confirm,{' '}
 						<kbd
-							className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+							className="px-1.5 py-0.5 rounded text-2xs font-mono"
 							style={{ backgroundColor: theme.colors.bgActivity }}
 						>
 							Esc

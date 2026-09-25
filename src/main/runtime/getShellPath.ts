@@ -15,7 +15,7 @@ export async function refreshShellPath(): Promise<string> {
 	if (cachedPathPromise) return cachedPathPromise;
 
 	cachedPathPromise = (async () => {
-		// On Windows, there's no reliable POSIX login shell to probe — fall back to
+		// On Windows, there's no reliable POSIX login shell to probe - fall back to
 		// the current process env PATH so callers still receive something useful.
 		if (isWindows()) {
 			const p = process.env.PATH || '';
@@ -40,7 +40,7 @@ export async function refreshShellPath(): Promise<string> {
 				try {
 					child.kill();
 				} catch {
-					// Ignore kill errors — process may have already exited
+					// Ignore kill errors - process may have already exited
 				}
 				reject(new Error('Timed out reading shell PATH'));
 			}, 2000);
@@ -82,6 +82,16 @@ export async function refreshShellPath(): Promise<string> {
 export async function getShellPath(): Promise<string> {
 	if (cachedPath) return cachedPath;
 	return refreshShellPath();
+}
+
+/**
+ * Synchronously read the cached shell PATH. Returns null when no probe has
+ * completed yet. Callers that can't await (e.g. PATH builders used in hot
+ * spawn paths) use this to opportunistically inherit the user's login-shell
+ * PATH without blocking.
+ */
+export function peekShellPath(): string | null {
+	return cachedPath;
 }
 
 /** Clear the in-memory cache (useful for tests). */

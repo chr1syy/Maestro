@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { renderHook } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { useSessionCategories } from '../../../renderer/hooks/session/useSessionCategories';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import type { Session, Group } from '../../../renderer/types';
@@ -293,6 +293,74 @@ describe('useSessionCategories', () => {
 			expect(names).toContain('Busy Agent');
 		});
 
+		it('includes agents in an error state even without unread tabs when showUnreadAgentsOnly is true', () => {
+			const s1 = makeSession({
+				name: 'Errored Agent',
+				state: 'error',
+			});
+			const s2 = makeSession({ name: 'Idle No Unread' });
+			resetStore([s1, s2]);
+
+			const { result } = renderHook(() => useSessionCategories('', [s1, s2], true));
+
+			expect(result.current.sortedFilteredSessions).toHaveLength(1);
+			expect(result.current.sortedFilteredSessions[0].name).toBe('Errored Agent');
+		});
+
+		it('keeps parent visible when a worktree child is in an error state', () => {
+			const parent = makeSession({ name: 'Parent' });
+			const child = makeSession({
+				name: 'Worktree Child',
+				parentSessionId: parent.id,
+				state: 'error',
+			});
+			resetStore([parent, child]);
+
+			const { result } = renderHook(() => useSessionCategories('', [parent, child], true));
+
+			expect(result.current.sortedFilteredSessions).toHaveLength(1);
+			expect(result.current.sortedFilteredSessions[0].name).toBe('Parent');
+		});
+
+		it('includes auto-running agents (AUTO badge) even when idle without unread tabs', () => {
+			const s1 = makeSession({
+				name: 'Has Unread',
+				aiTabs: [{ id: 't1', hasUnread: true } as any],
+			});
+			const s2 = makeSession({
+				name: 'Auto Run Agent',
+				aiTabs: [{ id: 't2', hasUnread: false } as any],
+			});
+			const s3 = makeSession({ name: 'Idle No Unread' });
+			resetStore([s1, s2, s3]);
+
+			const { result } = renderHook(() =>
+				useSessionCategories('', [s1, s2, s3], true, null, [s2.id])
+			);
+
+			expect(result.current.sortedFilteredSessions).toHaveLength(2);
+			const names = result.current.sortedFilteredSessions.map((s) => s.name);
+			expect(names).toContain('Has Unread');
+			expect(names).toContain('Auto Run Agent');
+		});
+
+		it('keeps parent visible when a worktree child is auto-running', () => {
+			const parent = makeSession({ name: 'Parent' });
+			const child = makeSession({
+				name: 'Worktree Child',
+				parentSessionId: parent.id,
+				aiTabs: [{ id: 't1', hasUnread: false } as any],
+			});
+			resetStore([parent, child]);
+
+			const { result } = renderHook(() =>
+				useSessionCategories('', [parent, child], true, null, [child.id])
+			);
+
+			expect(result.current.sortedFilteredSessions).toHaveLength(1);
+			expect(result.current.sortedFilteredSessions[0].name).toBe('Parent');
+		});
+
 		it('keeps parent visible when active session is a worktree child without unread', () => {
 			const parent = makeSession({ name: 'Parent' });
 			const child = makeSession({
@@ -358,7 +426,7 @@ describe('useSessionCategories', () => {
 
 		it('sortedBookmarkedParentSessions excludes worktree children', () => {
 			const parent = makeSession({ name: 'Parent', bookmarked: true });
-			// Worktree child that is also bookmarked — should be excluded from parent list
+			// Worktree child that is also bookmarked - should be excluded from parent list
 			// (In practice children can't be bookmarked, but the filter should still work)
 			resetStore([parent]);
 
@@ -446,7 +514,7 @@ describe('useSessionCategories', () => {
 
 		it('sortedUngroupedParentSessions excludes worktree children', () => {
 			const s1 = makeSession({ name: 'Parent' });
-			// Worktree child without groupId — excluded from parent list by parentSessionId filter
+			// Worktree child without groupId - excluded from parent list by parentSessionId filter
 			resetStore([s1]);
 
 			const { result } = renderHook(() => useSessionCategories('', [s1]));
@@ -585,6 +653,287 @@ describe('useSessionCategories', () => {
 			expect(result.current.ungroupedSessions).toHaveLength(66);
 			// All 100 in filtered
 			expect(result.current.sortedFilteredSessions).toHaveLength(100);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// Deep-equal lock-in for memo-cascade refactor
+	//
+	// PR-A commit 5 will collapse the four chained `useMemo`s
+	// (worktreeChildrenByParentId → sortedWorktreeChildrenByParentId →
+	// sortedSessionIndexById → getWorktreeChildren) into a single pass.
+	// These tests pin down the exact output shape for a representative
+	// fixture so the refactor is verified to produce identical results.
+	// -----------------------------------------------------------------------
+	describe('memo-cascade lock-in (PR-A 1.3)', () => {
+		function buildFixture() {
+			// 2 worktree parents, each with 2 children
+			const parentA = makeSession({ id: 'pa', name: '🌟 Alpha Parent' });
+			const childA1 = makeSession({
+				id: 'pa-c1',
+				name: '🌟 Branch Zeta',
+				parentSessionId: 'pa',
+			});
+			const childA2 = makeSession({
+				id: 'pa-c2',
+				name: '🔥 Branch Aurora',
+				parentSessionId: 'pa',
+			});
+			const parentB = makeSession({ id: 'pb', name: 'Bravo Parent', groupId: 'g1' });
+			const childB1 = makeSession({
+				id: 'pb-c1',
+				name: 'Branch X',
+				parentSessionId: 'pb',
+			});
+			const childB2 = makeSession({
+				id: 'pb-c2',
+				name: 'Branch Y',
+				parentSessionId: 'pb',
+			});
+			// Standalone sessions: bookmarked, grouped, ungrouped
+			const bookmark1 = makeSession({ id: 'b1', name: 'Bookmark 1', bookmarked: true });
+			const grouped1 = makeSession({ id: 'gr1', name: 'Grouped 1', groupId: 'g1' });
+			const ungrouped1 = makeSession({ id: 'u1', name: 'Ungrouped 1' });
+			const ungrouped2 = makeSession({ id: 'u2', name: 'Ungrouped 2' });
+
+			const allSessions = [
+				parentA,
+				childA1,
+				childA2,
+				parentB,
+				childB1,
+				childB2,
+				bookmark1,
+				grouped1,
+				ungrouped1,
+				ungrouped2,
+			];
+			// Top-level sessions only (sortedSessions excludes worktree children)
+			const sortedSessions = [parentA, parentB, bookmark1, grouped1, ungrouped1, ungrouped2];
+			const groups = [makeGroup({ id: 'g1', name: 'Group One' })];
+			return { allSessions, sortedSessions, groups };
+		}
+
+		it('produces stable worktreeChildrenByParentId for the fixture', () => {
+			const fx = buildFixture();
+			resetStore(fx.allSessions, fx.groups);
+			const { result } = renderHook(() => useSessionCategories('', fx.sortedSessions));
+
+			const map = result.current.worktreeChildrenByParentId;
+			expect(map.size).toBe(2);
+			expect(
+				map
+					.get('pa')!
+					.map((c) => c.id)
+					.sort()
+			).toEqual(['pa-c1', 'pa-c2']);
+			expect(
+				map
+					.get('pb')!
+					.map((c) => c.id)
+					.sort()
+			).toEqual(['pb-c1', 'pb-c2']);
+		});
+
+		it('produces stable sortedWorktreeChildrenByParentId for the fixture', () => {
+			const fx = buildFixture();
+			resetStore(fx.allSessions, fx.groups);
+			const { result } = renderHook(() => useSessionCategories('', fx.sortedSessions));
+
+			const map = result.current.sortedWorktreeChildrenByParentId;
+			// Aurora < Zeta (sort ignores emojis)
+			expect(map.get('pa')!.map((c) => c.id)).toEqual(['pa-c2', 'pa-c1']);
+			// X < Y (alphabetical)
+			expect(map.get('pb')!.map((c) => c.id)).toEqual(['pb-c1', 'pb-c2']);
+		});
+
+		it('produces stable sortedSessionIndexById for the fixture', () => {
+			const fx = buildFixture();
+			resetStore(fx.allSessions, fx.groups);
+			const { result } = renderHook(() => useSessionCategories('', fx.sortedSessions));
+
+			const map = result.current.sortedSessionIndexById;
+			expect(map.size).toBe(fx.sortedSessions.length);
+			fx.sortedSessions.forEach((s, i) => {
+				expect(map.get(s.id)).toBe(i);
+			});
+			// Ids not in sortedSessions should not be in the index map
+			expect(map.has('pa-c1')).toBe(false);
+			expect(map.has('pa-c2')).toBe(false);
+		});
+
+		it('getWorktreeChildren returns the SAME array reference as map lookup', () => {
+			const fx = buildFixture();
+			resetStore(fx.allSessions, fx.groups);
+			const { result } = renderHook(() => useSessionCategories('', fx.sortedSessions));
+
+			// Identity (toBe), not deep-equal (toEqual): consumers may
+			// memoize on this reference. If a future change accidentally
+			// returns a clone instead of the original, dependent useMemo /
+			// React.memo bail-outs would silently break.
+			expect(result.current.getWorktreeChildren('pa')).toBe(
+				result.current.worktreeChildrenByParentId.get('pa')
+			);
+			expect(result.current.getWorktreeChildren('pb')).toBe(
+				result.current.worktreeChildrenByParentId.get('pb')
+			);
+			// Unknown parent: caller-side fallback to a fresh [] each call,
+			// so identity does not hold here - content equality is the
+			// right contract.
+			expect(result.current.getWorktreeChildren('nonexistent')).toEqual([]);
+		});
+
+		it('reference identity holds across renders when sessions array does not change', () => {
+			const fx = buildFixture();
+			resetStore(fx.allSessions, fx.groups);
+			const { result, rerender } = renderHook(() => useSessionCategories('', fx.sortedSessions));
+
+			const firstRun = {
+				worktreeChildrenByParentId: result.current.worktreeChildrenByParentId,
+				sortedWorktreeChildrenByParentId: result.current.sortedWorktreeChildrenByParentId,
+				sortedSessionIndexById: result.current.sortedSessionIndexById,
+				getWorktreeChildren: result.current.getWorktreeChildren,
+			};
+
+			rerender();
+
+			// Sessions reference unchanged → memo outputs must be reference-stable.
+			expect(result.current.worktreeChildrenByParentId).toBe(firstRun.worktreeChildrenByParentId);
+			expect(result.current.sortedWorktreeChildrenByParentId).toBe(
+				firstRun.sortedWorktreeChildrenByParentId
+			);
+			expect(result.current.sortedSessionIndexById).toBe(firstRun.sortedSessionIndexById);
+			expect(result.current.getWorktreeChildren).toBe(firstRun.getWorktreeChildren);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// Multi-window: scopeSessions narrows the categorized universe. The hook
+	// reads sessions from the store itself, so a secondary window's Left Bar can
+	// only be scoped by applying the predicate HERE (not via the sortedSessions
+	// param) - this is the regression the desktop verify caught.
+	// -----------------------------------------------------------------------
+	describe('scopeSessions (per-window Left Bar scoping)', () => {
+		it('categorizes the full store list when scopeSessions is omitted', () => {
+			const a = makeSession({ name: 'Alpha' });
+			const b = makeSession({ name: 'Bravo' });
+			const c = makeSession({ name: 'Charlie' });
+			resetStore([a, b, c]);
+
+			const { result } = renderHook(() => useSessionCategories('', [a, b, c]));
+
+			expect(result.current.sortedFilteredSessions.map((s) => s.name)).toEqual([
+				'Alpha',
+				'Bravo',
+				'Charlie',
+			]);
+		});
+
+		it('categorizes ONLY the scoped agents when scopeSessions filters the store list', () => {
+			const a = makeSession({ name: 'Alpha' });
+			const b = makeSession({ name: 'Bravo' });
+			const c = makeSession({ name: 'Charlie' });
+			resetStore([a, b, c]);
+
+			// Secondary window owns only Bravo.
+			const scope = (list: Session[]) => list.filter((s) => s.id === b.id);
+			const { result } = renderHook(() =>
+				useSessionCategories('', [a, b, c], false, null, [], scope)
+			);
+
+			expect(result.current.sortedFilteredSessions.map((s) => s.name)).toEqual(['Bravo']);
+			expect(result.current.ungroupedSessions.map((s) => s.name)).toEqual(['Bravo']);
+		});
+
+		it('keeps a scoped agent AND its worktree child when both pass the predicate', () => {
+			const parent = makeSession({ name: 'Owner' });
+			const child = makeSession({ name: 'Owner Worktree', parentSessionId: parent.id });
+			const other = makeSession({ name: 'Unowned' });
+			resetStore([parent, child, other]);
+
+			// Scope keeps the owned parent + any child whose parent is owned.
+			const owned = new Set([parent.id]);
+			const scope = (list: Session[]) =>
+				list.filter(
+					(s) => owned.has(s.id) || (s.parentSessionId != null && owned.has(s.parentSessionId))
+				);
+			const { result } = renderHook(() =>
+				useSessionCategories('', [parent, child, other], false, null, [], scope)
+			);
+
+			// Parent shows as the categorized row; the child rides along in the
+			// worktree map (children are excluded from the flat categorized list).
+			expect(result.current.sortedFilteredSessions.map((s) => s.name)).toEqual(['Owner']);
+			expect(result.current.getWorktreeChildren(parent.id).map((s) => s.name)).toEqual([
+				'Owner Worktree',
+			]);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// Group collapse/expand must not re-categorize (#1186)
+	// -----------------------------------------------------------------------
+	describe('group collapse/expand', () => {
+		// Hoisted so `sortedSessions` / `activeBatchSessionIds` keep a stable
+		// identity across renders - both feed the categorization memo, so fresh
+		// literals would invalidate it no matter what `groupIds` does.
+		const batchIds: string[] = [];
+
+		it('keeps categorized collections reference-stable when a group is only collapsed', () => {
+			const group = makeGroup({ id: 'g1', collapsed: false });
+			const grouped = makeSession({ id: 's1', groupId: 'g1' });
+			const loose = makeSession({ id: 's2' });
+			const sorted = [grouped, loose];
+			resetStore(sorted, [group]);
+
+			const { result, rerender } = renderHook(() =>
+				useSessionCategories('', sorted, false, null, batchIds)
+			);
+
+			const before = {
+				grouped: result.current.sortedGroupSessionsById,
+				ungrouped: result.current.ungroupedSessions,
+				sortedFiltered: result.current.sortedFilteredSessions,
+				bookmarked: result.current.bookmarkedSessions,
+			};
+
+			// Collapsing rebuilds `groups` with a new array + new group object, but
+			// the set of group ids is untouched. Categorization must not re-run.
+			act(() => {
+				useSessionStore.setState({ groups: [{ ...group, collapsed: true }] } as any);
+			});
+			rerender();
+
+			expect(result.current.sortedGroupSessionsById).toBe(before.grouped);
+			expect(result.current.ungroupedSessions).toBe(before.ungrouped);
+			expect(result.current.sortedFilteredSessions).toBe(before.sortedFiltered);
+			expect(result.current.bookmarkedSessions).toBe(before.bookmarked);
+		});
+
+		it('re-categorizes when the set of group ids actually changes', () => {
+			const group = makeGroup({ id: 'g1', collapsed: false });
+			const grouped = makeSession({ id: 's1', groupId: 'g1' });
+			const orphan = makeSession({ id: 's2', groupId: 'g2' });
+			const sorted = [grouped, orphan];
+			resetStore(sorted, [group]);
+
+			const { result, rerender } = renderHook(() =>
+				useSessionCategories('', sorted, false, null, batchIds)
+			);
+
+			// 's2' points at a group that does not exist yet, so it lands in Ungrouped.
+			expect(result.current.ungroupedSessions.map((s) => s.id)).toEqual(['s2']);
+			const beforeGrouped = result.current.sortedGroupSessionsById;
+
+			act(() => {
+				useSessionStore.setState({ groups: [group, makeGroup({ id: 'g2' })] } as any);
+			});
+			rerender();
+
+			// New id in the signature → memo invalidates and 's2' moves into g2.
+			expect(result.current.sortedGroupSessionsById).not.toBe(beforeGrouped);
+			expect(result.current.ungroupedSessions).toEqual([]);
+			expect(result.current.sortedGroupSessionsById.get('g2')?.map((s) => s.id)).toEqual(['s2']);
 		});
 	});
 });

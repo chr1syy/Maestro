@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { calculateContextDisplay } from '../../utils/contextUsage';
-import { captureException } from '../../utils/sentry';
+import { resolveConfiguredContextWindow } from '../../utils/contextWindowResolver';
+import { resolveContextWindow } from '../../utils/contextWindowPrecedence';
 import type { Session, AITab } from '../../types';
 
 /**
@@ -22,27 +23,8 @@ export function useContextWindow(activeSession: Session | null, activeTab: AITab
 				return;
 			}
 
-			if (
-				typeof activeSession.customContextWindow === 'number' &&
-				activeSession.customContextWindow > 0
-			) {
-				if (isActive) setConfiguredContextWindow(activeSession.customContextWindow);
-				return;
-			}
-
-			try {
-				const config = await window.maestro.agents.getConfig(activeSession.toolType);
-				const value = typeof config?.contextWindow === 'number' ? config.contextWindow : 0;
-				if (isActive) setConfiguredContextWindow(value);
-			} catch (error) {
-				captureException(error, {
-					extra: {
-						message: 'Failed to load agent context window setting',
-						toolType: activeSession.toolType,
-					},
-				});
-				if (isActive) setConfiguredContextWindow(0);
-			}
+			const value = await resolveConfiguredContextWindow(activeSession);
+			if (isActive) setConfiguredContextWindow(value);
 		};
 
 		loadContextWindow();
@@ -51,17 +33,55 @@ export function useContextWindow(activeSession: Session | null, activeTab: AITab
 		};
 	}, [activeSession?.toolType, activeSession?.customContextWindow]);
 
-	const activeTabContextWindow = useMemo(() => {
-		const configured = configuredContextWindow;
-		const reported = activeTab?.usageStats?.contextWindow ?? 0;
-		return configured > 0 ? configured : reported;
-	}, [configuredContextWindow, activeTab?.usageStats?.contextWindow]);
+	// Resolved window AND which rank supplied it. The source is what lets the
+	// Edit Agent panel say "your stored value is being overridden" without
+	// re-deriving the ranking (#1370) - a second copy could disagree with this
+	// one, which is the bug PR #1221 fixed.
+	const resolvedContextWindow = useMemo(
+		() =>
+			resolveContextWindow({
+				customModel: activeSession?.customModel,
+				customContextWindow: activeSession?.customContextWindow,
+				contextWindowSource: activeSession?.contextWindowSource,
+				reportedWindow: activeTab?.usageStats?.contextWindow,
+				reportedResolved: activeTab?.usageStats?.contextWindowResolved,
+				configuredWindow: configuredContextWindow,
+			}),
+		[
+			configuredContextWindow,
+			activeTab?.usageStats?.contextWindow,
+			activeTab?.usageStats?.contextWindowResolved,
+			activeSession?.customContextWindow,
+			activeSession?.contextWindowSource,
+			activeSession?.customModel,
+		]
+	);
+	const activeTabContextWindow = resolvedContextWindow.window;
+
+	// Hold the last trustworthy result per tab so an untrustworthy frame
+	// (overflow without fallback, missing window) preserves the prior good
+	// values instead of displaying the capacity as if it were usage (#762).
+	const lastGoodRef = useRef<{ tabId: string | null; tokens: number; percentage: number }>({
+		tabId: null,
+		tokens: 0,
+		percentage: 0,
+	});
 
 	// Compute context tokens and percentage using the shared helper.
 	// Handles accumulated multi-tool turns by falling back to session.contextUsage.
 	const { tokens: activeTabContextTokens, percentage: activeTabContextUsage } = useMemo(() => {
-		if (!activeTab?.usageStats) return { tokens: 0, percentage: 0 };
-		return calculateContextDisplay(
+		const currentTabId = activeTab?.id ?? null;
+		// Reset last-good when switching tabs so a previous tab's reading doesn't
+		// bleed into a fresh tab that hasn't reported usage yet.
+		if (lastGoodRef.current.tabId !== currentTabId) {
+			lastGoodRef.current = { tabId: currentTabId, tokens: 0, percentage: 0 };
+		}
+
+		if (!activeTab?.usageStats) {
+			return { tokens: lastGoodRef.current.tokens, percentage: lastGoodRef.current.percentage };
+		}
+
+		const result = calculateContextDisplay(
 			{
 				inputTokens: activeTab.usageStats.inputTokens,
 				outputTokens: activeTab.usageStats.outputTokens,
@@ -72,7 +92,20 @@ export function useContextWindow(activeSession: Session | null, activeTab: AITab
 			activeSession?.toolType,
 			activeSession?.contextUsage
 		);
+
+		if (result.trustworthy) {
+			lastGoodRef.current = {
+				tabId: currentTabId,
+				tokens: result.tokens,
+				percentage: result.percentage,
+			};
+			return { tokens: result.tokens, percentage: result.percentage };
+		}
+
+		// Untrustworthy frame: keep last known good values.
+		return { tokens: lastGoodRef.current.tokens, percentage: lastGoodRef.current.percentage };
 	}, [
+		activeTab?.id,
 		activeTab?.usageStats,
 		activeSession?.toolType,
 		activeTabContextWindow,
@@ -83,5 +116,7 @@ export function useContextWindow(activeSession: Session | null, activeTab: AITab
 		activeTabContextWindow,
 		activeTabContextTokens,
 		activeTabContextUsage,
+		/** Which rank supplied `activeTabContextWindow` (see contextWindowPrecedence). */
+		activeTabContextWindowSource: resolvedContextWindow.source,
 	};
 }

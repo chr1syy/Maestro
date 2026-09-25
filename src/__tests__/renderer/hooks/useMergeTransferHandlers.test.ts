@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/react';
 import type { Session } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 
 // ============================================================================
 // Mock modules BEFORE importing the hook
@@ -98,8 +99,10 @@ vi.mock('../../../renderer/stores/modalStore', () => ({
 
 // Mock notificationStore
 const mockNotifyToast = vi.fn();
+const mockShowOsNotification = vi.fn();
 vi.mock('../../../renderer/stores/notificationStore', () => ({
 	notifyToast: (...args: unknown[]) => mockNotifyToast(...args),
+	showOsNotification: (...args: unknown[]) => mockShowOsNotification(...args),
 }));
 
 // Mock other dependencies
@@ -128,6 +131,7 @@ import {
 	type UseMergeTransferHandlersDeps,
 } from '../../../renderer/hooks/agent/useMergeTransferHandlers';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
+import { useTabStore } from '../../../renderer/stores/tabStore';
 import { useMergeSessionWithSessions } from '../../../renderer/hooks/agent/useMergeSession';
 import { useSendToAgentWithSessions } from '../../../renderer/hooks/agent/useSendToAgent';
 
@@ -135,13 +139,14 @@ import { useSendToAgentWithSessions } from '../../../renderer/hooks/agent/useSen
 // Helpers
 // ============================================================================
 
+// Thin wrapper: pre-populates an AI tab with chat logs so merge/transfer
+// handlers have content to merge.
 function createMockSession(overrides: Partial<Session> = {}): Session {
-	return {
-		id: 'session-1',
+	return baseCreateMockSession({
 		name: 'Test Agent',
-		state: 'idle',
-		busySource: undefined,
-		toolType: 'claude-code',
+		cwd: '/test',
+		fullPath: '/test',
+		projectRoot: '/test/project',
 		aiTabs: [
 			{
 				id: 'tab-1',
@@ -157,17 +162,11 @@ function createMockSession(overrides: Partial<Session> = {}): Session {
 				starred: false,
 				createdAt: Date.now(),
 			},
-		],
+		] as any,
 		activeTabId: 'tab-1',
-		inputMode: 'ai',
-		isGitRepo: false,
-		cwd: '/test',
-		projectRoot: '/test/project',
-		shellLogs: [],
 		shellCwd: '/test',
-		terminalTabs: [],
-		activeTerminalTabId: null,
-	} as unknown as Session;
+		...overrides,
+	});
 }
 
 // Create stable deps to avoid reference changes
@@ -215,9 +214,16 @@ beforeEach(() => {
 				command: 'claude',
 				args: [],
 				path: '/usr/bin/claude',
+				capabilities: { supportsStreamJsonInput: false },
 			}),
 		},
 		process: { spawn: vi.fn().mockResolvedValue(undefined) },
+		prompts: {
+			get: vi.fn().mockResolvedValue({ success: true, content: '' }),
+		},
+		history: {
+			getFilePath: vi.fn().mockResolvedValue(null),
+		},
 	};
 });
 
@@ -534,6 +540,75 @@ describe('useMergeTransferHandlers', () => {
 	});
 
 	// ----------------------------------------------------------------
+	// handleSendToAgent - terminal buffer transfer path
+	// ----------------------------------------------------------------
+
+	describe('handleSendToAgent - terminal buffer mode', () => {
+		beforeEach(() => {
+			useTabStore.getState().setPendingTerminalBufferSend(null);
+		});
+
+		it('uses the queued terminal buffer as the transferred message body', async () => {
+			const targetSession = createMockSession({
+				id: 'target-session',
+				name: 'Target Agent',
+				toolType: 'codex',
+			});
+			useSessionStore.setState({
+				sessions: [createMockSession(), targetSession],
+				activeSessionId: 'session-1',
+			});
+
+			useTabStore.getState().setPendingTerminalBufferSend({
+				content: '$ echo hello\nhello',
+				sourceName: 'Terminal 1',
+			});
+
+			const deps = createMockDeps();
+			const { result } = renderHook(() => useMergeTransferHandlers(deps));
+
+			let sendResult: any;
+			await act(async () => {
+				sendResult = await result.current.handleSendToAgent('target-session', {
+					groomContext: false,
+				} as any);
+			});
+
+			expect(sendResult.success).toBe(true);
+
+			const updatedSessions = useSessionStore.getState().sessions;
+			const updatedTarget = updatedSessions.find((s) => s.id === 'target-session');
+			const newTab = updatedTarget!.aiTabs.find((t) => t.id === sendResult.newTabId);
+			const userMessage = newTab!.logs.find((log) => log.source === 'user');
+
+			expect(userMessage).toBeDefined();
+			expect(userMessage!.text).toContain('Terminal Buffer from "Terminal 1"');
+			expect(userMessage!.text).toContain('$ echo hello');
+			expect(newTab!.name).toBe('From: Terminal 1');
+
+			// Buffer should be cleared after a successful send so later AI-tab sends use the
+			// normal extraction path.
+			expect(useTabStore.getState().pendingTerminalBufferSend).toBeNull();
+		});
+
+		it('clears the queued buffer when the transfer is cancelled', () => {
+			useTabStore.getState().setPendingTerminalBufferSend({
+				content: 'pending',
+				sourceName: 'Terminal 1',
+			});
+
+			const deps = createMockDeps();
+			const { result } = renderHook(() => useMergeTransferHandlers(deps));
+
+			act(() => {
+				result.current.handleCancelTransfer();
+			});
+
+			expect(useTabStore.getState().pendingTerminalBufferSend).toBeNull();
+		});
+	});
+
+	// ----------------------------------------------------------------
 	// handleMergeWith
 	// ----------------------------------------------------------------
 
@@ -685,25 +760,26 @@ describe('useMergeTransferHandlers', () => {
 	// ----------------------------------------------------------------
 
 	describe('sub-hook callbacks', () => {
-		it('passes sessions and setSessions to useMergeSessionWithSessions', () => {
+		it('passes setSessions and activeTabId to useMergeSessionWithSessions', () => {
 			const deps = createMockDeps();
 			renderHook(() => useMergeTransferHandlers(deps));
 
 			const mockMerge = vi.mocked(useMergeSessionWithSessions);
 			const callArgs = mockMerge.mock.calls[0]?.[0];
-			expect(callArgs).toHaveProperty('sessions');
+			expect(callArgs).not.toHaveProperty('sessions');
 			expect(callArgs).toHaveProperty('setSessions');
+			expect(callArgs).toHaveProperty('activeTabId');
 			expect(callArgs).toHaveProperty('onSessionCreated');
 			expect(callArgs).toHaveProperty('onMergeComplete');
 		});
 
-		it('passes sessions and setSessions to useSendToAgentWithSessions', () => {
+		it('passes setSessions to useSendToAgentWithSessions', () => {
 			const deps = createMockDeps();
 			renderHook(() => useMergeTransferHandlers(deps));
 
 			const mockTransfer = vi.mocked(useSendToAgentWithSessions);
 			const callArgs = mockTransfer.mock.calls[0]?.[0];
-			expect(callArgs).toHaveProperty('sessions');
+			expect(callArgs).not.toHaveProperty('sessions');
 			expect(callArgs).toHaveProperty('setSessions');
 			expect(callArgs).toHaveProperty('onSessionCreated');
 		});
@@ -735,9 +811,12 @@ describe('useMergeTransferHandlers', () => {
 					title: 'Session Merged',
 				})
 			);
-			expect((window as any).maestro.notification.show).toHaveBeenCalledWith(
+			expect(mockShowOsNotification).toHaveBeenCalledWith(
 				'Session Merged',
-				expect.stringContaining('Merged Session')
+				expect.stringContaining('Merged Session'),
+				undefined,
+				undefined,
+				{ fallbackToast: false }
 			);
 		});
 
@@ -801,10 +880,10 @@ describe('useMergeTransferHandlers', () => {
 	});
 
 	// ----------------------------------------------------------------
-	// handleSendToAgent — additional coverage
+	// handleSendToAgent - additional coverage
 	// ----------------------------------------------------------------
 
-	describe('handleSendToAgent — additional coverage', () => {
+	describe('handleSendToAgent - additional coverage', () => {
 		it('formats context message with empty logs as no-context message', async () => {
 			const sourceSession = createMockSession({
 				aiTabs: [
@@ -1071,10 +1150,10 @@ describe('useMergeTransferHandlers', () => {
 	});
 
 	// ----------------------------------------------------------------
-	// onMergeComplete — additional coverage
+	// onMergeComplete - additional coverage
 	// ----------------------------------------------------------------
 
-	describe('onMergeComplete — additional coverage', () => {
+	describe('onMergeComplete - additional coverage', () => {
 		it('does not navigate or toast when merge result is not successful', () => {
 			const mockSetActiveSessionId = vi.fn();
 			const deps = createMockDeps({ setActiveSessionId: mockSetActiveSessionId });
@@ -1150,7 +1229,7 @@ describe('useMergeTransferHandlers', () => {
 			if (updatedTarget) {
 				expect(updatedTarget.activeTabId).toBe('target-tab');
 			} else {
-				// The callback's setSessions updated the store — verify the toast as proof it ran
+				// The callback's setSessions updated the store - verify the toast as proof it ran
 				expect(mockNotifyToast).toHaveBeenCalledWith(
 					expect.objectContaining({
 						type: 'success',
@@ -1187,10 +1266,10 @@ describe('useMergeTransferHandlers', () => {
 	});
 
 	// ----------------------------------------------------------------
-	// onSessionCreated — additional coverage
+	// onSessionCreated - additional coverage
 	// ----------------------------------------------------------------
 
-	describe('onSessionCreated — additional coverage', () => {
+	describe('onSessionCreated - additional coverage', () => {
 		it('includes saved tokens info when tokensSaved > 0', () => {
 			const deps = createMockDeps();
 			renderHook(() => useMergeTransferHandlers(deps));
@@ -1269,18 +1348,21 @@ describe('useMergeTransferHandlers', () => {
 				});
 			});
 
-			expect((window as any).maestro.notification.show).toHaveBeenCalledWith(
+			expect(mockShowOsNotification).toHaveBeenCalledWith(
 				'Session Merged',
-				'Created "My Merged Session" with merged context'
+				'Created "My Merged Session" with merged context',
+				undefined,
+				undefined,
+				{ fallbackToast: false }
 			);
 		});
 	});
 
 	// ----------------------------------------------------------------
-	// handleMerge — additional coverage
+	// handleMerge - additional coverage
 	// ----------------------------------------------------------------
 
-	describe('handleMerge — additional coverage', () => {
+	describe('handleMerge - additional coverage', () => {
 		it('passes all parameters to executeMerge', async () => {
 			const deps = createMockDeps();
 			const { result } = renderHook(() => useMergeTransferHandlers(deps));

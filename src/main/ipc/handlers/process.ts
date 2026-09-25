@@ -1,35 +1,36 @@
 import { ipcMain, BrowserWindow } from 'electron';
 import Store from 'electron-store';
+import type { AgentConfigsData } from '../../stores/types';
 import * as os from 'os';
-import * as fs from 'fs';
 import * as path from 'path';
 import { ProcessManager } from '../../process-manager';
 import { AgentDetector } from '../../agents';
+import type { InteractiveReplayController } from '../../agents/claude-interactive-replay';
+import type { ProcessConfig as ProcessSpawnConfig } from '../../process-manager/types';
 import { logger } from '../../utils/logger';
-import { isWindows } from '../../../shared/platformDetection';
 import { getChildProcesses } from '../../process-manager/utils/childProcessInfo';
-import { addBreadcrumb, captureException } from '../../utils/sentry';
+import { addBreadcrumb } from '../../utils/sentry';
 import { isWebContentsAvailable } from '../../utils/safe-send';
-import {
-	buildAgentArgs,
-	applyAgentConfigOverrides,
-	getContextWindowValue,
-} from '../../utils/agent-args';
 import {
 	withIpcErrorLogging,
 	requireProcessManager,
-	requireDependency,
 	CreateHandlerOptions,
 } from '../../utils/ipcHandler';
 import { getSshRemoteConfig, createSshRemoteStoreAdapter } from '../../utils/ssh-remote-resolver';
-import { buildSshCommandWithStdin } from '../../utils/ssh-command-builder';
-import { buildStreamJsonMessage } from '../../process-manager/utils/streamJsonBuilder';
-import { getWindowsShellForAgentExecution } from '../../process-manager/utils/shellEscape';
-import { buildExpandedEnv } from '../../../shared/pathUtils';
+import { shellEscape, shellEscapeRemotePath } from '../../utils/shell-escape';
+import { resolveSshPath } from '../../utils/cliDetection';
 import type { SshRemoteConfig } from '../../../shared/types';
-import { powerManager } from '../../power-manager';
+import { buildSshOptionArgs } from '../../../shared/sshOptions';
 import { MaestroSettings } from './persistence';
-import { getDefaultShell } from '../../stores/defaults';
+import { getDefaultShell, resolveConfiguredShell } from '../../stores/defaults';
+import { handleProcessSpawn } from './process/handle-spawn';
+import type { SpawnProcessConfig } from './process/spawn-types';
+import {
+	initPermissionRelay,
+	resolvePermissionResponse,
+	type PermissionDecision,
+} from '../../permission-relay';
+import { releaseConcertoHtmlDocument, restoreConcertoHtmlDocument } from '../../concerto-html';
 
 const LOG_CONTEXT = '[ProcessManager]';
 
@@ -45,12 +46,7 @@ const handlerOpts = (
 	...extra,
 });
 
-/**
- * Interface for agent configuration store data
- */
-interface AgentConfigsData {
-	configs: Record<string, Record<string, any>>;
-}
+// AgentConfigsData imported from stores/types
 
 /**
  * Dependencies required for process handler registration
@@ -67,6 +63,12 @@ export interface CueProcessEntry {
 	sessionName: string;
 	subscriptionName: string;
 	eventType: string;
+	/** For SSH spawns: the agent invocation running on the remote host. */
+	sshRemoteCommand?: string;
+}
+
+interface ProcessQuery {
+	includeChildProcesses?: boolean;
 }
 
 export interface ProcessHandlerDependencies {
@@ -75,9 +77,18 @@ export interface ProcessHandlerDependencies {
 	agentConfigsStore: Store<AgentConfigsData>;
 	settingsStore: Store<MaestroSettings>;
 	getMainWindow: () => BrowserWindow | null;
+	safeSend?: (channel: string, ...args: unknown[]) => void;
 	sessionsStore: Store<{ sessions: any[] }>;
 	/** Optional callback to get active Cue run processes for Process Monitor */
 	getCueProcesses?: () => CueProcessEntry[];
+	/**
+	 * Optional reactive limit replay controller. When `maestro-p` exits with
+	 * code 2 (Max-plan quota hit mid-turn), the controller respawns the same
+	 * turn under `claude --print` so the user sees one continuous response.
+	 * Optional so test harnesses and CLI paths that don't run the replay flow
+	 * can omit it cleanly.
+	 */
+	interactiveReplayController?: InteractiveReplayController<ProcessSpawnConfig>;
 }
 
 /**
@@ -93,608 +104,70 @@ export interface ProcessHandlerDependencies {
  * - runCommand: Execute a single command and capture output
  */
 export function registerProcessHandlers(deps: ProcessHandlerDependencies): void {
-	const { getProcessManager, getAgentDetector, agentConfigsStore, settingsStore, getMainWindow } =
-		deps;
+	const {
+		getProcessManager,
+		getAgentDetector,
+		agentConfigsStore,
+		settingsStore,
+		getMainWindow,
+		safeSend,
+	} = deps;
+
+	// Wire the Claude Code permission relay: surface requests to the renderer
+	// and clean up per-spawn bindings when a process exits.
+	initPermissionRelay(getMainWindow, getProcessManager());
+
+	// Manual renderer closes are ownership events, not remote Movement/Cadenza
+	// mutations. Release their isolated documents explicitly so closed mockups do
+	// not retain memory or consume the bounded registry.
+	ipcMain.on('concerto-html:release', (_event, surface: unknown, id: unknown) => {
+		if ((surface !== 'movement' && surface !== 'cadenza') || typeof id !== 'string' || !id) {
+			return;
+		}
+		releaseConcertoHtmlDocument(surface, id);
+	});
+
+	ipcMain.handle(
+		'concerto-html:restore',
+		withIpcErrorLogging(
+			handlerOpts('restoreConcertoHtmlDocument'),
+			async (surface: unknown, id: unknown, html: unknown) => {
+				if (
+					(surface !== 'movement' && surface !== 'cadenza') ||
+					typeof id !== 'string' ||
+					!id ||
+					typeof html !== 'string'
+				) {
+					throw new Error('Invalid Concerto HTML restore request');
+				}
+				return restoreConcertoHtmlDocument(surface, id, html);
+			}
+		)
+	);
+
+	// Renderer -> main: the user's allow/deny decision for a relayed request.
+	ipcMain.handle(
+		'permission:respond',
+		(_event, requestId: string, decision: PermissionDecision) => {
+			return resolvePermissionResponse(requestId, decision);
+		}
+	);
 
 	// Spawn a new process for a session
 	// Supports agent-specific argument builders for batch mode, JSON output, resume, read-only mode, YOLO mode
 	ipcMain.handle(
 		'process:spawn',
-		withIpcErrorLogging(
-			handlerOpts('spawn'),
-			async (config: {
-				sessionId: string;
-				toolType: string;
-				cwd: string;
-				command: string;
-				args: string[];
-				prompt?: string;
-				shell?: string;
-				images?: string[]; // Base64 data URLs for images
-				// Stdin prompt delivery modes
-				sendPromptViaStdin?: boolean; // If true, send prompt via stdin as JSON (for stream-json compatible agents)
-				sendPromptViaStdinRaw?: boolean; // If true, send prompt via stdin as raw text (for OpenCode, Codex, etc.)
-				// Agent-specific spawn options (used to build args via agent config)
-				agentSessionId?: string; // For session resume
-				readOnlyMode?: boolean; // For read-only/plan mode
-				modelId?: string; // For model selection
-				yoloMode?: boolean; // For YOLO/full-access mode (bypasses confirmations)
-				// Per-session overrides (take precedence over agent-level config)
-				sessionCustomPath?: string; // Session-specific custom path
-				sessionCustomArgs?: string; // Session-specific custom args
-				sessionCustomEnvVars?: Record<string, string>; // Session-specific env vars
-				sessionCustomModel?: string; // Session-specific model selection
-				sessionCustomEffort?: string; // Session-specific effort/reasoning level
-				sessionCustomContextWindow?: number; // Session-specific context window size
-				// Per-session SSH remote config (takes precedence over agent-level SSH config)
-				sessionSshRemoteConfig?: {
-					enabled: boolean;
-					remoteId: string | null;
-					workingDirOverride?: string;
-				};
-				// System prompt delivery (separate from user message for token efficiency)
-				appendSystemPrompt?: string; // System prompt to pass via --append-system-prompt or embed in prompt
-				// Stats tracking options
-				querySource?: 'user' | 'auto'; // Whether this query is user-initiated or from Auto Run
-				tabId?: string; // Tab ID for multi-tab tracking
-			}) => {
-				const processManager = requireProcessManager(getProcessManager);
-				const agentDetector = requireDependency(getAgentDetector, 'Agent detector');
-
-				// Get agent definition to access config options and argument builders
-				const agent = await agentDetector.getAgent(config.toolType);
-				// Use INFO level on Windows for better visibility in logs
-
-				const logFn = isWindows() ? logger.info.bind(logger) : logger.debug.bind(logger);
-				logFn(`Spawn config received`, LOG_CONTEXT, {
-					platform: process.platform,
-					configToolType: config.toolType,
-					configCommand: config.command,
-					agentId: agent?.id,
-					agentCommand: agent?.command,
-					agentPath: agent?.path,
-					agentPathExtension: agent?.path ? require('path').extname(agent.path) : 'none',
-					hasAgentSessionId: !!config.agentSessionId,
-					hasPrompt: !!config.prompt,
-					promptLength: config.prompt?.length,
-					// On Windows, show prompt preview to help debug truncation issues
-					promptPreview:
-						config.prompt && isWindows()
-							? {
-									first50: config.prompt.substring(0, 50),
-									last50: config.prompt.substring(Math.max(0, config.prompt.length - 50)),
-									containsHash: config.prompt.includes('#'),
-									containsNewline: config.prompt.includes('\n'),
-								}
-							: undefined,
-					// SSH remote config logging
-					hasSessionSshRemoteConfig: !!config.sessionSshRemoteConfig,
-					sessionSshRemoteConfig: config.sessionSshRemoteConfig
-						? {
-								enabled: config.sessionSshRemoteConfig.enabled,
-								remoteId: config.sessionSshRemoteConfig.remoteId,
-								hasWorkingDirOverride: !!config.sessionSshRemoteConfig.workingDirOverride,
-							}
-						: null,
-				});
-				let finalArgs = buildAgentArgs(agent, {
-					baseArgs: config.args,
-					prompt: config.prompt,
-					cwd: config.cwd,
-					readOnlyMode: config.readOnlyMode,
-					modelId: config.modelId,
-					yoloMode: config.yoloMode,
-					agentSessionId: config.agentSessionId,
-				});
-
-				// ========================================================================
-				// Apply agent config options and session overrides
-				// Session-level overrides take precedence over agent-level config
-				// ========================================================================
-				const allConfigs = agentConfigsStore.get('configs', {});
-				const agentConfigValues = allConfigs[config.toolType] || {};
-				const configResolution = applyAgentConfigOverrides(agent, finalArgs, {
-					agentConfigValues,
-					sessionCustomModel: config.sessionCustomModel,
-					sessionCustomEffort: config.sessionCustomEffort,
-					sessionCustomArgs: config.sessionCustomArgs,
-					sessionCustomEnvVars: config.sessionCustomEnvVars,
-				});
-				finalArgs = configResolution.args;
-
-				if (configResolution.modelSource === 'session' && config.sessionCustomModel) {
-					logger.debug(`Using session-level model for ${config.toolType}`, LOG_CONTEXT, {
-						model: config.sessionCustomModel,
-					});
-				}
-
-				if (configResolution.customArgsSource !== 'none') {
-					logger.debug(
-						`Appending custom args for ${config.toolType} (${configResolution.customArgsSource}-level)`,
-						LOG_CONTEXT
-					);
-				}
-
-				// In read-only mode, apply agent-specific env var overrides to strip
-				// blanket permission grants (e.g., OpenCode's "*":"allow" YOLO config)
-				let effectiveCustomEnvVars = configResolution.effectiveCustomEnvVars;
-				if (config.readOnlyMode && agent?.readOnlyEnvOverrides) {
-					effectiveCustomEnvVars = {
-						...(effectiveCustomEnvVars || {}),
-						...agent.readOnlyEnvOverrides,
-					};
-				}
-				if (configResolution.customEnvSource !== 'none' && effectiveCustomEnvVars) {
-					logger.debug(
-						`Custom env vars configured for ${config.toolType} (${configResolution.customEnvSource}-level)`,
-						LOG_CONTEXT,
-						{ keys: Object.keys(effectiveCustomEnvVars) }
-					);
-				}
-
-				// ========================================================================
-				// System prompt delivery: use --append-system-prompt for supported agents,
-				// otherwise embed in the user prompt as fallback.
-				// On Windows local execution, use --append-system-prompt-file with a temp
-				// file to avoid exceeding the ~32K CreateProcess command-line length limit.
-				// SSH sessions are exempt (the command runs inside a stdin script, not the
-				// OS command line) and always use inline --append-system-prompt.
-				// ========================================================================
-				let effectivePrompt = config.prompt;
-				let systemPromptTempFile: string | undefined;
-				const isSshSession = config.sessionSshRemoteConfig?.enabled;
-				if (config.appendSystemPrompt) {
-					if (agent?.capabilities?.supportsAppendSystemPrompt) {
-						if (isWindows() && !isSshSession) {
-							// Windows local: write to temp file to avoid CLI length limits
-							const tmpDir = os.tmpdir();
-							systemPromptTempFile = path.join(
-								tmpDir,
-								`maestro-sysprompt-${config.sessionId}-${Date.now()}.txt`
-							);
-							fs.writeFileSync(systemPromptTempFile, config.appendSystemPrompt, 'utf-8');
-							// Schedule cleanup early so the file is removed even if spawn fails.
-							// 30s gives the agent plenty of time to read it after spawning.
-							const tempFileToClean = systemPromptTempFile;
-							setTimeout(() => {
-								try {
-									fs.unlinkSync(tempFileToClean);
-								} catch (cleanupErr: unknown) {
-									if ((cleanupErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-										captureException(
-											cleanupErr instanceof Error ? cleanupErr : new Error(String(cleanupErr)),
-											{
-												context: 'systemPromptTempFile cleanup (safety)',
-												file: tempFileToClean,
-											}
-										);
-									}
-								}
-							}, 30_000);
-							finalArgs = [...finalArgs, '--append-system-prompt-file', systemPromptTempFile];
-							logger.debug(
-								'Using --append-system-prompt-file for system prompt delivery (Windows)',
-								LOG_CONTEXT,
-								{
-									agentId: agent?.id,
-									systemPromptLength: config.appendSystemPrompt.length,
-									tempFile: systemPromptTempFile,
-								}
-							);
-						} else {
-							// Non-Windows or SSH: pass inline (no command-line length concern)
-							finalArgs = [...finalArgs, '--append-system-prompt', config.appendSystemPrompt];
-							logger.debug('Using --append-system-prompt for system prompt delivery', LOG_CONTEXT, {
-								agentId: agent?.id,
-								systemPromptLength: config.appendSystemPrompt.length,
-							});
-						}
-					} else if (effectivePrompt) {
-						// Fallback: embed system prompt in user message
-						effectivePrompt = `${config.appendSystemPrompt}\n\n---\n\n# User Request\n\n${effectivePrompt}`;
-						logger.debug('Embedding system prompt in user message (fallback)', LOG_CONTEXT, {
-							agentId: agent?.id,
-							systemPromptLength: config.appendSystemPrompt.length,
-						});
-					} else {
-						// No user message to embed into - send system prompt as sole content
-						effectivePrompt = config.appendSystemPrompt;
-						logger.warn(
-							'appendSystemPrompt provided without a user prompt; using as sole prompt',
-							LOG_CONTEXT,
-							{
-								agentId: agent?.id,
-								systemPromptLength: config.appendSystemPrompt.length,
-							}
-						);
-					}
-				}
-
-				// If no shell is specified and this is a terminal session, use the default shell from settings
-				// For terminal sessions, we also load custom shell path, args, and env vars
-				let shellToUse =
-					config.shell ||
-					(config.toolType === 'terminal'
-						? settingsStore.get('defaultShell', getDefaultShell())
-						: undefined);
-				let shellArgsStr: string | undefined;
-
-				// Load global shell environment variables for ALL process types (terminals and agents)
-				//
-				// IMPORTANT: These are the user-defined global env vars from Settings → General → Shell Configuration.
-				// They apply to BOTH terminal sessions AND agent processes. This allows users to set API keys,
-				// proxy settings, and other environment variables once and have them apply everywhere.
-				//
-				// Precedence order (highest to lowest):
-				// 1. Session-level overrides (config.sessionCustomEnvVars)
-				// 2. Global vars (shellEnvVars from Settings) - loaded here
-				// 3. Process defaults (with Electron/IDE vars stripped for agents)
-				//
-				// The actual merging happens in buildChildProcessEnv() or buildPtyTerminalEnv().
-				const globalShellEnvVars = settingsStore.get('shellEnvVars', {}) as Record<string, string>;
-
-				// Debug logging when global env vars are configured
-				if (Object.keys(globalShellEnvVars).length > 0) {
-					logger.debug(
-						`Applying ${Object.keys(globalShellEnvVars).length} global environment variables to ${config.toolType}`,
-						LOG_CONTEXT,
-						{
-							sessionId: config.sessionId,
-							toolType: config.toolType,
-							globalEnvVarKeys: Object.keys(globalShellEnvVars).join(', '),
-						}
-					);
-				}
-
-				if (config.toolType === 'terminal') {
-					// Custom shell path overrides the detected/selected shell path
-					const customShellPath = settingsStore.get('customShellPath', '');
-					if (customShellPath && customShellPath.trim()) {
-						shellToUse = customShellPath.trim();
-						logger.debug('Using custom shell path for terminal', LOG_CONTEXT, { customShellPath });
-					}
-					// Load additional shell args (env vars are loaded globally for both terminals and agents)
-					shellArgsStr = settingsStore.get('shellArgs', '');
-				}
-
-				// Extract session ID from args for logging (supports both --resume and --session flags)
-				const resumeArgIndex = finalArgs.indexOf('--resume');
-				const sessionArgIndex = finalArgs.indexOf('--session');
-				const agentSessionId =
-					resumeArgIndex !== -1
-						? finalArgs[resumeArgIndex + 1]
-						: sessionArgIndex !== -1
-							? finalArgs[sessionArgIndex + 1]
-							: config.agentSessionId;
-
-				// Redact system prompt content from logged args (can be large and sensitive)
-				const appendPromptIdx = finalArgs.indexOf('--append-system-prompt');
-				const argsToLog =
-					appendPromptIdx !== -1
-						? [
-								...finalArgs.slice(0, appendPromptIdx + 1),
-								`<${finalArgs[appendPromptIdx + 1]?.length ?? 0} chars>`,
-								...finalArgs.slice(appendPromptIdx + 2),
-							]
-						: finalArgs;
-
-				logger.info(`Spawning process: ${config.command}`, LOG_CONTEXT, {
-					sessionId: config.sessionId,
-					toolType: config.toolType,
-					cwd: config.cwd,
-					command: config.command,
-					fullCommand: `${config.command} ${argsToLog.join(' ')}`,
-					args: argsToLog,
-					requiresPty: agent?.requiresPty || false,
-					shell: shellToUse,
-					...(agentSessionId && { agentSessionId }),
-					...(config.readOnlyMode && { readOnlyMode: true }),
-					...(config.yoloMode && { yoloMode: true }),
-					...(config.modelId && { modelId: config.modelId }),
-					...(config.prompt && {
-						prompt:
-							config.prompt.length > 500 ? config.prompt.substring(0, 500) + '...' : config.prompt,
-					}),
-					...(config.appendSystemPrompt && {
-						systemPromptDelivery: agent?.capabilities?.supportsAppendSystemPrompt
-							? systemPromptTempFile
-								? 'file'
-								: 'cli-arg'
-							: 'embedded',
-						...(systemPromptTempFile && { systemPromptFile: systemPromptTempFile }),
-						effectivePromptLength: effectivePrompt?.length ?? 0,
-					}),
-				});
-
-				// Add breadcrumb for crash diagnostics (MAESTRO-5A/4Y)
-				await addBreadcrumb('agent', `Spawn: ${config.toolType}`, {
-					sessionId: config.sessionId,
-					toolType: config.toolType,
-					command: config.command,
-					hasPrompt: !!config.prompt,
-				});
-
-				// Get contextWindow: session-level override takes priority over agent-level config
-				// Falls back to the agent's configOptions default (e.g., 400000 for Codex, 128000 for OpenCode)
-				const contextWindow = getContextWindowValue(
-					agent,
-					agentConfigValues,
-					config.sessionCustomContextWindow
-				);
-
-				// ========================================================================
-				// Command Resolution: Apply session-level custom path override if set
-				// This allows users to override the detected agent path per-session
-				//
-				// NEW: Always use shell execution for agent processes on Windows (except SSH),
-				// so PATH and other environment variables are available. This ensures cross-platform
-				// compatibility and correct agent behavior.
-				// ========================================================================
-				let commandToSpawn = config.sessionCustomPath || config.command;
-				let argsToSpawn = finalArgs;
-				let useShell = false;
-				let sshRemoteUsed: SshRemoteConfig | null = null;
-				let customEnvVarsToPass: Record<string, string> | undefined = effectiveCustomEnvVars;
-				let sshStdinScript: string | undefined;
-
-				if (config.sessionCustomPath) {
-					logger.debug(`Using session-level custom path for ${config.toolType}`, LOG_CONTEXT, {
-						customPath: config.sessionCustomPath,
-						originalCommand: config.command,
-					});
-				}
-
-				// On Windows (except SSH), always use shell execution for agents
-				// This avoids cmd.exe command line length limits (~8191 chars) which can cause
-				// "Die Befehlszeile ist zu lang" errors with long prompts
-				if (isWindows() && !config.sessionSshRemoteConfig?.enabled) {
-					// Use expanded environment with custom env vars to ensure PATH includes all binary locations
-					const expandedEnv = buildExpandedEnv(customEnvVarsToPass);
-					// Filter out undefined values to match Record<string, string> type
-					customEnvVarsToPass = Object.fromEntries(
-						Object.entries(expandedEnv).filter(([_, value]) => value !== undefined)
-					) as Record<string, string>;
-
-					// Get the preferred shell for Windows (custom -> current -> PowerShell)
-					// PowerShell is preferred over cmd.exe to avoid command line length limits
-					const customShellPath = settingsStore.get('customShellPath', '') as string;
-					const shellConfig = getWindowsShellForAgentExecution({
-						customShellPath,
-						currentShell: shellToUse,
-					});
-					shellToUse = shellConfig.shell;
-					useShell = shellConfig.useShell;
-
-					logger.info(`Forcing shell execution for agent on Windows for PATH access`, LOG_CONTEXT, {
-						agentId: agent?.id,
-						command: commandToSpawn,
-						args: argsToSpawn,
-						shell: shellToUse,
-						shellSource: shellConfig.source,
-					});
-				}
-
-				// ========================================================================
-				// SSH Remote Execution: Detect and wrap command for remote execution
-				// Terminal sessions are always local (they need PTY for shell interaction)
-				// ========================================================================
-				// Only consider SSH remote for non-terminal AI agent sessions
-				// SSH is session-level ONLY - no agent-level or global defaults
-				// Log SSH evaluation on Windows for debugging
-				if (isWindows()) {
-					logger.info(`Evaluating SSH remote config`, LOG_CONTEXT, {
-						toolType: config.toolType,
-						isTerminal: config.toolType === 'terminal',
-						hasSessionSshRemoteConfig: !!config.sessionSshRemoteConfig,
-						sshEnabled: config.sessionSshRemoteConfig?.enabled,
-						willUseSsh: config.toolType !== 'terminal' && config.sessionSshRemoteConfig?.enabled,
-					});
-				}
-				if (config.toolType !== 'terminal' && config.sessionSshRemoteConfig?.enabled) {
-					// Session-level SSH config provided - resolve and use it
-					logger.info(`Using session-level SSH config`, LOG_CONTEXT, {
-						sessionId: config.sessionId,
-						enabled: config.sessionSshRemoteConfig.enabled,
-						remoteId: config.sessionSshRemoteConfig.remoteId,
-					});
-
-					// Resolve effective SSH remote configuration
-					const sshStoreAdapter = createSshRemoteStoreAdapter(settingsStore);
-					const sshResult = getSshRemoteConfig(sshStoreAdapter, {
-						sessionSshConfig: config.sessionSshRemoteConfig,
-					});
-
-					if (sshResult.config) {
-						// SSH remote is configured - use stdin-based execution
-						// This completely bypasses shell escaping issues by sending the script via stdin
-						sshRemoteUsed = sshResult.config;
-
-						// Determine the command to run on the remote host
-						const remoteCommand = config.sessionCustomPath || agent?.binaryName || config.command;
-
-						// Build the SSH command with stdin script
-						// The script contains PATH setup, cd, env vars, and the actual command
-						// This eliminates all shell escaping issues
-						//
-						// IMPORTANT: ALL agent prompts are passed via stdin passthrough for SSH.
-						// Benefits:
-						// - Avoids CLI argument length limits (128KB-2MB depending on OS)
-						// - No shell escaping needed - prompt is never parsed by any shell
-						// - Works with any prompt content (quotes, newlines, special chars)
-						// - Simpler code - no heredoc or delimiter collision detection
-						//
-						// How it works: bash reads the script, `exec` replaces bash with the agent,
-						// and the agent reads the remaining stdin (the prompt) directly.
-						//
-						// IMAGE SUPPORT: When images are present, the approach depends on the agent:
-						// - Stream-json agents (Claude Code): Images are embedded as base64 in the
-						//   stream-json message sent via stdin passthrough. --input-format stream-json
-						//   is added to args so the agent parses the JSON+base64 message correctly.
-						// - File-based agents (Codex, OpenCode): Images are decoded from base64 into
-						//   temp files on the remote host via the SSH script, then passed as CLI args
-						//   (e.g., -i /tmp/image.png for Codex, -f /tmp/image.png for OpenCode).
-						const hasImages = config.images && config.images.length > 0;
-						let sshArgs = finalArgs;
-						let stdinInput: string | undefined = effectivePrompt;
-
-						if (hasImages && effectivePrompt && agent?.capabilities?.supportsStreamJsonInput) {
-							// Stream-json agent (Claude Code): embed images in the stdin message
-							stdinInput = buildStreamJsonMessage(effectivePrompt, config.images!) + '\n';
-							if (!sshArgs.includes('--input-format')) {
-								sshArgs = [...sshArgs, '--input-format', 'stream-json'];
-							}
-							logger.info(`SSH: using stream-json stdin for images`, LOG_CONTEXT, {
-								sessionId: config.sessionId,
-								imageCount: config.images!.length,
-							});
-						}
-
-						// Determine if this is a resume with prompt-embed images
-						// agentSessionId presence indicates resume; imageResumeMode tells us to embed paths in prompt
-						const isResumeWithImages =
-							hasImages &&
-							agent?.capabilities?.imageResumeMode === 'prompt-embed' &&
-							config.agentSessionId;
-
-						// Merge global environment variables with session custom env vars
-						// Session vars take precedence over global vars
-						const mergedSshEnvVars = { ...globalShellEnvVars, ...(effectiveCustomEnvVars || {}) };
-
-						const sshCommand = await buildSshCommandWithStdin(sshResult.config, {
-							command: remoteCommand,
-							args: sshArgs,
-							cwd: config.cwd,
-							env: mergedSshEnvVars,
-							// prompt is not passed as CLI arg - it goes via stdinInput
-							stdinInput,
-							// File-based image agents (Codex, OpenCode): pass images for remote temp file creation
-							// Also needed for resume-with-prompt-embed (still creates temp files, just no -i args)
-							images:
-								hasImages && agent?.imageArgs && !agent?.capabilities?.supportsStreamJsonInput
-									? config.images
-									: undefined,
-							imageArgs:
-								hasImages && agent?.imageArgs && !agent?.capabilities?.supportsStreamJsonInput
-									? agent.imageArgs
-									: undefined,
-							// Signal resume mode for prompt embedding instead of -i CLI args
-							imageResumeMode: isResumeWithImages ? 'prompt-embed' : undefined,
-						});
-
-						commandToSpawn = sshCommand.command;
-						argsToSpawn = sshCommand.args;
-						sshStdinScript = sshCommand.stdinScript;
-
-						// For SSH, env vars are passed in the stdin script, not locally
-						customEnvVarsToPass = undefined;
-
-						// CRITICAL: When using SSH, do NOT use shell execution
-						// SSH needs direct stdin/stdout/stderr access for the script passthrough to work
-						// Running SSH through a shell breaks stdin passthrough and the agent never gets the script
-						useShell = false;
-						shellToUse = undefined;
-
-						logger.info(`SSH command built with stdin passthrough`, LOG_CONTEXT, {
-							sessionId: config.sessionId,
-							toolType: config.toolType,
-							sshBinary: sshCommand.command,
-							sshArgsCount: sshCommand.args.length,
-							remoteCommand,
-							remoteCwd: config.cwd,
-							promptLength: config.prompt?.length,
-							stdinScriptLength: sshCommand.stdinScript?.length,
-							hasImages,
-							imageCount: config.images?.length,
-						});
-					}
-				}
-
-				// Debug logging for shell configuration
-				logger.info(`Shell configuration before spawn`, LOG_CONTEXT, {
-					sessionId: config.sessionId,
-					useShell,
-					shellToUse,
-					isWindows: isWindows(),
-					isSshCommand: !!sshRemoteUsed,
-					globalEnvVarsCount: Object.keys(globalShellEnvVars).length,
-				});
-
-				const result = processManager.spawn({
-					...config,
-					command: commandToSpawn,
-					args: argsToSpawn,
-					// When using SSH, use user's home directory as local cwd
-					// The remote working directory is embedded in the SSH stdin script
-					// This fixes ENOENT errors when session.cwd is a remote-only path
-					cwd: sshRemoteUsed ? os.homedir() : config.cwd,
-					// When using SSH, disable PTY (SSH provides its own terminal handling)
-					requiresPty: sshRemoteUsed ? false : agent?.requiresPty,
-					// For SSH, prompt is included in the stdin script, not passed separately
-					// For local execution, pass prompt (with system prompt embedded for non-append-system-prompt agents)
-					prompt: sshRemoteUsed ? undefined : effectivePrompt,
-					shell: shellToUse,
-					runInShell: useShell,
-					shellArgs: shellArgsStr, // Shell-specific CLI args (for terminal sessions)
-					shellEnvVars: globalShellEnvVars, // Global shell env vars (for both terminals and agents)
-					contextWindow, // Pass configured context window to process manager
-					// When using SSH, env vars are passed in the stdin script, not locally
-					customEnvVars: customEnvVarsToPass,
-					imageArgs: agent?.imageArgs, // Function to build image CLI args (for Codex, OpenCode)
-					promptArgs: agent?.promptArgs, // Function to build prompt args (e.g., ['-p', prompt] for OpenCode)
-					noPromptSeparator: agent?.noPromptSeparator, // Some agents don't support '--' before prompt
-					// Stats tracking: use cwd as projectPath if not explicitly provided
-					projectPath: config.cwd,
-					// SSH remote context (for SSH-specific error messages)
-					sshRemoteId: sshRemoteUsed?.id,
-					sshRemoteHost: sshRemoteUsed?.host,
-					// SSH stdin script - the entire command is sent via stdin to /bin/bash on remote
-					sshStdinScript,
-				});
-
-				logger.info(`Process spawned successfully`, LOG_CONTEXT, {
-					sessionId: config.sessionId,
-					pid: result.pid,
-					...(sshRemoteUsed && {
-						sshRemoteId: sshRemoteUsed.id,
-						sshRemoteName: sshRemoteUsed.name,
-					}),
-				});
-
-				// Temp file cleanup is scheduled at creation time (30s safety net)
-				// so it's cleaned up even if spawn fails above.
-
-				// Add power block reason for AI sessions (not terminals)
-				// This prevents system sleep while AI is processing
-				if (config.toolType !== 'terminal') {
-					powerManager.addBlockReason(`session:${config.sessionId}`);
-				}
-
-				// Emit SSH remote status event for renderer to update session state
-				// This is emitted for all spawns (sshRemote will be null for local execution)
-				const mainWindow = getMainWindow();
-				if (isWebContentsAvailable(mainWindow)) {
-					const sshRemoteInfo = sshRemoteUsed
-						? {
-								id: sshRemoteUsed.id,
-								name: sshRemoteUsed.name,
-								host: sshRemoteUsed.host,
-							}
-						: null;
-					mainWindow.webContents.send('process:ssh-remote', config.sessionId, sshRemoteInfo);
-				}
-
-				// Return spawn result with SSH remote info if used
-				return {
-					...result,
-					sshRemote: sshRemoteUsed
-						? {
-								id: sshRemoteUsed.id,
-								name: sshRemoteUsed.name,
-								host: sshRemoteUsed.host,
-							}
-						: undefined,
-				};
-			}
+		withIpcErrorLogging(handlerOpts('spawn'), (config: SpawnProcessConfig) =>
+			handleProcessSpawn(config, {
+				getProcessManager,
+				getAgentDetector,
+				agentConfigsStore,
+				settingsStore,
+				getMainWindow,
+				safeSend,
+				sessionsStore: deps.sessionsStore,
+				interactiveReplayController: deps.interactiveReplayController,
+			})
 		)
 	);
 
@@ -709,6 +182,37 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 			});
 			return processManager.write(sessionId, data);
 		})
+	);
+
+	ipcMain.handle(
+		'process:broadcast-user-input',
+		withIpcErrorLogging(
+			handlerOpts('broadcast-user-input'),
+			async (payload: {
+				originId: string;
+				sessionId: string;
+				tabId?: string;
+				inputMode: 'ai' | 'terminal';
+				entry: {
+					id: string;
+					timestamp: number;
+					source: 'user';
+					text: string;
+					images?: string[];
+					readOnly?: boolean;
+					forceParallel?: boolean;
+				};
+			}) => {
+				if (safeSend) {
+					safeSend('process:user-input', payload);
+					return;
+				}
+				const mainWindow = getMainWindow();
+				if (mainWindow && isWebContentsAvailable(mainWindow)) {
+					mainWindow.webContents.send('process:user-input', payload);
+				}
+			}
+		)
 	);
 
 	// Send SIGINT to a process
@@ -727,6 +231,9 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 		withIpcErrorLogging(handlerOpts('kill'), async (sessionId: string) => {
 			const processManager = requireProcessManager(getProcessManager);
 			logger.info(`Killing process: ${sessionId}`, LOG_CONTEXT, { sessionId });
+			// Detach any interactive replay listener. A user-initiated kill
+			// shouldn't trigger an API-mode replay even if it happens to exit 2.
+			deps.interactiveReplayController?.clearInteractiveReplay(sessionId);
 			// Add breadcrumb for crash diagnostics (MAESTRO-5A/4Y)
 			await addBreadcrumb('agent', `Kill: ${sessionId}`, { sessionId });
 			return processManager.kill(sessionId);
@@ -748,7 +255,7 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 	// Get all active processes managed by the ProcessManager (and Cue runs if available)
 	ipcMain.handle(
 		'process:getActiveProcesses',
-		withIpcErrorLogging(handlerOpts('getActiveProcesses'), async () => {
+		withIpcErrorLogging(handlerOpts('getActiveProcesses'), async (options?: ProcessQuery) => {
 			const processManager = requireProcessManager(getProcessManager);
 			const processes = processManager.getAll();
 			// Return serializable process info (exclude non-serializable PTY/child process objects)
@@ -765,8 +272,10 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 						startTime: p.startTime,
 						command: p.command,
 						args: p.args,
+						maestroEnvVars: p.maestroEnvVars,
+						sshRemoteCommand: p.sshRemoteCommand,
 					};
-					if (p.isTerminal && p.pid) {
+					if (options?.includeChildProcesses !== false && p.isTerminal && p.pid) {
 						const children = await getChildProcesses(p.pid);
 						if (children.length > 0) {
 							entry.childProcesses = children;
@@ -789,6 +298,7 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 					startTime: cue.startTime,
 					command: cue.command,
 					args: cue.args,
+					sshRemoteCommand: cue.sshRemoteCommand,
 					isCueRun: true,
 					cueRunId: cue.runId,
 					cueSessionName: cue.sessionName,
@@ -798,6 +308,21 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 			}
 
 			return result;
+		})
+	);
+
+	// Check whether a terminal tab's PTY currently has a non-shell foreground process.
+	// Compares node-pty's `process` (foreground process name) to the basename of the
+	// shell we spawned. Used by Cmd+W to warn before closing a busy terminal.
+	ipcMain.handle(
+		'process:isTerminalBusy',
+		withIpcErrorLogging(handlerOpts('isTerminalBusy'), async (sessionId: string) => {
+			const processManager = requireProcessManager(getProcessManager);
+			const managed = processManager.get(sessionId);
+			if (!managed?.ptyProcess || !managed.command) return false;
+			const foreground = managed.ptyProcess.process;
+			if (!foreground) return false;
+			return path.basename(managed.command) !== foreground;
 		})
 	);
 
@@ -817,7 +342,7 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 				shellEnvVars?: Record<string, string>;
 				cols?: number;
 				rows?: number;
-				// Agent type (e.g. 'claude-code') — used to resolve agent-level customEnvVars
+				// Agent type (e.g. 'claude-code') - used to resolve agent-level customEnvVars
 				toolType?: string;
 				// Session-level custom env vars (override agent-level)
 				sessionCustomEnvVars?: Record<string, string>;
@@ -880,29 +405,73 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 							hasWorkingDirOverride: !!config.sessionSshRemoteConfig.workingDirOverride,
 						});
 						// For SSH terminal tabs we spawn ssh interactively so xterm.js can interact
-						const sshArgs = [
+						const sshArgs: string[] = [];
+
+						// SSH options for reliable connection, plus this remote's overrides.
+						// The 'interactive' context deliberately drops BatchMode (the user is
+						// at the keyboard and may need to answer a passphrase prompt),
+						// RequestTTY (the -t below does that job), and LogLevel (someone is
+						// watching this terminal, so SSH's own warnings are the diagnostics).
+						sshArgs.push(
+							...buildSshOptionArgs(sshResult.config.sshOptions, { context: 'interactive' })
+						);
+
+						if (sshResult.config.privateKeyPath) {
+							sshArgs.push('-i', sshResult.config.privateKeyPath);
+						}
+						if (sshResult.config.port && sshResult.config.port !== 22) {
+							sshArgs.push('-p', String(sshResult.config.port));
+						}
+
+						// -t forces PTY allocation, required for interactive SSH terminals
+						// regardless of whether a remote command is specified.
+						sshArgs.push('-t');
+
+						const workingDirOverride = config.sessionSshRemoteConfig.workingDirOverride;
+
+						// Destination: user@host or just host
+						sshArgs.push(
 							sshResult.config.username
 								? `${sshResult.config.username}@${sshResult.config.host}`
-								: sshResult.config.host,
-						];
-						if (sshResult.config.port && sshResult.config.port !== 22) {
-							sshArgs.unshift('-p', String(sshResult.config.port));
-						}
-						if (sshResult.config.privateKeyPath) {
-							sshArgs.unshift('-i', sshResult.config.privateKeyPath);
-						}
-						// If workingDirOverride is set, cd to that directory after connecting.
-						// -t forces PTY allocation (required when passing a remote command).
-						const workingDirOverride = config.sessionSshRemoteConfig.workingDirOverride;
+								: sshResult.config.host
+						);
+
+						// Build remote command parts
+						const remoteParts: string[] = [];
+
+						// Remote command (must come after destination)
 						if (workingDirOverride) {
-							sshArgs.unshift('-t');
-							sshArgs.push(`cd ${JSON.stringify(workingDirOverride)} && exec $SHELL`);
+							// Tilde-aware: `~/proj` reaches the remote as `"$HOME/proj"` so the
+							// shell expands it. The same rule every other remote `cd` uses.
+							remoteParts.push(`cd ${shellEscapeRemotePath(workingDirOverride)}`);
 						}
+
+						// Export merged env vars on the remote side
+						const envExports: string[] = [];
+						for (const [key, value] of Object.entries(mergedEnvVars)) {
+							if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+								envExports.push(`export ${key}=${shellEscape(value)}`);
+							}
+						}
+						if (envExports.length > 0) {
+							remoteParts.push(envExports.join(' && '));
+						}
+
+						// `-l` makes the remote shell a LOGIN shell, matching what the user gets from
+						// a plain `ssh host`. Because we pass a remote command, sshd runs it under a
+						// non-login shell, so without `-l` the login profiles never run. On macOS that
+						// means /etc/zprofile never calls /usr/libexec/path_helper, and the terminal is
+						// missing every /etc/paths + /etc/paths.d entry (/opt/homebrew/bin, TeX, etc.)
+						// while still having the ~/.zshrc additions. Local terminals already spawn with
+						// `-l -i` (see PtySpawner), so this keeps remote terminals consistent.
+						remoteParts.push('exec "$SHELL" -l');
+						sshArgs.push(remoteParts.join(' && '));
+
 						return processManager.spawn({
 							sessionId: config.sessionId,
 							toolType: 'terminal',
 							cwd: os.homedir(),
-							command: 'ssh',
+							command: await resolveSshPath(),
 							args: sshArgs,
 							shellEnvVars: mergedEnvVars,
 							cols: config.cols || 80,
@@ -952,17 +521,13 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 				};
 			}) => {
 				logger.warn(
-					'process:runCommand is deprecated — use process:spawnTerminalTab for persistent PTY sessions'
+					'process:runCommand is deprecated - use process:spawnTerminalTab for persistent PTY sessions'
 				);
 				const processManager = requireProcessManager(getProcessManager);
 
-				// Get the shell from settings if not provided
-				// Custom shell path takes precedence over the selected shell ID
-				let shell = config.shell || settingsStore.get('defaultShell', getDefaultShell());
-				const customShellPath = settingsStore.get('customShellPath', '');
-				if (customShellPath && customShellPath.trim()) {
-					shell = customShellPath.trim();
-				}
+				// Get the shell from settings if not provided. Shared with AI command
+				// mode, which has to name this exact shell to the model.
+				const shell = config.shell || resolveConfiguredShell(settingsStore);
 
 				// Get shell env vars for passing to runCommand
 				const shellEnvVars = settingsStore.get('shellEnvVars', {}) as Record<string, string>;
@@ -1005,6 +570,26 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 					shellEnvVars,
 					sshRemoteConfig
 				);
+			}
+		)
+	);
+
+	// Terminate an in-flight process:runCommand. Needed because a one-shot
+	// command can block forever (a program waiting on stdin, `tail -f`, a
+	// runaway build) and runCommand's child isn't in the ProcessManager's
+	// process map, so process:kill can't reach it.
+	ipcMain.handle(
+		'process:cancelCommand',
+		withIpcErrorLogging(
+			handlerOpts('cancelCommand'),
+			async (config: { sessionId: string }): Promise<boolean> => {
+				const processManager = requireProcessManager(getProcessManager);
+				const cancelled = processManager.cancelCommand(config.sessionId);
+				logger.debug(`Cancel command requested`, LOG_CONTEXT, {
+					sessionId: config.sessionId,
+					cancelled,
+				});
+				return cancelled;
 			}
 		)
 	);

@@ -7,6 +7,23 @@
 import type { ProcessManager } from '../process-manager';
 import { captureException } from '../utils/sentry';
 import { GROUP_CHAT_PREFIX, type ProcessListenerDependencies } from './types';
+import { extractCopilotUsageFromDisk } from '../group-chat/copilot-usage-extractor';
+
+/**
+ * True when routing a participant's response failed only because the group chat
+ * no longer exists.
+ *
+ * Participants keep running after the user deletes their group chat, so the exit
+ * that fires minutes later routes into a chat `loadGroupChat` can no longer
+ * find. The listener already handles it (the participant is marked done and the
+ * buffer is cleared), so it is an expected outcome of a normal user action
+ * rather than a defect worth reporting (MAESTRO-M4). Any other routing failure
+ * still reaches Sentry.
+ */
+export function isDeletedGroupChatFailure(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error ?? '');
+	return /^Group chat not found: /i.test(message);
+}
 
 /**
  * Sets up the exit listener for process termination.
@@ -37,6 +54,8 @@ export function setupExitListener(
 		| 'patterns'
 		| 'getCueEngine'
 		| 'isCueEnabled'
+		| 'getSshRemoteByName'
+		| 'getAgentContextWindow'
 	>
 ): void {
 	const {
@@ -56,10 +75,49 @@ export function setupExitListener(
 		patterns,
 		getCueEngine,
 		isCueEnabled,
+		getSshRemoteByName,
+		getAgentContextWindow,
 	} = deps;
 	const { REGEX_MODERATOR_SESSION } = patterns;
 
-	processManager.on('exit', (sessionId: string, code: number) => {
+	async function refreshCopilotUsageAfterExit(
+		groupChatId: string,
+		participantName: string
+	): Promise<void> {
+		try {
+			const chat = await groupChatStorage.loadGroupChat(groupChatId);
+			const participant = chat?.participants.find((p) => p.name === participantName);
+			if (!participant || participant.agentId !== 'copilot-cli') return;
+			if (!participant.agentSessionId) return;
+
+			const sshRemote = participant.sshRemoteName
+				? (getSshRemoteByName?.(participant.sshRemoteName) ?? null)
+				: null;
+			const contextWindow = getAgentContextWindow?.(participant.agentId) ?? 0;
+			if (!contextWindow) return;
+
+			const usage = await extractCopilotUsageFromDisk(
+				participant.agentSessionId,
+				contextWindow,
+				sshRemote
+			);
+			if (!usage) return;
+
+			const updated = await groupChatStorage.updateParticipant(groupChatId, participantName, {
+				contextUsage: usage.contextUsage,
+				tokenCount: usage.tokenCount,
+			});
+			groupChatEmitters.emitParticipantsChanged?.(groupChatId, updated.participants);
+		} catch (err) {
+			logger.warn('[GroupChat] Failed to refresh copilot usage from disk', 'ProcessListener', {
+				error: String(err),
+				groupChatId,
+				participantName,
+			});
+		}
+	}
+
+	processManager.on('exit', (sessionId: string, code: number, signal?: number) => {
 		// Remove power block reason for this session
 		// This allows system sleep when no AI sessions are active
 		powerManager.removeBlockReason(`session:${sessionId}`);
@@ -112,6 +170,7 @@ export function setupExitListener(
 						try {
 							return await groupChatStorage.loadGroupChat(groupChatId);
 						} catch (firstErr) {
+							void captureException(firstErr);
 							debugLog('GroupChat:Debug', ` First chat load failed, retrying after 100ms...`);
 							logger.warn('[GroupChat] Chat load failed, retrying once', 'ProcessListener', {
 								error: String(firstErr),
@@ -145,7 +204,7 @@ export function setupExitListener(
 							debugLog('GroupChat:Debug', ` Read-only state: ${readOnly}`);
 							const pm = getProcessManager();
 							const ad = getAgentDetector();
-							// Await routing — it manages state transitions internally
+							// Await routing - it manages state transitions internally
 							await groupChatRouter.routeModeratorResponse(
 								groupChatId,
 								parsedText,
@@ -237,6 +296,13 @@ export function setupExitListener(
 			groupChatRouter.clearActiveParticipantTaskSession(groupChatId, participantName);
 			debugLog('GroupChat:Debug', ` Emitted participant state: idle`);
 
+			// Refresh on-disk usage for copilot-cli participants. Copilot in batch
+			// mode only writes the session.shutdown event (the sole carrier of
+			// per-turn token counts) to events.jsonl on disk - it never appears
+			// on stdout, so the streaming usage path can't see it. Without this,
+			// the participant's context gauge stays at 0% forever.
+			void refreshCopilotUsageAfterExit(groupChatId, participantName);
+
 			// Route the buffered output now that process is complete
 			// IMPORTANT: We must wait for the response to be logged before triggering synthesis
 			// to avoid a race condition where synthesis reads the log before the response is written
@@ -252,33 +318,49 @@ export function setupExitListener(
 				debugLog('GroupChat:Debug', ` Is last participant to respond: ${isLastParticipant}`);
 				const pm = getProcessManager();
 				const ad = getAgentDetector();
-				if (isLastParticipant && pm && ad) {
-					// All participants have responded - spawn moderator synthesis round
-					debugLog('GroupChat:Debug', ` All participants responded - spawning synthesis round...`);
-					logger.info(
-						'[GroupChat] All participants responded, spawning moderator synthesis',
-						'ProcessListener',
-						{ groupChatId }
-					);
-					groupChatRouter.spawnModeratorSynthesis(groupChatId, pm, ad).catch((err) => {
-						debugLog('GroupChat:Debug', ` ERROR spawning synthesis:`, err);
-						logger.error('[GroupChat] Failed to spawn moderator synthesis', 'ProcessListener', {
-							error: String(err),
-							groupChatId,
+				if (isLastParticipant) {
+					// "Can synthesis run?" is a different question from "is the room
+					// still working?". Gating both on one condition meant a missing
+					// process manager or agent detector fell through every branch,
+					// leaving the room on 'agent-working' with its power block held -
+					// the quit dialog then reports a running chat that has finished.
+					if (pm && ad) {
+						// All participants have responded - spawn moderator synthesis round
+						debugLog(
+							'GroupChat:Debug',
+							` All participants responded - spawning synthesis round...`
+						);
+						logger.info(
+							'[GroupChat] All participants responded, spawning moderator synthesis',
+							'ProcessListener',
+							{ groupChatId }
+						);
+						groupChatRouter.spawnModeratorSynthesis(groupChatId, pm, ad).catch((err) => {
+							debugLog('GroupChat:Debug', ` ERROR spawning synthesis:`, err);
+							logger.error('[GroupChat] Failed to spawn moderator synthesis', 'ProcessListener', {
+								error: String(err),
+								groupChatId,
+							});
+							// Reset to idle so user is not stuck waiting indefinitely
+							groupChatRouter.settleGroupChatToIdle(groupChatId);
+							groupChatEmitters.emitMessage?.(groupChatId, {
+								timestamp: new Date().toISOString(),
+								from: 'system',
+								content: `⚠️ Synthesis failed. You can send another message to continue.`,
+							});
+							captureException(err, {
+								operation: 'groupChat:spawnModeratorSynthesis',
+								groupChatId,
+							});
 						});
-						// Reset to idle so user is not stuck waiting indefinitely
-						groupChatEmitters.emitStateChange?.(groupChatId, 'idle');
-						groupChatEmitters.emitMessage?.(groupChatId, {
-							timestamp: new Date().toISOString(),
-							from: 'system',
-							content: `⚠️ Synthesis failed. You can send another message to continue.`,
-						});
-						captureException(err, {
-							operation: 'groupChat:spawnModeratorSynthesis',
-							groupChatId,
-						});
-					});
-				} else if (!isLastParticipant) {
+					} else {
+						debugLog(
+							'GroupChat:Debug',
+							` All participants responded but synthesis is unavailable - settling to idle`
+						);
+						groupChatRouter.settleGroupChatToIdle(groupChatId);
+					}
+				} else {
 					// More participants pending
 					debugLog('GroupChat:Debug', ` Waiting for more participants to respond...`);
 				}
@@ -344,6 +426,7 @@ export function setupExitListener(
 								);
 								// Don't mark as responded yet - the recovery spawn will complete and trigger this
 							} catch (respawnErr) {
+								void captureException(respawnErr);
 								debugLog('GroupChat:Debug', ` Failed to respawn ${participantName}:`, respawnErr);
 								logger.error(
 									'[GroupChat] Failed to respawn participant for recovery',
@@ -408,6 +491,7 @@ export function setupExitListener(
 							markAndMaybeSynthesize();
 						}
 					} catch (err) {
+						if (!isDeletedGroupChatFailure(err)) void captureException(err);
 						debugLog('GroupChat:Debug', ` ERROR loading chat for participant:`, err);
 						logger.error(
 							'[GroupChat] Failed to load chat for participant output parsing',
@@ -431,6 +515,7 @@ export function setupExitListener(
 								markAndMaybeSynthesize();
 							}
 						} catch (routeErr) {
+							if (!isDeletedGroupChatFailure(routeErr)) void captureException(routeErr);
 							debugLog('GroupChat:Debug', ` ERROR routing agent response (fallback):`, routeErr);
 							logger.error('[GroupChat] Failed to route agent response', 'ProcessListener', {
 								error: String(routeErr),
@@ -470,7 +555,7 @@ export function setupExitListener(
 		//   - Cue's agent.completed subscriptions (which would fire spuriously
 		//     on every group-chat turn, since group-chat agents are driven by
 		//     the router, not the user's pipeline)
-		// We do not rely on early-return ordering of the branches above — this
+		// We do not rely on early-return ordering of the branches above - this
 		// guard is load-bearing and must stay here.
 		if (isGroupChatSession) {
 			logger.warn(
@@ -481,7 +566,20 @@ export function setupExitListener(
 			return;
 		}
 
-		safeSend('process:exit', sessionId, code);
+		// Diagnostic: log terminal PTY exits at the source (the ground truth for the
+		// "terminal tabs vanish" reports). A non-zero code on a remote terminal that
+		// the user didn't `exit` is the signature of a dropped SSH transport; a set
+		// `signal` means the shell was killed rather than exited. Pairs with the
+		// renderer-side 'Terminal PTY exited' / 'Closing terminal tab' logs.
+		if (sessionId.includes('-terminal-')) {
+			logger.info('Terminal PTY process exited', 'ProcessListener', {
+				sessionId,
+				exitCode: code,
+				signal,
+			});
+		}
+
+		safeSend('process:exit', sessionId, code, signal);
 
 		// Broadcast exit to web clients
 		const webServer = getWebServer();

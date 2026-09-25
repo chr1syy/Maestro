@@ -51,6 +51,14 @@ vi.mock('../../../main/cue/cue-db', () => ({
 	isCueDbReady: () => true,
 	recordCueEvent: vi.fn(),
 	updateCueEventStatus: vi.fn(),
+	safeRecordCueEvent: vi.fn(),
+	safeUpdateCueEventStatus: vi.fn(),
+	persistQueuedEvent: vi.fn(),
+	removeQueuedEvent: vi.fn(),
+	getQueuedEvents: vi.fn(() => []),
+	clearPersistedQueue: vi.fn(),
+	safePersistQueuedEvent: vi.fn(),
+	safeRemoveQueuedEvent: vi.fn(),
 }));
 
 // Mock crypto
@@ -88,8 +96,29 @@ describe('Cue Sleep Prevention', () => {
 		vi.useRealTimers();
 	});
 
-	describe('schedule-level sleep prevention', () => {
-		it('adds schedule reason when session has heartbeat subscription', () => {
+	/**
+	 * Cue must NOT take a sleep blocker merely because a session has time-based
+	 * subscriptions registered.
+	 *
+	 * This block previously asserted the opposite. That behaviour, keyed
+	 * `cue:schedule:{sessionId}`, held a blocker from session init to teardown -
+	 * i.e. for the app's entire uptime. Having a subscription is a static
+	 * property of the YAML, not a runtime state, so one job firing daily at 03:00
+	 * kept the blocker up for all 24 hours.
+	 *
+	 * On macOS the blocker was a display-sleep assertion, which is the signal the
+	 * OS uses to decide a user is present. Holding one indefinitely made the Duet
+	 * Activity Scheduler refuse the entire discretionary maintenance tier:
+	 * measured on one affected machine, 548,540 "Must Not Proceed" decisions and
+	 * zero proceeds across 264 distinct activities in 24 hours.
+	 *
+	 * Running a subscription is what genuinely needs the machine awake, and that
+	 * is covered per-run by `cue:run:{runId}` - see the run-level block below.
+	 */
+	describe('schedule-level sleep prevention is not taken', () => {
+		const scheduleReason = expect.stringContaining('cue:schedule:');
+
+		it('does not block sleep for a heartbeat subscription', () => {
 			const onPreventSleep = vi.fn();
 			const deps = createMockDeps({ onPreventSleep });
 			mockLoadCueConfig.mockReturnValue(
@@ -109,10 +138,10 @@ describe('Cue Sleep Prevention', () => {
 			const engine = new CueEngine(deps);
 			engine.start();
 
-			expect(onPreventSleep).toHaveBeenCalledWith('cue:schedule:session-1');
+			expect(onPreventSleep).not.toHaveBeenCalledWith(scheduleReason);
 		});
 
-		it('adds schedule reason when session has scheduled subscription', () => {
+		it('does not block sleep for a scheduled subscription', () => {
 			const onPreventSleep = vi.fn();
 			const deps = createMockDeps({ onPreventSleep });
 			mockLoadCueConfig.mockReturnValue(
@@ -132,20 +161,20 @@ describe('Cue Sleep Prevention', () => {
 			const engine = new CueEngine(deps);
 			engine.start();
 
-			expect(onPreventSleep).toHaveBeenCalledWith('cue:schedule:session-1');
+			expect(onPreventSleep).not.toHaveBeenCalledWith(scheduleReason);
 		});
 
-		it('does not add schedule reason for file.changed subscriptions only', () => {
+		it('does not block sleep across refresh when a heartbeat is added', () => {
 			const onPreventSleep = vi.fn();
 			const deps = createMockDeps({ onPreventSleep });
 			mockLoadCueConfig.mockReturnValue(
 				createMockConfig({
 					subscriptions: [
 						{
-							name: 'file-watcher',
+							name: 'file-sub',
 							event: 'file.changed',
-							watch: '**/*.ts',
-							prompt: 'review changes',
+							path: 'src/**',
+							prompt: 'do stuff',
 							enabled: true,
 						},
 					],
@@ -155,203 +184,36 @@ describe('Cue Sleep Prevention', () => {
 			const engine = new CueEngine(deps);
 			engine.start();
 
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
-		});
-
-		it('does not add schedule reason for agent.completed subscriptions only', () => {
-			const onPreventSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep });
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'completion-sub',
-							event: 'agent.completed',
-							source_session: 'other-session',
-							prompt: 'follow up',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
-		});
-
-		it('does not add schedule reason for github subscriptions only', () => {
-			const onPreventSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep });
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'pr-watcher',
-							event: 'github.pull_request',
-							prompt: 'review pr',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
-		});
-
-		it('does not add schedule reason for task.pending subscriptions only', () => {
-			const onPreventSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep });
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'task-scanner',
-							event: 'task.pending',
-							watch: '**/*.md',
-							prompt: 'do tasks',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
-		});
-
-		it('adds schedule reason once for mixed subs (heartbeat + file.changed)', () => {
-			const onPreventSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep });
 			mockLoadCueConfig.mockReturnValue(
 				createMockConfig({
 					subscriptions: [
 						{
 							name: 'heartbeat-sub',
 							event: 'time.heartbeat',
-							interval_minutes: 10,
-							prompt: 'check health',
-							enabled: true,
-						},
-						{
-							name: 'file-watcher',
-							event: 'file.changed',
-							watch: '**/*.ts',
-							prompt: 'review',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			const scheduleCalls = onPreventSleep.mock.calls.filter(
-				(call) => typeof call[0] === 'string' && call[0].startsWith('cue:schedule:')
-			);
-			expect(scheduleCalls).toHaveLength(1);
-			expect(scheduleCalls[0][0]).toBe('cue:schedule:session-1');
-		});
-
-		it('does not add schedule reason for disabled heartbeat subscription', () => {
-			const onPreventSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep });
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'disabled-heartbeat',
-							event: 'time.heartbeat',
-							interval_minutes: 5,
-							prompt: 'do stuff',
-							enabled: false,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
-		});
-
-		it('does not add schedule reason for heartbeat bound to different agent_id', () => {
-			const onPreventSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep });
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'other-agent-heartbeat',
-							event: 'time.heartbeat',
 							interval_minutes: 5,
 							prompt: 'do stuff',
 							enabled: true,
-							agent_id: 'different-session',
 						},
 					],
 				})
 			);
+			engine.refreshSession('session-1', '/projects/test');
 
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
+			expect(onPreventSleep).not.toHaveBeenCalledWith(scheduleReason);
 		});
 
-		it('adds separate schedule reasons for multiple sessions', () => {
+		it('releases nothing on teardown because nothing was taken', () => {
 			const onPreventSleep = vi.fn();
-			const session1 = createMockSession({ id: 'session-1', name: 'Session 1' });
-			const session2 = createMockSession({
-				id: 'session-2',
-				name: 'Session 2',
-				projectRoot: '/projects/test2',
-			});
-			const deps = createMockDeps({
-				onPreventSleep,
-				getSessions: vi.fn(() => [session1, session2]),
-			});
-
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'heartbeat',
-							event: 'time.heartbeat',
-							interval_minutes: 5,
-							prompt: 'check',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			expect(onPreventSleep).toHaveBeenCalledWith('cue:schedule:session-1');
-			expect(onPreventSleep).toHaveBeenCalledWith('cue:schedule:session-2');
-		});
-
-		it('removes schedule reason on teardownSession via removeSession', () => {
 			const onAllowSleep = vi.fn();
-			const deps = createMockDeps({ onAllowSleep });
+			const deps = createMockDeps({ onPreventSleep, onAllowSleep });
 			mockLoadCueConfig.mockReturnValue(
 				createMockConfig({
 					subscriptions: [
 						{
-							name: 'heartbeat',
+							name: 'heartbeat-sub',
 							event: 'time.heartbeat',
 							interval_minutes: 5,
-							prompt: 'check',
+							prompt: 'do stuff',
 							enabled: true,
 						},
 					],
@@ -360,170 +222,10 @@ describe('Cue Sleep Prevention', () => {
 
 			const engine = new CueEngine(deps);
 			engine.start();
-
 			engine.removeSession('session-1');
 
-			expect(onAllowSleep).toHaveBeenCalledWith('cue:schedule:session-1');
-		});
-
-		it('removes all schedule reasons on stop()', () => {
-			const onAllowSleep = vi.fn();
-			const session1 = createMockSession({ id: 'session-1', name: 'Session 1' });
-			const session2 = createMockSession({
-				id: 'session-2',
-				name: 'Session 2',
-				projectRoot: '/projects/test2',
-			});
-			const deps = createMockDeps({
-				onAllowSleep,
-				getSessions: vi.fn(() => [session1, session2]),
-			});
-
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'heartbeat',
-							event: 'time.heartbeat',
-							interval_minutes: 5,
-							prompt: 'check',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-			engine.stop();
-
-			expect(onAllowSleep).toHaveBeenCalledWith('cue:schedule:session-1');
-			expect(onAllowSleep).toHaveBeenCalledWith('cue:schedule:session-2');
-		});
-
-		it('refreshSession re-adds schedule reason when config still has heartbeat', () => {
-			const onPreventSleep = vi.fn();
-			const onAllowSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep, onAllowSleep });
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'heartbeat',
-							event: 'time.heartbeat',
-							interval_minutes: 5,
-							prompt: 'check',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			onPreventSleep.mockClear();
-			onAllowSleep.mockClear();
-
-			engine.refreshSession('session-1', '/projects/test');
-
-			// teardown releases, re-init re-adds
-			expect(onAllowSleep).toHaveBeenCalledWith('cue:schedule:session-1');
-			expect(onPreventSleep).toHaveBeenCalledWith('cue:schedule:session-1');
-		});
-
-		it('refreshSession cleans up reason when heartbeat removed from config', () => {
-			const onPreventSleep = vi.fn();
-			const onAllowSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep, onAllowSleep });
-
-			// Initial config has heartbeat
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'heartbeat',
-							event: 'time.heartbeat',
-							interval_minutes: 5,
-							prompt: 'check',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			onPreventSleep.mockClear();
-			onAllowSleep.mockClear();
-
-			// Refreshed config has no heartbeat
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'file-watcher',
-							event: 'file.changed',
-							watch: '**/*.ts',
-							prompt: 'review',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			engine.refreshSession('session-1', '/projects/test');
-
-			// teardown releases the old reason
-			expect(onAllowSleep).toHaveBeenCalledWith('cue:schedule:session-1');
-			// re-init does NOT add schedule reason (no time-based subs)
-			expect(onPreventSleep).not.toHaveBeenCalledWith(expect.stringContaining('cue:schedule:'));
-		});
-
-		it('refreshSession adds reason when heartbeat added to config', () => {
-			const onPreventSleep = vi.fn();
-			const onAllowSleep = vi.fn();
-			const deps = createMockDeps({ onPreventSleep, onAllowSleep });
-
-			// Initial config has no heartbeat
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'file-watcher',
-							event: 'file.changed',
-							watch: '**/*.ts',
-							prompt: 'review',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			const engine = new CueEngine(deps);
-			engine.start();
-
-			onPreventSleep.mockClear();
-
-			// Refreshed config adds heartbeat
-			mockLoadCueConfig.mockReturnValue(
-				createMockConfig({
-					subscriptions: [
-						{
-							name: 'heartbeat',
-							event: 'time.heartbeat',
-							interval_minutes: 5,
-							prompt: 'check',
-							enabled: true,
-						},
-					],
-				})
-			);
-
-			engine.refreshSession('session-1', '/projects/test');
-
-			expect(onPreventSleep).toHaveBeenCalledWith('cue:schedule:session-1');
+			expect(onPreventSleep).not.toHaveBeenCalledWith(scheduleReason);
+			expect(onAllowSleep).not.toHaveBeenCalledWith(scheduleReason);
 		});
 
 		it('operates normally when callbacks are not provided', () => {
@@ -769,9 +471,20 @@ describe('Cue Sleep Prevention', () => {
 						max_concurrent: 2,
 						queue_size: 10,
 					},
+					// Two DISTINCT subscriptions so both run concurrently. The
+					// self-overlap guard serializes repeated firings of the SAME
+					// subscription, so two ticks of one heartbeat would no longer
+					// yield two concurrent runs.
 					subscriptions: [
 						{
-							name: 'heartbeat',
+							name: 'heartbeat-a',
+							event: 'time.heartbeat',
+							interval_minutes: 5,
+							prompt: 'check',
+							enabled: true,
+						},
+						{
+							name: 'heartbeat-b',
 							event: 'time.heartbeat',
 							interval_minutes: 5,
 							prompt: 'check',
@@ -785,10 +498,7 @@ describe('Cue Sleep Prevention', () => {
 			engine.start();
 			await vi.advanceTimersByTimeAsync(100);
 
-			// Trigger a second run by advancing to next heartbeat
-			vi.advanceTimersByTime(5 * 60 * 1000);
-			await vi.advanceTimersByTimeAsync(100);
-
+			// Both distinct subscriptions fire on start → two concurrent runs.
 			const activeRuns = engine.getActiveRuns();
 			expect(activeRuns.length).toBe(2);
 
@@ -913,9 +623,27 @@ describe('Cue Sleep Prevention', () => {
 						max_concurrent: 3,
 						queue_size: 10,
 					},
+					// Three DISTINCT subscriptions so all three run concurrently.
+					// Repeated firings of one subscription now serialize (the
+					// self-overlap guard), so they would not produce three
+					// concurrent runs each with its own sleep-block reason.
 					subscriptions: [
 						{
-							name: 'heartbeat',
+							name: 'heartbeat-a',
+							event: 'time.heartbeat',
+							interval_minutes: 1,
+							prompt: 'check',
+							enabled: true,
+						},
+						{
+							name: 'heartbeat-b',
+							event: 'time.heartbeat',
+							interval_minutes: 1,
+							prompt: 'check',
+							enabled: true,
+						},
+						{
+							name: 'heartbeat-c',
 							event: 'time.heartbeat',
 							interval_minutes: 1,
 							prompt: 'check',
@@ -929,12 +657,7 @@ describe('Cue Sleep Prevention', () => {
 			engine.start();
 			await vi.advanceTimersByTimeAsync(100);
 
-			// Trigger more runs
-			vi.advanceTimersByTime(60 * 1000);
-			await vi.advanceTimersByTimeAsync(100);
-			vi.advanceTimersByTime(60 * 1000);
-			await vi.advanceTimersByTimeAsync(100);
-
+			// All three distinct subscriptions fire on start → three concurrent runs.
 			const runReasons = onPreventSleep.mock.calls
 				.filter((call) => typeof call[0] === 'string' && call[0].startsWith('cue:run:'))
 				.map((call) => call[0]);
@@ -1102,7 +825,7 @@ describe('Cue Sleep Prevention', () => {
 			).length;
 			expect(runAddsAfterQueue).toBe(1); // Still just the first run
 
-			// Now resolve the first run — queued event should be dispatched
+			// Now resolve the first run - queued event should be dispatched
 			resolveRun!({
 				runId: 'run-1',
 				sessionId: 'session-1',

@@ -11,20 +11,90 @@
  */
 
 import { create } from 'zustand';
-import type { FocusArea, RightPanelTab } from '../types';
+import type { FocusArea, RightPanelTab, UnifiedTabRef, UsageDashboardViewMode } from '../types';
+import { notifyCenterFlash } from './centerFlashStore';
+import { isNarrowViewportNow } from '../hooks/ui/useViewportBreakpoint';
+
+/**
+ * Keyboard-selection cursor for the two Left Bar sections that are NOT plain
+ * agents: Starred Sessions (top) and Group Chats (bottom). Plain agent rows are
+ * tracked by `selectedSidebarIndex` (an index into navSessions); this token
+ * tracks the cursor when arrow-key navigation lands in a non-agent section, so
+ * those rows can show the same keyboard-selected highlight. Exactly one of
+ * (selectedSidebarIndex >= 0) / (sidebarExtraSelection !== null) is "live" at a
+ * time - landing on a starred/group-chat row sets selectedSidebarIndex to -1.
+ */
+export type SidebarExtraSelection =
+	| { kind: 'starred'; key: string }
+	| { kind: 'groupChat'; id: string };
+
+/** Per-window state for the AI chat "Find" bar (one slot per agent+AI-tab). */
+export interface OutputSearchSlot {
+	open: boolean;
+	query: string;
+	regex: boolean;
+}
+
+/**
+ * A request to scroll a specific transcript entry into view and flash it.
+ * Set by cross-tab message search (Opt+Cmd+F) after it switches tabs; consumed
+ * by the TerminalOutput instance whose agent+tab match, which clears it.
+ */
+export interface PendingLogJump {
+	sessionId: string;
+	tabId: string;
+	logId: string;
+}
 
 export interface UIStoreState {
-	// Sidebar
+	// Sidebar - tri-state via two booleans: !hidden && open = full panel,
+	// !hidden && !open = collapsed status-dot strip, hidden = no panel at all.
 	leftSidebarOpen: boolean;
+	leftSidebarHidden: boolean;
 	rightPanelOpen: boolean;
 
 	// Focus
 	activeFocus: FocusArea;
 	activeRightTab: RightPanelTab;
 
+	// Tab tiling: id of the pane currently maximized/zoomed to fill the whole
+	// panel (Ctrl+Cmd+Z). Transient and non-persisted, per the spec - toggling
+	// again clears it. null when no pane is zoomed.
+	zoomedPaneId: string | null;
+
+	// Tab tiling: transient state for a pane REARRANGE drag driven by pointer
+	// events (not native HTML5 DnD, which does not reliably start a macOS drag
+	// session inside child Electron windows). Set while a tile header is being
+	// dragged; the drop-zone overlay reads `hover` to paint the target region and
+	// the swap/move badge. null when no pane drag is in flight. See usePaneDrag.
+	paneDrag: {
+		groupId: string;
+		leafId: string;
+		/** Live pointer position in client (viewport) px, for the drag ghost. */
+		pointer: { x: number; y: number };
+		/** The pane + zone under the pointer, or null when over no droppable pane. */
+		hover: { leafId: string; zone: import('../utils/panelLayout').DropZone } | null;
+	} | null;
+
+	// One-shot request to move DOM FOCUS into a tab's real input (the caret into
+	// its terminal / editor / address bar / chat box), consumed and cleared by
+	// MainPanelContent. Addressed EITHER by tiled pane leaf id or by tab ref, since
+	// both routes end at the same place: a keyboard pane command knows the leaf it
+	// moved to, while a plain "new tab" handler only ever knows the tab it minted.
+	// One request slot rather than two so there is a single focus owner and a
+	// single cancel chain - a later request always supersedes an earlier one.
+	//
+	// Fired ONLY by explicit create/move commands - moving the focus ring alone
+	// leaves the user typing into whatever had focus before.
+	//
+	// Deliberately a request rather than an effect keyed on `focusedPaneId`: a mouse
+	// press anywhere in a pane also moves `focusedPaneId`, so a derived effect would
+	// yank the caret into the AI input mid-drag and break text selection in the
+	// conversation. Keeping it explicit ties the steal to user intent.
+	focusRequest: { leafId: string } | { tab: UnifiedTabRef } | null;
+
 	// Sidebar collapse/expand
 	bookmarksCollapsed: boolean;
-	groupChatsExpanded: boolean;
 
 	// Session list filter
 	showUnreadOnly: boolean;
@@ -32,19 +102,41 @@ export interface UIStoreState {
 	preFilterActiveTabId: string | null;
 	preTerminalFileTabId: string | null;
 
+	// Pianola workspace: which pinned view is showing (its chat or the agent dashboard).
+	pianolaView: 'chat' | 'dashboard';
+
 	// Session sidebar selection
 	selectedSidebarIndex: number;
+	// Keyboard cursor when it lands on a Starred / Group Chat row (see type docs).
+	// null when the cursor is on a plain agent row (tracked by selectedSidebarIndex).
+	sidebarExtraSelection: SidebarExtraSelection | null;
 
-	// Flash notifications
-	flashNotification: string | null;
-	successFlashNotification: string | null;
+	// Output search (the AI chat "Find" bar). Scoped per agent+AI-tab so a search
+	// opened in one chat window doesn't follow the user - state, open flag, and
+	// term - across other agents/tabs. Keyed by `${sessionId}::${tabId}` (see
+	// outputSearchKeyFor in utils/outputSearch). Slots are pruned when a search is
+	// closed with an empty term, so the map only holds windows with an active find.
+	outputSearchByKey: Record<string, OutputSearchSlot>;
 
-	// Output search
-	outputSearchOpen: boolean;
-	outputSearchQuery: string;
+	// Pending "jump to this message" request from cross-tab search. Null when no
+	// jump is in flight; the target transcript clears it once it has scrolled.
+	pendingLogJump: PendingLogJump | null;
 
 	// Session filter (sidebar agent search)
 	sessionFilterOpen: boolean;
+	/**
+	 * The sidebar's filter text. Shared rather than local to the filter hook,
+	 * because Cmd+[ / Cmd+] has to cycle exactly the rows the sidebar is drawing
+	 * and a `useState` inside the hook gives every caller its own copy - the
+	 * cycle could not see the filter at all, so it walked agents that were not
+	 * on screen.
+	 */
+	sessionFilter: string;
+	/**
+	 * Whether archived group chats are shown. Same reason as `sessionFilter`:
+	 * membership of the drawn list is a shared question, not a private one.
+	 */
+	showArchivedGroupChats: boolean;
 
 	// History panel search
 	historySearchFilterOpen: boolean;
@@ -59,26 +151,116 @@ export interface UIStoreState {
 	editingGroupId: string | null;
 	editingSessionId: string | null;
 
+	// Queued message currently open in the edit modal (QueuedItemEditModal), or
+	// null when it is closed. Lives here rather than inside QueuedItemsList so
+	// the "Edit Last Queued Message" shortcut can open the modal from anywhere -
+	// the list itself is buried in the transcript scroll area.
+	editingQueuedItemId: string | null;
+
 	// Auto-follow active task during batch runs
 	autoFollowEnabled: boolean;
+
+	// Whether a performance-profiling recording is active. Drives the animated
+	// wand indicator in the Left Bar header. Source of truth is the main process
+	// (contentTracing singleton); the command palette reconciles this on open.
+	profilingActive: boolean;
+
+	// Trace-buffer usage of the active recording, 0-1. Chromium drops events once
+	// the buffer fills, so this - not elapsed time - is what limits a capture, and
+	// showing it is what lets a user see how much window they have left instead of
+	// guessing. Refreshed whenever the palette reconciles profiling status.
+	profilingBufferPercent: number;
+
+	// Last-selected Usage Dashboard tab. In-memory only: survives closing and
+	// reopening the dashboard within a session, resets to 'overview' on restart.
+	usageDashboardViewMode: UsageDashboardViewMode;
+
+	// Accounts the user hid in the Usage Dashboard provider quota panels, keyed
+	// by provider id ('claude-code' | 'codex'); values are canonical account
+	// keys. Persisted via settings write-through (mirrors bookmarksCollapsed) and
+	// hydrated by loadAllSettings on startup.
+	hiddenQuotaAccounts: Record<string, string[]>;
+
+	// Auto-refresh cadence for the Usage Dashboard provider quota panels, keyed
+	// by provider id ('claude-code' | 'codex'); value is the interval in ms
+	// (0 = off). Persisted via settings write-through (same as hiddenQuotaAccounts)
+	// and hydrated by loadAllSettings on startup. The main-process background
+	// scheduler (usage-refresh-scheduler.ts) reads the same persisted map and is
+	// the sole driver of background sampling on this cadence.
+	usageRefreshIntervals: Record<string, number>;
+
+	// Namespaced ids (`<pluginId>/<panelId>`) of docked plugin panels the user
+	// collapsed to the reopen rail (PluginPanelSlot). Dock-only affordance; the
+	// frame's non-suppressible provenance line is untouched. Persisted via
+	// settings write-through (mirrors hiddenQuotaAccounts) and hydrated by
+	// loadAllSettings on startup.
+	hiddenPluginPanels: string[];
+
+	// Namespaced id (`<pluginId>/<panelId>`) of the ONE `modal`-placement plugin
+	// panel currently open, or null. Deliberately global rather than local to
+	// Settings: the same mount serves the Settings -> Encore -> Plugins launch
+	// path and a plugin summoning its own panel via `ui.openPanel`/`togglePanel`,
+	// so the two can never fight over the panel's webview guest. Transient (not
+	// persisted) - a summoned overlay should not survive a restart.
+	openPluginPanelId: string | null;
 }
 
 export interface UIStoreActions {
 	// Sidebar
 	setLeftSidebarOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
 	toggleLeftSidebar: () => void;
+	setLeftSidebarHidden: (hidden: boolean | ((prev: boolean) => boolean)) => void;
+	cycleLeftSidebar: () => void;
 	setRightPanelOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
 	toggleRightPanel: () => void;
+	/**
+	 * Narrow viewports: the left drawer covers the main panel, so activating
+	 * anything listed in it - an agent row, a group chat, a starred session - is
+	 * a request to LOOK at that thing, and the drawer gets out of the way. No-op
+	 * on a wide viewport, where the Left Bar is a permanent column beside the
+	 * panel and closing it would be a surprise.
+	 *
+	 * Call it AT THE TAP rather than from an effect keyed on what became active:
+	 * tapping the row that is already active (an agent still selected behind an
+	 * open group chat, the chat the user is already in) changes no state at all,
+	 * and a transition-keyed effect reads that as nothing having happened -
+	 * leaving the user staring at the drawer they just tapped through.
+	 */
+	closeLeftSidebarForNavigation: () => void;
+	/**
+	 * The right drawer's half of the same rule, and it fails the same way.
+	 * Opening a file from the Files panel is a request to LOOK at that file, and
+	 * on a phone the drawer covers the whole screen - so it gets out of the way.
+	 *
+	 * Call it AT THE OPEN, for the same reason as its left-hand twin: the
+	 * transition-keyed effect in `App.tsx` watches `activeFileTabId` and friends,
+	 * and re-previewing the file that is ALREADY the active tab moves none of
+	 * them. The effect reads that as nothing having happened, so the file the
+	 * user just tapped Preview on stays behind the tree they tapped it in.
+	 * Media is the permanent case: it never becomes a tab at all, so that key
+	 * can never change for it.
+	 */
+	closeRightPanelForNavigation: () => void;
 
 	// Focus
 	setActiveFocus: (focus: FocusArea | ((prev: FocusArea) => FocusArea)) => void;
 	setActiveRightTab: (tab: RightPanelTab | ((prev: RightPanelTab) => RightPanelTab)) => void;
 
+	// Tab tiling: set/clear the zoomed (maximized) pane id.
+	setZoomedPaneId: (id: string | null) => void;
+
+	// Tab tiling: set/clear the transient pane-rearrange drag state.
+	setPaneDrag: (drag: UIStore['paneDrag']) => void;
+
+	// Ask the panel to put DOM focus inside a pane (by tiled leaf id) or a tab (by
+	// ref), and clear that request once it has been acted on.
+	requestPaneFocus: (leafId: string) => void;
+	requestTabFocus: (tab: UnifiedTabRef) => void;
+	clearFocusRequest: () => void;
+
 	// Sidebar collapse/expand
 	setBookmarksCollapsed: (collapsed: boolean | ((prev: boolean) => boolean)) => void;
 	toggleBookmarksCollapsed: () => void;
-	setGroupChatsExpanded: (expanded: boolean | ((prev: boolean) => boolean)) => void;
-	toggleGroupChatsExpanded: () => void;
 
 	// Session list filter
 	setShowUnreadOnly: (show: boolean | ((prev: boolean) => boolean)) => void;
@@ -87,22 +269,42 @@ export interface UIStoreActions {
 	toggleShowUnreadAgentsOnly: () => void;
 	setPreFilterActiveTabId: (id: string | null) => void;
 	setPreTerminalFileTabId: (id: string | null) => void;
+	setPianolaView: (view: 'chat' | 'dashboard') => void;
 
 	// Session sidebar selection
 	setSelectedSidebarIndex: (index: number | ((prev: number) => number)) => void;
+	setSidebarExtraSelection: (selection: SidebarExtraSelection | null) => void;
 
-	// Flash notifications
+	/**
+	 * Compatibility shim - fires a yellow center flash.
+	 * New code should call `notifyCenterFlash({ message, color: 'yellow' })` directly.
+	 * Passing `null` is a no-op (auto-dismiss handles clearing).
+	 */
 	setFlashNotification: (msg: string | null | ((prev: string | null) => string | null)) => void;
+	/**
+	 * Compatibility shim - fires a themed center flash.
+	 * New code should call `notifyCenterFlash({ message })` directly (defaults to `theme`).
+	 * Passing `null` is a no-op (auto-dismiss handles clearing).
+	 */
 	setSuccessFlashNotification: (
 		msg: string | null | ((prev: string | null) => string | null)
 	) => void;
 
 	// Output search
-	setOutputSearchOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
-	setOutputSearchQuery: (query: string | ((prev: string) => string)) => void;
+	setOutputSearchOpen: (key: string, open: boolean | ((prev: boolean) => boolean)) => void;
+	setOutputSearchQuery: (key: string, query: string | ((prev: string) => string)) => void;
+	setOutputSearchRegex: (key: string, regex: boolean | ((prev: boolean) => boolean)) => void;
+	toggleOutputSearchRegex: (key: string) => void;
+
+	// Cross-tab search jump target
+	setPendingLogJump: (jump: PendingLogJump | null) => void;
+	/** Clear only if the pending jump still points at this exact entry. */
+	clearPendingLogJump: (logId: string) => void;
 
 	// Session filter (sidebar agent search)
 	setSessionFilterOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
+	setSessionFilter: (value: string | ((prev: string) => string)) => void;
+	setShowArchivedGroupChats: (show: boolean | ((prev: boolean) => boolean)) => void;
 
 	// History panel search
 	setHistorySearchFilterOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
@@ -116,9 +318,33 @@ export interface UIStoreActions {
 	// Editing
 	setEditingGroupId: (id: string | null | ((prev: string | null) => string | null)) => void;
 	setEditingSessionId: (id: string | null | ((prev: string | null) => string | null)) => void;
+	setEditingQueuedItemId: (id: string | null) => void;
 
 	// Auto-follow
 	setAutoFollowEnabled: (enabled: boolean | ((prev: boolean) => boolean)) => void;
+
+	// Performance-profiling indicator (drives the wand animation)
+	setProfilingActive: (active: boolean | ((prev: boolean) => boolean)) => void;
+	setProfilingBufferPercent: (percent: number) => void;
+
+	// Usage Dashboard last-selected tab
+	setUsageDashboardViewMode: (
+		mode: UsageDashboardViewMode | ((prev: UsageDashboardViewMode) => UsageDashboardViewMode)
+	) => void;
+
+	// Toggle a provider quota account between hidden and visible.
+	toggleHiddenQuotaAccount: (providerId: string, accountKey: string) => void;
+
+	// Set the auto-refresh interval (ms; 0 = off) for a provider quota panel.
+	setUsageRefreshInterval: (providerId: string, ms: number) => void;
+
+	// Toggle a docked plugin panel between shown and collapsed (reopen rail).
+	toggleHiddenPluginPanel: (panelId: string) => void;
+
+	/** Open (or, with null, close) the single modal plugin-panel mount. */
+	setOpenPluginPanelId: (panelId: string | null) => void;
+	/** Open the panel, or close it if that same panel is already open. */
+	toggleOpenPluginPanelId: (panelId: string) => void;
 }
 
 export type UIStore = UIStoreState & UIStoreActions;
@@ -130,46 +356,145 @@ function resolve<T>(valOrFn: T | ((prev: T) => T), prev: T): T {
 	return typeof valOrFn === 'function' ? (valOrFn as (prev: T) => T)(prev) : valOrFn;
 }
 
+const DEFAULT_OUTPUT_SEARCH: OutputSearchSlot = { open: false, query: '', regex: false };
+
+/**
+ * Immutably patch one agent+tab's Find-bar slot. A closed search with an empty
+ * term carries no state worth keeping, so its slot is dropped - this keeps the
+ * map bounded to the handful of windows with a live find.
+ */
+function patchOutputSearchSlot(
+	map: Record<string, OutputSearchSlot>,
+	key: string,
+	patch: Partial<OutputSearchSlot>
+): Record<string, OutputSearchSlot> {
+	const cur = map[key] ?? DEFAULT_OUTPUT_SEARCH;
+	const slot: OutputSearchSlot = { ...cur, ...patch };
+	const next = { ...map };
+	if (!slot.open && slot.query === '') {
+		delete next[key];
+	} else {
+		next[key] = slot;
+	}
+	return next;
+}
+
+/**
+ * Persist the Bookmarks section collapse state so it survives app restarts.
+ * The runtime value lives here (filter mode transiently toggles it), so this
+ * write-through is the single persistence point; the saved value is hydrated
+ * back into this store on startup by `loadAllSettings` in settingsStore.
+ */
+function persistBookmarksCollapsed(value: boolean): void {
+	window.maestro?.settings?.set('bookmarksCollapsed', value);
+}
+
+/**
+ * Persist the per-provider hidden quota accounts map so the user's hide choices
+ * survive app restarts. Hydrated back into this store on startup by
+ * `loadAllSettings` in settingsStore.
+ */
+function persistHiddenQuotaAccounts(value: Record<string, string[]>): void {
+	window.maestro?.settings?.set('hiddenQuotaAccounts', value);
+}
+
+/**
+ * Persist the per-provider quota auto-refresh intervals so the dropdown survives
+ * app restarts and the main-process background scheduler can read the cadence.
+ * Hydrated back into this store on startup by `loadAllSettings` in settingsStore.
+ */
+function persistUsageRefreshIntervals(value: Record<string, number>): void {
+	window.maestro?.settings?.set('usageRefreshIntervals', value);
+}
+
+/**
+ * Persist the collapsed docked-plugin-panel id list so a user's hide choice
+ * survives app restarts. Hydrated back into this store on startup by
+ * loadAllSettings in settingsStore.
+ */
+function persistHiddenPluginPanels(value: string[]): void {
+	window.maestro?.settings?.set('hiddenPluginPanels', value);
+}
+
 export const useUIStore = create<UIStore>()((set) => ({
 	// --- State ---
 	leftSidebarOpen: true,
+	leftSidebarHidden: false,
 	rightPanelOpen: true,
 	activeFocus: 'main',
 	activeRightTab: 'files',
+	zoomedPaneId: null,
+	paneDrag: null,
+	focusRequest: null,
 	bookmarksCollapsed: false,
-	groupChatsExpanded: true,
 	showUnreadOnly: false,
 	showUnreadAgentsOnly: false,
 	preFilterActiveTabId: null,
 	preTerminalFileTabId: null,
+	pianolaView: 'dashboard',
 	selectedSidebarIndex: 0,
-	flashNotification: null,
-	successFlashNotification: null,
-	outputSearchOpen: false,
-	outputSearchQuery: '',
+	sidebarExtraSelection: null,
+	outputSearchByKey: {},
+	pendingLogJump: null,
 	sessionFilterOpen: false,
+	sessionFilter: '',
+	showArchivedGroupChats: false,
 	historySearchFilterOpen: false,
 	groupChatHistorySearchFilterOpen: false,
 	draggingSessionId: null,
 	editingGroupId: null,
 	editingSessionId: null,
+	editingQueuedItemId: null,
 	autoFollowEnabled: false,
+	profilingActive: false,
+	profilingBufferPercent: 0,
+	usageDashboardViewMode: 'overview',
+	hiddenQuotaAccounts: {},
+	usageRefreshIntervals: {},
+	hiddenPluginPanels: [],
+	openPluginPanelId: null,
 
 	// --- Actions ---
 	setLeftSidebarOpen: (v) => set((s) => ({ leftSidebarOpen: resolve(v, s.leftSidebarOpen) })),
 	toggleLeftSidebar: () => set((s) => ({ leftSidebarOpen: !s.leftSidebarOpen })),
+	setLeftSidebarHidden: (v) => set((s) => ({ leftSidebarHidden: resolve(v, s.leftSidebarHidden) })),
+	// Cycle: full → collapsed → hidden → full. Lets the same control walk
+	// through all three states with a single click.
+	cycleLeftSidebar: () =>
+		set((s) => {
+			if (s.leftSidebarHidden) return { leftSidebarHidden: false, leftSidebarOpen: true };
+			if (s.leftSidebarOpen) return { leftSidebarOpen: false, leftSidebarHidden: false };
+			return { leftSidebarOpen: false, leftSidebarHidden: true };
+		}),
 	setRightPanelOpen: (v) => set((s) => ({ rightPanelOpen: resolve(v, s.rightPanelOpen) })),
 	toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),
+	closeLeftSidebarForNavigation: () =>
+		set((s) => (s.leftSidebarOpen && isNarrowViewportNow() ? { leftSidebarOpen: false } : s)),
+	closeRightPanelForNavigation: () =>
+		set((s) => (s.rightPanelOpen && isNarrowViewportNow() ? { rightPanelOpen: false } : s)),
 
 	setActiveFocus: (v) => set((s) => ({ activeFocus: resolve(v, s.activeFocus) })),
 	setActiveRightTab: (v) => set((s) => ({ activeRightTab: resolve(v, s.activeRightTab) })),
 
+	setZoomedPaneId: (id) => set({ zoomedPaneId: id }),
+	setPaneDrag: (drag) => set({ paneDrag: drag }),
+
+	requestPaneFocus: (leafId) => set({ focusRequest: { leafId } }),
+	requestTabFocus: (tab) => set({ focusRequest: { tab } }),
+	clearFocusRequest: () => set({ focusRequest: null }),
+
 	setBookmarksCollapsed: (v) =>
-		set((s) => ({ bookmarksCollapsed: resolve(v, s.bookmarksCollapsed) })),
-	toggleBookmarksCollapsed: () => set((s) => ({ bookmarksCollapsed: !s.bookmarksCollapsed })),
-	setGroupChatsExpanded: (v) =>
-		set((s) => ({ groupChatsExpanded: resolve(v, s.groupChatsExpanded) })),
-	toggleGroupChatsExpanded: () => set((s) => ({ groupChatsExpanded: !s.groupChatsExpanded })),
+		set((s) => {
+			const next = resolve(v, s.bookmarksCollapsed);
+			persistBookmarksCollapsed(next);
+			return { bookmarksCollapsed: next };
+		}),
+	toggleBookmarksCollapsed: () =>
+		set((s) => {
+			const next = !s.bookmarksCollapsed;
+			persistBookmarksCollapsed(next);
+			return { bookmarksCollapsed: next };
+		}),
 
 	setShowUnreadOnly: (v) => set((s) => ({ showUnreadOnly: resolve(v, s.showUnreadOnly) })),
 	toggleShowUnreadOnly: () => set((s) => ({ showUnreadOnly: !s.showUnreadOnly })),
@@ -178,18 +503,57 @@ export const useUIStore = create<UIStore>()((set) => ({
 	toggleShowUnreadAgentsOnly: () => set((s) => ({ showUnreadAgentsOnly: !s.showUnreadAgentsOnly })),
 	setPreFilterActiveTabId: (id) => set({ preFilterActiveTabId: id }),
 	setPreTerminalFileTabId: (id) => set({ preTerminalFileTabId: id }),
+	setPianolaView: (view) => set({ pianolaView: view }),
 
 	setSelectedSidebarIndex: (v) =>
 		set((s) => ({ selectedSidebarIndex: resolve(v, s.selectedSidebarIndex) })),
+	setSidebarExtraSelection: (selection) => set({ sidebarExtraSelection: selection }),
 
-	setFlashNotification: (v) => set((s) => ({ flashNotification: resolve(v, s.flashNotification) })),
-	setSuccessFlashNotification: (v) =>
-		set((s) => ({ successFlashNotification: resolve(v, s.successFlashNotification) })),
+	setFlashNotification: (v) => {
+		const value = typeof v === 'function' ? v(null) : v;
+		if (value === null) return;
+		notifyCenterFlash({ message: value, color: 'yellow' });
+	},
+	setSuccessFlashNotification: (v) => {
+		const value = typeof v === 'function' ? v(null) : v;
+		if (value === null) return;
+		notifyCenterFlash({ message: value, color: 'theme' });
+	},
 
-	setOutputSearchOpen: (v) => set((s) => ({ outputSearchOpen: resolve(v, s.outputSearchOpen) })),
-	setOutputSearchQuery: (v) => set((s) => ({ outputSearchQuery: resolve(v, s.outputSearchQuery) })),
+	setOutputSearchOpen: (key, v) =>
+		set((s) => ({
+			outputSearchByKey: patchOutputSearchSlot(s.outputSearchByKey, key, {
+				open: resolve(v, (s.outputSearchByKey[key] ?? DEFAULT_OUTPUT_SEARCH).open),
+			}),
+		})),
+	setOutputSearchQuery: (key, v) =>
+		set((s) => ({
+			outputSearchByKey: patchOutputSearchSlot(s.outputSearchByKey, key, {
+				query: resolve(v, (s.outputSearchByKey[key] ?? DEFAULT_OUTPUT_SEARCH).query),
+			}),
+		})),
+	setOutputSearchRegex: (key, v) =>
+		set((s) => ({
+			outputSearchByKey: patchOutputSearchSlot(s.outputSearchByKey, key, {
+				regex: resolve(v, (s.outputSearchByKey[key] ?? DEFAULT_OUTPUT_SEARCH).regex),
+			}),
+		})),
+	toggleOutputSearchRegex: (key) =>
+		set((s) => ({
+			outputSearchByKey: patchOutputSearchSlot(s.outputSearchByKey, key, {
+				regex: !(s.outputSearchByKey[key] ?? DEFAULT_OUTPUT_SEARCH).regex,
+			}),
+		})),
+
+	setPendingLogJump: (jump) => set({ pendingLogJump: jump }),
+	// Guarded so a stale consumer can't wipe a newer jump the user just queued.
+	clearPendingLogJump: (logId) =>
+		set((s) => (s.pendingLogJump?.logId === logId ? { pendingLogJump: null } : s)),
 
 	setSessionFilterOpen: (v) => set((s) => ({ sessionFilterOpen: resolve(v, s.sessionFilterOpen) })),
+	setSessionFilter: (v) => set((s) => ({ sessionFilter: resolve(v, s.sessionFilter) })),
+	setShowArchivedGroupChats: (v) =>
+		set((s) => ({ showArchivedGroupChats: resolve(v, s.showArchivedGroupChats) })),
 	setHistorySearchFilterOpen: (v) =>
 		set((s) => ({ historySearchFilterOpen: resolve(v, s.historySearchFilterOpen) })),
 	setGroupChatHistorySearchFilterOpen: (v) =>
@@ -201,6 +565,48 @@ export const useUIStore = create<UIStore>()((set) => ({
 
 	setEditingGroupId: (v) => set((s) => ({ editingGroupId: resolve(v, s.editingGroupId) })),
 	setEditingSessionId: (v) => set((s) => ({ editingSessionId: resolve(v, s.editingSessionId) })),
+	setEditingQueuedItemId: (id) => set({ editingQueuedItemId: id }),
 
 	setAutoFollowEnabled: (v) => set((s) => ({ autoFollowEnabled: resolve(v, s.autoFollowEnabled) })),
+
+	setProfilingActive: (v) => set((s) => ({ profilingActive: resolve(v, s.profilingActive) })),
+	setProfilingBufferPercent: (percent) => set({ profilingBufferPercent: percent }),
+
+	setUsageDashboardViewMode: (v) =>
+		set((s) => ({ usageDashboardViewMode: resolve(v, s.usageDashboardViewMode) })),
+
+	toggleHiddenQuotaAccount: (providerId, accountKey) =>
+		set((s) => {
+			const current = s.hiddenQuotaAccounts[providerId] ?? [];
+			const next = current.includes(accountKey)
+				? current.filter((k) => k !== accountKey)
+				: [...current, accountKey];
+			const nextMap = { ...s.hiddenQuotaAccounts, [providerId]: next };
+			persistHiddenQuotaAccounts(nextMap);
+			return { hiddenQuotaAccounts: nextMap };
+		}),
+
+	setUsageRefreshInterval: (providerId, ms) =>
+		set((s) => {
+			const nextMap = { ...s.usageRefreshIntervals, [providerId]: ms };
+			persistUsageRefreshIntervals(nextMap);
+			return { usageRefreshIntervals: nextMap };
+		}),
+
+	toggleHiddenPluginPanel: (panelId) =>
+		set((s) => {
+			const next = s.hiddenPluginPanels.includes(panelId)
+				? s.hiddenPluginPanels.filter((id) => id !== panelId)
+				: [...s.hiddenPluginPanels, panelId];
+			persistHiddenPluginPanels(next);
+			return { hiddenPluginPanels: next };
+		}),
+
+	setOpenPluginPanelId: (panelId) => set({ openPluginPanelId: panelId }),
+
+	// Toggle by namespaced id: open it, or close it if that exact panel is already
+	// the open one. A DIFFERENT panel being open swaps to the requested one rather
+	// than closing, since only one modal panel mount exists.
+	toggleOpenPluginPanelId: (panelId) =>
+		set((s) => ({ openPluginPanelId: s.openPluginPanelId === panelId ? null : panelId })),
 }));

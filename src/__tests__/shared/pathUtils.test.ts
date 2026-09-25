@@ -18,10 +18,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
 	expandTilde,
-	parseVersion,
 	compareVersions,
 	buildExpandedPath,
 	buildExpandedEnv,
+	encodeClaudeProjectPath,
 } from '../../shared/pathUtils';
 
 // Mock os.homedir for consistent test behavior
@@ -82,34 +82,6 @@ describe('expandTilde', () => {
 			expect(result).toContain('testuser');
 			expect(result).toContain('.config');
 		});
-	});
-});
-
-describe('parseVersion', () => {
-	it('should parse version with v prefix', () => {
-		expect(parseVersion('v22.10.0')).toEqual([22, 10, 0]);
-	});
-
-	it('should parse version without v prefix', () => {
-		expect(parseVersion('0.14.0')).toEqual([0, 14, 0]);
-	});
-
-	it('should handle single digit versions', () => {
-		expect(parseVersion('v8.0.0')).toEqual([8, 0, 0]);
-	});
-
-	it('should handle versions with more than 3 parts', () => {
-		expect(parseVersion('1.2.3.4')).toEqual([1, 2, 3, 4]);
-	});
-
-	it('should handle non-numeric parts as 0', () => {
-		expect(parseVersion('1.beta.3')).toEqual([1, 0, 3]);
-	});
-
-	it('should strip pre-release suffixes before parsing', () => {
-		expect(parseVersion('0.15.0-rc.1')).toEqual([0, 15, 0]);
-		expect(parseVersion('v1.2.0-beta.3')).toEqual([1, 2, 0]);
-		expect(parseVersion('0.15.0-alpha')).toEqual([0, 15, 0]);
 	});
 });
 
@@ -262,12 +234,13 @@ describe('buildExpandedPath', () => {
 		});
 
 		it('should not duplicate paths already in PATH', () => {
-			process.env.PATH = '/opt/homebrew/bin:/usr/bin';
+			// Seed and split with `path.delimiter` (the same primitive the product
+			// uses). `path.delimiter` is a platform constant that does NOT follow
+			// the `process.platform` mock, so a literal ':' breaks on Windows.
+			process.env.PATH = ['/opt/homebrew/bin', '/usr/bin'].join(path.delimiter);
 			const result = buildExpandedPath();
 
-			// Use hardcoded ':' since this test models Unix behavior
-			// (path.delimiter is a compile-time constant that doesn't follow process.platform mocks)
-			const pathParts = result.split(':');
+			const pathParts = result.split(path.delimiter);
 			const homebrewCount = pathParts.filter((p) => p === '/opt/homebrew/bin').length;
 			expect(homebrewCount).toBe(1);
 		});
@@ -284,7 +257,8 @@ describe('buildExpandedPath', () => {
 		it('should prepend detected Node version manager bin paths', () => {
 			process.env.PATH = '/usr/bin';
 			const originalNvmDir = process.env.NVM_DIR;
-			const tempNvmDir = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-nvm-'));
+			const realTempParent = fs.realpathSync(process.env.TEMP ?? process.env.TMP ?? process.cwd());
+			const tempNvmDir = fs.mkdtempSync(path.join(realTempParent, 'maestro-nvm-'));
 			process.env.NVM_DIR = tempNvmDir;
 			fs.mkdirSync(path.join(tempNvmDir, 'current', 'bin'), { recursive: true });
 			fs.mkdirSync(path.join(tempNvmDir, 'versions', 'node', 'v22.10.0', 'bin'), {
@@ -293,7 +267,7 @@ describe('buildExpandedPath', () => {
 
 			try {
 				const result = buildExpandedPath();
-				const pathParts = result.split(':');
+				const pathParts = result.split(path.delimiter);
 				const currentBin = path.join(tempNvmDir, 'current', 'bin');
 				const versionedBin = path.join(tempNvmDir, 'versions', 'node', 'v22.10.0', 'bin');
 
@@ -435,5 +409,34 @@ describe('buildExpandedEnv', () => {
 
 		expect(process.env.PATH).toBe(originalPathValue);
 		expect(process.env.NEW_VAR).toBeUndefined();
+	});
+});
+
+describe('encodeClaudeProjectPath', () => {
+	it('should replace every non-alphanumeric character with a dash', () => {
+		expect(encodeClaudeProjectPath('/Users/test/my_project.v2')).toBe('-Users-test-my-project-v2');
+	});
+
+	it('should strip a trailing slash so the encoding matches what Claude Code writes', () => {
+		expect(encodeClaudeProjectPath('/Volumes/VRAM/01_Tools/Interceptor/')).toBe(
+			encodeClaudeProjectPath('/Volumes/VRAM/01_Tools/Interceptor')
+		);
+		expect(encodeClaudeProjectPath('/Volumes/VRAM/01_Tools/Interceptor/')).toBe(
+			'-Volumes-VRAM-01-Tools-Interceptor'
+		);
+	});
+
+	it('should strip repeated and backslash trailing separators', () => {
+		expect(encodeClaudeProjectPath('/path/to/repo///')).toBe('-path-to-repo');
+		expect(encodeClaudeProjectPath('C:\\Users\\test\\repo\\')).toBe('C--Users-test-repo');
+	});
+
+	it('should leave filesystem roots intact', () => {
+		expect(encodeClaudeProjectPath('/')).toBe('-');
+		expect(encodeClaudeProjectPath('C:\\')).toBe('C--');
+	});
+
+	it('should handle an empty path', () => {
+		expect(encodeClaudeProjectPath('')).toBe('');
 	});
 });

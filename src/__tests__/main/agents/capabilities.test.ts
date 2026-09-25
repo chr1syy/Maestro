@@ -101,7 +101,8 @@ describe('agent-capabilities', () => {
 			expect(capabilities.supportsUsageStats).toBe(true);
 			expect(capabilities.supportsBatchMode).toBe(true);
 			expect(capabilities.supportsStreaming).toBe(true);
-			expect(capabilities.supportsSlashCommands).toBe(false);
+			// Custom skills/prompts read off disk and expanded renderer-side.
+			expect(capabilities.supportsSlashCommands).toBe(true);
 			expect(capabilities.supportsResultMessages).toBe(false);
 			expect(capabilities.imageResumeMode).toBe('prompt-embed');
 		});
@@ -117,9 +118,11 @@ describe('agent-capabilities', () => {
 		it('should have capabilities for qwen3-coder', () => {
 			const capabilities = AGENT_CAPABILITIES['qwen3-coder'];
 			expect(capabilities).toBeDefined();
-			// Local model - no cost tracking
+			// Local/plan model - no cost tracking
 			expect(capabilities.supportsCostTracking).toBe(false);
 			expect(capabilities.supportsStreaming).toBe(true);
+			expect(capabilities.supportsJsonOutput).toBe(true);
+			expect(capabilities.supportsModelSelection).toBe(true);
 		});
 
 		it('should have capabilities for opencode', () => {
@@ -135,6 +138,61 @@ describe('agent-capabilities', () => {
 			expect(capabilities.supportsResultMessages).toBe(true);
 		});
 
+		it('should have verified capabilities for copilot', () => {
+			const capabilities = AGENT_CAPABILITIES['copilot-cli'];
+			expect(capabilities).toBeDefined();
+			expect(capabilities.supportsResume).toBe(true);
+			expect(capabilities.supportsReadOnlyMode).toBe(true);
+			expect(capabilities.supportsJsonOutput).toBe(true);
+			expect(capabilities.supportsSessionId).toBe(true);
+			expect(capabilities.supportsImageInput).toBe(true);
+			expect(capabilities.supportsImageInputOnResume).toBe(true);
+			expect(capabilities.supportsSlashCommands).toBe(true);
+			expect(capabilities.supportsSessionStorage).toBe(true);
+			expect(capabilities.supportsBatchMode).toBe(true);
+			expect(capabilities.supportsStreaming).toBe(true);
+			expect(capabilities.supportsResultMessages).toBe(true);
+			expect(capabilities.supportsThinkingDisplay).toBe(true);
+			expect(capabilities.supportsContextMerge).toBe(true);
+			expect(capabilities.supportsContextExport).toBe(true);
+			expect(capabilities.supportsWizard).toBe(true);
+			expect(capabilities.supportsGroupChatModeration).toBe(true);
+		});
+
+		it('should expose Pi capabilities backed by its documented CLI contract', () => {
+			const capabilities = AGENT_CAPABILITIES.pi;
+
+			expect(capabilities.supportsResume).toBe(true);
+			expect(capabilities.supportsReadOnlyMode).toBe(true);
+			expect(capabilities.supportsJsonOutput).toBe(true);
+			expect(capabilities.supportsSessionId).toBe(true);
+			expect(capabilities.supportsImageInputOnResume).toBe(true);
+			expect(capabilities.supportsCostTracking).toBe(true);
+			expect(capabilities.supportsUsageStats).toBe(true);
+			expect(capabilities.supportsResultMessages).toBe(true);
+			expect(capabilities.supportsThinkingDisplay).toBe(true);
+			expect(capabilities.usesJsonLineOutput).toBe(true);
+		});
+
+		it('should expose Oh My Pi capabilities backed by its JSON event protocol', () => {
+			const capabilities = AGENT_CAPABILITIES.omp;
+
+			expect(capabilities).toBeDefined();
+			expect(capabilities.supportsResume).toBe(true);
+			expect(capabilities.supportsJsonOutput).toBe(true);
+			expect(capabilities.supportsSessionId).toBe(true);
+			expect(capabilities.supportsImageInput).toBe(true);
+			expect(capabilities.supportsModelSelection).toBe(true);
+			expect(capabilities.supportsCostTracking).toBe(true);
+			expect(capabilities.supportsUsageStats).toBe(true);
+			expect(capabilities.supportsBatchMode).toBe(true);
+			expect(capabilities.supportsStreaming).toBe(true);
+			expect(capabilities.supportsResultMessages).toBe(true);
+			expect(capabilities.supportsThinkingDisplay).toBe(true);
+			expect(capabilities.supportsReadOnlyMode).toBe(true);
+			expect(capabilities.usesJsonLineOutput).toBe(true);
+		});
+
 		it('should define capabilities for all known agents', () => {
 			const knownAgents = [
 				'claude-code',
@@ -144,7 +202,8 @@ describe('agent-capabilities', () => {
 				'qwen3-coder',
 				'opencode',
 				'factory-droid',
-				'aider',
+				'copilot-cli',
+				'omp',
 			];
 
 			for (const agentId of knownAgents) {
@@ -227,18 +286,32 @@ describe('agent-capabilities', () => {
 			}
 		});
 
+		it('marks omp as unable to read the prompt from stdin', () => {
+			// omp takes the prompt positionally: piping it to stdin makes the run
+			// exit 0 with no output, which is why prompt delivery is capability-gated.
+			expect(hasCapability('omp', 'supportsPromptViaStdin')).toBe(false);
+			expect(hasCapability('claude-code', 'supportsPromptViaStdin')).toBe(true);
+			expect(hasCapability('codex', 'supportsPromptViaStdin')).toBe(true);
+			expect(hasCapability('opencode', 'supportsPromptViaStdin')).toBe(true);
+			// Unknown agents fall back to argv delivery (loud failure over silent).
+			expect(hasCapability('unknown-agent', 'supportsPromptViaStdin')).toBe(false);
+		});
+
 		it('should return correct values for new capability flags', () => {
 			// supportsWizard
 			expect(hasCapability('claude-code', 'supportsWizard')).toBe(true);
 			expect(hasCapability('codex', 'supportsWizard')).toBe(true);
 			expect(hasCapability('opencode', 'supportsWizard')).toBe(true);
-			expect(hasCapability('factory-droid', 'supportsWizard')).toBe(false);
+			expect(hasCapability('factory-droid', 'supportsWizard')).toBe(true);
+			expect(hasCapability('copilot-cli', 'supportsWizard')).toBe(true);
+			expect(hasCapability('grok', 'supportsWizard')).toBe(true);
 			expect(hasCapability('terminal', 'supportsWizard')).toBe(false);
 
 			// supportsGroupChatModeration
 			expect(hasCapability('claude-code', 'supportsGroupChatModeration')).toBe(true);
 			expect(hasCapability('codex', 'supportsGroupChatModeration')).toBe(true);
 			expect(hasCapability('opencode', 'supportsGroupChatModeration')).toBe(true);
+			expect(hasCapability('copilot-cli', 'supportsGroupChatModeration')).toBe(true);
 			expect(hasCapability('factory-droid', 'supportsGroupChatModeration')).toBe(true);
 			expect(hasCapability('terminal', 'supportsGroupChatModeration')).toBe(false);
 
@@ -272,6 +345,7 @@ describe('agent-capabilities', () => {
 				'supportsBatchMode',
 				'supportsStreaming',
 				'supportsStreamJsonInput',
+				'supportsPromptViaStdin',
 				'supportsResultMessages',
 				'supportsModelSelection',
 				'requiresPromptToStart',
@@ -283,6 +357,8 @@ describe('agent-capabilities', () => {
 				'usesJsonLineOutput',
 				'usesCombinedContextWindow',
 				'supportsAppendSystemPrompt',
+				'supportsProjectMemory',
+				'supportsAdditionalDirectories',
 			];
 
 			const defaultKeys = Object.keys(DEFAULT_CAPABILITIES);

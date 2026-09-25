@@ -24,8 +24,9 @@ import {
 import { MaestroWizard } from '../../../../renderer/components/Wizard/MaestroWizard';
 import { WizardResumeModal } from '../../../../renderer/components/Wizard/WizardResumeModal';
 import { LayerStackProvider } from '../../../../renderer/contexts/LayerStackContext';
-import type { Theme, AgentConfig } from '../../../../renderer/types';
+import type { AgentConfig } from '../../../../renderer/types';
 
+import { mockTheme } from '../../../helpers/mockTheme';
 // Mock lucide-react icons
 vi.mock('lucide-react', () => ({
 	X: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
@@ -60,6 +61,9 @@ vi.mock('lucide-react', () => ({
 	),
 	ChevronDown: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="chevron-down-icon" className={className} style={style} />
+	),
+	ChevronLeft: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="chevron-left-icon" className={className} style={style} />
 	),
 	ChevronRight: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="chevron-right-icon" className={className} style={style} />
@@ -197,36 +201,9 @@ vi.mock('../../../../renderer/components/Wizard/services/phaseGenerator', () => 
 		isGenerationInProgress: vi.fn().mockReturnValue(false),
 		abort: vi.fn(),
 	},
-	AUTO_RUN_FOLDER_NAME: '.maestro/playbooks',
 }));
 
 // Mock theme
-const mockTheme: Theme = {
-	id: 'test-dark',
-	name: 'Test Dark',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgSidebar: '#252525',
-		bgActivity: '#2a2a2a',
-		border: '#333333',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		textFaint: '#555555',
-		accent: '#4a9eff',
-		accentDim: '#3a8eef',
-		accentText: '#ffffff',
-		accentForeground: '#ffffff',
-		buttonBg: '#333333',
-		buttonHover: '#444444',
-		headerBg: '#202020',
-		scrollbarTrack: '#1a1a1a',
-		scrollbarThumb: '#444444',
-		success: '#22c55e',
-		warning: '#f59e0b',
-		error: '#ef4444',
-	},
-};
 
 // Mock available agents
 const mockAgents: AgentConfig[] = [
@@ -255,6 +232,7 @@ const mockMaestro = {
 	agents: {
 		detect: vi.fn(),
 		get: vi.fn(),
+		getMaestroPDetectedPath: vi.fn().mockResolvedValue(null),
 	},
 	git: {
 		isRepo: vi.fn(),
@@ -1044,7 +1022,9 @@ describe('Wizard Integration Tests', () => {
 			fireEvent.click(screen.getByRole('button', { name: /exit.*save progress/i }));
 
 			// Analytics callback should be called
-			expect(onWizardAbandon).toHaveBeenCalled();
+			await waitFor(() => {
+				expect(onWizardAbandon).toHaveBeenCalled();
+			});
 		});
 	});
 

@@ -68,6 +68,53 @@ describe('cue-recovery-service', () => {
 			expect(mockPruneCueEvents).toHaveBeenCalledWith(EVENT_PRUNE_AGE_MS);
 		});
 
+		it('prunes with the user configured retention window', () => {
+			const service = createCueRecoveryService({
+				onLog: vi.fn(),
+				getSessions: () => new Map(),
+				onDispatch: vi.fn(),
+				getCueHistoryRetentionDays: () => 30,
+			});
+
+			service.init();
+
+			expect(mockPruneCueEvents).toHaveBeenCalledWith(30 * 24 * 60 * 60 * 1000);
+		});
+
+		it('falls back to EVENT_PRUNE_AGE_MS when the setting is unusable', () => {
+			// 0 would mean "delete every row" - the resolver must swallow it.
+			for (const bad of [undefined, 0, -1, NaN, 'abc']) {
+				mockPruneCueEvents.mockClear();
+				const service = createCueRecoveryService({
+					onLog: vi.fn(),
+					getSessions: () => new Map(),
+					onDispatch: vi.fn(),
+					getCueHistoryRetentionDays: () => bad,
+				});
+
+				service.init();
+
+				expect(mockPruneCueEvents).toHaveBeenCalledWith(EVENT_PRUNE_AGE_MS);
+			}
+		});
+
+		it('re-reads the setting on every init so a change needs no app restart', () => {
+			let days: unknown = 7;
+			const service = createCueRecoveryService({
+				onLog: vi.fn(),
+				getSessions: () => new Map(),
+				onDispatch: vi.fn(),
+				getCueHistoryRetentionDays: () => days,
+			});
+
+			service.init();
+			days = 21;
+			service.init();
+
+			expect(mockPruneCueEvents).toHaveBeenNthCalledWith(1, 7 * 24 * 60 * 60 * 1000);
+			expect(mockPruneCueEvents).toHaveBeenNthCalledWith(2, 21 * 24 * 60 * 60 * 1000);
+		});
+
 		it('returns ok=false and logs/captures when DB init throws', () => {
 			const dbError = new Error('disk full');
 			mockInitCueDb.mockImplementation(() => {
@@ -136,7 +183,7 @@ describe('cue-recovery-service', () => {
 		it('does nothing when the gap is below the sleep threshold', () => {
 			const now = Date.now();
 			vi.spyOn(Date, 'now').mockReturnValue(now);
-			// Gap of just 1 minute — well under SLEEP_THRESHOLD_MS (2 minutes).
+			// Gap of just 1 minute - well under SLEEP_THRESHOLD_MS (2 minutes).
 			mockGetLastHeartbeat.mockReturnValue(now - 60_000);
 
 			const onDispatch = vi.fn();
@@ -173,7 +220,7 @@ describe('cue-recovery-service', () => {
 		it('dispatches a catch-up event for each missed time.heartbeat subscription', () => {
 			const now = Date.now();
 			vi.spyOn(Date, 'now').mockReturnValue(now);
-			// 10-minute gap — well over both the threshold and the 1-min interval.
+			// 10-minute gap - well over both the threshold and the 1-min interval.
 			mockGetLastHeartbeat.mockReturnValue(now - 10 * 60_000);
 
 			const onDispatch =

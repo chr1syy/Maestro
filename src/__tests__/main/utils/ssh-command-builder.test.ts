@@ -97,6 +97,22 @@ describe('ssh-command-builder', () => {
 			expect(result).toBe("cd '/home/user/project'\\''s name' && claude");
 		});
 
+		it('keeps a home-relative cwd expandable on the remote', async () => {
+			// A single-quoted '~/proj' never expands: the remote shell looks for a
+			// directory literally named `~` and the agent fails to start. The remote
+			// user's home cannot be resolved locally, so it has to reach the shell
+			// as "$HOME/proj".
+			const result = buildRemoteCommand({
+				command: 'claude',
+				args: ['--print'],
+				cwd: '~/git-projects',
+			});
+			expect(result).toBe('cd "$HOME/git-projects" && claude \'--print\'');
+			expect(buildRemoteCommand({ command: 'claude', args: [], cwd: '~' })).toBe(
+				'cd "$HOME" && claude'
+			);
+		});
+
 		it('escapes special characters in env values', async () => {
 			const result = buildRemoteCommand({
 				command: 'claude',
@@ -170,6 +186,66 @@ describe('ssh-command-builder', () => {
 			expect(result.args).toContain('-p');
 			expect(result.args).toContain('22');
 			expect(result.args).toContain('testuser@dev.example.com');
+		});
+
+		describe('per-remote sshOptions overrides', () => {
+			/**
+			 * A command-line -o outranks ~/.ssh/config, so these overrides are the
+			 * ONLY way a user can change one of Maestro's connection defaults. They
+			 * are also how an exotic transport (tailcat, cloudflared, a ProxyJump
+			 * bastion) is expressed without a field per transport.
+			 */
+			it('passes a ProxyCommand through to the ssh argv', async () => {
+				const result = await buildSshCommand(
+					{ ...baseConfig, sshOptions: { ProxyCommand: '/opt/homebrew/bin/tailcat tcABC 22' } },
+					{ command: 'claude', args: [] }
+				);
+
+				expect(result.args).toContain('ProxyCommand=/opt/homebrew/bin/tailcat tcABC 22');
+			});
+
+			it('replaces a default rather than emitting the keyword twice', async () => {
+				// OpenSSH applies -o first-wins, so a duplicate keyword would keep the
+				// default and make the override silently inert.
+				const result = await buildSshCommand(
+					{ ...baseConfig, sshOptions: { ConnectTimeout: '45' } },
+					{ command: 'claude', args: [] }
+				);
+
+				expect(result.args).toContain('ConnectTimeout=45');
+				expect(result.args).not.toContain('ConnectTimeout=10');
+			});
+
+			it('never reads the parked record, which is what parking means', async () => {
+				// Two records rather than one flag is the whole design: being present
+				// in `sshOptions` is exactly the same statement as being live, so the
+				// builder needs no filter and a switched-off ProxyCommand cannot leak
+				// into the argv.
+				const result = await buildSshCommand(
+					{
+						...baseConfig,
+						sshOptions: { ConnectTimeout: '45' },
+						sshOptionsDisabled: { ProxyCommand: '/opt/homebrew/bin/tailcat tcABC 22' },
+					},
+					{ command: 'claude', args: [] }
+				);
+
+				expect(result.args).toContain('ConnectTimeout=45');
+				expect(result.args.join(' ')).not.toContain('ProxyCommand');
+				expect(result.args.join(' ')).not.toContain('tailcat');
+			});
+
+			it('refuses to let a remote pin RequestTTY', async () => {
+				// RequestTTY is derived from whether the remote command speaks
+				// stream-json; a forced TTY corrupts that stream.
+				const result = await buildSshCommand(
+					{ ...baseConfig, sshOptions: { RequestTTY: 'force' } },
+					{ command: 'claude', args: [] }
+				);
+
+				expect(result.args).toContain('RequestTTY=no');
+				expect(result.args).not.toContain('RequestTTY=force');
+			});
 		});
 
 		describe('TTY allocation (CRITICAL for Claude Code)', () => {
@@ -334,6 +410,26 @@ describe('ssh-command-builder', () => {
 			expect(lastArg).not.toContain('&& cd'); // cd comes after PATH setup if present
 		});
 
+		it('includes common agent install locations in PATH wrapper (issue #878)', async () => {
+			const result = await buildSshCommand(baseConfig, {
+				command: 'command',
+				args: ['-v', 'claude'],
+			});
+
+			const lastArg = result.args[result.args.length - 1];
+			expect(lastArg).toContain('export PATH=');
+			expect(lastArg).toContain('$HOME/.local/bin');
+			expect(lastArg).toContain('$HOME/.opencode/bin');
+			expect(lastArg).toContain('$HOME/.claude/local');
+			expect(lastArg).toContain('$HOME/go/bin');
+			expect(lastArg).toContain('$HOME/.bun/bin');
+			expect(lastArg).toContain('$HOME/.deno/bin');
+			expect(lastArg).toContain('$HOME/.nix-profile/bin');
+			expect(lastArg).toContain('/usr/local/bin');
+			expect(lastArg).toContain('/opt/homebrew/bin');
+			expect(lastArg).toContain('/snap/bin');
+		});
+
 		it('includes the remote command as the last argument', async () => {
 			const result = await buildSshCommand(baseConfig, {
 				command: 'claude',
@@ -344,6 +440,34 @@ describe('ssh-command-builder', () => {
 			expect(lastArg).toContain('claude');
 			expect(lastArg).toContain('--print');
 			expect(lastArg).toContain('hello world');
+		});
+
+		it('applies per-remote sshOptions while keeping RequestTTY=no', async () => {
+			// Stdin mode never wants a TTY (it would interfere with piping the
+			// script), which the reserved-key rule guarantees no override can change.
+			const result = await buildSshCommandWithStdin(
+				{ ...baseConfig, sshOptions: { ProxyJump: 'bastion', RequestTTY: 'force' } },
+				{ command: 'opencode', args: ['run'] }
+			);
+
+			expect(result.args).toContain('ProxyJump=bastion');
+			expect(result.args).toContain('RequestTTY=no');
+			expect(result.args).not.toContain('RequestTTY=force');
+		});
+
+		it('exposes the bare remote agent invocation via remoteCommandLine', async () => {
+			const result = await buildSshCommand(baseConfig, {
+				command: 'claude',
+				args: ['--print', 'hello world'],
+				cwd: '/home/user/project',
+				env: { API_KEY: 'test-key' },
+			});
+
+			// remoteCommandLine is the agent invocation only - no cd/env prefix, no
+			// /bin/bash PATH bootstrap wrapper - for display in Process Details.
+			expect(result.remoteCommandLine).toBe("claude '--print' 'hello world'");
+			expect(result.remoteCommandLine).not.toContain('cd ');
+			expect(result.remoteCommandLine).not.toContain('export PATH=');
 		});
 
 		it('properly formats the SSH command for spawning', async () => {
@@ -694,6 +818,19 @@ describe('ssh-command-builder', () => {
 			);
 		});
 
+		it('exposes the bare remote agent invocation via remoteCommandLine', async () => {
+			const result = await buildSshCommandWithStdin(baseConfig, {
+				command: 'opencode',
+				args: ['run', '--format', 'json'],
+			});
+
+			// The remote command line is the agent invocation only - no PATH bootstrap,
+			// no `exec` wrapper - so the Process Details modal can show what runs remotely.
+			expect(result.remoteCommandLine).toBe("opencode 'run' '--format' 'json'");
+			expect(result.remoteCommandLine).not.toContain('exec ');
+			expect(result.remoteCommandLine).not.toContain('export PATH=');
+		});
+
 		it('includes PATH setup in stdin script', async () => {
 			const result = await buildSshCommandWithStdin(baseConfig, {
 				command: 'opencode',
@@ -702,8 +839,17 @@ describe('ssh-command-builder', () => {
 
 			expect(result.stdinScript).toBeDefined();
 			expect(result.stdinScript).toContain('export PATH=');
-			expect(result.stdinScript).toContain('.local/bin');
+			// Common install locations (regression coverage for issue #878)
+			expect(result.stdinScript).toContain('$HOME/.local/bin');
+			expect(result.stdinScript).toContain('$HOME/.opencode/bin');
+			expect(result.stdinScript).toContain('$HOME/.claude/local');
+			expect(result.stdinScript).toContain('$HOME/go/bin');
+			expect(result.stdinScript).toContain('$HOME/.bun/bin');
+			expect(result.stdinScript).toContain('$HOME/.deno/bin');
+			expect(result.stdinScript).toContain('$HOME/.nix-profile/bin');
+			expect(result.stdinScript).toContain('/usr/local/bin');
 			expect(result.stdinScript).toContain('/opt/homebrew/bin');
+			expect(result.stdinScript).toContain('/snap/bin');
 		});
 
 		it('includes cd command in stdin script when cwd provided', async () => {
@@ -714,6 +860,19 @@ describe('ssh-command-builder', () => {
 			});
 
 			expect(result.stdinScript).toContain("cd '/home/user/project'");
+		});
+
+		it('keeps a home-relative cwd expandable in the stdin script', async () => {
+			const result = await buildSshCommandWithStdin(baseConfig, {
+				command: 'opencode',
+				args: ['run'],
+				cwd: '~/git-projects',
+			});
+
+			// Same rule as buildRemoteCommand: the script's first line is the cd,
+			// and a single-quoted tilde would `exit 1` before the agent ever ran.
+			expect(result.stdinScript).toContain('cd "$HOME/git-projects" || exit 1');
+			expect(result.stdinScript).not.toContain("cd '~");
 		});
 
 		it('includes environment variables in stdin script', async () => {
@@ -1034,6 +1193,28 @@ describe('ssh-command-builder', () => {
 			expect(cmdPortion).not.toContain("'-i'");
 			// Should have cleanup rm -f
 			expect(result.stdinScript).toContain('; rm -f');
+		});
+
+		it('embeds Copilot image @mentions when imagePromptBuilder is provided', async () => {
+			const testImage = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==';
+			const result = await buildSshCommandWithStdin(baseConfig, {
+				command: 'copilot',
+				args: ['--output-format', 'json'],
+				stdinInput: 'describe this image',
+				images: [testImage],
+				imagePromptBuilder: (paths: string[]) =>
+					`Use these attached images as context:\n${paths.map((imagePath) => `@${imagePath}`).join('\n')}\n\n`,
+			});
+
+			expect(result.stdinScript).toContain('base64 -d >');
+			const cmdLine = result.stdinScript?.split('\n').find((line) => line.startsWith('copilot '));
+			expect(cmdLine).toBeDefined();
+			expect(cmdLine).not.toContain("'-i'");
+			expect(cmdLine).toContain('; rm -f');
+
+			const afterCmd = result.stdinScript?.split(cmdLine + '\n')[1];
+			expect(afterCmd).toContain('@/tmp/maestro-image-');
+			expect(afterCmd).toContain('describe this image');
 		});
 
 		it('does not embed image paths when imageResumeMode is not set (default behavior)', async () => {

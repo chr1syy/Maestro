@@ -8,6 +8,14 @@
  *
  * IMPORTANT: This is the single source of truth for theme colors.
  * Do NOT duplicate theme definitions elsewhere.
+ *
+ * DOWNSTREAM CONTRACT: RunMaestro.ai generates its theme picker from this file.
+ * The website checks out RunMaestro/Maestro in CI (and on a daily cron) and fails
+ * its build if its generated palette drifts from this one. Renaming this file,
+ * moving the THEMES export, or changing its shape will turn that repo red without
+ * any signal here, so treat the export surface as public API. The website layers
+ * on one extra token (accentSecondary) that has no counterpart in ThemeColors;
+ * it is deliberately website-only and must NOT be added here.
  */
 
 import type { Theme, ThemeId, ThemeColors } from './theme-types';
@@ -290,28 +298,35 @@ const ayuLightAnsi: AnsiPalette = {
 	selection: 'rgba(85, 180, 212, 0.2)',
 };
 
-/** Pedurple (vibe) — purple-themed ANSI palette */
+/**
+ * Pedurple (vibe) - neutral ANSI palette, purple only in the magenta slots.
+ *
+ * The original palette tinted EVERY slot purple, which is why terminal output
+ * read as one wash of violet and the brand color had nothing to pop against.
+ * Purple is the accent here, not the medium: the greens, yellows, blues, and
+ * greys are ordinary, so `#9146ff` is the loudest thing on the screen.
+ */
 const pedurpleAnsi: AnsiPalette = {
-	ansiBlack: '#1a0f24',
-	ansiRed: '#da70d6',
-	ansiGreen: '#7cb342',
-	ansiYellow: '#d4af37',
-	ansiBlue: '#9b59b6',
-	ansiMagenta: '#ff69b4',
-	ansiCyan: '#c3a5e8',
-	ansiWhite: '#e8d5f5',
-	ansiBrightBlack: '#4a2a6a',
-	ansiBrightRed: '#ff82db',
-	ansiBrightGreen: '#8ec952',
-	ansiBrightYellow: '#e8c648',
-	ansiBrightBlue: '#b073d0',
-	ansiBrightMagenta: '#ff8dc7',
-	ansiBrightCyan: '#d4bdef',
-	ansiBrightWhite: '#f3eaf8',
-	selection: 'rgba(255, 105, 180, 0.3)',
+	ansiBlack: '#1f1f26',
+	ansiRed: '#ff5c6a',
+	ansiGreen: '#3ecf8e',
+	ansiYellow: '#f5b642',
+	ansiBlue: '#7c9cff',
+	ansiMagenta: '#9146ff',
+	ansiCyan: '#4fd1e0',
+	ansiWhite: '#dedce6',
+	ansiBrightBlack: '#5a5868',
+	ansiBrightRed: '#ff7a86',
+	ansiBrightGreen: '#6fe3aa',
+	ansiBrightYellow: '#ffc966',
+	ansiBrightBlue: '#9db6ff',
+	ansiBrightMagenta: '#b07cff',
+	ansiBrightCyan: '#7fe0ec',
+	ansiBrightWhite: '#f7f6fa',
+	selection: 'rgba(145, 70, 255, 0.30)',
 };
 
-/** Maestro's Choice (vibe) — gold/dark ANSI palette */
+/** Maestro's Choice (vibe) - gold/dark ANSI palette */
 const maestrosChoiceAnsi: AnsiPalette = {
 	ansiBlack: '#1a1a24',
 	ansiRed: '#e05070',
@@ -332,7 +347,7 @@ const maestrosChoiceAnsi: AnsiPalette = {
 	selection: 'rgba(244, 196, 48, 0.3)',
 };
 
-/** Dre Synth (vibe) — cyberpunk/neon ANSI palette */
+/** Dre Synth (vibe) - cyberpunk/neon ANSI palette */
 const dreSynthAnsi: AnsiPalette = {
 	ansiBlack: '#0d0221',
 	ansiRed: '#ff2a6d',
@@ -353,25 +368,25 @@ const dreSynthAnsi: AnsiPalette = {
 	selection: 'rgba(0, 255, 204, 0.3)',
 };
 
-/** InQuest (vibe) — high-contrast red/black ANSI palette */
-const inquestAnsi: AnsiPalette = {
-	ansiBlack: '#0a0a0a',
-	ansiRed: '#cc0033',
-	ansiGreen: '#f5f5f5',
-	ansiYellow: '#cc0033',
-	ansiBlue: '#888888',
-	ansiMagenta: '#ff3355',
-	ansiCyan: '#ffffff',
+/** Winamp (vibe) - retro media player ANSI palette */
+const winampAnsi: AnsiPalette = {
+	ansiBlack: '#1a1a1a',
+	ansiRed: '#ff5555',
+	ansiGreen: '#00e000',
+	ansiYellow: '#ffff00',
+	ansiBlue: '#4a4a4a',
+	ansiMagenta: '#ff8924',
+	ansiCyan: '#8a8a62',
 	ansiWhite: '#cccccc',
-	ansiBrightBlack: '#2a2a2a',
-	ansiBrightRed: '#ff1144',
-	ansiBrightGreen: '#ffffff',
-	ansiBrightYellow: '#ff3355',
-	ansiBrightBlue: '#aaaaaa',
-	ansiBrightMagenta: '#ff6677',
-	ansiBrightCyan: '#ffffff',
-	ansiBrightWhite: '#f5f5f5',
-	selection: 'rgba(204, 0, 51, 0.3)',
+	ansiBrightBlack: '#3a3a3a',
+	ansiBrightRed: '#ff6666',
+	ansiBrightGreen: '#33ff33',
+	ansiBrightYellow: '#ffff55',
+	ansiBrightBlue: '#666666',
+	ansiBrightMagenta: '#ffaa55',
+	ansiBrightCyan: '#aaaa77',
+	ansiBrightWhite: '#ffffff',
+	selection: 'rgba(255, 137, 36, 0.3)',
 };
 
 export const THEMES: Record<ThemeId, Theme> = {
@@ -382,6 +397,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#282a36',
+			bgTitleBar: '#282a36',
 			bgSidebar: '#21222c',
 			bgActivity: '#343746',
 			border: '#44475a',
@@ -403,6 +419,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#272822',
+			bgTitleBar: '#272822',
 			bgSidebar: '#1e1f1c',
 			bgActivity: '#3e3d32',
 			border: '#49483e',
@@ -424,6 +441,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#2e3440',
+			bgTitleBar: '#2e3440',
 			bgSidebar: '#3b4252',
 			bgActivity: '#434c5e',
 			border: '#4c566a',
@@ -445,6 +463,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#1a1b26',
+			bgTitleBar: '#1a1b26',
 			bgSidebar: '#16161e',
 			bgActivity: '#24283b',
 			border: '#414868',
@@ -466,6 +485,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#1e1e2e',
+			bgTitleBar: '#1e1e2e',
 			bgSidebar: '#181825',
 			bgActivity: '#313244',
 			border: '#45475a',
@@ -487,6 +507,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#282828',
+			bgTitleBar: '#282828',
 			bgSidebar: '#1d2021',
 			bgActivity: '#3c3836',
 			border: '#504945',
@@ -508,6 +529,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#002b36',
+			bgTitleBar: '#002b36',
 			bgSidebar: '#073642',
 			bgActivity: '#0a4050',
 			border: '#2f4f56',
@@ -522,6 +544,48 @@ export const THEMES: Record<ThemeId, Theme> = {
 			error: '#dc322f',
 		},
 	},
+	'olive-nights': {
+		id: 'olive-nights',
+		name: 'Olive Nights',
+		mode: 'dark',
+		colors: {
+			bgMain: '#0a0b0a',
+			bgTitleBar: '#0a0b0a',
+			bgSidebar: '#0a0a0a',
+			bgActivity: '#111311',
+			border: '#0f0f0f',
+			textMain: '#f2ebc0',
+			textDim: '#cec8ba',
+			accent: '#5b675b',
+			accentDim: 'rgba(31, 43, 31, 1)',
+			accentText: '#ffffff',
+			accentForeground: '#fcfcfc',
+			success: '#bed78e',
+			warning: '#d0a795',
+			error: '#ff5555',
+		},
+	},
+	'indigo-blue': {
+		id: 'indigo-blue',
+		name: 'Indigo Blue',
+		mode: 'dark',
+		colors: {
+			bgMain: '#010204',
+			bgTitleBar: '#010204',
+			bgSidebar: '#020203',
+			bgActivity: '#030507',
+			border: '#06070a',
+			textMain: '#f2ebc0',
+			textDim: '#c7c2b3',
+			accent: '#1f2f63',
+			accentDim: 'rgba(14, 22, 46, 1)',
+			accentText: '#a9b8df',
+			accentForeground: '#ffffff',
+			success: '#a5b0ca',
+			warning: '#d0a795',
+			error: '#ff5555',
+		},
+	},
 	// Light themes
 	'github-light': {
 		id: 'github-light',
@@ -529,6 +593,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'light',
 		colors: {
 			bgMain: '#ffffff',
+			bgTitleBar: '#ffffff',
 			bgSidebar: '#f6f8fa',
 			bgActivity: '#eff2f5',
 			border: '#d0d7de',
@@ -550,10 +615,13 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'light',
 		colors: {
 			bgMain: '#fdf6e3',
+			bgTitleBar: '#fdf6e3',
 			bgSidebar: '#eee8d5',
 			bgActivity: '#e6dfc8',
 			border: '#d3cbb7',
-			textMain: '#5f737b',
+			// Solarized base02. The previous #5f737b sat at 4.61:1, which left dimmed
+			// secondary text below the 3:1 floor no matter how light the dimming.
+			textMain: '#073642',
 			textDim: '#606969',
 			accent: '#207c76',
 			accentDim: 'rgba(32, 124, 118, 0.1)',
@@ -571,6 +639,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'light',
 		colors: {
 			bgMain: '#fafafa',
+			bgTitleBar: '#fafafa',
 			bgSidebar: '#eaeaeb',
 			bgActivity: '#dbdbdc',
 			border: '#c8c8c9',
@@ -592,6 +661,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'light',
 		colors: {
 			bgMain: '#fbf1c7',
+			bgTitleBar: '#fbf1c7',
 			bgSidebar: '#ebdbb2',
 			bgActivity: '#d5c4a1',
 			border: '#bdae93',
@@ -613,6 +683,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'light',
 		colors: {
 			bgMain: '#eff1f5',
+			bgTitleBar: '#eff1f5',
 			bgSidebar: '#e6e9ef',
 			bgActivity: '#dce0e8',
 			border: '#acb0be',
@@ -634,6 +705,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'light',
 		colors: {
 			bgMain: '#fafafa',
+			bgTitleBar: '#fafafa',
 			bgSidebar: '#f3f4f5',
 			bgActivity: '#e7e8e9',
 			border: '#d9d9d9',
@@ -654,20 +726,27 @@ export const THEMES: Record<ThemeId, Theme> = {
 		id: 'pedurple',
 		name: 'Pedurple',
 		mode: 'vibe',
+		// Slate base, true-Pedurple accent. `#9146FF` IS the Pedurple color, and
+		// the theme that carried the name never used it: the accent was hot pink
+		// and every surface was purple-tinted, so the brand hue had nowhere to
+		// land. The surfaces are neutral grey now and `bgActivity` is the one
+		// place a purple hint survives, on the card fill where it reads as depth
+		// rather than as a wash.
 		colors: {
-			bgMain: '#1a0f24',
-			bgSidebar: '#140a1c',
-			bgActivity: '#2a1a3a',
-			border: '#4a2a6a',
-			textMain: '#e8d5f5',
-			textDim: '#b89fd0',
-			accent: '#ff69b4',
-			accentDim: 'rgba(255, 105, 180, 0.25)',
-			accentText: '#ff8dc7',
-			accentForeground: '#1a0f24',
-			success: '#7cb342',
-			warning: '#d4af37',
-			error: '#da70d6',
+			bgMain: '#1f1f26',
+			bgTitleBar: '#1a1a20',
+			bgSidebar: '#1a1a20',
+			bgActivity: '#2b2735',
+			border: '#3a3a46',
+			textMain: '#f4f3f7',
+			textDim: '#a09dab',
+			accent: '#9146ff',
+			accentDim: 'rgba(145, 70, 255, 0.22)',
+			accentText: '#b07cff',
+			accentForeground: '#ffffff',
+			success: '#3ecf8e',
+			warning: '#f5b642',
+			error: '#ff5c6a',
 			...pedurpleAnsi,
 		},
 	},
@@ -677,6 +756,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'vibe',
 		colors: {
 			bgMain: '#1a1a24',
+			bgTitleBar: '#1a1a24',
 			bgSidebar: '#141420',
 			bgActivity: '#24243a',
 			border: '#3a3a5a',
@@ -698,6 +778,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'vibe',
 		colors: {
 			bgMain: '#0d0221',
+			bgTitleBar: '#0d0221',
 			bgSidebar: '#0a0118',
 			bgActivity: '#150530',
 			border: '#00d4aa',
@@ -713,25 +794,26 @@ export const THEMES: Record<ThemeId, Theme> = {
 			...dreSynthAnsi,
 		},
 	},
-	inquest: {
-		id: 'inquest',
-		name: 'InQuest',
+	winamp: {
+		id: 'winamp',
+		name: 'Winamp',
 		mode: 'vibe',
 		colors: {
-			bgMain: '#0a0a0a',
-			bgSidebar: '#050505',
-			bgActivity: '#141414',
-			border: '#2a2a2a',
-			textMain: '#f5f5f5',
-			textDim: '#888888',
-			accent: '#cc0033',
-			accentDim: 'rgba(204, 0, 51, 0.25)',
-			accentText: '#ff3355',
-			accentForeground: '#ffffff',
-			success: '#f5f5f5',
-			warning: '#cc0033',
-			error: '#cc0033',
-			...inquestAnsi,
+			bgMain: '#232323',
+			bgTitleBar: '#232323',
+			bgSidebar: '#1a1a1a',
+			bgActivity: '#3a3a3a',
+			border: '#4a4a4a',
+			textMain: '#00e000',
+			textDim: '#8a8a62',
+			accent: '#ff8924',
+			accentDim: 'rgba(255, 137, 36, 0.2)',
+			accentText: '#ffff00',
+			accentForeground: '#1a1a1a',
+			success: '#00e000',
+			warning: '#ff8924',
+			error: '#ff5555',
+			...winampAnsi,
 		},
 	},
 	// Custom theme - user-configurable, defaults to Dracula
@@ -741,6 +823,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 		mode: 'dark',
 		colors: {
 			bgMain: '#282a36',
+			bgTitleBar: '#282a36',
 			bgSidebar: '#21222c',
 			bgActivity: '#343746',
 			border: '#44475a',

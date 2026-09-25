@@ -1,39 +1,27 @@
 ---
 title: Remote Control
 description: Control Maestro from your phone via the built-in web server and Cloudflare tunnels.
-icon: wifi
+icon: tower-broadcast
 ---
 
 Maestro includes a built-in web server for mobile remote control:
 
-1. **Automatic Security** — Web server runs on a random port with an auto-generated security token (UUID) embedded in the URL
-2. **QR Code Access** — Scan a QR code to connect instantly from your phone
-3. **Live Sessions** — Sessions marked as "live" become accessible through the web interface (protected by the security token)
-4. **Remote Tunneling** — Access Maestro from anywhere via Cloudflare tunnel (requires `cloudflared` CLI)
+1. **Automatic Security** - Web server runs on a random port with an auto-generated security token (UUID) embedded in the URL
+2. **QR Code Access** - Scan a QR code to connect instantly from your phone
+3. **Live Sessions** - Sessions marked as "live" become accessible through the web interface (protected by the security token)
+4. **Remote Tunneling** - Access Maestro from anywhere via Cloudflare tunnel (requires `cloudflared` CLI)
 
 ## Mobile Web Interface
 
-The mobile web interface provides a comprehensive remote control experience:
+The web interface is the full Maestro app, served by the desktop app to any browser on your network. On a laptop it is the desktop layout you already know. On a phone it switches to a **phone layout** built for one hand and a small screen:
 
-### Core Features
+- **Tabs**: the magnifier in the tab bar opens the tab list directly. Tap a tab to switch to it. Press and hold a tab for its actions, which open in a sheet you can scroll, swipe down, or close.
+- **Panels**: the agent list and the Files / History / Auto Run panel open full screen. Swipe them back, use the panel's own close button, or pick an agent and the list gets out of the way.
+- **Composer**: the message box folds away behind a slim handle at the bottom so the conversation gets the screen. Tap the handle, or swipe it up, to type. A dot on the handle means the agent is still working; a pencil means you left an unsent draft.
+- **Modals**: swipe down from the top of the screen to close whatever is open, in addition to its close button.
+- **Toolbars**: buttons show icons only. Press and hold a button for its label.
 
-- Real-time session monitoring and command input
-- Device color scheme preference support (light/dark mode)
-- Connection status indicator with automatic reconnection (30-second countdown timer)
-- Offline queue for commands typed while disconnected (persisted to localStorage, up to 50 commands)
-- Multi-tab support with tab bar and tab search modal
-
-### Gestures and Navigation
-
-- Swipe gestures (left/right/up/down) for common actions
-- Pull-to-refresh functionality
-- Long-press menu for mode switching (AI ↔ Terminal)
-
-### Input Features
-
-- Recent command chips for quick access
-- Slash command autocomplete
-- Command history drawer
+Everything else is the desktop app: the same agents, tabs, transcripts (including pasted screenshots), Auto Run, and settings, live-synced with the desktop window.
 
 ## Local Access (Same Network)
 
@@ -54,7 +42,7 @@ To access Maestro from outside your local network (e.g., on mobile data or from 
 3. Toggle **Remote Control** in the Live overlay panel
 4. A secure Cloudflare tunnel URL (e.g., `https://abc123.trycloudflare.com`) will be generated within ~30 seconds
 5. Use the **Local/Remote** pill selector to switch between QR codes
-6. The tunnel stays active as long as Maestro is running — no time limits, no Cloudflare account required
+6. The tunnel stays active as long as Maestro is running - no time limits, no Cloudflare account required
 
 <Tip>
 The Remote tab automatically activates when the tunnel connects successfully.
@@ -62,13 +50,13 @@ The Remote tab automatically activates when the tunnel connects successfully.
 
 ## Custom Port Configuration
 
-By default, Maestro assigns a **random port** each time the web server starts. This is a security-by-obscurity measure — attackers can't easily guess which port to target.
+By default, Maestro assigns a **random port** each time the web server starts. This is a security-by-obscurity measure - attackers can't easily guess which port to target.
 
 However, if you need a **fixed port** (e.g., for firewall rules, reverse proxies, or persistent tunnel configurations), you can enable custom port mode:
 
 1. Click the **LIVE** button to open the Live overlay panel
 2. Toggle **Custom Port** to enable static port mode
-3. Enter your desired port number (1–65535)
+3. Enter your desired port number (1-65535)
 4. The server restarts automatically on the new port
 
 **Use cases for custom ports:**
@@ -88,28 +76,33 @@ However, if you need a **fixed port** (e.g., for firewall rules, reverse proxies
 - Consider additional authentication at the network level
   </Warning>
 
+## Requiring a Login
+
+By default, anyone who has the URL is in: the token in the URL is the whole credential. When more than one person drives the same Maestro, or the URL travels further than you would like, turn on **Web Login**:
+
+1. Open **Settings**, then **Extensions**, and enable the **Web Login** tile
+2. On the same tile, add an account for each person: a username, an optional display name, and a password
+3. The next time a browser opens the web interface it lands on a login page styled in your active theme. Each person signs in once per browser and stays signed in for 30 days
+
+What login changes:
+
+- **Attribution.** Every message sent from a signed-in browser is credited to that person: a pill on the History entry, a **sender** filter in the History panel, and a `user_name` column in the usage database. Turns typed at the desktop show no pill.
+- **Sign out** is in the Left Bar hamburger menu on the web interface.
+- **Focus stays yours.** With several people connected, each browser keeps its own active agent and tab. Switching agents at the desktop or on another phone never moves your view. Streams, thinking indicators and History updates still arrive everywhere.
+
+What login does not change:
+
+- The URL token is still required. Login is a second factor on top of it, not a replacement.
+- `maestro-cli` on the Maestro machine is never asked to log in. Every browser is, including one opened on the Maestro machine itself.
+- There are no roles. Every account is an equal operator; the desktop is the administrator. A browser can never add, remove, or reset an account.
+
+<Warning>
+On your own network the web interface is served over plain HTTP, so a password typed on the LAN travels in the clear. Use the Remote Control tunnel, which is HTTPS end to end, or a network you trust. Enabling Web Login with no accounts locks every browser out until you add one.
+</Warning>
+
 ## Connection Handling
 
-The mobile interface includes robust connection management:
-
-### Automatic Reconnection
-
-- When disconnected, a 30-second countdown timer displays before automatic reconnection
-- Manual **Retry** button available for immediate reconnection
-- Reconnection attempts counter shows progress (e.g., "Attempt 3 of 10")
-
-### Offline Mode
-
-- Commands typed while offline are queued (up to 50 commands)
-- Queued commands are persisted to localStorage and survive page reloads
-- Commands automatically send when connection is restored
-- An **Offline Queue Banner** shows the number of pending commands
-
-### Connection Status Indicator
-
-- Displays as a dismissible banner when connection is lost
-- Shows different states: **Connecting**, **Authenticating**, **Disconnected**, **No internet**
-- Expandable error details for troubleshooting
+The browser talks to the desktop app over a WebSocket. If the connection drops (the phone sleeps, you switch apps, the network changes), the page reconnects and then reloads itself so it picks up everything that happened while it was away; the desktop app is the single source of truth. Anything you typed during the gap but had not yet sent needs to be sent again.
 
 ## Screenshots
 
@@ -119,5 +112,5 @@ The mobile interface includes robust connection management:
 
 ## Related
 
-- [Configuration](/configuration) — General settings including web interface options
-- [SSH Remote Execution](/ssh-remote-execution) — Running Maestro on remote servers
+- [Configuration](/configuration) - General settings including web interface options
+- [SSH Remote Execution](/ssh-remote-execution) - Running Maestro on remote servers

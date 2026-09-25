@@ -19,12 +19,16 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { logger } from '../../../renderer/utils/logger';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { HistoryPanel, HistoryPanelHandle } from '../../../renderer/components/HistoryPanel';
-import type { Theme, Session, HistoryEntry, HistoryEntryType } from '../../../renderer/types';
+import type { Session, HistoryEntry, HistoryEntryType } from '../../../renderer/types';
+import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
 import { useUIStore } from '../../../renderer/stores/uiStore';
 import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 
+import { mockTheme } from '../../helpers/mockTheme';
+import { installLocalStorageMock } from '../../helpers/mockLocalStorage';
 // Mock child components
 vi.mock('../../../renderer/components/HistoryDetailModal', () => ({
 	HistoryDetailModal: ({
@@ -106,47 +110,14 @@ vi.mock('../../../renderer/components/HistoryHelpModal', () => ({
 }));
 
 // Create mock theme
-const mockTheme: Theme = {
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1e1e1e',
-		bgSidebar: '#252526',
-		bgActivity: '#333333',
-		textMain: '#ffffff',
-		textDim: '#808080',
-		accent: '#007acc',
-		border: '#404040',
-		success: '#4ec9b0',
-		warning: '#dcdcaa',
-		error: '#f14c4c',
-		buttonBg: '#0e639c',
-		buttonText: '#ffffff',
-	},
-};
 
-// Create mock session
-const createMockSession = (overrides: Partial<Session> = {}): Session => ({
-	id: 'session-1',
-	name: 'Test Session',
-	toolType: 'claude-code',
-	state: 'idle',
-	inputMode: 'ai',
-	cwd: '/test/project',
-	projectRoot: '/test/project',
-	aiPid: 1234,
-	terminalPid: 5678,
-	aiLogs: [],
-	shellLogs: [],
-	isGitRepo: true,
-	fileTree: [],
-	fileExplorerExpanded: [],
-	messageQueue: [],
-	terminalTabs: [],
-	activeTerminalTabId: null,
-	...overrides,
-});
+const createMockSession = (overrides: Partial<Session> = {}): Session =>
+	baseCreateMockSession({
+		aiPid: 1234,
+		terminalPid: 5678,
+		isGitRepo: true,
+		...overrides,
+	});
 
 // Create mock history entry factory
 const createMockEntry = (overrides: Partial<HistoryEntry> = {}): HistoryEntry => ({
@@ -166,6 +137,14 @@ describe('HistoryPanel', () => {
 
 	beforeEach(() => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
+
+		// Install a fresh in-memory localStorage mock between tests. Filter
+		// toggles persist under HISTORY_PANEL_FILTERS_KEY; without a reset, a test
+		// that deselects a type leaks the restrictive filter into every later
+		// test, hiding their entries and failing all entry-render assertions.
+		// jsdom here provides no working Storage, so a mock is required. This
+		// installs a fresh in-memory store, which also serves as the per-test reset.
+		installLocalStorageMock();
 
 		// Reset uiStore state used by HistoryPanel
 		useUIStore.setState({ historySearchFilterOpen: false });
@@ -188,14 +167,56 @@ describe('HistoryPanel', () => {
 		mockHistoryDelete = vi.fn().mockResolvedValue(true);
 		mockHistoryUpdate = vi.fn().mockResolvedValue(true);
 
-		// Add history, settings, and directorNotes mocks to window.maestro
+		// Add history, settings, and directorNotes mocks to window.maestro.
+		// `getAll` is no longer called by HistoryPanel (replaced by paginated
+		// loading), but tests still drive the entry set through
+		// `mockHistoryGetAll.mockResolvedValue([...])`. We bridge that via an
+		// adapter on `getAllPaginated` that slices the mocked array per the
+		// page request - keeps the existing test surface intact.
+		const getAllPaginatedAdapter = vi.fn(
+			async (options?: {
+				pagination?: { offset?: number; limit?: number };
+				lookbackHours?: number | null;
+				types?: string[];
+			}) => {
+				const all = await mockHistoryGetAll();
+				const arr = Array.isArray(all) ? all : [];
+				// Mirror the server: apply lookback + type filters before paging.
+				// The type filter matters beyond bookkeeping now that CUE rows are
+				// served from `cue_events` (CUE-HISTORY-02): the handler skips that
+				// query entirely when 'CUE' is absent from `types`, so a panel that
+				// stopped sending the array would get Cue rows it asked to hide.
+				const lookback = options?.lookbackHours ?? null;
+				const cutoff =
+					lookback !== null && lookback > 0 ? Date.now() - lookback * 60 * 60 * 1000 : 0;
+				const typeSet = options?.types ? new Set(options.types) : null;
+				const filtered = arr.filter(
+					(e: { timestamp?: number; type?: string }) =>
+						(cutoff === 0 || (e.timestamp ?? 0) >= cutoff) &&
+						(!typeSet || typeSet.has(e.type ?? ''))
+				);
+				const offset = options?.pagination?.offset ?? 0;
+				const limit = options?.pagination?.limit ?? 100;
+				const slice = filtered.slice(offset, offset + limit);
+				return {
+					entries: slice,
+					total: filtered.length,
+					limit,
+					offset,
+					hasMore: offset + limit < filtered.length,
+				};
+			}
+		);
 		(
 			window as unknown as {
 				maestro: {
 					history: {
 						getAll: typeof mockHistoryGetAll;
+						getAllPaginated: typeof getAllPaginatedAdapter;
 						delete: typeof mockHistoryDelete;
 						update: typeof mockHistoryUpdate;
+						getGraphData: ReturnType<typeof vi.fn>;
+						getOffsetForTimestamp: ReturnType<typeof vi.fn>;
 					};
 					settings: {
 						get: ReturnType<typeof vi.fn>;
@@ -209,8 +230,24 @@ describe('HistoryPanel', () => {
 		).maestro = {
 			history: {
 				getAll: mockHistoryGetAll,
+				getAllPaginated: getAllPaginatedAdapter,
 				delete: mockHistoryDelete,
 				update: mockHistoryUpdate,
+				// Accepts (sessionId, bucketCount, lookbackHours, sharedContext)
+				// - the lookback is keyed into the cache server-side.
+				getGraphData: vi.fn().mockResolvedValue({
+					buckets: Array.from({ length: 24 }, () => ({ auto: 0, user: 0, cue: 0 })),
+					bucketCount: 24,
+					earliestTimestamp: Date.now() - 24 * 60 * 60 * 1000,
+					latestTimestamp: Date.now(),
+					totalCount: 0,
+					autoCount: 0,
+					userCount: 0,
+					cueCount: 0,
+					hostCounts: {},
+					cached: false,
+				}),
+				getOffsetForTimestamp: vi.fn().mockResolvedValue(0),
 			},
 			settings: {
 				get: vi.fn().mockResolvedValue(undefined),
@@ -221,7 +258,7 @@ describe('HistoryPanel', () => {
 			},
 		};
 
-		consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		consoleErrorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
@@ -379,7 +416,9 @@ describe('HistoryPanel', () => {
 
 			await waitFor(() => {
 				// Find the success indicator with validated title
-				const indicator = screen.getByTitle('Task completed successfully and human-validated');
+				const indicator = screen.getByTitle(
+					'Task completed successfully, and you marked it as checked'
+				);
 				expect(indicator).toBeInTheDocument();
 				// Should contain an SVG with two polylines (double check)
 				const svg = indicator.querySelector('svg');
@@ -425,8 +464,12 @@ describe('HistoryPanel', () => {
 			const autoFilter = screen.getByRole('button', { name: /AUTO/i });
 			fireEvent.click(autoFilter);
 
+			// Empty-state copy now references the loaded window since the
+			// list is paginated.
 			await waitFor(() => {
-				expect(screen.getByText('No entries match the selected filters.')).toBeInTheDocument();
+				expect(
+					screen.getByText('No entries match the selected filters in the loaded window.')
+				).toBeInTheDocument();
 			});
 		});
 
@@ -456,6 +499,8 @@ describe('HistoryPanel', () => {
 			const searchInput = screen.getByPlaceholderText('Filter history...');
 			fireEvent.change(searchInput, { target: { value: 'nonexistent' } });
 
+			// Empty-state copy references the loaded window since search
+			// only filters loaded pages client-side.
 			await waitFor(() => {
 				expect(screen.getByText(/No entries match "nonexistent"/)).toBeInTheDocument();
 			});
@@ -466,8 +511,14 @@ describe('HistoryPanel', () => {
 
 			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
 
+			// Error originates inside the shared pagination hook now -
+			// `Initial page load failed` is its standard log.
 			await waitFor(() => {
-				expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to load history:', expect.any(Error));
+				expect(consoleErrorSpy).toHaveBeenCalledWith(
+					'Initial page load failed',
+					'useHistoryPagination',
+					expect.any(Error)
+				);
 				expect(screen.getByText(/No history yet/)).toBeInTheDocument();
 			});
 		});
@@ -568,6 +619,96 @@ describe('HistoryPanel', () => {
 
 			await waitFor(() => {
 				expect(screen.getByText('Cue triggered task')).toBeInTheDocument();
+			});
+		});
+
+		// CUE rows are no longer in the agent's JSONL file - the main process
+		// reads them from `cue_events` and SKIPS that query entirely when 'CUE'
+		// is absent from the request's `types` (CUE-HISTORY-02). So the pill is
+		// only half a client-side filter now; these cover the server half.
+		it('sends the CUE type to the main process so Cue rows are queried at all', async () => {
+			useSettingsStore.setState({
+				encoreFeatures: {
+					directorNotes: false,
+					usageStats: false,
+					symphony: false,
+					maestroCue: true,
+				},
+			});
+			mockHistoryGetAll.mockResolvedValue([]);
+			const getAllPaginated = (
+				window as unknown as {
+					maestro: { history: { getAllPaginated: ReturnType<typeof vi.fn> } };
+				}
+			).maestro.history.getAllPaginated;
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(getAllPaginated).toHaveBeenCalled();
+			});
+			const typesOnLoad = getAllPaginated.mock.calls[getAllPaginated.mock.calls.length - 1][0]
+				.types as string[];
+			// AGENT is rc's cross-agent consult type; it rides along with the
+			// always-on types, so the set is one wider than main's was.
+			expect([...typesOnLoad].sort()).toEqual(['AGENT', 'AUTO', 'CUE', 'USER']);
+
+			// Toggling the pill off must drop CUE from the request, not merely
+			// hide already-fetched rows.
+			fireEvent.click(screen.getByRole('button', { name: /CUE/i }));
+
+			await waitFor(() => {
+				const types = getAllPaginated.mock.calls[getAllPaginated.mock.calls.length - 1][0]
+					.types as string[];
+				expect(types).not.toContain('CUE');
+				expect([...types].sort()).toEqual(['AGENT', 'AUTO', 'USER']);
+			});
+		});
+
+		it('keeps the empty state honest for a Cue-only agent when CUE is toggled off', async () => {
+			// An agent whose activity is entirely Cue runs has no JSONL entries
+			// at all, so the server returns zero rows once CUE leaves `types`.
+			// The empty state must blame the filter, not claim the agent has
+			// never run anything.
+			useSettingsStore.setState({
+				encoreFeatures: {
+					directorNotes: false,
+					usageStats: false,
+					symphony: false,
+					maestroCue: true,
+				},
+			});
+			mockHistoryGetAll.mockResolvedValue([
+				createMockEntry({
+					id: 'cue-only-1',
+					type: 'CUE',
+					summary: 'Nightly sweep finished',
+					cueTriggerName: 'nightly',
+					cueEventType: 'time.interval',
+				}),
+			]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Nightly sweep finished')).toBeInTheDocument();
+			});
+
+			fireEvent.click(screen.getByRole('button', { name: /CUE/i }));
+
+			await waitFor(() => {
+				expect(
+					screen.getByText('No entries match the selected filters in the loaded window.')
+				).toBeInTheDocument();
+			});
+			expect(screen.queryByText(/No history yet/)).not.toBeInTheDocument();
+
+			// And back on: the rows return from the server, not from a stale
+			// client-side cache.
+			fireEvent.click(screen.getByRole('button', { name: /CUE/i }));
+
+			await waitFor(() => {
+				expect(screen.getByText('Nightly sweep finished')).toBeInTheDocument();
 			});
 		});
 
@@ -687,6 +828,177 @@ describe('HistoryPanel', () => {
 			});
 		});
 
+		it('should filter by hostname', async () => {
+			const entry1 = createMockEntry({
+				id: 'e1',
+				summary: 'Local machine task',
+				hostname: 'macbook-local',
+			});
+			const entry2 = createMockEntry({
+				id: 'e2',
+				summary: 'Remote server task',
+				hostname: 'prod-server-01',
+			});
+			mockHistoryGetAll.mockResolvedValue([entry1, entry2]);
+
+			const { container } = render(
+				<HistoryPanel session={createMockSession()} theme={mockTheme} />
+			);
+
+			await waitFor(() => {
+				expect(screen.getByText('Local machine task')).toBeInTheDocument();
+				expect(screen.getByText('Remote server task')).toBeInTheDocument();
+			});
+
+			// Open search
+			const listContainer = container.querySelector('[tabIndex="0"]');
+			if (listContainer) {
+				fireEvent.keyDown(listContainer, { key: 'f', metaKey: true });
+			}
+
+			const searchInput = await screen.findByPlaceholderText('Filter history...');
+			fireEvent.change(searchInput, { target: { value: 'prod-server' } });
+
+			await waitFor(() => {
+				expect(screen.queryByText('Local machine task')).not.toBeInTheDocument();
+				expect(screen.getByText('Remote server task')).toBeInTheDocument();
+			});
+		});
+
+		it('should hide source picker when only one host is present', async () => {
+			const entry = createMockEntry({ id: 'e1', summary: 'Local only' });
+			mockHistoryGetAll.mockResolvedValue([entry]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Local only')).toBeInTheDocument();
+			});
+
+			expect(screen.queryByText('All Sources')).not.toBeInTheDocument();
+		});
+
+		it('should show source picker and narrow list when a host is selected', async () => {
+			const localEntry = createMockEntry({
+				id: 'e1',
+				summary: 'Local task',
+			});
+			const remoteEntry = createMockEntry({
+				id: 'e2',
+				summary: 'Remote task',
+				hostname: 'pedopswat',
+			});
+			mockHistoryGetAll.mockResolvedValue([localEntry, remoteEntry]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Local task')).toBeInTheDocument();
+				expect(screen.getByText('Remote task')).toBeInTheDocument();
+			});
+
+			// Default trigger label
+			const trigger = await screen.findByText('All Sources');
+			fireEvent.click(trigger);
+
+			// Popover renders host names with a parenthesized count, e.g.
+			// "pedopswat (1)". The entry's hostname pill in the footer
+			// renders just the bare host name, so this matcher is unique
+			// to the popover row.
+			const remoteOption = await screen.findByText(/pedopswat \(\d+\)/);
+			fireEvent.click(remoteOption);
+
+			await waitFor(() => {
+				expect(screen.queryByText('Local task')).not.toBeInTheDocument();
+				expect(screen.getByText('Remote task')).toBeInTheDocument();
+			});
+		});
+
+		it('should hide the sender picker when every entry came from the desktop', async () => {
+			const entry = createMockEntry({ id: 'e1', summary: 'Desktop only' });
+			mockHistoryGetAll.mockResolvedValue([entry]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Desktop only')).toBeInTheDocument();
+			});
+
+			expect(screen.queryByText('All Senders')).not.toBeInTheDocument();
+		});
+
+		it('should show the sender picker and narrow the list when an account is selected', async () => {
+			const desktopEntry = createMockEntry({ id: 'e1', summary: 'Desktop task' });
+			const webEntry = createMockEntry({
+				id: 'e2',
+				summary: 'Phone task',
+				userName: 'pedram',
+				userDisplayName: 'Pedram A',
+			});
+			mockHistoryGetAll.mockResolvedValue([desktopEntry, webEntry]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Desktop task')).toBeInTheDocument();
+				expect(screen.getByText('Phone task')).toBeInTheDocument();
+			});
+
+			const trigger = await screen.findByText('All Senders');
+			fireEvent.click(trigger);
+
+			// The popover row carries a parenthesized count; the footer pill on
+			// the entry renders the bare display name, so this matcher is unique
+			// to the popover.
+			const webOption = await screen.findByText(/Pedram A \(\d+\)/);
+			fireEvent.click(webOption);
+
+			await waitFor(() => {
+				expect(screen.queryByText('Desktop task')).not.toBeInTheDocument();
+				expect(screen.getByText('Phone task')).toBeInTheDocument();
+			});
+		});
+
+		it('should match the sender username and display name in search', async () => {
+			const desktopEntry = createMockEntry({ id: 'e1', summary: 'Desktop task' });
+			const webEntry = createMockEntry({
+				id: 'e2',
+				summary: 'Phone task',
+				userName: 'pedram',
+				userDisplayName: 'Pedram A',
+			});
+			mockHistoryGetAll.mockResolvedValue([desktopEntry, webEntry]);
+
+			const { container } = render(
+				<HistoryPanel session={createMockSession()} theme={mockTheme} />
+			);
+
+			await waitFor(() => {
+				expect(screen.getByText('Desktop task')).toBeInTheDocument();
+			});
+
+			const listContainer = container.querySelector('[tabIndex="0"]');
+			if (listContainer) {
+				fireEvent.keyDown(listContainer, { key: 'f', metaKey: true });
+			}
+
+			const searchInput = await screen.findByPlaceholderText('Filter history...');
+			fireEvent.change(searchInput, { target: { value: 'pedram' } });
+
+			await waitFor(() => {
+				expect(screen.queryByText('Desktop task')).not.toBeInTheDocument();
+				expect(screen.getByText('Phone task')).toBeInTheDocument();
+			});
+
+			// The display name is what the pill draws, so typing that has to
+			// find the same row.
+			fireEvent.change(searchInput, { target: { value: 'Pedram A' } });
+
+			await waitFor(() => {
+				expect(screen.getByText('Phone task')).toBeInTheDocument();
+			});
+		});
+
 		it('should be case-insensitive in search', async () => {
 			const entry = createMockEntry({ summary: 'UPPERCASE Summary' });
 			mockHistoryGetAll.mockResolvedValue([entry]);
@@ -788,7 +1100,7 @@ describe('HistoryPanel', () => {
 			// Check that the result count is shown
 			await waitFor(() => {
 				// The component shows "{count} result" or "{count} results"
-				const resultCountDiv = container.querySelector('.text-right.text-\\[10px\\]');
+				const resultCountDiv = container.querySelector('.text-right.text-2xs');
 				expect(resultCountDiv).toBeInTheDocument();
 				expect(resultCountDiv?.textContent).toMatch(/2 results?/);
 			});
@@ -826,6 +1138,261 @@ describe('HistoryPanel', () => {
 	});
 
 	// ===== KEYBOARD NAVIGATION =====
+	// The Cue rollup runs in the MAIN process, because the panel only ever holds
+	// a page of entries and grouping that would report a page's worth of runs for
+	// a trigger that ran thousands of times. So the panel's whole job here is to
+	// forward the setting and to reset the window when it flips.
+	// CUE-HISTORY-03 task #3.
+	describe('groupCueEntries', () => {
+		// The store's default is ON, and these tests flip it. Restore it or the
+		// flip leaks into every later test in the file (see the same trap in
+		// settingsStore.test.ts's partial `resetStore`).
+		afterEach(() => {
+			useSettingsStore.setState({ groupCueEntries: true });
+		});
+
+		const paginatedCalls = () =>
+			(
+				window as unknown as {
+					maestro: { history: { getAllPaginated: { mock: { calls: unknown[][] } } } };
+				}
+			).maestro.history.getAllPaginated.mock.calls;
+
+		it('forwards the setting to the paginated read', async () => {
+			useSettingsStore.setState({ groupCueEntries: true });
+			mockHistoryGetAll.mockResolvedValue([]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => expect(paginatedCalls().length).toBeGreaterThan(0));
+			expect((paginatedCalls()[0][0] as { groupCue?: boolean }).groupCue).toBe(true);
+		});
+
+		it('asks for ungrouped rows when the user turns grouping off', async () => {
+			useSettingsStore.setState({ groupCueEntries: false });
+			mockHistoryGetAll.mockResolvedValue([]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => expect(paginatedCalls().length).toBeGreaterThan(0));
+			expect((paginatedCalls()[0][0] as { groupCue?: boolean }).groupCue).toBe(false);
+		});
+
+		it('renders a collapsed row with its trigger name and run count', async () => {
+			useSettingsStore.setState({
+				groupCueEntries: true,
+				encoreFeatures: {
+					directorNotes: false,
+					usageStats: false,
+					symphony: false,
+					maestroCue: true,
+				},
+			});
+			mockHistoryGetAll.mockResolvedValue([
+				createMockEntry({
+					id: 'cue-newest',
+					type: 'CUE',
+					summary: 'Bus drained 4 commands',
+					cueTriggerName: 'Pedsidian-Command-Bus',
+					cueEventType: 'file.changed',
+					cueGroup: {
+						key: 'Pedsidian-Command-Bus',
+						label: 'Pedsidian-Command-Bus',
+						runCount: 1382,
+						failureCount: 3,
+					},
+				}),
+			]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => {
+				expect(screen.getByText('Pedsidian-Command-Bus')).toBeInTheDocument();
+			});
+			expect(screen.getByText('1,382 runs')).toBeInTheDocument();
+			expect(screen.getByText('3 failed')).toBeInTheDocument();
+		});
+	});
+
+	// CUE-HISTORY-03 task #5. Grouping narrows the list; so do the pills and
+	// the search box. These cover the two ways that combination can lose a run.
+	//
+	// The pill is the easy half: 'CUE' leaving `types` makes the main process
+	// skip the Cue query outright, grouped or not.
+	//
+	// Search is the half that is easy to get wrong. A collapsed row carries the
+	// text of exactly ONE run (its newest), so a term matching any earlier run
+	// in the group would match nothing and the row would vanish - hiding every
+	// run it stood for. The panel therefore turns grouping OFF for the duration
+	// of a search, so the matching run is on screen as itself.
+	describe('grouped Cue rows under the filter pills and search', () => {
+		afterEach(() => {
+			useSettingsStore.setState({ groupCueEntries: true });
+		});
+
+		const CUE_ENCORE = {
+			directorNotes: false,
+			usageStats: false,
+			symphony: false,
+			maestroCue: true,
+		};
+
+		// Two runs of one chatty trigger. Neither summary contains the trigger
+		// name, and only the OLDER one mentions the term the tests search for -
+		// which is exactly the case a collapsed row cannot answer by itself.
+		const newestRun = () =>
+			createMockEntry({
+				id: 'cue-newest',
+				type: 'CUE',
+				timestamp: 3000,
+				summary: 'Bus drained 4 commands',
+				cueTriggerName: 'Pedsidian-Command-Bus',
+				cueEventType: 'file.changed',
+			});
+		const olderRun = () =>
+			createMockEntry({
+				id: 'cue-older',
+				type: 'CUE',
+				timestamp: 1000,
+				summary: 'Bus hit a timeout',
+				success: false,
+				cueTriggerName: 'Pedsidian-Command-Bus',
+				cueEventType: 'file.changed',
+			});
+
+		const paginatedMock = () =>
+			(
+				window as unknown as {
+					maestro: { history: { getAllPaginated: ReturnType<typeof vi.fn> } };
+				}
+			).maestro.history.getAllPaginated;
+
+		const lastRequest = () => {
+			const calls = paginatedMock().mock.calls;
+			return calls[calls.length - 1][0] as { groupCue?: boolean; types?: string[] };
+		};
+
+		/**
+		 * Stands in for the main process's own branch: `groupCue` picks the
+		 * rollup over the per-run read, and 'CUE' missing from `types` skips
+		 * the Cue query entirely. The shared adapter in `beforeEach` cannot do
+		 * this - it slices one fixed array - and the whole point here is that
+		 * the two reads return DIFFERENT rows.
+		 */
+		const installSplitRead = () => {
+			const read = vi.fn(async (options?: { groupCue?: boolean; types?: string[] }) => {
+				const wantsCue = !options?.types || options.types.includes('CUE');
+				const entries = !wantsCue
+					? []
+					: options?.groupCue
+						? [
+								{
+									...newestRun(),
+									cueGroup: {
+										key: 'Pedsidian-Command-Bus',
+										label: 'Pedsidian-Command-Bus',
+										runCount: 2,
+										failureCount: 1,
+									},
+								},
+							]
+						: [newestRun(), olderRun()];
+				return { entries, total: entries.length, limit: 100, offset: 0, hasMore: false };
+			});
+			(
+				window as unknown as {
+					maestro: { history: { getAllPaginated: unknown } };
+				}
+			).maestro.history.getAllPaginated = read;
+			return read;
+		};
+
+		const typeInSearch = (term: string) =>
+			fireEvent.change(screen.getByPlaceholderText('Filter history...'), {
+				target: { value: term },
+			});
+
+		it('surfaces a run inside a collapsed group when the search matches it', async () => {
+			useSettingsStore.setState({ groupCueEntries: true, encoreFeatures: CUE_ENCORE });
+			useUIStore.setState({ historySearchFilterOpen: true });
+			installSplitRead();
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			// Collapsed: the older run's text is nowhere on screen.
+			await waitFor(() => expect(screen.getByText('2 runs')).toBeInTheDocument());
+			expect(screen.queryByText('Bus hit a timeout')).not.toBeInTheDocument();
+
+			typeInSearch('timeout');
+
+			await waitFor(() => {
+				expect(screen.getByText('Bus hit a timeout')).toBeInTheDocument();
+			});
+			// And the row it was hiding behind is gone, not sitting beside it.
+			expect(screen.queryByText('2 runs')).not.toBeInTheDocument();
+		});
+
+		it('asks the main process for ungrouped rows while a term is typed, and groups again when it is cleared', async () => {
+			useSettingsStore.setState({ groupCueEntries: true, encoreFeatures: CUE_ENCORE });
+			useUIStore.setState({ historySearchFilterOpen: true });
+			mockHistoryGetAll.mockResolvedValue([]);
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+
+			await waitFor(() => expect(paginatedMock()).toHaveBeenCalled());
+			expect(lastRequest().groupCue).toBe(true);
+
+			typeInSearch('timeout');
+			await waitFor(() => expect(lastRequest().groupCue).toBe(false));
+
+			// Typing MORE must not re-fetch: the read only cares whether a term
+			// exists, so the window is not reset on every keystroke.
+			const callsWhileSearching = paginatedMock().mock.calls.length;
+			typeInSearch('timeout error');
+			await waitFor(() =>
+				expect(screen.getByPlaceholderText('Filter history...')).toHaveValue('timeout error')
+			);
+			expect(paginatedMock().mock.calls.length).toBe(callsWhileSearching);
+
+			typeInSearch('');
+			await waitFor(() => expect(lastRequest().groupCue).toBe(true));
+		});
+
+		it('matches a Cue row by its trigger name, which is all a collapsed row shows', async () => {
+			useSettingsStore.setState({ groupCueEntries: true, encoreFeatures: CUE_ENCORE });
+			useUIStore.setState({ historySearchFilterOpen: true });
+			installSplitRead();
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+			await waitFor(() => expect(screen.getByText('2 runs')).toBeInTheDocument());
+
+			// Neither run's summary contains 'Pedsidian'.
+			typeInSearch('Pedsidian');
+
+			await waitFor(() => {
+				expect(screen.getByText('Bus drained 4 commands')).toBeInTheDocument();
+			});
+			expect(screen.getByText('Bus hit a timeout')).toBeInTheDocument();
+		});
+
+		it('hides grouped rows entirely when the CUE pill is toggled off', async () => {
+			useSettingsStore.setState({ groupCueEntries: true, encoreFeatures: CUE_ENCORE });
+			installSplitRead();
+
+			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
+			await waitFor(() => expect(screen.getByText('Pedsidian-Command-Bus')).toBeInTheDocument());
+
+			fireEvent.click(screen.getByRole('button', { name: /CUE/i }));
+
+			await waitFor(() => {
+				expect(screen.queryByText('Pedsidian-Command-Bus')).not.toBeInTheDocument();
+			});
+			expect(screen.queryByText('2 runs')).not.toBeInTheDocument();
+			// Server half: the rollup must not even be asked for.
+			expect(lastRequest().types).not.toContain('CUE');
+		});
+	});
+
 	describe('keyboard navigation', () => {
 		it('should navigate with ArrowDown', async () => {
 			const entries = [
@@ -904,6 +1471,41 @@ describe('HistoryPanel', () => {
 				expect(screen.getByTestId('history-detail-modal')).toBeInTheDocument();
 				expect(screen.getByTestId('modal-entry-summary')).toHaveTextContent('Detail entry');
 			});
+		});
+
+		it('should jump to the entry session with Cmd+Enter instead of opening the modal', async () => {
+			const onOpenSessionAsTab = vi.fn();
+			const entry = createMockEntry({
+				summary: 'Jump entry',
+				agentSessionId: 'abc12345-def-789',
+				sessionName: 'Jump Session',
+			});
+			mockHistoryGetAll.mockResolvedValue([entry]);
+
+			const { container } = render(
+				<HistoryPanel
+					session={createMockSession()}
+					theme={mockTheme}
+					onOpenSessionAsTab={onOpenSessionAsTab}
+				/>
+			);
+
+			await waitFor(() => {
+				expect(screen.getByText('Jump entry')).toBeInTheDocument();
+			});
+
+			const listContainer = container.querySelector('[tabIndex="0"]');
+			fireEvent.keyDown(listContainer!, { key: 'ArrowDown' });
+			fireEvent.keyDown(listContainer!, { key: 'Enter', metaKey: true });
+
+			// Keyboard jump and pill click are the same restore, so both hand over
+			// the recorded name the tab would otherwise come back without.
+			expect(onOpenSessionAsTab).toHaveBeenCalledWith(
+				'abc12345-def-789',
+				'/test/project',
+				'Jump Session'
+			);
+			expect(screen.queryByTestId('history-detail-modal')).not.toBeInTheDocument();
 		});
 
 		it('should clear selection with Escape when modal is closed', async () => {
@@ -1063,6 +1665,7 @@ describe('HistoryPanel', () => {
 			await waitFor(() => {
 				expect(consoleErrorSpy).toHaveBeenCalledWith(
 					'Failed to delete history entry:',
+					undefined,
 					expect.any(Error)
 				);
 			});
@@ -1228,7 +1831,11 @@ describe('HistoryPanel', () => {
 
 			fireEvent.click(screen.getByText('ABC12345'));
 
-			expect(onOpenSessionAsTab).toHaveBeenCalledWith('abc12345-def-789', '/test/project');
+			expect(onOpenSessionAsTab).toHaveBeenCalledWith(
+				'abc12345-def-789',
+				'/test/project',
+				undefined
+			);
 		});
 
 		it('should render summary with truncation', async () => {
@@ -1413,17 +2020,19 @@ describe('HistoryPanel', () => {
 
 			const { rerender } = render(<HistoryPanel session={session1} theme={mockTheme} />);
 
+			// Pagination is keyed on sessionId via the hook's loader-identity
+			// reset; the rendered entry confirms the load fired correctly.
 			await waitFor(() => {
-				expect(mockHistoryGetAll).toHaveBeenCalledWith('/project1', 'session-1', undefined);
+				expect(screen.getByText('Entry from session 1')).toBeInTheDocument();
 			});
 
-			// Change session
+			// Change session - new loadPage identity triggers a fresh fetch.
 			mockHistoryGetAll.mockResolvedValue([createMockEntry({ summary: 'Entry from session 2' })]);
 
 			rerender(<HistoryPanel session={session2} theme={mockTheme} />);
 
 			await waitFor(() => {
-				expect(mockHistoryGetAll).toHaveBeenCalledWith('/project2', 'session-2', undefined);
+				expect(screen.getByText('Entry from session 2')).toBeInTheDocument();
 			});
 		});
 	});
@@ -1510,8 +2119,11 @@ describe('HistoryPanel', () => {
 			});
 		});
 
-		it('should limit entries to MAX_HISTORY_IN_MEMORY', async () => {
-			// Create 600 entries (more than 500 limit)
+		it('should render all entries returned by getAll without an in-memory cap', async () => {
+			// The renderer no longer caps entries - the per-session disk file
+			// already bounds the dataset (MAX_ENTRIES_PER_SESSION=5000), and
+			// the activity graph data is fetched separately from a cached
+			// server endpoint that covers the full history.
 			const entries = Array.from({ length: 600 }, (_, i) =>
 				createMockEntry({ id: `entry-${i}`, summary: `Entry ${i}` })
 			);
@@ -1519,8 +2131,6 @@ describe('HistoryPanel', () => {
 
 			render(<HistoryPanel session={createMockSession()} theme={mockTheme} />);
 
-			// Should display entries (virtualized) with the first one visible
-			// The MAX_HISTORY_IN_MEMORY limit (500) is applied when storing entries
 			await waitFor(() => {
 				expect(screen.getByText('Entry 0')).toBeInTheDocument();
 			});

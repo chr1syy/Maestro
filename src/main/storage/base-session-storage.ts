@@ -6,15 +6,15 @@
  * match preview extraction, eliminating duplication across agents.
  *
  * Subclasses must implement:
- * - listSessions() — agent-specific session discovery and metadata parsing
- * - readSessionMessages() — agent-specific message loading and normalization
- * - getSessionPath() — agent-specific path resolution
- * - deleteMessagePair() — agent-specific message deletion
- * - getSearchableMessages() — load messages for search in agent-specific format
+ * - listSessions() - agent-specific session discovery and metadata parsing
+ * - readSessionMessages() - agent-specific message loading and normalization
+ * - getSessionPath() - agent-specific path resolution
+ * - deleteMessagePair() - agent-specific message deletion
+ * - getSearchableMessages() - load messages for search in agent-specific format
  *
  * Subclasses inherit:
- * - listSessionsPaginated() — cursor-based pagination over listSessions()
- * - searchSessions() — full-text search with configurable mode
+ * - listSessionsPaginated() - cursor-based pagination over listSessions()
+ * - searchSessions() - full-text search with configurable mode
  */
 
 import type { ToolType, SshRemoteConfig } from '../../shared/types';
@@ -257,20 +257,23 @@ export abstract class BaseSessionStorage implements AgentSessionStorage {
 	}
 
 	/**
-	 * Extract a preview snippet around a search match with ±60 character context.
+	 * Extract a preview snippet around a search match. Asymmetric by default:
+	 * short lead, long trail, so the matched keyword stays visible when the
+	 * UI truncates the preview with `text-overflow: ellipsis`.
 	 */
 	static extractMatchPreview(
 		originalText: string,
 		lowerText: string,
 		searchLower: string,
 		queryLength: number,
-		contextChars: number = 60
+		leadChars: number = 20,
+		trailChars: number = 120
 	): string {
 		const idx = lowerText.indexOf(searchLower);
 		if (idx < 0) return '';
 
-		const start = Math.max(0, idx - contextChars);
-		const end = Math.min(originalText.length, idx + queryLength + contextChars);
+		const start = Math.max(0, idx - leadChars);
+		const end = Math.min(originalText.length, idx + queryLength + trailChars);
 		return (
 			(start > 0 ? '...' : '') +
 			originalText.slice(start, end) +

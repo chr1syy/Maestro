@@ -1,5 +1,5 @@
 /**
- * useLiveMode — extracted from App.tsx (Tier 3B)
+ * useLiveMode - extracted from App.tsx (Tier 3B)
  *
  * Manages the global live mode (web interface for all sessions):
  *   - isLiveMode state (whether web server is running)
@@ -10,7 +10,8 @@
  * Calls IPC: window.maestro.tunnel, window.maestro.live
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import { logger } from '../../utils/logger';
 
 // ============================================================================
 // Return type
@@ -31,9 +32,55 @@ export interface UseLiveModeReturn {
 // Hook implementation
 // ============================================================================
 
-export function useLiveMode(): UseLiveModeReturn {
+export function useLiveMode(autoStart = false): UseLiveModeReturn {
 	const [isLiveMode, setIsLiveMode] = useState(false);
 	const [webInterfaceUrl, setWebInterfaceUrl] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (!autoStart) return;
+
+		let cancelled = false;
+		const enableLiveMode = async () => {
+			try {
+				const existingUrl = await window.maestro.live.getDashboardUrl();
+				if (cancelled) return;
+				if (existingUrl) {
+					setIsLiveMode(true);
+					setWebInterfaceUrl(existingUrl);
+					return;
+				}
+
+				const result = await window.maestro.live.startServer();
+				if (cancelled) {
+					// This effect initiated the server, so disabling auto-start or
+					// unmounting before it finishes must not leave an ownerless process.
+					if (result.success) {
+						try {
+							await window.maestro.live.stopServer();
+						} catch (error) {
+							logger.error('[useLiveMode] Failed to stop cancelled auto-start:', undefined, error);
+						}
+					}
+					return;
+				}
+				if (result.success && result.url) {
+					setIsLiveMode(true);
+					setWebInterfaceUrl(result.url);
+				} else {
+					logger.error('[useLiveMode] Failed to auto-start server:', undefined, result.error);
+				}
+			} catch (error) {
+				if (!cancelled) {
+					logger.error('[useLiveMode] Auto-start failed:', undefined, error);
+				}
+			}
+		};
+
+		void enableLiveMode();
+		return () => {
+			cancelled = true;
+		};
+	}, [autoStart]);
 
 	const toggleGlobalLive = useCallback(async () => {
 		try {
@@ -45,7 +92,11 @@ export function useLiveMode(): UseLiveModeReturn {
 				try {
 					await (window as any).maestro.live.disableAll();
 				} catch (disableErr) {
-					console.error('[toggleGlobalLive] disableAll failed after tunnel stop:', disableErr);
+					logger.error(
+						'[toggleGlobalLive] disableAll failed after tunnel stop:',
+						undefined,
+						disableErr
+					);
 				}
 			} else {
 				// Turn on - start the server and get the URL
@@ -54,13 +105,28 @@ export function useLiveMode(): UseLiveModeReturn {
 					setIsLiveMode(true);
 					setWebInterfaceUrl(result.url);
 				} else {
-					console.error('[toggleGlobalLive] Failed to start server:', result.error);
+					logger.error('[toggleGlobalLive] Failed to start server:', undefined, result.error);
 				}
 			}
 		} catch (error) {
-			console.error('[toggleGlobalLive] Error:', error);
+			logger.error('[toggleGlobalLive] Error:', undefined, error);
 		}
 	}, [isLiveMode]);
+
+	// Moving between networks (WiFi to hotspot, dock to undock) changes the LAN
+	// address the URL and QR code are built from. The server keeps running on
+	// 0.0.0.0, so main just hands us the new address and the panel redraws -
+	// no restart, and the token stays the same.
+	useEffect(() => {
+		const unsubscribe = (window as any).maestro?.live?.onUrlChanged?.(
+			({ url }: { url: string }) => {
+				// Only while the panel has a URL to show: with Live off the
+				// server is CLI-only and its address is not user-facing.
+				setWebInterfaceUrl((prev) => (prev ? url : prev));
+			}
+		);
+		return () => unsubscribe?.();
+	}, []);
 
 	const restartWebServer = useCallback(async (): Promise<string | null> => {
 		if (!isLiveMode) return null;
@@ -72,17 +138,17 @@ export function useLiveMode(): UseLiveModeReturn {
 				setWebInterfaceUrl(result.url);
 				return result.url;
 			} else {
-				// Server stopped but failed to restart — update state to reflect stopped server
+				// Server stopped but failed to restart - update state to reflect stopped server
 				setIsLiveMode(false);
 				setWebInterfaceUrl(null);
-				console.error('[restartWebServer] Failed to restart server:', result.error);
+				logger.error('[restartWebServer] Failed to restart server:', undefined, result.error);
 				return null;
 			}
 		} catch (error) {
-			// stopServer may have succeeded — ensure state reflects server is down
+			// stopServer may have succeeded - ensure state reflects server is down
 			setIsLiveMode(false);
 			setWebInterfaceUrl(null);
-			console.error('[restartWebServer] Error:', error);
+			logger.error('[restartWebServer] Error:', undefined, error);
 			return null;
 		}
 	}, [isLiveMode]);

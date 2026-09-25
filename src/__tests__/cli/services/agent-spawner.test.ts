@@ -23,6 +23,7 @@ import { EventEmitter } from 'events';
 const mockSpawn = vi.fn();
 const mockStdin = {
 	end: vi.fn(),
+	write: vi.fn(),
 };
 const mockStdout = new EventEmitter();
 const mockStderr = new EventEmitter();
@@ -32,15 +33,72 @@ const mockChild = Object.assign(new EventEmitter(), {
 	stderr: mockStderr,
 });
 
+/**
+ * How the harness answers a `which` / `where` PATH probe.
+ *
+ * Every LOCAL agent spawn now resolves its binary before exec'ing it (#1608),
+ * so a cold cache means one probe child in front of the agent child. Tests
+ * assert on the AGENT spawn, so the probe is answered here and never reaches
+ * `mockSpawn` - which keeps `mockSpawn.mock.calls[0]` the agent spawn for every
+ * existing assertion in this file.
+ *
+ * Set to `null` to fall through to `mockSpawn` instead: the detection tests
+ * drive the probe themselves and assert on what it resolved.
+ */
+type PathProbeResolver = ((binary: string) => string | undefined) | null;
+const DEFAULT_PATH_PROBE: PathProbeResolver = (binary) => `/usr/local/bin/${binary}`;
+let pathProbeResolver: PathProbeResolver = DEFAULT_PATH_PROBE;
+
+/** Commands `getWhichCommand()` can return, on either platform. */
+const PATH_PROBE_COMMANDS = new Set(['which', 'where']);
+
+/**
+ * A short-lived child that answers one PATH probe on the next tick. The probe's
+ * listeners are attached synchronously after `spawn()` returns, so the answer
+ * cannot be emitted inline.
+ */
+function makePathProbeChild(binary: string) {
+	const stdout = new EventEmitter();
+	const child = Object.assign(new EventEmitter(), {
+		stdin: { end: vi.fn(), write: vi.fn() },
+		stdout,
+		stderr: new EventEmitter(),
+	});
+	const resolved = pathProbeResolver?.(binary);
+	setTimeout(() => {
+		if (resolved) {
+			stdout.emit('data', Buffer.from(`${resolved}\n`));
+			child.emit('close', 0);
+		} else {
+			// Non-zero exit is how `which`/`where` reports "not on PATH".
+			child.emit('close', 1);
+		}
+	}, 0);
+	return child;
+}
+
+function routeSpawn(...args: unknown[]) {
+	const [command, spawnArgs] = args as [unknown, unknown];
+	if (
+		pathProbeResolver &&
+		typeof command === 'string' &&
+		PATH_PROBE_COMMANDS.has(command) &&
+		Array.isArray(spawnArgs)
+	) {
+		return makePathProbeChild(String(spawnArgs[0]));
+	}
+	return mockSpawn(...args);
+}
+
 // Mock child_process before imports
 vi.mock('child_process', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('child_process')>();
 	return {
 		...actual,
-		spawn: (...args: unknown[]) => mockSpawn(...args),
+		spawn: (...args: unknown[]) => routeSpawn(...args),
 		default: {
 			...actual,
-			spawn: (...args: unknown[]) => mockSpawn(...args),
+			spawn: (...args: unknown[]) => routeSpawn(...args),
 		},
 	};
 });
@@ -53,6 +111,12 @@ vi.mock('fs', async () => {
 		readFileSync: vi.fn(),
 		writeFileSync: vi.fn(),
 		existsSync: vi.fn(() => false),
+		// Default to "maestro-p not found" so Claude spawns resolve to API unless a
+		// test opts into the TUI by making this succeed. Mirrors production, where
+		// getCliMaestroPBinPath()/fileExists gate the interactive path.
+		accessSync: vi.fn(() => {
+			throw new Error('ENOENT');
+		}),
 		readdirSync: vi.fn(() => []),
 		mkdirSync: vi.fn(),
 		createWriteStream: vi.fn(
@@ -66,6 +130,7 @@ vi.mock('fs', async () => {
 			...actual.promises,
 			stat: vi.fn(),
 			access: vi.fn(),
+			readdir: vi.fn(),
 		},
 		constants: {
 			X_OK: 1,
@@ -93,8 +158,18 @@ vi.mock('os', async () => {
 
 // Mock storage service
 const mockGetAgentCustomPath = vi.fn();
+const mockReadAgentConfig = vi.fn<(toolType: string) => Record<string, unknown>>(() => ({}));
+const mockReadSshRemotes = vi.fn<() => unknown[]>(() => []);
 vi.mock('../../../cli/services/storage', () => ({
 	getAgentCustomPath: (...args: unknown[]) => mockGetAgentCustomPath(...args),
+	readAgentConfig: (toolType: string) => mockReadAgentConfig(toolType),
+	readSshRemotes: () => mockReadSshRemotes(),
+}));
+
+// Mock SSH wrapper so SSH tests don't need real ssh/bash on the test machine
+const mockWrapSpawnWithSsh = vi.fn();
+vi.mock('../../../main/utils/ssh-spawn-wrapper', () => ({
+	wrapSpawnWithSsh: (...args: unknown[]) => mockWrapSpawnWithSsh(...args),
 }));
 
 import {
@@ -106,9 +181,12 @@ import {
 	detectClaude,
 	detectAgent,
 	getAgentCommand,
+	resolveCliBatchModeArgs,
 	spawnAgent,
 	AgentResult,
 } from '../../../cli/services/agent-spawner';
+import { getAgentDefinition } from '../../../main/agents/definitions';
+import { isolateAgentEnv } from '../../helpers/agentEnvIsolation';
 
 describe('agent-spawner', () => {
 	beforeEach(() => {
@@ -118,6 +196,10 @@ describe('agent-spawner', () => {
 		mockStderr.removeAllListeners();
 		(mockChild as EventEmitter).removeAllListeners();
 		mockGetAgentCustomPath.mockReturnValue(undefined);
+		mockReadAgentConfig.mockReturnValue({});
+		mockReadSshRemotes.mockReturnValue([]);
+		mockWrapSpawnWithSsh.mockReset();
+		pathProbeResolver = DEFAULT_PATH_PROBE;
 	});
 
 	afterEach(() => {
@@ -522,6 +604,9 @@ Some text with [x] in it that's not a checkbox
 		beforeEach(() => {
 			// Reset the cached path by reimporting
 			vi.resetModules();
+			// Detection IS the subject here, so the probe goes through mockSpawn
+			// and each test drives and asserts on it.
+			pathProbeResolver = null;
 		});
 
 		it('should detect Claude with custom path from settings', async () => {
@@ -707,6 +792,8 @@ Some text with [x] in it that's not a checkbox
 	describe('detectAgent', () => {
 		beforeEach(() => {
 			vi.resetModules();
+			// Detection IS the subject here - drive the probe through mockSpawn.
+			pathProbeResolver = null;
 		});
 
 		it('should detect agent with custom path from settings', async () => {
@@ -722,6 +809,61 @@ Some text with [x] in it that's not a checkbox
 			expect(result.available).toBe(true);
 			expect(result.path).toBe('/custom/path/to/codex');
 			expect(result.source).toBe('settings');
+		});
+
+		it('should resolve a rotated Codex Desktop path from settings', async () => {
+			const originalPlatform = process.platform;
+			const originalLocalAppData = process.env.LOCALAPPDATA;
+			Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+			process.env.LOCALAPPDATA = 'C:\\Users\\test\\AppData\\Local';
+			const stalePath = path.win32.join(
+				process.env.LOCALAPPDATA,
+				'OpenAI',
+				'Codex',
+				'bin',
+				'old-version',
+				'codex.exe'
+			);
+			const currentPath = path.win32.join(
+				process.env.LOCALAPPDATA,
+				'OpenAI',
+				'Codex',
+				'bin',
+				'current-version',
+				'codex.exe'
+			);
+			mockGetAgentCustomPath.mockReturnValue(stalePath);
+			vi.mocked(fs.promises.readdir).mockResolvedValue([
+				{ name: 'current-version', isDirectory: () => true },
+			] as any);
+			vi.mocked(fs.promises.stat).mockImplementation(async (filePath) => {
+				if (filePath === currentPath) {
+					return { isFile: () => true, birthtimeMs: 200 } as fs.Stats;
+				}
+				throw new Error('ENOENT');
+			});
+
+			try {
+				const { detectAgent: freshDetectAgent } =
+					await import('../../../cli/services/agent-spawner');
+				const result = await freshDetectAgent('codex');
+
+				expect(result).toEqual({
+					available: true,
+					path: currentPath,
+					source: 'settings',
+				});
+			} finally {
+				if (originalLocalAppData === undefined) {
+					delete process.env.LOCALAPPDATA;
+				} else {
+					process.env.LOCALAPPDATA = originalLocalAppData;
+				}
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+			}
 		});
 
 		it('should fall back to PATH detection when custom path is invalid', async () => {
@@ -791,6 +933,12 @@ Some text with [x] in it that's not a checkbox
 	});
 
 	describe('spawnAgent', () => {
+		// Agent env defaults are shell-wins by design, so a value exported by the
+		// developer's own shell would otherwise be what the default assertions
+		// below actually measure. Tests that exercise the shell-wins path set the
+		// variable themselves, inside the test body, after this has run.
+		isolateAgentEnv();
+
 		beforeEach(() => {
 			mockSpawn.mockReturnValue(mockChild);
 		});
@@ -829,6 +977,64 @@ Some text with [x] in it that's not a checkbox
 
 			const result = await resultPromise;
 			expect(result.success).toBe(true);
+		});
+
+		it('runs the local maestro-p TUI when the agent selected the interactive token source', async () => {
+			// Honoring the token source across the board: a local Claude agent set to
+			// interactive (TUI) wraps the spawn with maestro-p via process.execPath
+			// (node), injecting MAESTRO_CLAUDE_BIN, instead of running `claude --print`.
+			// Make maestro-p "present": getCliMaestroPBinPath() (accessSync) resolves
+			// and the resolver's fileExists (existsSync) confirms the candidate.
+			vi.mocked(fs.accessSync).mockReturnValue(undefined);
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+
+			const resultPromise = spawnAgent('claude-code', '/project/path', 'Test prompt', undefined, {
+				enableMaestroP: true,
+				maestroPMode: 'interactive',
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			expect(mockSpawn).toHaveBeenCalled();
+			const [cmd, args, options] = mockSpawn.mock.calls[0];
+
+			// Command is the node/electron execPath (maestro-p is a Node script), not claude.
+			expect(cmd).toBe(process.execPath);
+			// maestro-p.js script is the first arg, followed by its interactive flag,
+			// then the original headless batch args ending with the prompt positional.
+			expect(String(args[0])).toMatch(/maestro-p\.js$/);
+			expect(args).toContain('--dangerously-skip-permissions');
+			expect(args).toContain('--');
+			expect(args).toContain('Test prompt');
+			// MAESTRO_CLAUDE_BIN points maestro-p at the real claude binary to drive.
+			expect(options.env.MAESTRO_CLAUDE_BIN).toBeTruthy();
+
+			mockStdout.emit('data', Buffer.from('{"type":"result","result":"ok"}\n'));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+		});
+
+		it('stays on claude --print for the API token source (no maestro-p wrap)', async () => {
+			// The inverse guard: even with maestro-p present on disk, an agent set to
+			// API must NOT route through maestro-p.
+			vi.mocked(fs.accessSync).mockReturnValue(undefined);
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+
+			const resultPromise = spawnAgent('claude-code', '/project/path', 'Test prompt', undefined, {
+				enableMaestroP: false,
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [cmd, args] = mockSpawn.mock.calls[0];
+			expect(cmd).not.toBe(process.execPath);
+			expect(String(args[0])).not.toMatch(/maestro-p\.js$/);
+			expect(args).toContain('--print');
+
+			mockStdout.emit('data', Buffer.from('{"type":"result","result":"ok"}\n'));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+			await resultPromise;
 		});
 
 		it('should use --resume for existing session', async () => {
@@ -925,6 +1131,9 @@ Some text with [x] in it that's not a checkbox
 				cacheCreationInputTokens: 10,
 				totalCostUsd: 0.05,
 				contextWindow: 200000,
+				// Reported by the model, so flagged authoritative even though it
+				// matches the fallback size (review of PR #1356).
+				contextWindowResolved: true,
 			});
 		});
 
@@ -1337,6 +1546,43 @@ Some text with [x] in it that's not a checkbox
 			await resultPromise;
 		});
 
+		it('Codex read-only spawn includes skip-git-repo-check exactly once and omits dangerous bypass flag', async () => {
+			// Spawn Codex in read-only mode and inspect the args passed to the child
+			const resultPromise = spawnAgent('codex', '/project', 'prompt', undefined, {
+				readOnlyMode: true,
+			});
+
+			// Let async ops schedule
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			expect(mockSpawn).toHaveBeenCalled();
+			const [, args] = mockSpawn.mock.calls[0];
+
+			// --skip-git-repo-check should appear exactly once
+			const skipCount = args.filter((a: unknown) => String(a) === '--skip-git-repo-check').length;
+			expect(skipCount).toBe(1);
+
+			// --sandbox should be present and followed immediately by 'read-only'
+			const sandboxIdx = args.findIndex((a: unknown) => String(a) === '--sandbox');
+			expect(sandboxIdx).toBeGreaterThanOrEqual(0);
+			expect(String(args[sandboxIdx + 1])).toBe('read-only');
+
+			// Dangerous bypass flag must NOT be present in read-only mode
+			expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+
+			// Complete the spawn so the promise resolves
+			mockStdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', text: 'Done' }) + '\n'));
+			mockChild.emit('close', 0);
+			await resultPromise;
+		});
+
+		it('Hermes read-only spawn args retain quiet mode and omit yolo', () => {
+			const args = resolveCliBatchModeArgs(getAgentDefinition('hermes'), true);
+
+			expect(args).toContain('-Q');
+			expect(args).not.toContain('--yolo');
+		});
+
 		it('should not include read-only args when readOnlyMode is false', async () => {
 			const resultPromise = spawnAgent('claude-code', '/project', 'prompt', undefined, {
 				readOnlyMode: false,
@@ -1399,6 +1645,264 @@ Some text with [x] in it that's not a checkbox
 					/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 				);
 			}
+		});
+
+		it('should set CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 for claude-code batch spawns (#861)', async () => {
+			const resultPromise = spawnAgent('claude-code', '/project', 'prompt');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [, , options] = mockSpawn.mock.calls[0];
+			expect(options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe('1');
+
+			mockStdout.emit('data', Buffer.from('{"type":"result","result":"Done"}\n'));
+			mockChild.emit('close', 0);
+			await resultPromise;
+		});
+
+		it('should set CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 even in read-only mode', async () => {
+			const resultPromise = spawnAgent('claude-code', '/project', 'prompt', undefined, {
+				readOnlyMode: true,
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [, , options] = mockSpawn.mock.calls[0];
+			expect(options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe('1');
+
+			mockStdout.emit('data', Buffer.from('{"type":"result","result":"Done"}\n'));
+			mockChild.emit('close', 0);
+			await resultPromise;
+		});
+
+		it('should spawn copilot-cli with -p prompt arg and parse its result event', async () => {
+			const resultPromise = spawnAgent('copilot-cli', '/project', 'Hello copilot');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [cmd, args] = mockSpawn.mock.calls[0];
+			expect(cmd).toBeTruthy();
+
+			// Copilot-CLI batch mode: copilot --allow-all --output-format json -p "prompt"
+			expect(args).toContain('--allow-all');
+			expect(args).toContain('--output-format');
+			expect(args).toContain('json');
+			expect(args).toContain('-p');
+			expect(args).toContain('Hello copilot');
+			// promptArgs path replaces the '--' separator
+			expect(args).not.toContain('--');
+
+			// Mirror real Copilot CLI batch-mode stdout: no session.start event;
+			// the sessionId arrives only on the terminal `result` line.
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					JSON.stringify({
+						type: 'assistant.message',
+						data: { content: 'Final answer from copilot', toolRequests: [] },
+					}) + '\n'
+				)
+			);
+			mockStdout.emit(
+				'data',
+				Buffer.from(JSON.stringify({ type: 'result', sessionId: 'cop-1', exitCode: 0 }) + '\n')
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+			expect(result.response).toBe('Final answer from copilot');
+			expect(result.agentSessionId).toBe('cop-1');
+		});
+
+		it('should pass through --resume=<sessionId> when resuming a copilot-cli session', async () => {
+			const resultPromise = spawnAgent('copilot-cli', '/project', 'follow-up', 'cop-resume-1');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [, args] = mockSpawn.mock.calls[0];
+			// resumeArgs in the agent definition emits `--resume=<id>` as a single token.
+			expect(args).toContain('--resume=cop-resume-1');
+
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					JSON.stringify({
+						type: 'assistant.message',
+						data: { content: 'still remembers', toolRequests: [] },
+					}) + '\n'
+				)
+			);
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					JSON.stringify({ type: 'result', sessionId: 'cop-resume-1', exitCode: 0 }) + '\n'
+				)
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+			// The resumed session id must round-trip through agentSessionId so the
+			// caller can persist it and keep the chain going.
+			expect(result.agentSessionId).toBe('cop-resume-1');
+		});
+
+		it('should spawn grok headless with -p, --always-approve, streaming-json and accumulate text deltas', async () => {
+			const resultPromise = spawnAgent('grok', '/project', 'Hello grok');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [cmd, args] = mockSpawn.mock.calls[0];
+			expect(cmd).toBeTruthy();
+
+			// Grok batch mode: grok --always-approve --output-format streaming-json -p "prompt"
+			expect(args).toContain('--always-approve');
+			expect(args).toContain('--output-format');
+			expect(args).toContain('streaming-json');
+			expect(args).toContain('-p');
+			expect(args).toContain('Hello grok');
+			// promptArgs path replaces the '--' separator
+			expect(args).not.toContain('--');
+			// --permission-mode belongs to read-only mode only; grok's clap errors
+			// with "cannot be used multiple times" if the flag ever repeats.
+			expect(args).not.toContain('--permission-mode');
+
+			// Mirror real grok streaming-json stdout: the answer arrives only as
+			// token-sized text deltas, thought deltas are reasoning (excluded from
+			// the response), and the terminal `end` event carries the sole
+			// sessionId but no text.
+			mockStdout.emit(
+				'data',
+				Buffer.from('{"type":"thought","data":"thinking..."}\n{"type":"text","data":"REA"}\n')
+			);
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					'{"type":"text","data":"DY"}\n' +
+						JSON.stringify({
+							type: 'end',
+							stopReason: 'EndTurn',
+							sessionId: 'grok-sess-1',
+							requestId: 'req-1',
+						}) +
+						'\n'
+				)
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+			expect(result.response).toBe('READY');
+			expect(result.agentSessionId).toBe('grok-sess-1');
+		});
+
+		it('should run grok read-only with a single --permission-mode plan and no approve flag', async () => {
+			const resultPromise = spawnAgent('grok', '/project', 'look around', undefined, {
+				readOnlyMode: true,
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [, args] = mockSpawn.mock.calls[0] as [string, string[]];
+			// grok hard-errors on a repeated --permission-mode ("the argument
+			// '--permission-mode <MODE>' cannot be used multiple times"), so
+			// read-only must strip the batch approve flag and leave exactly one.
+			expect(args.filter((a) => a === '--permission-mode')).toHaveLength(1);
+			expect(args[args.indexOf('--permission-mode') + 1]).toBe('plan');
+			expect(args).not.toContain('--always-approve');
+			expect(args).not.toContain('bypassPermissions');
+
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					'{"type":"text","data":"ok"}\n{"type":"end","stopReason":"EndTurn","sessionId":"grok-sess-2"}\n'
+				)
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+			expect(result.response).toBe('ok');
+		});
+
+		it('should resume a grok session via --resume <sessionId> and round-trip the id', async () => {
+			const resultPromise = spawnAgent('grok', '/project', 'follow-up', 'grok-resume-1');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [, args] = mockSpawn.mock.calls[0] as [string, string[]];
+			const resumeIdx = args.indexOf('--resume');
+			expect(resumeIdx).toBeGreaterThanOrEqual(0);
+			expect(args[resumeIdx + 1]).toBe('grok-resume-1');
+
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					'{"type":"text","data":"still remembers"}\n{"type":"end","stopReason":"EndTurn","sessionId":"grok-resume-1"}\n'
+				)
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 0);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+			// The resumed session id must round-trip through agentSessionId so the
+			// caller can persist it and keep the chain going.
+			expect(result.agentSessionId).toBe('grok-resume-1');
+		});
+
+		it('should surface a grok stream error event as a failed result', async () => {
+			const resultPromise = spawnAgent('grok', '/project', 'trigger an error');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			// grok emits {"type":"error","message":...} on stdout, duplicates it on
+			// stderr as `Error: <message>`, and exits 1.
+			mockStdout.emit(
+				'data',
+				Buffer.from('{"type":"error","message":"This model does not support that"}\n')
+			);
+			mockStderr.emit('data', Buffer.from('Error: This model does not support that\n'));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 1);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(false);
+			expect(result.error).toBe('This model does not support that');
+		});
+
+		it('should soft-succeed when Grok streams a full answer then exits non-zero without a structured error', async () => {
+			// Mirrors wizard recovery: --max-turns (or similar) can exit 1 after
+			// a complete text+end stream with no {"type":"error"} event.
+			const resultPromise = spawnAgent('grok', '/project', 'brief task');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			mockStdout.emit(
+				'data',
+				Buffer.from(
+					'{"type":"text","data":"all done"}\n{"type":"end","stopReason":"EndTurn","sessionId":"sess-soft"}\n'
+				)
+			);
+			mockStderr.emit('data', Buffer.from('max turns reached\n'));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			mockChild.emit('close', 1);
+
+			const result = await resultPromise;
+			expect(result.success).toBe(true);
+			expect(result.response).toBe('all done');
+			expect(result.agentSessionId).toBe('sess-soft');
+		});
+
+		it('should let a pre-set CLAUDE_CODE_DISABLE_BACKGROUND_TASKS from shell env win', async () => {
+			// `isolateAgentEnv` restores the real value after the test.
+			process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '0';
+
+			const resultPromise = spawnAgent('claude-code', '/project', 'prompt');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			const [, , options] = mockSpawn.mock.calls[0];
+			expect(options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe('0');
+
+			mockStdout.emit('data', Buffer.from('{"type":"result","result":"Done"}\n'));
+			mockChild.emit('close', 0);
+			await resultPromise;
 		});
 	});
 
@@ -1499,6 +2003,12 @@ Some text with [x] in it that's not a checkbox
 	});
 
 	describe('platform-specific behavior', () => {
+		beforeEach(() => {
+			// These assert on the probe command itself (`where` vs `which`), so it
+			// has to reach mockSpawn.
+			pathProbeResolver = null;
+		});
+
 		it('should use where command on Windows for findClaudeInPath', async () => {
 			const originalPlatform = process.platform;
 			Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
@@ -1569,6 +2079,833 @@ Some text with [x] in it that's not a checkbox
 			expect(fs.promises.access).not.toHaveBeenCalled();
 
 			Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+		});
+	});
+
+	// ========================================================================
+	// Config override + SSH remote tests
+	// ========================================================================
+	//
+	// These tests cover the CLI's agent-config override path
+	// (applyAgentConfigOverrides) and the SSH remote wrapper integration.
+	//
+	// The spawn flow is driven by fake events on mockChild so we can assert
+	// on the *inputs* to spawn() (command, args, env) without running anything.
+	// runSpawn() schedules a "close" event on the next tick so the promise
+	// resolves; tests call it before awaiting the spawnAgent promise.
+
+	/** Yield to the microtask queue so spawn() runs and event listeners attach. */
+	const yieldTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+	/**
+	 * Wait until mockSpawn has been called at least `minCalls` times, or until
+	 * the per-poll attempts run out. First-run dynamic imports (ssh-spawn-wrapper)
+	 * can take several ticks, so we poll rather than assume spawn fires quickly.
+	 */
+	async function waitForSpawnCall(minCalls = 1, attempts = 50): Promise<void> {
+		for (let i = 0; i < attempts; i++) {
+			if (mockSpawn.mock.calls.length >= minCalls) return;
+			await yieldTick();
+		}
+	}
+
+	/**
+	 * Drive a spawnAgent promise to resolution. Waits for spawn to be called
+	 * (guarantees listeners are attached), emits stdout data, then emits a
+	 * close event. Returns the agent result.
+	 */
+	async function driveSpawnToCompletion(
+		resultPromise: Promise<AgentResult>,
+		code = 0,
+		output = ''
+	): Promise<AgentResult> {
+		// Race the spawn call against a soft timeout so tests that legitimately
+		// never call spawn (e.g., SSH hard-fail path) still resolve quickly via
+		// the promise they're awaiting rather than hanging here.
+		await Promise.race([waitForSpawnCall(), resultPromise.then(() => {})]);
+		if (mockSpawn.mock.calls.length > 0) {
+			if (output) mockStdout.emit('data', Buffer.from(output));
+			await yieldTick();
+			(mockChild as EventEmitter).emit('close', code);
+		}
+		return resultPromise;
+	}
+
+	/** Grab the (command, args, options) triple passed to spawn(). */
+	function spawnCall(): { command: string; args: string[]; options: { env: NodeJS.ProcessEnv } } {
+		expect(mockSpawn).toHaveBeenCalled();
+		const [command, args, options] = mockSpawn.mock.calls[0] as [
+			string,
+			string[],
+			{ env: NodeJS.ProcessEnv },
+		];
+		return { command, args, options };
+	}
+
+	const CLAUDE_OK = () => JSON.stringify({ type: 'result', result: 'ok' }) + '\n';
+	const CODEX_INIT = () => JSON.stringify({ type: 'task_started' }) + '\n';
+
+	describe('spawnAgent: local config overrides', () => {
+		// Same reason as the `spawnAgent` suite above: this one asserts what an
+		// agent's `defaultEnvVars` produce, which the ambient shell can override.
+		isolateAgentEnv();
+
+		beforeEach(() => {
+			mockSpawn.mockReturnValue(mockChild);
+		});
+
+		it('appends session customArgs to Claude spawn', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				customArgs: '--verbose-extra --flag',
+			});
+			const result = await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			expect(result.success).toBe(true);
+			const { args } = spawnCall();
+			expect(args).toContain('--verbose-extra');
+			expect(args).toContain('--flag');
+		});
+
+		it('shell-quote-parses session customArgs (preserves spaces inside quotes)', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				customArgs: '--foo "has spaces" --bar',
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).toContain('--foo');
+			expect(args).toContain('has spaces');
+			expect(args).toContain('--bar');
+		});
+
+		it('reads customArgs from agent-level config when session customArgs is not set', async () => {
+			mockReadAgentConfig.mockReturnValue({ customArgs: '--from-agent-config' });
+
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).toContain('--from-agent-config');
+		});
+
+		it('session customArgs overrides agent-level customArgs', async () => {
+			mockReadAgentConfig.mockReturnValue({ customArgs: '--agent-level' });
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				customArgs: '--session-level',
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).toContain('--session-level');
+			expect(args).not.toContain('--agent-level');
+		});
+
+		it('applies session customEnvVars to local spawn env (wins over shell env)', async () => {
+			const prev = process.env.MAESTRO_TEST_ENV;
+			process.env.MAESTRO_TEST_ENV = 'from-shell';
+
+			try {
+				const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+					customEnvVars: { MAESTRO_TEST_ENV: 'from-session' },
+				});
+				await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+				const { options } = spawnCall();
+				expect(options.env.MAESTRO_TEST_ENV).toBe('from-session');
+			} finally {
+				if (prev === undefined) delete process.env.MAESTRO_TEST_ENV;
+				else process.env.MAESTRO_TEST_ENV = prev;
+			}
+		});
+
+		it('session customEnvVars wins over agent-level customEnvVars', async () => {
+			mockReadAgentConfig.mockReturnValue({
+				customEnvVars: { MAESTRO_TEST_LAYER: 'agent' },
+			});
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				customEnvVars: { MAESTRO_TEST_LAYER: 'session' },
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { options } = spawnCall();
+			expect(options.env.MAESTRO_TEST_LAYER).toBe('session');
+		});
+
+		it('shell env wins over agent defaultEnvVars when user has no customEnvVars', async () => {
+			// Regression: agent.defaultEnvVars must NOT silently override a value
+			// the shell already exports. OpenCode has OPENCODE_CONFIG_CONTENT in
+			// its defaultEnvVars - if the shell sets it, that shell value should
+			// survive to the spawned process.
+			// `isolateAgentEnv` restores the real value after the test.
+			process.env.OPENCODE_CONFIG_CONTENT = 'shell-wins';
+
+			const p = spawnAgent('opencode', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0);
+
+			const { options } = spawnCall();
+			expect(options.env.OPENCODE_CONFIG_CONTENT).toBe('shell-wins');
+		});
+
+		it('agent defaultEnvVars is applied when the shell has not set it', async () => {
+			// Complements the "shell wins" test: when the shell does NOT export
+			// the key, the agent default must still reach the spawned process.
+			// `isolateAgentEnv` has already cleared the key for this test.
+			const p = spawnAgent('opencode', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0);
+
+			const { options } = spawnCall();
+			expect(options.env.OPENCODE_CONFIG_CONTENT).toContain('"permission"');
+		});
+
+		it('applies customModel via configOptions argBuilder for Claude', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, { customModel: 'opus' });
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			const modelIdx = args.indexOf('--model');
+			expect(modelIdx).toBeGreaterThanOrEqual(0);
+			expect(args[modelIdx + 1]).toBe('opus');
+		});
+
+		it('applies customModel for Codex (JSON-line agent)', async () => {
+			const p = spawnAgent('codex', '/p', 'hi', undefined, { customModel: 'gpt-5.3-codex' });
+			await driveSpawnToCompletion(p, 0, CODEX_INIT());
+
+			const { args } = spawnCall();
+			const modelIdx = args.indexOf('-m');
+			expect(modelIdx).toBeGreaterThanOrEqual(0);
+			expect(args[modelIdx + 1]).toBe('gpt-5.3-codex');
+		});
+
+		it('does not add --model when customModel is empty', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).not.toContain('--model');
+		});
+	});
+
+	describe('spawnAgent: SSH integration', () => {
+		beforeEach(() => {
+			mockSpawn.mockReturnValue(mockChild);
+		});
+
+		const sshWrapResult = (
+			overrides: Partial<{
+				command: string;
+				args: string[];
+				cwd: string;
+				customEnvVars: Record<string, string> | undefined;
+				sshStdinScript: string | undefined;
+				sshRemoteUsed: { id: string; name: string; host: string } | null;
+			}> = {}
+		) => ({
+			command: 'ssh',
+			args: ['remotehost', 'claude --print -- hi'],
+			cwd: '/home/user',
+			customEnvVars: undefined,
+			prompt: undefined,
+			sshStdinScript: undefined,
+			sshRemoteUsed: { id: 'r1', name: 'r1', host: 'remotehost' },
+			...overrides,
+		});
+
+		it('does NOT invoke the SSH wrapper when sshRemoteConfig is undefined', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			expect(mockWrapSpawnWithSsh).not.toHaveBeenCalled();
+			const { command } = spawnCall();
+			expect(command).not.toBe('ssh');
+		});
+
+		it('does NOT invoke the SSH wrapper when sshRemoteConfig.enabled is false', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: false, remoteId: null },
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			expect(mockWrapSpawnWithSsh).not.toHaveBeenCalled();
+		});
+
+		it('invokes the SSH wrapper and replaces command/args when remote resolves', async () => {
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult());
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+			});
+			const result = await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			expect(result.success).toBe(true);
+			expect(mockWrapSpawnWithSsh).toHaveBeenCalledTimes(1);
+			const { command, args } = spawnCall();
+			expect(command).toBe('ssh');
+			expect(args).toEqual(['remotehost', 'claude --print -- hi']);
+		});
+
+		it('writes sshStdinScript to child.stdin when large-prompt passthrough is used', async () => {
+			const script = '#!/bin/bash\nexec claude --print\nbig prompt here';
+			mockWrapSpawnWithSsh.mockResolvedValue(
+				sshWrapResult({ args: ['remotehost', '/bin/bash'], sshStdinScript: script })
+			);
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			expect(mockStdin.write).toHaveBeenCalledWith(script);
+			expect(mockStdin.end).toHaveBeenCalled();
+			// write() must run BEFORE end() (first call of write precedes first end)
+			expect(mockStdin.write.mock.invocationCallOrder[0]).toBeLessThan(
+				mockStdin.end.mock.invocationCallOrder[0]
+			);
+		});
+
+		it('does NOT write to stdin when running locally (no sshStdinScript)', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			expect(mockStdin.write).not.toHaveBeenCalled();
+			expect(mockStdin.end).toHaveBeenCalled();
+		});
+
+		it('returns a clear error when SSH is enabled but the remote is unresolvable', async () => {
+			mockWrapSpawnWithSsh.mockResolvedValue(
+				sshWrapResult({ command: 'claude', args: [], cwd: '/p', sshRemoteUsed: null })
+			);
+
+			const result = await spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'missing-remote' },
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.error).toMatch(/SSH remote execution is enabled/i);
+			expect(result.error).toMatch(/could not be resolved/i);
+			expect(result.error).toContain('missing-remote');
+			// Must not fall through to a local spawn - user explicitly opted into SSH
+			expect(mockSpawn).not.toHaveBeenCalled();
+		});
+
+		it('hard-fails for JSON-line agents (Codex) when SSH remote is unresolvable', async () => {
+			mockWrapSpawnWithSsh.mockResolvedValue(
+				sshWrapResult({ command: 'codex', args: [], cwd: '/p', sshRemoteUsed: null })
+			);
+
+			const result = await spawnAgent('codex', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'gone' },
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.error).toMatch(/could not be resolved/);
+			expect(mockSpawn).not.toHaveBeenCalled();
+		});
+
+		it('forwards agent binaryName (not local path) to the SSH wrapper', async () => {
+			mockGetAgentCustomPath.mockReturnValue('/opt/local/claude');
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult({ args: ['remotehost'] }));
+
+			// Explicit API token source so the remote command stays `claude`.
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				enableMaestroP: false,
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [
+				{ agentBinaryName?: string; command: string },
+			];
+			expect(wrapConfig.agentBinaryName).toBe('claude');
+			// local `command` may be a resolved path, but agentBinaryName is what
+			// the wrapper actually uses for the remote invocation.
+		});
+
+		it('defaults an UNCONFIGURED SSH agent to claude --print, NOT the remote TUI', async () => {
+			// The CLI cannot probe the remote for maestro-p and it may not be
+			// installed there, so an agent that never chose a token source must
+			// default to API (claude) over SSH - never optimistically exec maestro-p.
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult({ args: ['remotehost'] }));
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				// enableMaestroP intentionally omitted (unconfigured).
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [
+				{ agentBinaryName?: string; args: string[] },
+			];
+			expect(wrapConfig.agentBinaryName).toBe('claude');
+			expect(wrapConfig.agentBinaryName).not.toBe('maestro-p');
+		});
+
+		it('runs maestro-p on the remote host when the agent selected the TUI token source', async () => {
+			// Honoring the token source across the board: an SSH agent set to
+			// interactive (TUI) drives the remote maestro-p on the Max plan instead
+			// of `claude --print`, mirroring the desktop SSH remote-interactive path.
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult({ args: ['remotehost'] }));
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				enableMaestroP: true,
+				maestroPMode: 'interactive',
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [
+				{ agentBinaryName?: string; args: string[] },
+			];
+			// Remote command is maestro-p (not claude), with the interactive flag
+			// prepended ahead of the headless batch args.
+			expect(wrapConfig.agentBinaryName).toBe('maestro-p');
+			expect(wrapConfig.args).toContain('--dangerously-skip-permissions');
+		});
+
+		it('passes session customArgs through to the SSH wrapper (baseline args include them)', async () => {
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult({ args: ['remotehost'] }));
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				customArgs: '--ssh-injected-flag',
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [{ args: string[] }];
+			expect(wrapConfig.args).toContain('--ssh-injected-flag');
+		});
+
+		it('passes session customEnvVars through to the SSH wrapper (env reaches remote host)', async () => {
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult({ args: ['remotehost'] }));
+
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				customEnvVars: { REMOTE_TOKEN: 'abc' },
+			});
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [
+				{ customEnvVars?: Record<string, string> },
+			];
+			expect(wrapConfig.customEnvVars).toBeDefined();
+			expect(wrapConfig.customEnvVars!.REMOTE_TOKEN).toBe('abc');
+		});
+
+		it('forwards agent defaultEnvVars to the SSH wrapper even without user customEnvVars', async () => {
+			// Defaults must still reach the remote host (which has no shell env
+			// to fall back on). Session customEnvVars is omitted here - we're
+			// asserting that the default-only path survived the env-layer fix.
+			mockWrapSpawnWithSsh.mockResolvedValue(sshWrapResult({ args: ['remotehost'] }));
+
+			const p = spawnAgent('opencode', '/p', 'hi', undefined, {
+				sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+			});
+			await driveSpawnToCompletion(p, 0);
+
+			const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [
+				{ customEnvVars?: Record<string, string> },
+			];
+			expect(wrapConfig.customEnvVars).toBeDefined();
+			expect(wrapConfig.customEnvVars!.OPENCODE_CONFIG_CONTENT).toContain('"permission"');
+		});
+	});
+
+	describe('spawnAgent: local binary resolution (#1608)', () => {
+		// A COLD detection cache is this bug's precondition - `goal-runner` and
+		// `batch-processor` reach `spawnAgent()` without any prior `detectAgent()`,
+		// so nothing has populated it. The suites above warm the shared module's
+		// cache, so every test here takes a fresh module instance instead.
+		async function freshSpawner() {
+			vi.resetModules();
+			return import('../../../cli/services/agent-spawner');
+		}
+
+		beforeEach(() => {
+			mockSpawn.mockReturnValue(mockChild);
+		});
+
+		it('execs the resolved npm .cmd shim on Windows rather than a bare binaryName', async () => {
+			// No Windows CI leg runs this path, so the platform is mocked. Node
+			// cannot exec a bare `claude` on Windows at all: CreateProcess does not
+			// apply PATHEXT, so the `.cmd` shim npm installs is never found.
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+			const shim = 'C:\\Users\\t\\AppData\\Roaming\\npm\\claude.cmd';
+			pathProbeResolver = () => shim;
+
+			try {
+				const { spawnAgent: freshSpawnAgent } = await freshSpawner();
+				const result = await driveSpawnToCompletion(
+					freshSpawnAgent('claude-code', 'C:\\project', 'hi'),
+					0,
+					CLAUDE_OK()
+				);
+
+				expect(result.success).toBe(true);
+				expect(spawnCall().command).toBe(shim);
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+			}
+		});
+
+		it('resolves a JSON-line agent on a cold cache too', async () => {
+			pathProbeResolver = () => '/opt/homebrew/bin/codex';
+
+			const { spawnAgent: freshSpawnAgent } = await freshSpawner();
+			await driveSpawnToCompletion(freshSpawnAgent('codex', '/p', 'hi'), 0, CODEX_INIT());
+
+			expect(spawnCall().command).toBe('/opt/homebrew/bin/codex');
+		});
+
+		it("honors the user's configured custom path on a cold cache", async () => {
+			// `detectAgent()` is the only reader of `getAgentCustomPath()`, so before
+			// this a playbook run silently ignored the binary the user pointed at
+			// and ran whatever PATH offered.
+			mockGetAgentCustomPath.mockReturnValue('/custom/bin/codex');
+			vi.mocked(fs.promises.stat).mockResolvedValue({ isFile: () => true } as fs.Stats);
+			vi.mocked(fs.promises.access).mockResolvedValue(undefined);
+
+			const { spawnAgent: freshSpawnAgent } = await freshSpawner();
+			await driveSpawnToCompletion(freshSpawnAgent('codex', '/p', 'hi'), 0, CODEX_INIT());
+
+			expect(spawnCall().command).toBe('/custom/bin/codex');
+		});
+
+		it('falls back to the bare binaryName when nothing resolves', async () => {
+			// Unchanged behavior on a machine where the probe comes up empty: the
+			// spawn is still attempted so the user gets the real ENOENT, rather
+			// than being refused by the resolver.
+			pathProbeResolver = () => undefined;
+
+			const { spawnAgent: freshSpawnAgent } = await freshSpawner();
+			await driveSpawnToCompletion(freshSpawnAgent('claude-code', '/p', 'hi'), 0, CLAUDE_OK());
+
+			expect(spawnCall().command).toBe('claude');
+		});
+
+		it('leaves an SSH spawn on the bare binaryName', async () => {
+			// A path resolved on THIS machine names nothing on the remote host,
+			// which resolves the command through its own login-shell PATH.
+			pathProbeResolver = () => '/usr/local/bin/claude';
+			mockWrapSpawnWithSsh.mockResolvedValue({
+				command: 'ssh',
+				args: ['remotehost', 'claude --print -- hi'],
+				cwd: '/home/user',
+				customEnvVars: undefined,
+				prompt: undefined,
+				sshStdinScript: undefined,
+				sshRemoteUsed: { id: 'r1', name: 'r1', host: 'remotehost' },
+			});
+
+			const { spawnAgent: freshSpawnAgent } = await freshSpawner();
+			await driveSpawnToCompletion(
+				freshSpawnAgent('claude-code', '/p', 'hi', undefined, {
+					sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				}),
+				0,
+				CLAUDE_OK()
+			);
+
+			const wrapConfig = mockWrapSpawnWithSsh.mock.calls[0][0];
+			expect(wrapConfig.command).toBe('claude');
+		});
+	});
+
+	describe('spawnAgent: regression', () => {
+		beforeEach(() => {
+			mockSpawn.mockReturnValue(mockChild);
+		});
+
+		it('Claude spawn without any options still includes base stream-json flags', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).toContain('--print');
+			expect(args).toContain('--verbose');
+			expect(args).toContain('--output-format');
+			expect(args).toContain('stream-json');
+			expect(args).toContain('--dangerously-skip-permissions');
+			// prompt is appended as positional after '--'
+			const sep = args.indexOf('--');
+			expect(sep).toBeGreaterThan(0);
+			expect(args[sep + 1]).toBe('hi');
+		});
+
+		it('Claude read-only mode uses --permission-mode plan instead of --dangerously-skip-permissions', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi', undefined, { readOnlyMode: true });
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).toContain('--permission-mode');
+			expect(args).toContain('plan');
+			expect(args).not.toContain('--dangerously-skip-permissions');
+		});
+
+		it('Claude resumes existing agent session when agentSessionId is provided', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi', 'agent-session-xyz');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args).toContain('--resume');
+			expect(args).toContain('agent-session-xyz');
+			// no --session-id should be injected when resuming
+			expect(args).not.toContain('--session-id');
+		});
+
+		it('Claude generates fresh --session-id when no agentSessionId is provided', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			const idx = args.indexOf('--session-id');
+			expect(idx).toBeGreaterThanOrEqual(0);
+			expect(args[idx + 1]).toMatch(/^[0-9a-f-]{36}$/);
+		});
+
+		it('Codex spawn preserves working-dir flag and resume args', async () => {
+			const p = spawnAgent('codex', '/working', 'hi', 'codex-thread-123');
+			await driveSpawnToCompletion(p, 0, CODEX_INIT());
+
+			const { args } = spawnCall();
+			expect(args).toContain('exec');
+			expect(args).toContain('--json');
+			// Codex takes -C <dir> for working directory
+			const c = args.indexOf('-C');
+			expect(c).toBeGreaterThanOrEqual(0);
+			expect(args[c + 1]).toBe('/working');
+			// resume args are ['resume', '<id>']
+			expect(args).toContain('resume');
+			expect(args).toContain('codex-thread-123');
+
+			// Ordering is load-bearing: `-C` is a ROOT-level global flag that MUST
+			// precede the `exec` subcommand, which in turn precedes `resume <id>`.
+			// Placing `-C` after `resume` makes Codex hard-fail with
+			// "unexpected argument '-C' found", breaking Relay follow-up messages
+			// to Codex agents (regression of #960). Enforce -C < exec < resume.
+			const execIdx = args.indexOf('exec');
+			const resumeIdx = args.indexOf('resume');
+			expect(c).toBeLessThan(execIdx);
+			expect(execIdx).toBeLessThan(resumeIdx);
+		});
+
+		it('unsupported agent type returns a failure result', async () => {
+			const result = await spawnAgent('terminal' as never, '/p', 'hi');
+			expect(result.success).toBe(false);
+			expect(result.error).toMatch(/Unsupported agent type/);
+		});
+	});
+
+	describe('spawnAgent: appendSystemPrompt', () => {
+		beforeEach(() => {
+			mockSpawn.mockReturnValue(mockChild);
+		});
+
+		it('passes the Maestro system prompt to Claude via --append-system-prompt (non-Windows)', async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+			try {
+				const p = spawnAgent('claude-code', '/p', 'user msg', undefined, {
+					appendSystemPrompt: 'maestro context here',
+				});
+				await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+				const { args } = spawnCall();
+				const flagIdx = args.indexOf('--append-system-prompt');
+				expect(flagIdx).toBeGreaterThanOrEqual(0);
+				expect(args[flagIdx + 1]).toBe('maestro context here');
+				// The flag must precede the '--' separator so it doesn't get
+				// swallowed as part of the positional prompt.
+				const sepIdx = args.indexOf('--');
+				expect(flagIdx).toBeLessThan(sepIdx);
+				expect(args[sepIdx + 1]).toBe('user msg');
+			} finally {
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+			}
+		});
+
+		it('uses --append-system-prompt-file with a temp file on Windows local execution', async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+			const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
+			try {
+				const p = spawnAgent('claude-code', 'C:\\proj', 'hi', undefined, {
+					appendSystemPrompt: 'sysprompt',
+				});
+				await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+				const { args } = spawnCall();
+				const fileFlagIdx = args.indexOf('--append-system-prompt-file');
+				expect(fileFlagIdx).toBeGreaterThanOrEqual(0);
+				// The arg after the flag should be a tmp-path with the maestro prefix
+				expect(args[fileFlagIdx + 1]).toMatch(/maestro-sysprompt-/);
+				// Inline flag must NOT also be emitted on the Windows local path
+				expect(args.indexOf('--append-system-prompt')).toBe(-1);
+				// And we must have written the temp file
+				expect(writeSpy).toHaveBeenCalledWith(
+					expect.stringMatching(/maestro-sysprompt-/),
+					'sysprompt',
+					'utf-8'
+				);
+			} finally {
+				writeSpy.mockRestore();
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+			}
+		});
+
+		it('sanitizes the session tag in the Windows temp-file path to block traversal', async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+			const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
+			try {
+				// A session id containing path separators / `..` would normally
+				// let `path.join(os.tmpdir(), …)` walk upward and escape tmpdir.
+				// We pass it through as the agentSessionId (which becomes the
+				// sessionTag inside buildAppendSystemPromptArgs).
+				const p = spawnAgent('claude-code', 'C:\\proj', 'hi', '../../../etc/passwd', {
+					appendSystemPrompt: 'sysprompt',
+				});
+				await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+				const { args } = spawnCall();
+				const fileFlagIdx = args.indexOf('--append-system-prompt-file');
+				expect(fileFlagIdx).toBeGreaterThanOrEqual(0);
+				const tempPath = args[fileFlagIdx + 1];
+				// Sanitized path must not contain unescaped traversal tokens
+				expect(tempPath).not.toMatch(/\.\.\//);
+				expect(tempPath).not.toMatch(/\.\.\\/);
+				// And the dangerous chars should have collapsed to safe ones
+				expect(tempPath).toMatch(/maestro-sysprompt-[A-Za-z0-9_-]+-\d+\.txt$/);
+			} finally {
+				writeSpy.mockRestore();
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+			}
+		});
+
+		it('uses inline --append-system-prompt on Windows when SSH is enabled (cmd is in a shell script)', async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+			mockWrapSpawnWithSsh.mockResolvedValue({
+				command: 'ssh',
+				args: ['remotehost', 'claude --append-system-prompt sysprompt -- hi'],
+				cwd: '/home/user',
+				customEnvVars: undefined,
+				prompt: undefined,
+				sshStdinScript: undefined,
+				sshRemoteUsed: { id: 'r1', name: 'r1', host: 'remotehost' },
+			});
+			try {
+				const p = spawnAgent('claude-code', '/p', 'hi', undefined, {
+					appendSystemPrompt: 'sysprompt',
+					sshRemoteConfig: { enabled: true, remoteId: 'r1' },
+				});
+				await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+				expect(mockWrapSpawnWithSsh).toHaveBeenCalled();
+				const [wrapConfig] = mockWrapSpawnWithSsh.mock.calls[0] as [{ args: string[] }];
+				const flagIdx = wrapConfig.args.indexOf('--append-system-prompt');
+				expect(flagIdx).toBeGreaterThanOrEqual(0);
+				expect(wrapConfig.args[flagIdx + 1]).toBe('sysprompt');
+				expect(wrapConfig.args.indexOf('--append-system-prompt-file')).toBe(-1);
+			} finally {
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+			}
+		});
+
+		it('still injects the Maestro system prompt on resume (Claude reads it every turn)', async () => {
+			// Pin the platform to a POSIX value so this exercises the inline
+			// `--append-system-prompt` path deterministically. On Windows local
+			// spawns the product instead writes the prompt to a temp file and
+			// passes `--append-system-prompt-file` (see buildAppendSystemPromptArgs),
+			// which is correct but a different arg shape. On Unix this override is
+			// a no-op.
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+			try {
+				const p = spawnAgent('claude-code', '/p', 'follow-up', 'session-abc', {
+					appendSystemPrompt: 'maestro context',
+				});
+				await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+				const { args } = spawnCall();
+				expect(args).toContain('--resume');
+				expect(args).toContain('session-abc');
+				const flagIdx = args.indexOf('--append-system-prompt');
+				expect(flagIdx).toBeGreaterThanOrEqual(0);
+				expect(args[flagIdx + 1]).toBe('maestro context');
+			} finally {
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+			}
+		});
+
+		it('Codex (no native --append-system-prompt support) embeds the system prompt in the first user turn', async () => {
+			const p = spawnAgent('codex', '/p', 'do thing', undefined, {
+				appendSystemPrompt: 'maestro ctx',
+			});
+			await driveSpawnToCompletion(p, 0, CODEX_INIT());
+
+			const { args } = spawnCall();
+			// codex uses `-- <prompt>` positional form
+			const sepIdx = args.indexOf('--');
+			expect(sepIdx).toBeGreaterThan(0);
+			const positional = args[sepIdx + 1];
+			expect(positional).toContain('maestro ctx');
+			expect(positional).toContain('# User Request');
+			expect(positional).toContain('do thing');
+			// must NOT emit the native flag for agents that don't support it
+			expect(args.indexOf('--append-system-prompt')).toBe(-1);
+			expect(args.indexOf('--append-system-prompt-file')).toBe(-1);
+		});
+
+		it('Codex resume skips system-prompt embedding (already captured in transcript)', async () => {
+			const p = spawnAgent('codex', '/p', 'do thing', 'codex-thread-xyz', {
+				appendSystemPrompt: 'maestro ctx',
+			});
+			await driveSpawnToCompletion(p, 0, CODEX_INIT());
+
+			const { args } = spawnCall();
+			const sepIdx = args.indexOf('--');
+			expect(sepIdx).toBeGreaterThan(0);
+			const positional = args[sepIdx + 1];
+			expect(positional).toBe('do thing');
+			expect(positional).not.toContain('maestro ctx');
+			expect(positional).not.toContain('# User Request');
+		});
+
+		it('Claude spawn without appendSystemPrompt does NOT add the flag (regression)', async () => {
+			const p = spawnAgent('claude-code', '/p', 'hi');
+			await driveSpawnToCompletion(p, 0, CLAUDE_OK());
+
+			const { args } = spawnCall();
+			expect(args.indexOf('--append-system-prompt')).toBe(-1);
+			expect(args.indexOf('--append-system-prompt-file')).toBe(-1);
+		});
+
+		it('Codex spawn without appendSystemPrompt passes the raw user prompt unchanged (regression)', async () => {
+			const p = spawnAgent('codex', '/p', 'just the user message');
+			await driveSpawnToCompletion(p, 0, CODEX_INIT());
+
+			const { args } = spawnCall();
+			const sepIdx = args.indexOf('--');
+			expect(sepIdx).toBeGreaterThan(0);
+			expect(args[sepIdx + 1]).toBe('just the user message');
 		});
 	});
 });

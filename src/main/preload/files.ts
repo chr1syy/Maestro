@@ -8,13 +8,33 @@
  */
 
 import { ipcRenderer } from 'electron';
+import type { HistoryEntryType } from '../../shared/types';
+import type { GraphBucket } from '../../shared/history';
+
+/**
+ * All-time graph data returned by `history:getGraphData` and
+ * `director-notes:getGraphData`. Buckets always span the full source
+ * history so the activity graph stays "all-encompassing" even when the
+ * entry list paginates a smaller window underneath.
+ */
+export interface HistoryGraphData {
+	buckets: GraphBucket[];
+	bucketCount: number;
+	earliestTimestamp: number;
+	latestTimestamp: number;
+	totalCount: number;
+	autoCount: number;
+	userCount: number;
+	cueCount: number;
+	cached: boolean;
+}
 
 /**
  * History entry
  */
 export interface HistoryEntry {
 	id: string;
-	type: 'AUTO' | 'USER' | 'CUE';
+	type: HistoryEntryType;
 	timestamp: number;
 	summary: string;
 	fullResponse?: string;
@@ -35,6 +55,12 @@ export interface HistoryEntry {
 	elapsedTimeMs?: number;
 	validated?: boolean;
 	hostname?: string;
+	/** Cross-agent attribution: the agent that consulted this one via `@mention`. */
+	sourceAgentName?: string;
+	/** Claude-only, per-turn: `interactive` = maestro-p TUI, `api` = `claude --print`. */
+	tokenSource?: 'interactive' | 'api';
+	/** Claude-only, per-turn: `auto` = user/usage selected, `limit` = forced API fallback. */
+	tokenSourceReason?: 'auto' | 'limit';
 }
 
 /**
@@ -64,7 +90,26 @@ export function createHistoryApi() {
 			projectPath?: string;
 			sessionId?: string;
 			pagination?: { limit?: number; offset?: number };
+			lookbackHours?: number | null;
+			sharedContext?: { sshRemoteId: string; remoteCwd: string };
+			types?: HistoryEntryType[];
+			hostKey?: string | null;
+			/** Collapse Cue runs to one row per trigger (`groupCueEntries`). */
+			groupCue?: boolean;
 		}) => ipcRenderer.invoke('history:getAllPaginated', options),
+
+		/**
+		 * The individual runs behind one collapsed Cue row. `groupKey` is the
+		 * `cueGroup.key` the grouped read put on that row, and `lookbackHours`
+		 * must match the window it was counted over.
+		 */
+		getCueGroupRuns: (options: {
+			sessionId: string;
+			groupKey: string;
+			projectPath?: string;
+			lookbackHours?: number | null;
+			limit?: number;
+		}) => ipcRenderer.invoke('history:getCueGroupRuns', options),
 
 		add: (entry: HistoryEntry, sharedContext?: { sshRemoteId: string; remoteCwd: string }) =>
 			ipcRenderer.invoke('history:add', entry, sharedContext),
@@ -74,7 +119,7 @@ export function createHistoryApi() {
 		delete: (entryId: string, sessionId?: string) =>
 			ipcRenderer.invoke('history:delete', entryId, sessionId),
 
-		update: (entryId: string, updates: { validated?: boolean }, sessionId?: string) =>
+		update: (entryId: string, updates: Partial<HistoryEntry>, sessionId?: string) =>
 			ipcRenderer.invoke('history:update', entryId, updates, sessionId),
 
 		updateSessionName: (agentSessionId: string, sessionName: string) =>
@@ -83,6 +128,44 @@ export function createHistoryApi() {
 		getFilePath: (sessionId: string) => ipcRenderer.invoke('history:getFilePath', sessionId),
 
 		listSessions: () => ipcRenderer.invoke('history:listSessions'),
+
+		// Cached graph buckets for a single session. The lookback parameter
+		// controls the window - `null` for "all time", or hours back from
+		// "now". Each (bucketCount, lookback) pair gets its own cached
+		// aggregate keyed by source-file fingerprint.
+		getGraphData: (
+			sessionId: string,
+			bucketCount: number,
+			lookbackHours: number | null,
+			sharedContext?: { sshRemoteId: string; remoteCwd: string },
+			projectPath?: string
+		): Promise<HistoryGraphData> =>
+			ipcRenderer.invoke(
+				'history:getGraphData',
+				sessionId,
+				bucketCount,
+				lookbackHours,
+				sharedContext,
+				projectPath
+			),
+
+		// Resolve the offset (newest-first sorted, with the same lookback
+		// filter applied to the paginated list) of the first entry whose
+		// timestamp is <= the given timestamp. Powers the activity-graph's
+		// click-to-jump behavior.
+		getOffsetForTimestamp: (
+			sessionId: string,
+			timestamp: number,
+			lookbackHours?: number | null,
+			types?: HistoryEntryType[]
+		): Promise<number> =>
+			ipcRenderer.invoke(
+				'history:getOffsetForTimestamp',
+				sessionId,
+				timestamp,
+				lookbackHours,
+				types
+			),
 
 		onExternalChange: (handler: () => void) => {
 			const wrappedHandler = () => handler();

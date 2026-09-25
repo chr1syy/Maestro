@@ -5,11 +5,11 @@
  * - AutoRunContext: document list, tree, loading state, task counts
  * - useBatchProcessor: batch run states (via reducer), custom prompts
  *
- * The batch reducer logic is reused directly — dispatchBatch applies the
+ * The batch reducer logic is reused directly - dispatchBatch applies the
  * existing batchReducer function to the current state. Hooks retain their
  * async orchestration; this store owns the state layer only.
  *
- * Can be used outside React via getBatchState() / getBatchActions().
+ * Can be used outside React via getBatchState().
  */
 
 import { create } from 'zustand';
@@ -22,7 +22,7 @@ import { batchReducer, type BatchAction } from '../hooks/batch/batchReducer';
 // ============================================================================
 
 /**
- * Task count entry — tracks completed vs total tasks for a document.
+ * Task count entry - tracks completed vs total tasks for a document.
  * Moved from AutoRunContext.
  */
 export interface TaskCountEntry {
@@ -87,6 +87,15 @@ function resolve<T>(valOrFn: T | ((prev: T) => T), prev: T): T {
 	return typeof valOrFn === 'function' ? (valOrFn as (prev: T) => T)(prev) : valOrFn;
 }
 
+function shallowArrayEqual<T>(a: readonly T[], b: readonly T[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
+
 // ============================================================================
 // Selectors
 // ============================================================================
@@ -96,26 +105,24 @@ export function selectHasAnyActiveBatch(s: BatchStoreState): boolean {
 	return Object.values(s.batchRunStates).some((state) => state.isRunning);
 }
 
+/**
+ * True when this agent's Auto Run entry is a read-only MIRROR of a run owned by
+ * a different Maestro client (see `useAutoRunStateMirror`). The run loop and the
+ * refs its controls poke live in the owning client, so every mutator bails on a
+ * mirrored entry and every control that calls one renders disabled.
+ *
+ * Reads the store directly so it works outside React, where the control actions
+ * run. `useIsMirroredBatchRun` is the subscribing form for components.
+ */
+export function isMirroredBatchRun(sessionId: string): boolean {
+	return useBatchStore.getState().batchRunStates[sessionId]?.mirrored === true;
+}
+
 /** List of session IDs with active batches */
 export function selectActiveBatchSessionIds(s: BatchStoreState): string[] {
 	return Object.entries(s.batchRunStates)
-		.filter(([, state]) => state.isRunning)
+		.filter(([, state]) => state.isRunning && !state.errorPaused)
 		.map(([sessionId]) => sessionId);
-}
-
-/** List of session IDs that are in stopping state */
-export function selectStoppingBatchSessionIds(s: BatchStoreState): string[] {
-	return Object.entries(s.batchRunStates)
-		.filter(([, state]) => state.isRunning && state.isStopping)
-		.map(([sessionId]) => sessionId);
-}
-
-/** Get batch run state for a specific session */
-export function selectBatchRunState(
-	s: BatchStoreState,
-	sessionId: string
-): BatchRunState | undefined {
-	return s.batchRunStates[sessionId];
 }
 
 // ============================================================================
@@ -132,7 +139,16 @@ export const useBatchStore = create<BatchStore>()((set) => ({
 	customPrompts: {},
 
 	// --- AutoRun document actions ---
-	setDocumentList: (v) => set((s) => ({ documentList: resolve(v, s.documentList) })),
+	setDocumentList: (v) =>
+		set((s) => {
+			const next = resolve(v, s.documentList);
+			// Skip update when content is unchanged - prevents reference churn from
+			// SSH polling (every 3s the loader replaces the array with a fresh
+			// reference, retriggering downstream effects like BatchRunnerModal's
+			// task-count loader). See useAutoRunDocumentLoader runRemotePoll.
+			if (shallowArrayEqual(next, s.documentList)) return {};
+			return { documentList: next };
+		}),
 	setDocumentTree: (v) => set((s) => ({ documentTree: resolve(v, s.documentTree) })),
 	setIsLoadingDocuments: (v) =>
 		set((s) => ({ isLoadingDocuments: resolve(v, s.isLoadingDocuments) })),
@@ -141,6 +157,10 @@ export const useBatchStore = create<BatchStore>()((set) => ({
 
 	updateTaskCount: (filename, completed, total) =>
 		set((s) => {
+			const existing = s.documentTaskCounts.get(filename);
+			if (existing && existing.completed === completed && existing.total === total) {
+				return {};
+			}
 			const next = new Map(s.documentTaskCounts);
 			next.set(filename, { completed, total });
 			return { documentTaskCounts: next };
@@ -179,23 +199,4 @@ export const useBatchStore = create<BatchStore>()((set) => ({
  */
 export function getBatchState() {
 	return useBatchStore.getState();
-}
-
-/**
- * Get stable batch action references outside React.
- */
-export function getBatchActions() {
-	const state = useBatchStore.getState();
-	return {
-		setDocumentList: state.setDocumentList,
-		setDocumentTree: state.setDocumentTree,
-		setIsLoadingDocuments: state.setIsLoadingDocuments,
-		setDocumentTaskCounts: state.setDocumentTaskCounts,
-		updateTaskCount: state.updateTaskCount,
-		clearDocumentList: state.clearDocumentList,
-		dispatchBatch: state.dispatchBatch,
-		setBatchRunStates: state.setBatchRunStates,
-		setCustomPrompt: state.setCustomPrompt,
-		clearCustomPrompts: state.clearCustomPrompts,
-	};
 }

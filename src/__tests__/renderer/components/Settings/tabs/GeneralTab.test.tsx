@@ -3,7 +3,7 @@
  *
  * Tests the general settings tab including:
  * - Section rendering (About Me, Shell, Log Level, GitHub CLI, etc.)
- * - Conductor Profile textarea with character count and limit
+ * - Conductor Profile textarea with character count and 5000-char limit
  * - Shell detection, selection, and configuration
  * - Custom shell path, arguments, and environment variables
  * - Log level toggle buttons
@@ -24,14 +24,22 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { GeneralTab } from '../../../../../renderer/components/Settings/tabs/GeneralTab';
-import type { Theme, ShellInfo } from '../../../../../renderer/types';
+import type { ShellInfo } from '../../../../../renderer/types';
 
+import { mockTheme } from '../../../../helpers/mockTheme';
 // Mock platformUtils
 vi.mock('../../../../../renderer/utils/platformUtils', () => ({
 	getOpenInLabel: vi.fn(() => 'Open in Finder'),
 	isWindowsPlatform: vi.fn(() => false),
 	isMacOSPlatform: vi.fn(() => false),
 	isLinuxPlatform: vi.fn(() => false),
+}));
+
+vi.mock('../../../../../shared/platformDetection', () => ({
+	isLinux: vi.fn(() => false),
+	isMacOS: vi.fn(() => false),
+	isWindows: vi.fn(() => false),
+	getWhichCommand: vi.fn(() => 'which'),
 }));
 
 // Shared mock fns so tests can assert on useSettings setters
@@ -43,10 +51,16 @@ const mockSetShellEnvVars = vi.fn();
 const mockSetGhPath = vi.fn();
 const mockSetLogLevel = vi.fn();
 const mockSetEnterToSendAI = vi.fn();
+const mockSetEnterToSendAIExpanded = vi.fn();
+const mockSetAutoResumeOnLimit = vi.fn();
+const mockSetAutoResumeCheckIntervalHours = vi.fn();
+const mockSetAutoResumeGiveUpDays = vi.fn();
 const mockSetDefaultSaveToHistory = vi.fn();
 const mockSetDefaultShowThinking = vi.fn();
+const mockSetShowToolCalls = vi.fn();
 const mockSetAutomaticTabNamingEnabled = vi.fn();
 const mockSetPreventSleepEnabled = vi.fn();
+const mockSetPreventDisplaySleepEnabled = vi.fn();
 const mockSetDisableGpuAcceleration = vi.fn();
 const mockSetDisableConfetti = vi.fn();
 const mockSetCheckForUpdatesOnStartup = vi.fn();
@@ -60,6 +74,9 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 		// Conductor Profile
 		conductorProfile: '',
 		setConductorProfile: mockSetConductorProfile,
+		// Global show-Maestro hotkey
+		globalShowHotkey: [],
+		setGlobalShowHotkey: vi.fn(),
 		// Shell settings
 		defaultShell: 'zsh',
 		setDefaultShell: mockSetDefaultShell,
@@ -77,16 +94,28 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 		// Input settings
 		enterToSendAI: true,
 		setEnterToSendAI: mockSetEnterToSendAI,
+		enterToSendAIExpanded: false,
+		setEnterToSendAIExpanded: mockSetEnterToSendAIExpanded,
+		autoResumeOnLimit: false,
+		setAutoResumeOnLimit: mockSetAutoResumeOnLimit,
+		autoResumeCheckIntervalHours: 6,
+		setAutoResumeCheckIntervalHours: mockSetAutoResumeCheckIntervalHours,
+		autoResumeGiveUpDays: 21,
+		setAutoResumeGiveUpDays: mockSetAutoResumeGiveUpDays,
 		defaultSaveToHistory: true,
 		setDefaultSaveToHistory: mockSetDefaultSaveToHistory,
 		defaultShowThinking: 'off',
 		setDefaultShowThinking: mockSetDefaultShowThinking,
+		showToolCalls: true,
+		setShowToolCalls: mockSetShowToolCalls,
 		// Tab naming
 		automaticTabNamingEnabled: true,
 		setAutomaticTabNamingEnabled: mockSetAutomaticTabNamingEnabled,
 		// Power management
 		preventSleepEnabled: false,
 		setPreventSleepEnabled: mockSetPreventSleepEnabled,
+		preventDisplaySleepEnabled: false,
+		setPreventDisplaySleepEnabled: mockSetPreventDisplaySleepEnabled,
 		// Rendering
 		disableGpuAcceleration: false,
 		setDisableGpuAcceleration: mockSetDisableGpuAcceleration,
@@ -102,27 +131,6 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 		...mockUseSettingsOverrides,
 	}),
 }));
-
-const mockTheme: Theme = {
-	id: 'dracula',
-	name: 'Dracula',
-	mode: 'dark',
-	colors: {
-		bgMain: '#282a36',
-		bgSidebar: '#21222c',
-		bgActivity: '#343746',
-		border: '#44475a',
-		textMain: '#f8f8f2',
-		textDim: '#6272a4',
-		accent: '#bd93f9',
-		accentDim: '#bd93f920',
-		accentText: '#ff79c6',
-		accentForeground: '#ffffff',
-		success: '#50fa7b',
-		warning: '#ffb86c',
-		error: '#ff5555',
-	},
-};
 
 const mockShells: ShellInfo[] = [
 	{ id: 'zsh', name: 'Zsh', path: '/bin/zsh', available: true },
@@ -165,13 +173,13 @@ describe('GeneralTab', () => {
 			expect(screen.getByText('System Log Level')).toBeInTheDocument();
 			expect(screen.getByText('GitHub CLI (gh) Path')).toBeInTheDocument();
 			expect(screen.getByText('Input Send Behavior')).toBeInTheDocument();
+			expect(screen.getByText('Auto-Resume on Limit')).toBeInTheDocument();
 			expect(screen.getByText('Default History Toggle')).toBeInTheDocument();
 			expect(screen.getByText('Default Thinking Mode')).toBeInTheDocument();
-			expect(screen.getByText('Automatic Tab Naming')).toBeInTheDocument();
+			expect(screen.getByText('Tab Behavior')).toBeInTheDocument();
 			expect(screen.getByText('Power')).toBeInTheDocument();
 			expect(screen.getByText('Rendering Options')).toBeInTheDocument();
 			expect(screen.getByText('Updates')).toBeInTheDocument();
-			expect(screen.getByText('Pre-release Channel')).toBeInTheDocument();
 			expect(screen.getByText('Privacy')).toBeInTheDocument();
 			expect(screen.getByText('Storage Location')).toBeInTheDocument();
 		});
@@ -202,16 +210,17 @@ describe('GeneralTab', () => {
 
 			const textarea = screen.getByPlaceholderText(/I'm a senior developer/);
 			expect(textarea).toBeInTheDocument();
+			expect(screen.getByRole('textbox', { name: 'Conductor Profile' })).toBe(textarea);
 		});
 
-		it('should display character count as 0/1000 when empty', async () => {
+		it('should display character count as 0/5000 when empty', async () => {
 			render(<GeneralTab theme={mockTheme} isOpen={true} />);
 
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(100);
 			});
 
-			expect(screen.getByText('0/1000')).toBeInTheDocument();
+			expect(screen.getByText('0/5000')).toBeInTheDocument();
 		});
 
 		it('should display character count matching profile length', async () => {
@@ -222,10 +231,10 @@ describe('GeneralTab', () => {
 				await vi.advanceTimersByTimeAsync(100);
 			});
 
-			expect(screen.getByText('11/1000')).toBeInTheDocument();
+			expect(screen.getByText('11/5000')).toBeInTheDocument();
 		});
 
-		it('should have maxLength of 1000 on the textarea', async () => {
+		it('should have maxLength of 5000 on the textarea', async () => {
 			render(<GeneralTab theme={mockTheme} isOpen={true} />);
 
 			await act(async () => {
@@ -233,7 +242,7 @@ describe('GeneralTab', () => {
 			});
 
 			const textarea = screen.getByPlaceholderText(/I'm a senior developer/) as HTMLTextAreaElement;
-			expect(textarea.maxLength).toBe(1000);
+			expect(textarea.maxLength).toBe(5000);
 		});
 
 		it('should call setConductorProfile when text changes', async () => {
@@ -846,9 +855,14 @@ describe('GeneralTab', () => {
 			expect(
 				screen.getByText('Show AI thinking/reasoning content for new tabs')
 			).toBeInTheDocument();
-			expect(screen.getByRole('button', { name: 'Off' })).toBeInTheDocument();
-			expect(screen.getByRole('button', { name: 'On' })).toBeInTheDocument();
-			expect(screen.getByRole('button', { name: 'Sticky' })).toBeInTheDocument();
+			// Scope to the thinking-mode section: the Synopsis Debounce toggle also
+			// renders an "Off" button, so a bare getByRole would be ambiguous.
+			const thinkingSection = screen
+				.getByText('Show AI thinking/reasoning content for new tabs')
+				.closest('[data-setting-id="general-thinking-mode"]') as HTMLElement;
+			expect(within(thinkingSection).getByRole('button', { name: 'Off' })).toBeInTheDocument();
+			expect(within(thinkingSection).getByRole('button', { name: 'On' })).toBeInTheDocument();
+			expect(within(thinkingSection).getByRole('button', { name: 'Sticky' })).toBeInTheDocument();
 		});
 
 		it('should call setDefaultShowThinking with on when On is clicked', async () => {
@@ -881,7 +895,12 @@ describe('GeneralTab', () => {
 				await vi.advanceTimersByTimeAsync(100);
 			});
 
-			fireEvent.click(screen.getByRole('button', { name: 'Off' }));
+			// Scope to the thinking-mode section: the Synopsis Debounce toggle also
+			// renders an "Off" button, so a bare getByRole would be ambiguous.
+			const thinkingSection = screen
+				.getByText('Show AI thinking/reasoning content for new tabs')
+				.closest('[data-setting-id="general-thinking-mode"]') as HTMLElement;
+			fireEvent.click(within(thinkingSection).getByRole('button', { name: 'Off' }));
 			expect(mockSetDefaultShowThinking).toHaveBeenCalledWith('off');
 		});
 
@@ -916,6 +935,85 @@ describe('GeneralTab', () => {
 			});
 
 			expect(screen.getByText('Thinking streams live and stays visible')).toBeInTheDocument();
+		});
+	});
+
+	describe('Tool Calls', () => {
+		it('renders the tool calls toggle under the thinking-mode section', async () => {
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			expect(screen.getByText('Show tool calls in responses')).toBeInTheDocument();
+			// The tool-calls control is now grouped inside the Default Thinking Mode
+			// section rather than its own heading.
+			const toolCalls = screen
+				.getByText('Show tool calls in responses')
+				.closest('[data-setting-id="general-tool-calls"]') as HTMLElement;
+			expect(toolCalls.closest('[data-setting-id="general-thinking-mode"]')).not.toBeNull();
+		});
+
+		it('calls setShowToolCalls when toggled', async () => {
+			mockUseSettingsOverrides = { showToolCalls: true, defaultShowThinking: 'on' };
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			fireEvent.click(screen.getByRole('switch', { name: 'Show tool calls in responses' }));
+			// Clicking the switch fires exactly once; the wrapper onClick must not
+			// also fire (ToggleSwitch stops propagation).
+			expect(mockSetShowToolCalls).toHaveBeenCalledWith(false);
+			expect(mockSetShowToolCalls).toHaveBeenCalledTimes(1);
+		});
+
+		it('toggles once when the row is activated by keyboard', async () => {
+			mockUseSettingsOverrides = { showToolCalls: true, defaultShowThinking: 'on' };
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			const section = screen
+				.getByText('Show tool calls in responses')
+				.closest('[data-setting-id="general-tool-calls"]') as HTMLElement;
+			// Enter on the row toggles once; the target-guard in onKeyDown keeps a
+			// focused nested switch from also triggering the row handler.
+			fireEvent.keyDown(within(section).getByRole('button'), { key: 'Enter' });
+			expect(mockSetShowToolCalls).toHaveBeenCalledTimes(1);
+		});
+
+		it('stays usable when the default thinking mode is off', async () => {
+			// The two settings are independent: tool-call visibility must be
+			// controllable whatever the thinking mode is, so the switch is never
+			// ghosted and both the switch and the row still toggle it.
+			mockUseSettingsOverrides = { showToolCalls: true, defaultShowThinking: 'off' };
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			const toggle = screen.getByRole('switch', { name: 'Show tool calls in responses' });
+			expect(toggle).not.toBeDisabled();
+			expect(toggle).toBeChecked();
+			fireEvent.click(toggle);
+			expect(mockSetShowToolCalls).toHaveBeenCalledWith(false);
+
+			mockSetShowToolCalls.mockClear();
+			const section = screen
+				.getByText('Show tool calls in responses')
+				.closest('[data-setting-id="general-tool-calls"]') as HTMLElement;
+			fireEvent.keyDown(within(section).getByRole('button'), { key: 'Enter' });
+			expect(mockSetShowToolCalls).toHaveBeenCalledTimes(1);
+		});
+
+		it('reflects the off state independently of the thinking mode', async () => {
+			mockUseSettingsOverrides = { showToolCalls: false, defaultShowThinking: 'sticky' };
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			const toggle = screen.getByRole('switch', { name: 'Show tool calls in responses' });
+			expect(toggle).not.toBeChecked();
+			fireEvent.click(toggle);
+			expect(mockSetShowToolCalls).toHaveBeenCalledWith(true);
 		});
 	});
 
@@ -1013,8 +1111,8 @@ describe('GeneralTab', () => {
 		});
 
 		it('should show Linux-specific note when on Linux platform', async () => {
-			const { isLinuxPlatform } = await import('../../../../../renderer/utils/platformUtils');
-			vi.mocked(isLinuxPlatform).mockReturnValue(true);
+			const { isLinux } = await import('../../../../../shared/platformDetection');
+			vi.mocked(isLinux).mockReturnValue(true);
 
 			render(<GeneralTab theme={mockTheme} isOpen={true} />);
 
@@ -1026,7 +1124,7 @@ describe('GeneralTab', () => {
 				screen.getByText(/limited support on some Linux desktop environments/)
 			).toBeInTheDocument();
 
-			vi.mocked(isLinuxPlatform).mockReturnValue(false);
+			vi.mocked(isLinux).mockReturnValue(false);
 		});
 
 		it('should not show Linux-specific note on non-Linux platforms', async () => {
@@ -1039,6 +1137,66 @@ describe('GeneralTab', () => {
 			expect(
 				screen.queryByText(/limited support on some Linux desktop environments/)
 			).not.toBeInTheDocument();
+		});
+
+		it('should disable the display toggle while sleep prevention is off', async () => {
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			const toggle = screen.getByRole('switch', { name: 'Keep the display awake' });
+			expect(toggle).toBeDisabled();
+
+			fireEvent.click(screen.getByText('Keep the display awake').closest('[role="button"]')!);
+			expect(mockSetPreventDisplaySleepEnabled).not.toHaveBeenCalled();
+		});
+
+		it('should toggle keep display awake when sleep prevention is on', async () => {
+			mockUseSettingsOverrides = { preventSleepEnabled: true };
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			fireEvent.click(screen.getByRole('switch', { name: 'Keep the display awake' }));
+			expect(mockSetPreventDisplaySleepEnabled).toHaveBeenCalledWith(true);
+		});
+
+		it('should warn about paused macOS maintenance when the option is on', async () => {
+			const { isMacOSPlatform } = await import('../../../../../renderer/utils/platformUtils');
+			vi.mocked(isMacOSPlatform).mockReturnValue(true);
+			mockUseSettingsOverrides = {
+				preventSleepEnabled: true,
+				preventDisplaySleepEnabled: true,
+			};
+
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect(screen.getByText(/housekeeping stays parked/)).toBeInTheDocument();
+
+			vi.mocked(isMacOSPlatform).mockReturnValue(false);
+		});
+
+		it('should not warn about macOS maintenance on other platforms', async () => {
+			mockUseSettingsOverrides = {
+				preventSleepEnabled: true,
+				preventDisplaySleepEnabled: true,
+			};
+
+			render(<GeneralTab theme={mockTheme} isOpen={true} />);
+
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+
+			expect(screen.queryByText(/housekeeping stays parked/)).not.toBeInTheDocument();
 		});
 	});
 
@@ -1168,7 +1326,7 @@ describe('GeneralTab', () => {
 				await vi.advanceTimersByTimeAsync(100);
 			});
 
-			expect(screen.getByText('Check for updates on startup')).toBeInTheDocument();
+			expect(screen.getByText('Check for updates automatically')).toBeInTheDocument();
 		});
 
 		it('should call setCheckForUpdatesOnStartup when toggle is clicked', async () => {
@@ -1178,7 +1336,7 @@ describe('GeneralTab', () => {
 				await vi.advanceTimersByTimeAsync(100);
 			});
 
-			const titleElement = screen.getByText('Check for updates on startup');
+			const titleElement = screen.getByText('Check for updates automatically');
 			const toggleContainer = titleElement.closest('[role="button"]');
 			const toggleSwitch = toggleContainer?.querySelector('button[role="switch"]');
 

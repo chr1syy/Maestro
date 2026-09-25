@@ -48,6 +48,10 @@ export interface LogEntry {
 	timestamp: number;
 	text: string;
 	source: 'user' | 'stdout' | 'stderr' | 'thinking' | 'tool';
+	/** Base64 data URLs attached to a user message (e.g. pasted images).
+	 *  Mirrors the renderer-side LogEntry.images so optimistic chat history
+	 *  shows the same attachments the agent receives. */
+	images?: string[];
 	metadata?: {
 		toolState?: {
 			name?: string;
@@ -90,6 +94,8 @@ export interface UseMobileSessionManagementDeps {
 	onResponseComplete?: (session: Session, response?: unknown) => void;
 	/** Callback when theme updates from server */
 	onThemeUpdate?: (theme: Theme) => void;
+	/** Callback when the global Bionify reading-mode setting updates from the server */
+	onBionifyReadingModeUpdate?: (enabled: boolean) => void;
 	/** Callback when custom commands are received */
 	onCustomCommands?: (commands: CustomCommand[]) => void;
 	/** Callback when AutoRun state changes */
@@ -138,9 +144,17 @@ export interface MobileSessionHandlers {
 	onSessionExit: (sessionId: string, exitCode: number) => void;
 	onUserInput: (sessionId: string, command: string, inputMode: 'ai' | 'terminal') => void;
 	onThemeUpdate: (theme: Theme) => void;
+	onBionifyReadingModeUpdate: (enabled: boolean) => void;
 	onCustomCommands: (commands: CustomCommand[]) => void;
 	onAutoRunStateChange: (sessionId: string, state: AutoRunState | null) => void;
 	onTabsChanged: (sessionId: string, aiTabs: AITabData[], newActiveTabId: string) => void;
+	onRenameTabResult: (
+		sessionId: string,
+		tabId: string,
+		success: boolean,
+		newName: string,
+		error?: string
+	) => void;
 }
 
 /**
@@ -184,7 +198,7 @@ export interface UseMobileSessionManagementReturn {
 	/** Handler to toggle bookmark on a session */
 	handleToggleBookmark: (sessionId: string) => void;
 	/** Add a user input log entry to session logs */
-	addUserLogEntry: (text: string, inputMode: 'ai' | 'terminal') => void;
+	addUserLogEntry: (text: string, inputMode: 'ai' | 'terminal', images?: string[]) => void;
 	/** WebSocket handlers for session state updates */
 	sessionsHandlers: MobileSessionHandlers;
 }
@@ -214,6 +228,7 @@ export function useMobileSessionManagement(
 		hapticTapPattern,
 		onResponseComplete,
 		onThemeUpdate,
+		onBionifyReadingModeUpdate,
 		onCustomCommands,
 		onAutoRunStateChange,
 	} = deps;
@@ -246,7 +261,7 @@ export function useMobileSessionManagement(
 	const activeSessionIdRef = useRef<string | null>(urlSessionId || savedActiveSessionId);
 	// Ref to track activeTabId for use in callbacks (avoids stale closure issues)
 	const activeTabIdRef = useRef<string | null>(urlTabId || savedActiveTabId);
-	// Timestamp of last local session selection — used to ignore server echoes
+	// Timestamp of last local session selection - used to ignore server echoes
 	const lastLocalSelectionRef = useRef<number>(0);
 
 	// Keep activeSessionIdRef in sync with state
@@ -451,18 +466,22 @@ export function useMobileSessionManagement(
 	);
 
 	// Add a user input log entry to session logs
-	const addUserLogEntry = useCallback((text: string, inputMode: 'ai' | 'terminal') => {
-		const userLogEntry: LogEntry = {
-			id: `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-			timestamp: Date.now(),
-			text,
-			source: 'user',
-		};
-		setSessionLogs((prev) => {
-			const logKey = inputMode === 'ai' ? 'aiLogs' : 'shellLogs';
-			return { ...prev, [logKey]: [...prev[logKey], userLogEntry] };
-		});
-	}, []);
+	const addUserLogEntry = useCallback(
+		(text: string, inputMode: 'ai' | 'terminal', images?: string[]) => {
+			const userLogEntry: LogEntry = {
+				id: `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+				timestamp: Date.now(),
+				text,
+				source: 'user',
+				...(images && images.length > 0 ? { images } : {}),
+			};
+			setSessionLogs((prev) => {
+				const logKey = inputMode === 'ai' ? 'aiLogs' : 'shellLogs';
+				return { ...prev, [logKey]: [...prev[logKey], userLogEntry] };
+			});
+		},
+		[]
+	);
 
 	// WebSocket handlers for session updates
 	const sessionsHandlers = useMemo(
@@ -515,7 +534,7 @@ export function useMobileSessionManagement(
 				setSessions((prev) => {
 					// Exclude inputMode from server broadcasts to prevent race conditions
 					// with optimistic mode switches. The web client manages its own inputMode
-					// via handleModeToggle — server state_change broadcasts may carry stale
+					// via handleModeToggle - server state_change broadcasts may carry stale
 					// inputMode values during the IPC round-trip (web → server → desktop → broadcast).
 					const { inputMode: _serverInputMode, ...safeAdditionalData } = additionalData || {};
 					const updatedSessions = prev.map((s) =>
@@ -561,7 +580,7 @@ export function useMobileSessionManagement(
 			},
 			onActiveSessionChanged: (sessionId: string) => {
 				// Ignore server echoes that arrive shortly after a local selection
-				// (user selected a session in web, server echoed it back — but user may
+				// (user selected a session in web, server echoed it back - but user may
 				// have already clicked another session by the time the echo arrives)
 				const timeSinceLocalSelect = Date.now() - lastLocalSelectionRef.current;
 				if (timeSinceLocalSelect < 2000 && sessionId === activeSessionIdRef.current) {
@@ -752,6 +771,10 @@ export function useMobileSessionManagement(
 				webLogger.debug(`Theme update received: ${theme.name} (${theme.mode})`, 'Mobile');
 				onThemeUpdate?.(theme);
 			},
+			onBionifyReadingModeUpdate: (enabled: boolean) => {
+				webLogger.debug(`Bionify reading mode update received: ${enabled}`, 'Mobile');
+				onBionifyReadingModeUpdate?.(enabled);
+			},
 			onCustomCommands: (commands: CustomCommand[]) => {
 				// Custom slash commands from desktop app
 				webLogger.debug(`Custom commands received: ${commands.length}`, 'Mobile');
@@ -781,8 +804,38 @@ export function useMobileSessionManagement(
 					setActiveTabId(newActiveTabId);
 				}
 			},
+			onRenameTabResult: (
+				sessionId: string,
+				tabId: string,
+				success: boolean,
+				newName: string,
+				error?: string
+			) => {
+				if (!success) {
+					webLogger.warn(`Rename tab failed: ${error || 'unknown error'}`, 'Mobile');
+					return;
+				}
+
+				setSessions((prev) =>
+					prev.map((s) => {
+						if (s.id !== sessionId) return s;
+						return {
+							...s,
+							aiTabs: s.aiTabs?.map((tab) =>
+								tab.id === tabId ? { ...tab, name: newName || null } : tab
+							),
+						};
+					})
+				);
+			},
 		}),
-		[onResponseComplete, onThemeUpdate, onCustomCommands, onAutoRunStateChange]
+		[
+			onResponseComplete,
+			onThemeUpdate,
+			onBionifyReadingModeUpdate,
+			onCustomCommands,
+			onAutoRunStateChange,
+		]
 	);
 
 	return {

@@ -1,7 +1,17 @@
 import { memo } from 'react';
 import type { Session, Group, Theme } from '../../types';
 import { getStatusColor } from '../../utils/theme';
+import { hasNoClaudeProviderSession } from '../SessionItem';
 import { SessionTooltipContent } from './SessionTooltipContent';
+import { PluginUiItemsSlot } from '../plugins/PluginUiItemsSlot';
+import {
+	sessionNeedsAttention,
+	outageIdsFromSignature,
+	type AttentionContext,
+} from '../../utils/sessionAttention';
+import { CornerDot } from '../ui/CornerDot';
+import { hasUnreadVisibleTab } from '../../utils/tabHelpers';
+import { useConsultedSessionIds } from '../../stores/crossAgentInFlightStore';
 
 interface SkinnySidebarProps {
 	theme: Theme;
@@ -14,6 +24,9 @@ interface SkinnySidebarProps {
 	getFileCount: (sessionId: string) => number;
 	setActiveSessionId: (id: string) => void;
 	handleContextMenu: (e: React.MouseEvent, sessionId: string) => void;
+	showUnreadAgentsOnly: boolean;
+	/** Comma-joined signature of agents stuck auto-retrying an outage. */
+	stuckOutageSignature: string;
 }
 
 export const SkinnySidebar = memo(function SkinnySidebar({
@@ -27,18 +40,42 @@ export const SkinnySidebar = memo(function SkinnySidebar({
 	getFileCount,
 	setActiveSessionId,
 	handleContextMenu,
+	showUnreadAgentsOnly,
+	stuckOutageSignature,
 }: SkinnySidebarProps) {
+	const consultedSessionIds = useConsultedSessionIds();
+	const attentionCtx: AttentionContext = {
+		batchSessionIds: new Set(activeBatchSessionIds),
+		stuckOutageIds: outageIdsFromSignature(stuckOutageSignature),
+	};
+	const visibleSessions = showUnreadAgentsOnly
+		? sortedSessions.filter(
+				(s) => s.id === activeSessionId || sessionNeedsAttention(s, attentionCtx)
+			)
+		: sortedSessions;
+
 	return (
 		<div className="flex-1 min-h-0 flex flex-col items-center py-4 gap-2 overflow-y-auto overflow-x-visible no-scrollbar">
-			{sortedSessions.map((session) => {
+			<PluginUiItemsSlot surface="activity-bar" />
+			{visibleSessions.map((session) => {
 				const isInBatch = activeBatchSessionIds.includes(session.id);
-				const hasUnreadTabs = session.aiTabs?.some((tab) => tab.hasUnread);
-				const effectiveStatusColor = isInBatch
+				const hasUnreadTabs = hasUnreadVisibleTab(session.aiTabs);
+				const isUnboundClaude = hasNoClaudeProviderSession(session);
+				// A cross-agent consult never touches `session.state` (hidden tab,
+				// synthetic process id), so it is folded in beside Auto Run: real work
+				// the collapsed rail would otherwise draw as a green idle dot. It also
+				// outranks the unbound-Claude hollow dot, since a consult tab has no
+				// provider session of its own until the agent answers.
+				const isConsulted = consultedSessionIds.has(session.id);
+				// One flag for "working, but not via `session.state`", so the color and
+				// the hollow-dot branch below cannot disagree about which wins.
+				const isBusyOffState = isInBatch || isConsulted;
+				const effectiveStatusColor = isBusyOffState
 					? theme.colors.warning
-					: session.toolType === 'claude-code' && !session.agentSessionId
+					: isUnboundClaude
 						? undefined
 						: getStatusColor(session.state, theme);
-				const shouldPulse = session.state === 'busy' || isInBatch;
+				const shouldPulse = session.state === 'busy' || isBusyOffState;
 
 				return (
 					<div
@@ -61,7 +98,7 @@ export const SkinnySidebar = memo(function SkinnySidebar({
 								className={`w-3 h-3 rounded-full ${shouldPulse ? 'animate-pulse' : ''}`}
 								style={{
 									opacity: activeSessionId === session.id ? 1 : 0.25,
-									...(session.toolType === 'claude-code' && !session.agentSessionId && !isInBatch
+									...(isUnboundClaude && !isBusyOffState
 										? {
 												border: `1.5px solid ${theme.colors.textDim}`,
 												backgroundColor: 'transparent',
@@ -71,17 +108,15 @@ export const SkinnySidebar = memo(function SkinnySidebar({
 											}),
 								}}
 								title={
-									session.toolType === 'claude-code' && !session.agentSessionId
-										? 'No active Claude session'
-										: undefined
+									isConsulted
+										? 'Answering a consult'
+										: isUnboundClaude
+											? 'No active Claude session'
+											: undefined
 								}
 							/>
 							{activeSessionId !== session.id && hasUnreadTabs && (
-								<div
-									className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full"
-									style={{ backgroundColor: theme.colors.error }}
-									title="Unread messages"
-								/>
+								<CornerDot color={theme.colors.error} title="Unread messages" />
 							)}
 						</div>
 

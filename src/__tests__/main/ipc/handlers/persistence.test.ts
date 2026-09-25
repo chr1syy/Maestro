@@ -6,18 +6,21 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ipcMain, app } from 'electron';
+import { ipcMain, app, BrowserWindow } from 'electron';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import {
 	registerPersistenceHandlers,
+	SESSION_LIFECYCLE_SYNC_CHANNEL,
 	PersistenceHandlerDependencies,
 	MaestroSettings,
 	SessionsData,
 	GroupsData,
 } from '../../../../main/ipc/handlers/persistence';
 import type Store from 'electron-store';
+import type { StoredSession } from '../../../../main/stores/types';
 import type { WebServer } from '../../../../main/web-server';
+import { broadcastBridgeEvent } from '../../../../main/web-server/handlers/bridgeHandlers';
 
 // Mock electron's ipcMain and app
 vi.mock('electron', () => ({
@@ -27,6 +30,12 @@ vi.mock('electron', () => ({
 	},
 	app: {
 		getPath: vi.fn().mockReturnValue('/mock/user/data'),
+		on: vi.fn(),
+	},
+	// settings:set notifies peer windows so a renderer never gets its own write
+	// echoed back as an external change (see notifyPeerWindows).
+	BrowserWindow: {
+		getAllWindows: vi.fn(() => []),
 	},
 }));
 
@@ -48,6 +57,19 @@ vi.mock('../../../../main/utils/logger', () => ({
 	},
 }));
 
+// The lifecycle push fans out to web-desktop clients through the bridge; mock it
+// so the tests can assert what peers were told without a live WebSocket server.
+vi.mock('../../../../main/web-server/handlers/bridgeHandlers', () => ({
+	broadcastBridgeEvent: vi.fn(),
+}));
+
+const { backupSessionsBeforeWipeMock } = vi.hoisted(() => ({
+	backupSessionsBeforeWipeMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../../../main/stores/sessions-backup', () => ({
+	backupSessionsBeforeWipe: backupSessionsBeforeWipeMock,
+}));
+
 // Mock the themes module
 vi.mock('../../../../main/themes', () => ({
 	getThemeById: vi.fn().mockReturnValue({
@@ -67,6 +89,7 @@ describe('persistence IPC handlers', () => {
 	let mockSessionsStore: {
 		get: ReturnType<typeof vi.fn>;
 		set: ReturnType<typeof vi.fn>;
+		path: string;
 	};
 	let mockGroupsStore: {
 		get: ReturnType<typeof vi.fn>;
@@ -75,12 +98,15 @@ describe('persistence IPC handlers', () => {
 	let mockWebServer: {
 		getWebClientCount: ReturnType<typeof vi.fn>;
 		broadcastThemeChange: ReturnType<typeof vi.fn>;
+		broadcastBionifyReadingModeChange: ReturnType<typeof vi.fn>;
 		broadcastCustomCommands: ReturnType<typeof vi.fn>;
+		broadcastSettingsChanged: ReturnType<typeof vi.fn>;
 		broadcastSessionStateChange: ReturnType<typeof vi.fn>;
 		broadcastSessionAdded: ReturnType<typeof vi.fn>;
 		broadcastSessionRemoved: ReturnType<typeof vi.fn>;
 	};
 	let getWebServerFn: () => WebServer | null;
+	let mockFlushSessionWrites: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
 		// Clear mocks
@@ -96,6 +122,7 @@ describe('persistence IPC handlers', () => {
 		mockSessionsStore = {
 			get: vi.fn().mockReturnValue([]),
 			set: vi.fn(),
+			path: '/mock/maestro-sessions.json',
 		};
 
 		mockGroupsStore = {
@@ -106,13 +133,16 @@ describe('persistence IPC handlers', () => {
 		mockWebServer = {
 			getWebClientCount: vi.fn().mockReturnValue(0),
 			broadcastThemeChange: vi.fn(),
+			broadcastBionifyReadingModeChange: vi.fn(),
 			broadcastCustomCommands: vi.fn(),
+			broadcastSettingsChanged: vi.fn(),
 			broadcastSessionStateChange: vi.fn(),
 			broadcastSessionAdded: vi.fn(),
 			broadcastSessionRemoved: vi.fn(),
 		};
 
 		getWebServerFn = () => mockWebServer as unknown as WebServer;
+		mockFlushSessionWrites = vi.fn().mockResolvedValue(undefined);
 
 		// Capture all registered handlers
 		handlers = new Map();
@@ -126,6 +156,7 @@ describe('persistence IPC handlers', () => {
 			sessionsStore: mockSessionsStore as unknown as Store<SessionsData>,
 			groupsStore: mockGroupsStore as unknown as Store<GroupsData>,
 			getWebServer: getWebServerFn,
+			flushSessionWrites: mockFlushSessionWrites,
 		};
 		registerPersistenceHandlers(deps);
 	});
@@ -141,9 +172,11 @@ describe('persistence IPC handlers', () => {
 				'settings:set',
 				'settings:getAll',
 				'sessions:getAll',
+				'images:resolve',
 				'sessions:getActiveSessionId',
 				'sessions:setActiveSessionId',
 				'sessions:setAll',
+				'sessions:setMany',
 				'groups:getAll',
 				'groups:setAll',
 				'cli:getActivity',
@@ -167,10 +200,192 @@ describe('persistence IPC handlers', () => {
 	});
 
 	describe('sessions:setActiveSessionId', () => {
-		it('should persist and retrieve an active session ID', async () => {
+		// The write is debounced (see registerPersistenceHandlers) to avoid a full
+		// sessions-store re-serialize on every session/tab switch.
+		beforeEach(() => vi.useFakeTimers());
+		afterEach(() => vi.useRealTimers());
+
+		it('debounces the disk write, then flushes after the interval', async () => {
 			const setHandler = handlers.get('sessions:setActiveSessionId');
 			await setHandler!({} as any, 'test-session-123');
+
+			// Not written synchronously.
+			expect(mockSessionsStore.set).not.toHaveBeenCalled();
+
+			// Flushes once the debounce elapses.
+			vi.advanceTimersByTime(400);
+			expect(mockSessionsStore.set).toHaveBeenCalledTimes(1);
 			expect(mockSessionsStore.set).toHaveBeenCalledWith('activeSessionId', 'test-session-123');
+		});
+
+		it('coalesces a burst of rapid switches into a single write (last wins)', async () => {
+			const setHandler = handlers.get('sessions:setActiveSessionId');
+			await setHandler!({} as any, 'a');
+			await setHandler!({} as any, 'b');
+			await setHandler!({} as any, 'c');
+
+			vi.advanceTimersByTime(400);
+			expect(mockSessionsStore.set).toHaveBeenCalledTimes(1);
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('activeSessionId', 'c');
+		});
+
+		it('reads back the pending id before it is flushed (read-through)', async () => {
+			const setHandler = handlers.get('sessions:setActiveSessionId');
+			const getHandler = handlers.get('sessions:getActiveSessionId');
+			await setHandler!({} as any, 'pending-id');
+
+			// Store not yet written, but the getter returns the pending value.
+			expect(mockSessionsStore.set).not.toHaveBeenCalled();
+			expect(await getHandler!({} as any)).toBe('pending-id');
+			expect(mockSessionsStore.get).not.toHaveBeenCalledWith('activeSessionId', '');
+		});
+
+		it('flushes synchronously on before-quit', async () => {
+			const setHandler = handlers.get('sessions:setActiveSessionId');
+			await setHandler!({} as any, 'quit-id');
+			expect(mockSessionsStore.set).not.toHaveBeenCalled();
+
+			// Invoke the registered before-quit listener.
+			const onCalls = vi.mocked(app.on).mock.calls as unknown as Array<[string, () => void]>;
+			const beforeQuit = onCalls.find(([event]) => event === 'before-quit')?.[1];
+			expect(beforeQuit).toBeDefined();
+			beforeQuit!();
+
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('activeSessionId', 'quit-id');
+		});
+
+		describe('session.activated plugin event', () => {
+			let emitPluginEvent: ReturnType<typeof vi.fn>;
+			let setHandler: (event: unknown, id: string) => Promise<unknown>;
+
+			beforeEach(() => {
+				handlers.clear();
+				emitPluginEvent = vi.fn();
+				const deps: PersistenceHandlerDependencies = {
+					settingsStore: mockSettingsStore as unknown as Store<MaestroSettings>,
+					sessionsStore: mockSessionsStore as unknown as Store<SessionsData>,
+					groupsStore: mockGroupsStore as unknown as Store<GroupsData>,
+					getWebServer: getWebServerFn,
+					emitPluginEvent,
+				};
+				registerPersistenceHandlers(deps);
+				setHandler = handlers.get('sessions:setActiveSessionId') as typeof setHandler;
+			});
+
+			it('emits a metadata-only session.activated after its own short debounce', async () => {
+				await setHandler({}, 'sess-1');
+				expect(emitPluginEvent).not.toHaveBeenCalled();
+
+				vi.advanceTimersByTime(100);
+				expect(emitPluginEvent).toHaveBeenCalledTimes(1);
+				const event = emitPluginEvent.mock.calls[0][0];
+				expect(event.topic).toBe('session.activated');
+				expect(event.payload).toEqual({ sessionId: 'sess-1' });
+				expect(typeof event.at).toBe('string');
+			});
+
+			it('coalesces a burst of switches into one event for the session landed on', async () => {
+				await setHandler({}, 'a');
+				await setHandler({}, 'b');
+				await setHandler({}, 'c');
+
+				vi.advanceTimersByTime(100);
+				expect(emitPluginEvent).toHaveBeenCalledTimes(1);
+				expect(emitPluginEvent.mock.calls[0][0].payload).toEqual({ sessionId: 'c' });
+			});
+
+			it('does not re-emit when the same session is re-focused', async () => {
+				await setHandler({}, 'same');
+				vi.advanceTimersByTime(100);
+				await setHandler({}, 'same');
+				vi.advanceTimersByTime(100);
+
+				expect(emitPluginEvent).toHaveBeenCalledTimes(1);
+			});
+
+			it('ignores an empty session id', async () => {
+				await setHandler({}, '');
+				vi.advanceTimersByTime(100);
+
+				expect(emitPluginEvent).not.toHaveBeenCalled();
+			});
+
+			// Regression: the plugin focus verbs (index.ts) emit session.activated
+			// directly, bypassing flushSessionActivated's dedupe. If the plugin path
+			// does not record its id via noteSessionActivated, the two paths desync:
+			// after the user is on A and a plugin focuses B, returning to A would be
+			// wrongly suppressed and subscribers stay stuck on B.
+			it('keeps the plugin path in sync so returning to a prior session still emits', async () => {
+				handlers.clear();
+				const localEmit = vi.fn();
+				const { noteSessionActivated } = registerPersistenceHandlers({
+					settingsStore: mockSettingsStore as unknown as Store<MaestroSettings>,
+					sessionsStore: mockSessionsStore as unknown as Store<SessionsData>,
+					groupsStore: mockGroupsStore as unknown as Store<GroupsData>,
+					getWebServer: getWebServerFn,
+					emitPluginEvent: localEmit,
+				});
+				const localSetHandler = handlers.get('sessions:setActiveSessionId') as (
+					event: unknown,
+					id: string
+				) => Promise<unknown>;
+
+				// User navigates to A: the flush path emits A (lastEmitted = A).
+				await localSetHandler({}, 'A');
+				vi.advanceTimersByTime(100);
+				expect(localEmit).toHaveBeenCalledTimes(1);
+				expect(localEmit.mock.calls[0][0].payload).toEqual({ sessionId: 'A' });
+
+				// Agent Flow calls sessions.focus(B): index.ts emits B directly, then
+				// records it through the shared dedupe. Simulate that record here.
+				noteSessionActivated('B');
+
+				// User returns to A: A differs from the last-emitted id (now B), so it
+				// must still be emitted rather than suppressed as a repeat.
+				await localSetHandler({}, 'A');
+				vi.advanceTimersByTime(100);
+				expect(localEmit).toHaveBeenCalledTimes(2);
+				expect(localEmit.mock.calls[1][0].payload).toEqual({ sessionId: 'A' });
+			});
+
+			// Regression (race): a direct plugin focus must supersede an already-queued
+			// debounced flush for a DIFFERENT session, or that stale timer fires after
+			// the plugin's emit and re-announces the wrong session.
+			it('cancels a pending debounced flush when the plugin directly focuses another session', async () => {
+				handlers.clear();
+				const localEmit = vi.fn();
+				const { noteSessionActivated } = registerPersistenceHandlers({
+					settingsStore: mockSettingsStore as unknown as Store<MaestroSettings>,
+					sessionsStore: mockSessionsStore as unknown as Store<SessionsData>,
+					groupsStore: mockGroupsStore as unknown as Store<GroupsData>,
+					getWebServer: getWebServerFn,
+					emitPluginEvent: localEmit,
+				});
+				const localSetHandler = handlers.get('sessions:setActiveSessionId') as (
+					event: unknown,
+					id: string
+				) => Promise<unknown>;
+
+				// User navigates to A: its 100ms flush is now armed but has NOT fired.
+				await localSetHandler({}, 'A');
+				expect(localEmit).not.toHaveBeenCalled();
+
+				// Agent Flow directly focuses B mid-window (index.ts emits B on the bus
+				// and records it here). This must cancel the pending A flush.
+				noteSessionActivated('B');
+
+				// Let the original A timer elapse: it must be dead, so A is never emitted
+				// after B. Subscribers stay on B (the real active session).
+				vi.advanceTimersByTime(100);
+				expect(localEmit).not.toHaveBeenCalled();
+
+				// And a later genuine navigation back to A still emits (B was the last
+				// recorded id, so A is not a duplicate).
+				await localSetHandler({}, 'A');
+				vi.advanceTimersByTime(100);
+				expect(localEmit).toHaveBeenCalledTimes(1);
+				expect(localEmit.mock.calls[0][0].payload).toEqual({ sessionId: 'A' });
+			});
 		});
 	});
 
@@ -223,6 +438,91 @@ describe('persistence IPC handlers', () => {
 			expect(result).toBe(true);
 		});
 
+		// usageStats holds lifetime high-water marks. The merge lives here, not
+		// in the renderer, because the caller's own copy cannot be trusted: a
+		// renderer mid-hydration still holds zeros, and a second window holds a
+		// stale snapshot. Either one used to be able to overwrite a real peak.
+		describe('usageStats peaks', () => {
+			const stored = {
+				maxAgents: 89,
+				maxDefinedAgents: 89,
+				maxSimultaneousAutoRuns: 8,
+				maxSimultaneousQueries: 8,
+				maxQueueDepth: 16,
+			};
+
+			it('refuses a write that would lower a stored peak', async () => {
+				mockSettingsStore.get.mockReturnValue(stored);
+
+				const handler = handlers.get('settings:set');
+				const result = await handler!({} as any, 'usageStats', {
+					maxAgents: 12,
+					maxDefinedAgents: 12,
+					maxSimultaneousAutoRuns: 1,
+					maxSimultaneousQueries: 2,
+					maxQueueDepth: 0,
+				});
+
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('usageStats', stored);
+				expect(result).toBe(true);
+			});
+
+			it('raises only the counters that were beaten', async () => {
+				mockSettingsStore.get.mockReturnValue(stored);
+
+				const handler = handlers.get('settings:set');
+				await handler!({} as any, 'usageStats', { ...stored, maxQueueDepth: 21 });
+
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('usageStats', {
+					...stored,
+					maxQueueDepth: 21,
+				});
+			});
+
+			// The exact shape of the incident: an unhydrated renderer sends its
+			// zeroed defaults maxed against a live snapshot.
+			it('survives a write from a caller whose baseline is zeroed', async () => {
+				mockSettingsStore.get.mockReturnValue(stored);
+
+				const handler = handlers.get('settings:set');
+				await handler!({} as any, 'usageStats', {
+					maxAgents: 88,
+					maxDefinedAgents: 88,
+					maxSimultaneousAutoRuns: 1,
+					maxSimultaneousQueries: 3,
+					maxQueueDepth: 2,
+				});
+
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('usageStats', stored);
+			});
+
+			it('accepts the first write when nothing is stored yet', async () => {
+				mockSettingsStore.get.mockReturnValue(undefined);
+
+				const handler = handlers.get('settings:set');
+				await handler!({} as any, 'usageStats', { maxAgents: 4 });
+
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('usageStats', {
+					maxAgents: 4,
+					maxDefinedAgents: 0,
+					maxSimultaneousAutoRuns: 0,
+					maxSimultaneousQueries: 0,
+					maxQueueDepth: 0,
+				});
+			});
+
+			it('leaves every other key untouched by the merge', async () => {
+				mockSettingsStore.get.mockReturnValue({ maxAgents: 99 });
+
+				const handler = handlers.get('settings:set');
+				await handler!({} as any, 'autoRunStats', { cumulativeTimeMs: 5 });
+
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('autoRunStats', {
+					cumulativeTimeMs: 5,
+				});
+			});
+		});
+
 		it('should handle nested keys', async () => {
 			const handler = handlers.get('settings:set');
 			const result = await handler!({} as any, 'shortcuts.newTab', { ctrl: true, key: 't' });
@@ -232,6 +532,28 @@ describe('persistence IPC handlers', () => {
 				key: 't',
 			});
 			expect(result).toBe(true);
+		});
+
+		it('should notify other windows but never the window that wrote', async () => {
+			const { BrowserWindow } = await import('electron');
+			const makeWindow = (id: number) => ({
+				isDestroyed: () => false,
+				webContents: { id, send: vi.fn(), isDestroyed: () => false },
+			});
+			const writer = makeWindow(1);
+			const peer = makeWindow(2);
+			(BrowserWindow.getAllWindows as unknown as ReturnType<typeof vi.fn>).mockReturnValue([
+				writer,
+				peer,
+			]);
+
+			const handler = handlers.get('settings:set');
+			await handler!({ sender: { id: 1 } } as any, 'fontSize', 16);
+
+			// Echoing the write back to its own window makes that renderer reload
+			// settings asynchronously on top of whatever is being typed.
+			expect(writer.webContents.send).not.toHaveBeenCalled();
+			expect(peer.webContents.send).toHaveBeenCalledWith('settings:externalChange');
 		});
 
 		it('should broadcast theme changes to connected web clients', async () => {
@@ -255,6 +577,66 @@ describe('persistence IPC handlers', () => {
 			expect(mockWebServer.broadcastThemeChange).not.toHaveBeenCalled();
 		});
 
+		it('should cascade every settings change to peer windows (settings are global)', async () => {
+			const { BrowserWindow } = await import('electron');
+			const peer = {
+				isDestroyed: () => false,
+				webContents: { id: 2, send: vi.fn(), isDestroyed: () => false },
+			};
+			(BrowserWindow.getAllWindows as unknown as ReturnType<typeof vi.fn>).mockReturnValue([peer]);
+
+			const handler = handlers.get('settings:set');
+
+			// A UI-driven theme switch must reach every other window, not just the sender.
+			await handler!({ sender: { id: 1 } } as any, 'activeThemeId', 'light');
+			expect(peer.webContents.send).toHaveBeenCalledWith('settings:externalChange');
+
+			// Not theme-specific: any setting cascades so all windows stay in unison.
+			peer.webContents.send.mockClear();
+			await handler!({ sender: { id: 1 } } as any, 'fontSize', 16);
+			expect(peer.webContents.send).toHaveBeenCalledWith('settings:externalChange');
+		});
+
+		it('should not cascade when the settings write fails', async () => {
+			mockSettingsStore.set.mockImplementationOnce(() => {
+				const err = new Error('disk full') as NodeJS.ErrnoException;
+				err.code = 'ENOSPC';
+				throw err;
+			});
+
+			const { BrowserWindow } = await import('electron');
+			const peer = {
+				isDestroyed: () => false,
+				webContents: { id: 2, send: vi.fn(), isDestroyed: () => false },
+			};
+			(BrowserWindow.getAllWindows as unknown as ReturnType<typeof vi.fn>).mockReturnValue([peer]);
+
+			const handler = handlers.get('settings:set');
+			const result = await handler!({ sender: { id: 1 } } as any, 'activeThemeId', 'light');
+
+			expect(result).toBe(false);
+			expect(peer.webContents.send).not.toHaveBeenCalled();
+		});
+
+		it('should broadcast bionify reading mode changes to connected web clients', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(2);
+
+			const handler = handlers.get('settings:set');
+			await handler!({} as any, 'bionifyReadingMode', true);
+
+			expect(mockSettingsStore.set).toHaveBeenCalledWith('bionifyReadingMode', true);
+			expect(mockWebServer.broadcastBionifyReadingModeChange).toHaveBeenCalledWith(true);
+		});
+
+		it('should not broadcast bionify reading mode changes when no web clients connected', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(0);
+
+			const handler = handlers.get('settings:set');
+			await handler!({} as any, 'bionifyReadingMode', true);
+
+			expect(mockWebServer.broadcastBionifyReadingModeChange).not.toHaveBeenCalled();
+		});
+
 		it('should broadcast custom commands changes to connected web clients', async () => {
 			mockWebServer.getWebClientCount.mockReturnValue(2);
 			const customCommands = [{ name: 'test', prompt: 'test prompt' }];
@@ -274,6 +656,41 @@ describe('persistence IPC handlers', () => {
 			expect(mockWebServer.broadcastCustomCommands).not.toHaveBeenCalled();
 		});
 
+		it('should broadcast generic web settings (e.g. maxOutputLines) to connected web clients', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(1);
+			mockSettingsStore.get.mockImplementation((key: string, def: unknown) => {
+				if (key === 'maxOutputLines') return 25;
+				return def;
+			});
+
+			const handler = handlers.get('settings:set');
+			await handler!({} as any, 'maxOutputLines', 25);
+
+			expect(mockSettingsStore.set).toHaveBeenCalledWith('maxOutputLines', 25);
+			expect(mockWebServer.broadcastSettingsChanged).toHaveBeenCalledTimes(1);
+			expect(mockWebServer.broadcastSettingsChanged).toHaveBeenCalledWith(
+				expect.objectContaining({ maxOutputLines: 25 })
+			);
+		});
+
+		it('should not broadcast generic web settings when no web clients are connected', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(0);
+
+			const handler = handlers.get('settings:set');
+			await handler!({} as any, 'maxOutputLines', 25);
+
+			expect(mockWebServer.broadcastSettingsChanged).not.toHaveBeenCalled();
+		});
+
+		it('should not broadcast for keys outside the web-relevant set', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(1);
+
+			const handler = handlers.get('settings:set');
+			await handler!({} as any, 'someUnrelatedSetting', 'value');
+
+			expect(mockWebServer.broadcastSettingsChanged).not.toHaveBeenCalled();
+		});
+
 		it('should handle null webServer gracefully', async () => {
 			// Re-register handlers with null webServer
 			handlers.clear();
@@ -282,6 +699,7 @@ describe('persistence IPC handlers', () => {
 				sessionsStore: mockSessionsStore as unknown as Store<SessionsData>,
 				groupsStore: mockGroupsStore as unknown as Store<GroupsData>,
 				getWebServer: () => null,
+				flushSessionWrites: mockFlushSessionWrites,
 			};
 			registerPersistenceHandlers(deps);
 
@@ -347,6 +765,72 @@ describe('persistence IPC handlers', () => {
 
 			expect(result).toEqual([]);
 		});
+
+		it('should compact oversized tool output before returning legacy sessions', async () => {
+			const oversizedOutput = 'x'.repeat(50_000);
+			const sessions = [
+				{
+					id: 'session-1',
+					name: 'Session 1',
+					cwd: '/test',
+					aiLogs: [
+						{
+							id: 'legacy-tool',
+							metadata: { toolState: { status: 'completed', output: oversizedOutput } },
+						},
+					],
+					aiTabs: [
+						{
+							id: 'tab-1',
+							logs: [
+								{
+									id: 'tool-1',
+									metadata: { toolState: { status: 'completed', output: oversizedOutput } },
+								},
+							],
+						},
+					],
+					snoozedTabs: [
+						{
+							type: 'group',
+							members: [
+								{
+									type: 'ai',
+									tab: {
+										id: 'snoozed-tab',
+										logs: [
+											{
+												id: 'snoozed-tool',
+												metadata: {
+													toolState: {
+														status: 'completed',
+														output: oversizedOutput,
+													},
+												},
+											},
+										],
+									},
+								},
+							],
+						},
+					],
+				},
+			];
+			mockSessionsStore.get.mockReturnValue(sessions);
+
+			const handler = handlers.get('sessions:getAll');
+			const result = (await handler!({} as any)) as typeof sessions;
+			const output = result[0].aiTabs[0].logs[0].metadata.toolState.output;
+			const legacyOutput = result[0].aiLogs[0].metadata.toolState.output;
+			const snoozedOutput =
+				result[0].snoozedTabs[0].members[0].tab.logs[0].metadata.toolState.output;
+
+			expect(output.length).toBeLessThan(5_000);
+			expect(output).toContain('[tool output truncated');
+			expect(legacyOutput).toBe(output);
+			expect(snoozedOutput).toBe(output);
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('sessions', result);
+		});
 	});
 
 	describe('sessions:setAll', () => {
@@ -367,7 +851,36 @@ describe('persistence IPC handlers', () => {
 			const result = await handler!({} as any, sessions);
 
 			expect(mockSessionsStore.set).toHaveBeenCalledWith('sessions', sessions);
+			expect(mockFlushSessionWrites).toHaveBeenCalledOnce();
 			expect(result).toBe(true);
+		});
+
+		it('should compact oversized tool output before writing sessions', async () => {
+			const oversizedOutput = 'x'.repeat(50_000);
+			const sessions = [
+				{
+					id: 'session-1',
+					name: 'Session 1',
+					cwd: '/test',
+					state: 'idle',
+					inputMode: 'ai',
+					toolType: 'claude-code',
+					aiTabs: [
+						{
+							id: 'tab-1',
+							logs: [{ metadata: { toolState: { output: oversizedOutput } } }],
+						},
+					],
+				},
+			];
+			mockSessionsStore.get.mockReturnValue([]);
+
+			await handlers.get('sessions:setAll')!({} as any, sessions);
+
+			const persisted = mockSessionsStore.set.mock.calls[0][1];
+			const output = persisted[0].aiTabs[0].logs[0].metadata.toolState.output;
+			expect(output.length).toBeLessThan(5_000);
+			expect(output).toContain('[tool output truncated');
 		});
 
 		it('should detect new sessions and broadcast to web clients', async () => {
@@ -401,10 +914,11 @@ describe('persistence IPC handlers', () => {
 				groupEmoji: null,
 				parentSessionId: null,
 				worktreeBranch: null,
+				autoRunFolderPath: null,
 			});
 		});
 
-		it('should detect removed sessions and broadcast to web clients', async () => {
+		it('should preserve stored sessions omitted from a bootstrap snapshot', async () => {
 			mockWebServer.getWebClientCount.mockReturnValue(2);
 			const previousSessions = [
 				{
@@ -421,7 +935,8 @@ describe('persistence IPC handlers', () => {
 			const handler = handlers.get('sessions:setAll');
 			await handler!({} as any, []);
 
-			expect(mockWebServer.broadcastSessionRemoved).toHaveBeenCalledWith('session-1');
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('sessions', previousSessions);
+			expect(mockWebServer.broadcastSessionRemoved).not.toHaveBeenCalled();
 		});
 
 		it('should detect state changes and broadcast to web clients', async () => {
@@ -556,6 +1071,90 @@ describe('persistence IPC handlers', () => {
 			expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalled();
 		});
 
+		// Characterization tests for cliActivity diff semantics. PR-A commit 2 will
+		// swap the JSON.stringify comparison for a shallow field compare; these
+		// tests pin down the exact (prev, curr) pairs that must continue to
+		// broadcast (or stay silent) so the swap is verifiable.
+		describe('cliActivity diff (lock-in for shallow-compare swap)', () => {
+			const baseSession = {
+				id: 'session-1',
+				name: 'Session 1',
+				cwd: '/test',
+				state: 'idle' as const,
+				inputMode: 'ai' as const,
+				toolType: 'claude-code',
+			};
+			const playbookA = { playbookId: 'pb-a', playbookName: 'Build', startedAt: 1000 };
+			const playbookB = { playbookId: 'pb-b', playbookName: 'Test', startedAt: 2000 };
+
+			beforeEach(() => {
+				mockWebServer.getWebClientCount.mockReturnValue(2);
+			});
+
+			it('does not broadcast when both prev and curr have no cliActivity', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [{ ...baseSession }]);
+				expect(mockWebServer.broadcastSessionStateChange).not.toHaveBeenCalled();
+			});
+
+			it('broadcasts when cliActivity goes from undefined to playbook', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [{ ...baseSession, cliActivity: playbookA }]);
+				expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledTimes(1);
+			});
+
+			it('broadcasts when cliActivity goes from playbook to undefined', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession, cliActivity: playbookA }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [{ ...baseSession }]);
+				expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledTimes(1);
+			});
+
+			it('broadcasts when playbookId changes', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession, cliActivity: playbookA }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [
+					{ ...baseSession, cliActivity: { ...playbookA, playbookId: 'pb-c' } },
+				]);
+				expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledTimes(1);
+			});
+
+			it('broadcasts when playbookName changes', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession, cliActivity: playbookA }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [
+					{ ...baseSession, cliActivity: { ...playbookA, playbookName: 'NewName' } },
+				]);
+				expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledTimes(1);
+			});
+
+			it('broadcasts when startedAt changes', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession, cliActivity: playbookA }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [
+					{ ...baseSession, cliActivity: { ...playbookA, startedAt: 9999 } },
+				]);
+				expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledTimes(1);
+			});
+
+			it('does not broadcast when cliActivity reference changes but fields match', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession, cliActivity: playbookA }]);
+				const handler = handlers.get('sessions:setAll');
+				// New object, same field values - should be treated as unchanged.
+				await handler!({} as any, [{ ...baseSession, cliActivity: { ...playbookA } }]);
+				expect(mockWebServer.broadcastSessionStateChange).not.toHaveBeenCalled();
+			});
+
+			it('broadcasts when entire playbook is swapped', async () => {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession, cliActivity: playbookA }]);
+				const handler = handlers.get('sessions:setAll');
+				await handler!({} as any, [{ ...baseSession, cliActivity: playbookB }]);
+				expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledTimes(1);
+			});
+		});
+
 		it('should not broadcast when no web clients connected', async () => {
 			mockWebServer.getWebClientCount.mockReturnValue(0);
 			const sessions = [
@@ -629,7 +1228,6 @@ describe('persistence IPC handlers', () => {
 					inputMode: 'ai',
 					toolType: 'claude-code',
 				}, // state changed
-				// session-2 removed
 				{
 					id: 'session-3',
 					name: 'Session 3',
@@ -648,10 +1246,15 @@ describe('persistence IPC handlers', () => {
 				'busy',
 				expect.any(Object)
 			);
-			expect(mockWebServer.broadcastSessionRemoved).toHaveBeenCalledWith('session-2');
+			expect(mockWebServer.broadcastSessionRemoved).not.toHaveBeenCalled();
 			expect(mockWebServer.broadcastSessionAdded).toHaveBeenCalledWith(
 				expect.objectContaining({ id: 'session-3' })
 			);
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('sessions', [
+				newSessions[0],
+				newSessions[1],
+				previousSessions[1],
+			]);
 		});
 
 		it('should return false on ENOSPC write error', async () => {
@@ -678,6 +1281,515 @@ describe('persistence IPC handlers', () => {
 			const result = await handler!({} as any, [{ id: 's1', name: 'S1', state: 'idle' }]);
 
 			expect(result).toBe(false);
+		});
+	});
+
+	describe('sessions:setMany', () => {
+		const baseSession = {
+			id: 's1',
+			name: 'Session 1',
+			cwd: '/test',
+			projectRoot: '/test',
+			state: 'idle' as const,
+			inputMode: 'ai' as const,
+			toolType: 'claude-code',
+		};
+
+		it('writes the merged sessions array to the store', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, name: 'Updated' }], []);
+
+			expect(mockSessionsStore.set).toHaveBeenCalledWith(
+				'sessions',
+				expect.arrayContaining([expect.objectContaining({ id: 's1', name: 'Updated' })])
+			);
+		});
+
+		it('compacts oversized tool output before writing merged sessions', async () => {
+			const oversizedOutput = 'x'.repeat(50_000);
+			mockSessionsStore.get.mockReturnValue([]);
+
+			await handlers.get('sessions:setMany')!(
+				{} as any,
+				[
+					{
+						...baseSession,
+						aiTabs: [
+							{
+								id: 'tab-1',
+								logs: [{ metadata: { toolState: { output: oversizedOutput } } }],
+							},
+						],
+					},
+				],
+				[]
+			);
+
+			const persisted = mockSessionsStore.set.mock.calls[0][1];
+			const output = persisted[0].aiTabs[0].logs[0].metadata.toolState.output;
+			expect(output.length).toBeLessThan(5_000);
+			expect(output).toContain('[tool output truncated');
+		});
+
+		it('returns true on success', async () => {
+			mockSessionsStore.get.mockReturnValue([]);
+			const handler = handlers.get('sessions:setMany');
+			const result = await handler!({} as any, [], []);
+			expect(result).toBe(true);
+		});
+
+		it('is a no-op when given empty updates and empty removeIds', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [], []);
+
+			// merged should equal previous (no add, no remove)
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('sessions', [
+				expect.objectContaining({ id: 's1' }),
+			]);
+		});
+
+		it('replaces an existing session by id', async () => {
+			mockSessionsStore.get.mockReturnValue([
+				{ ...baseSession, name: 'Old' },
+				{ ...baseSession, id: 's2', name: 'Other' },
+			]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, name: 'New' }], []);
+
+			const merged = mockSessionsStore.set.mock.calls[0][1];
+			expect(merged).toHaveLength(2);
+			expect(merged.find((s: any) => s.id === 's1').name).toBe('New');
+			expect(merged.find((s: any) => s.id === 's2').name).toBe('Other');
+		});
+
+		it('appends a new session to the end', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, id: 's2', name: 'Two' }], []);
+
+			const merged = mockSessionsStore.set.mock.calls[0][1];
+			expect(merged.map((s: any) => s.id)).toEqual(['s1', 's2']);
+		});
+
+		it('removes sessions whose id is in removeIds', async () => {
+			mockSessionsStore.get.mockReturnValue([
+				{ ...baseSession, id: 's1' },
+				{ ...baseSession, id: 's2' },
+			]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [], ['s1']);
+
+			const merged = mockSessionsStore.set.mock.calls[0][1];
+			expect(merged.map((s: any) => s.id)).toEqual(['s2']);
+		});
+
+		it('backs up before explicit removals empty the registry', async () => {
+			const stored = [{ ...baseSession }];
+			mockSessionsStore.get.mockReturnValue(stored);
+
+			await handlers.get('sessions:setMany')!({} as any, [], ['s1']);
+
+			expect(backupSessionsBeforeWipeMock).toHaveBeenCalledWith(
+				stored,
+				[],
+				'/mock/maestro-sessions.json'
+			);
+			expect(mockSessionsStore.set).toHaveBeenCalledWith('sessions', []);
+		});
+
+		it('serializes additions behind a final-agent backup', async () => {
+			let stored = [{ ...baseSession }];
+			mockSessionsStore.get.mockImplementation((key: string, fallback: unknown) =>
+				key === 'sessions' ? stored : fallback
+			);
+			mockSessionsStore.set.mockImplementation((key: string, value: StoredSession[]) => {
+				if (key === 'sessions') stored = value;
+			});
+			let releaseBackup: (() => void) | undefined;
+			backupSessionsBeforeWipeMock.mockImplementationOnce(
+				() =>
+					new Promise<void>((resolve) => {
+						releaseBackup = resolve;
+					})
+			);
+
+			const removal = handlers.get('sessions:setMany')!({} as any, [], ['s1']);
+			await vi.waitFor(() => expect(backupSessionsBeforeWipeMock).toHaveBeenCalled());
+
+			const addition = handlers.get('sessions:setAll')!({} as any, [
+				{ ...baseSession, id: 'created-concurrently' },
+			]);
+			await Promise.resolve();
+			expect(mockSessionsStore.set).not.toHaveBeenCalled();
+
+			releaseBackup?.();
+			await Promise.all([removal, addition]);
+
+			expect(stored.map((session) => session.id)).toEqual(['created-concurrently']);
+		});
+
+		it('handles mixed updates and removes in one call', async () => {
+			mockSessionsStore.get.mockReturnValue([
+				{ ...baseSession, id: 's1' },
+				{ ...baseSession, id: 's2' },
+				{ ...baseSession, id: 's3' },
+			]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!(
+				{} as any,
+				[
+					{ ...baseSession, id: 's2', name: 'Updated' },
+					{ ...baseSession, id: 's4', name: 'New' },
+				],
+				['s1']
+			);
+
+			const merged = mockSessionsStore.set.mock.calls[0][1];
+			// s1 removed, s2 updated, s3 untouched, s4 appended
+			expect(merged.map((s: any) => s.id)).toEqual(['s2', 's3', 's4']);
+			expect(merged.find((s: any) => s.id === 's2').name).toBe('Updated');
+		});
+
+		it('preserves existing order when updating', async () => {
+			mockSessionsStore.get.mockReturnValue([
+				{ ...baseSession, id: 'a' },
+				{ ...baseSession, id: 'b' },
+				{ ...baseSession, id: 'c' },
+			]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, id: 'b', name: 'B-updated' }], []);
+
+			const merged = mockSessionsStore.set.mock.calls[0][1];
+			expect(merged.map((s: any) => s.id)).toEqual(['a', 'b', 'c']);
+		});
+
+		it('lets remove win when an id appears in both updates and removeIds', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, name: 'Should be ignored' }], ['s1']);
+
+			const merged = mockSessionsStore.set.mock.calls[0][1];
+			expect(merged).toEqual([]);
+		});
+
+		it('treats updates with unseen ids as adds (broadcastSessionAdded)', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(2);
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, id: 'new1' }], []);
+
+			expect(mockWebServer.broadcastSessionAdded).toHaveBeenCalledWith(
+				expect.objectContaining({ id: 'new1' })
+			);
+			expect(mockWebServer.broadcastSessionStateChange).not.toHaveBeenCalled();
+		});
+
+		it('broadcasts state changes for updated sessions when web clients connected', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(2);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession, state: 'idle' }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, state: 'busy' }], []);
+
+			expect(mockWebServer.broadcastSessionStateChange).toHaveBeenCalledWith(
+				's1',
+				'busy',
+				expect.any(Object)
+			);
+		});
+
+		it('broadcasts removals for ids that existed', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(2);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [], ['s1']);
+
+			expect(mockWebServer.broadcastSessionRemoved).toHaveBeenCalledWith('s1');
+		});
+
+		it('does not broadcast removals for ids that did not exist', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(2);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession, id: 's1' }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [], ['nonexistent']);
+
+			expect(mockWebServer.broadcastSessionRemoved).not.toHaveBeenCalled();
+		});
+
+		it('does not broadcast when no web clients are connected', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(0);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, state: 'busy' }], ['nonexistent']);
+
+			expect(mockWebServer.broadcastSessionStateChange).not.toHaveBeenCalled();
+			expect(mockWebServer.broadcastSessionAdded).not.toHaveBeenCalled();
+			expect(mockWebServer.broadcastSessionRemoved).not.toHaveBeenCalled();
+		});
+
+		it('does not broadcast state-change for an unchanged session', async () => {
+			mockWebServer.getWebClientCount.mockReturnValue(2);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			// New object with identical primitives - should be silent.
+			await handler!({} as any, [{ ...baseSession }], []);
+
+			expect(mockWebServer.broadcastSessionStateChange).not.toHaveBeenCalled();
+		});
+
+		it('returns false on ENOSPC write error (recoverable)', async () => {
+			const error = new Error('ENOSPC: no space left on device') as NodeJS.ErrnoException;
+			error.code = 'ENOSPC';
+			mockSessionsStore.set.mockImplementation(() => {
+				throw error;
+			});
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+			const result = await handler!({} as any, [{ ...baseSession }], []);
+
+			expect(result).toBe(false);
+		});
+
+		it('returns false on ENFILE write error (recoverable)', async () => {
+			const error = new Error('ENFILE: too many open files') as NodeJS.ErrnoException;
+			error.code = 'ENFILE';
+			mockSessionsStore.set.mockImplementation(() => {
+				throw error;
+			});
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+			const result = await handler!({} as any, [{ ...baseSession }], []);
+
+			expect(result).toBe(false);
+		});
+
+		it('returns false when a deferred write reports a recoverable disk error', async () => {
+			const error = new Error('ENOSPC: no space left on device') as NodeJS.ErrnoException;
+			error.code = 'ENOSPC';
+			mockFlushSessionWrites.mockRejectedValueOnce(error);
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+			const result = await handler!({} as any, [{ ...baseSession }], []);
+
+			expect(result).toBe(false);
+			expect(mockSessionsStore.set).toHaveBeenCalledOnce();
+			expect(mockFlushSessionWrites).toHaveBeenCalledOnce();
+		});
+
+		it('does not acknowledge an unexpected deferred write failure', async () => {
+			const error = new Error('EIO: input/output error') as NodeJS.ErrnoException;
+			error.code = 'EIO';
+			mockFlushSessionWrites.mockRejectedValueOnce(error);
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+
+			await expect(handler!({} as any, [{ ...baseSession }], [])).rejects.toBe(error);
+			expect(mockSessionsStore.set).toHaveBeenCalledOnce();
+			expect(mockFlushSessionWrites).toHaveBeenCalledOnce();
+		});
+
+		it('rethrows unexpected errors so withIpcErrorLogging can surface them to Sentry', async () => {
+			mockSessionsStore.set.mockImplementation(() => {
+				throw new TypeError('Converting circular structure to JSON');
+			});
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+
+			await expect(handler!({} as any, [{ ...baseSession }], [])).rejects.toThrow(
+				'Converting circular structure to JSON'
+			);
+		});
+	});
+
+	// One store, several renderers: each desktop window and every web-desktop
+	// browser tab keeps its own session tree and flushes it back here. These
+	// tests cover the delta that tells the others what entered and left, plus the
+	// guard that stops a stale peer flush from resurrecting a closed agent
+	// (issues #1398 / #1492).
+	describe('cross-client agent lifecycle sync', () => {
+		const baseSession = {
+			id: 's1',
+			name: 'Session 1',
+			cwd: '/test',
+			projectRoot: '/test',
+			state: 'idle' as const,
+			inputMode: 'ai' as const,
+			toolType: 'claude-code',
+		};
+
+		/** The payload of the last `sessions:lifecycleSync` bridge push, if any. */
+		const lastBridgePayload = () => {
+			const calls = vi
+				.mocked(broadcastBridgeEvent)
+				.mock.calls.filter(([channel]) => channel === SESSION_LIFECYCLE_SYNC_CHANNEL);
+			if (calls.length === 0) return null;
+			return (calls[calls.length - 1][1] as [{ added: any[]; removedIds: string[] }])[0];
+		};
+
+		it('tells peers about an agent another client just created', async () => {
+			mockSessionsStore.get.mockReturnValue([]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, id: 'from-web' }], []);
+
+			expect(lastBridgePayload()).toEqual({
+				added: [expect.objectContaining({ id: 'from-web' })],
+				removedIds: [],
+			});
+		});
+
+		it('tells peers about an agent another client just closed', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [], ['s1']);
+
+			expect(lastBridgePayload()).toEqual({ added: [], removedIds: ['s1'] });
+		});
+
+		it('says nothing when a flush only updates agents everyone already has', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession, state: 'idle' }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [{ ...baseSession, state: 'busy' }], []);
+
+			expect(lastBridgePayload()).toBeNull();
+		});
+
+		it('reaches every window except the one that wrote', async () => {
+			const makeWindow = (id: number) => ({
+				isDestroyed: () => false,
+				webContents: { id, isDestroyed: () => false, send: vi.fn() },
+			});
+			const sender = makeWindow(1);
+			const peer = makeWindow(2);
+			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([sender, peer] as any);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			await handler!({ sender: sender.webContents } as any, [], ['s1']);
+
+			expect(sender.webContents.send).not.toHaveBeenCalled();
+			expect(peer.webContents.send).toHaveBeenCalledWith(SESSION_LIFECYCLE_SYNC_CHANNEL, {
+				added: [],
+				removedIds: ['s1'],
+			});
+		});
+
+		it('survives a bridge call that carries no sender', async () => {
+			const peer = {
+				isDestroyed: () => false,
+				webContents: { id: 7, isDestroyed: () => false, send: vi.fn() },
+			};
+			vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([peer] as any);
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+
+			const handler = handlers.get('sessions:setMany');
+			// The web bridge dispatches with a synthetic event that has no `sender`.
+			await handler!({ senderFrame: null } as any, [], ['s1']);
+
+			expect(peer.webContents.send).toHaveBeenCalledWith(
+				SESSION_LIFECYCLE_SYNC_CHANNEL,
+				expect.objectContaining({ removedIds: ['s1'] })
+			);
+		});
+
+		it('refuses to re-add an agent a peer closed moments ago', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+			const handler = handlers.get('sessions:setMany');
+			await handler!({} as any, [], ['s1']);
+
+			// The peer's flush was already in flight, still carrying the agent.
+			mockSessionsStore.get.mockReturnValue([]);
+			await handler!({} as any, [{ ...baseSession }], []);
+
+			const merged = mockSessionsStore.set.mock.calls.at(-1)![1];
+			expect(merged).toEqual([]);
+		});
+
+		it('keeps refusing a resurrection long after the close', async () => {
+			// The client that missed the close can be away for hours - a suspended
+			// mobile browser, a laptop lid - so the guard is bounded by how many
+			// closes it remembers, never by how long ago they were.
+			vi.useFakeTimers();
+			try {
+				mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+				const handler = handlers.get('sessions:setMany');
+				await handler!({} as any, [], ['s1']);
+
+				vi.advanceTimersByTime(6 * 60 * 60 * 1000);
+
+				mockSessionsStore.get.mockReturnValue([]);
+				await handler!({} as any, [{ ...baseSession }], []);
+
+				const merged = mockSessionsStore.set.mock.calls.at(-1)![1];
+				expect(merged).toEqual([]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('blocks a resurrection arriving through the bootstrap setAll path too', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession }]);
+			await handlers.get('sessions:setMany')!({} as any, [], ['s1']);
+
+			mockSessionsStore.get.mockReturnValue([]);
+			await handlers.get('sessions:setAll')!({} as any, [{ ...baseSession }]);
+
+			const merged = mockSessionsStore.set.mock.calls.at(-1)![1];
+			expect(merged).toEqual([]);
+		});
+
+		it('still accepts updates for an agent that is legitimately live', async () => {
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession, id: 'other' }]);
+			await handlers.get('sessions:setMany')!({} as any, [], ['s1']);
+
+			// 's1' was never stored, so nothing was tombstoned and a later write
+			// naming it is an ordinary add, not a resurrection.
+			mockSessionsStore.get.mockReturnValue([{ ...baseSession, id: 'other' }]);
+			await handlers.get('sessions:setMany')!({} as any, [{ ...baseSession }], []);
+
+			const merged = mockSessionsStore.set.mock.calls.at(-1)![1];
+			expect(merged.map((sess: any) => sess.id)).toEqual(['other', 's1']);
+		});
+
+		it("preserves agents omitted from one client's opening snapshot", async () => {
+			// A client that loaded before a peer created an agent has no idea it
+			// exists; treating its absence as a close would delete a live agent.
+			mockSessionsStore.get.mockReturnValue([
+				{ ...baseSession, id: 's1' },
+				{ ...baseSession, id: 'created-elsewhere' },
+			]);
+
+			await handlers.get('sessions:setAll')!({} as any, [{ ...baseSession, id: 's1' }]);
+
+			const persisted = mockSessionsStore.set.mock.calls.at(-1)![1];
+			expect(persisted.map((session: any) => session.id)).toEqual(['s1', 'created-elsewhere']);
+			expect(lastBridgePayload()).toBeNull();
+		});
+
+		it('reports agents a bootstrap snapshot introduces', async () => {
+			mockSessionsStore.get.mockReturnValue([]);
+
+			await handlers.get('sessions:setAll')!({} as any, [{ ...baseSession, id: 'fresh' }]);
+
+			expect(lastBridgePayload()).toEqual({
+				added: [expect.objectContaining({ id: 'fresh' })],
+				removedIds: [],
+			});
 		});
 	});
 

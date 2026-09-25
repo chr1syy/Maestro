@@ -18,10 +18,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # Pinned to macos-15 (not macos-latest). On 2026-06-15 the macos-latest
+          # label began migrating to macOS 26, and electron-builder's macOS
+          # packaging/signing step dies silently on the macOS 26 image (the build
+          # aborts right after native-module collection with no error). macos-15 is
+          # the last known-good image. Revisit unpinning once macOS 26 signing works.
+          - os: macos-15
             platform: mac
             arch: universal
-          - os: ubuntu-latest
+          # Pinned to ubuntu-22.04 (not ubuntu-latest). The x64 native modules
+          # (better-sqlite3, node-pty) are compiled from source on this runner,
+          # so the runner's glibc sets the floor for the shipped binaries.
+          # ubuntu-latest is a moving label (now 24.04, glibc 2.39); building on a
+          # newer glibc can raise that floor above Ubuntu 22.04's glibc 2.35, which
+          # makes the native modules fail to load there with "version 'GLIBC_x.y'
+          # not found" (this has broken the Cue and stats databases on 22.04 before).
+          # 22.04 is the oldest supported target, so keep this pinned. Enforced per
+          # build by .github/scripts/verify-glibc-floor.sh.
+          - os: ubuntu-22.04
             platform: linux
             arch: x64
           # ARM64 Linux requires native ARM64 runner for node-pty native module
@@ -209,7 +223,7 @@ jobs:
       # macOS: Skip initial rebuild - architecture-specific rebuilds happen before each packaging step
       # This prevents arm64 binaries from contaminating x64 builds (GitHub issue #719)
 
-      # Verify native module architectures after initial rebuild (Linux only — macOS rebuilds per-arch before packaging)
+      # Verify native module architectures after initial rebuild (Linux only - macOS rebuilds per-arch before packaging)
       - name: Verify native module architecture (Linux x64)
         if: matrix.platform == 'linux'
         run: .github/scripts/verify-native-arch.sh x64
@@ -222,6 +236,20 @@ jobs:
         run: npm run build
         env:
           VITE_APP_VERSION: ${{ steps.version.outputs.VERSION }}
+          # Crash-reporting address. Deliberately a secret rather than a source
+          # literal: when the DSN sat in src/main/index.ts every fork inherited it and
+          # reported into smash-labs/maestro, which both drowned our issue stream and
+          # shipped fork users' telemetry to a project they never chose. Forks do not
+          # inherit secrets, so a fork build gets no DSN and reports nowhere.
+          # See src/shared/buildProvenance.ts.
+          MAESTRO_SENTRY_DSN: ${{ secrets.MAESTRO_SENTRY_DSN }}
+          MAESTRO_OFFICIAL_BUILD: '1'
+
+      # Fail loudly rather than shipping a release with crash reporting silently off.
+      - name: Verify crash reporting was provisioned
+        run: npm run verify:provenance
+        env:
+          MAESTRO_SENTRY_DSN: ${{ secrets.MAESTRO_SENTRY_DSN }}
 
       # List release directory before packaging for debugging
       - name: Create release directory
@@ -291,6 +319,37 @@ jobs:
         run: npx electron-builder --win --publish never --config.extraMetadata.version=${{ steps.version.outputs.VERSION }}
         env:
           DEBUG: electron-builder
+
+      # Verify native modules are correctly included in unpacked resources (Windows x64)
+      - name: Verify native modules in package (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $unpackedDir = "release/win-unpacked/resources/app.asar.unpacked"
+          # node-pty on Windows uses ConPTY: ships conpty.node + conpty_console_list.node, not pty.node
+          $nativeModules = @(
+            "node_modules/node-pty/build/Release/conpty.node",
+            "node_modules/node-pty/build/Release/conpty_console_list.node",
+            "node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          )
+
+          foreach ($relativePath in $nativeModules) {
+            $nativePath = Join-Path $unpackedDir $relativePath
+            Write-Host "Checking for $relativePath in unpacked resources..."
+            if (Test-Path $nativePath) {
+              Get-Item $nativePath | Format-List FullName,Length
+            } else {
+              Write-Error "ERROR: $relativePath not found in unpacked resources"
+              Write-Host "Available native modules:"
+              if (Test-Path $unpackedDir) {
+                Get-ChildItem -Path $unpackedDir -Filter *.node -Recurse -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty FullName
+              } else {
+                Write-Host "Directory not found: $unpackedDir"
+              }
+              exit 1
+            }
+          }
 
       # Linux/macOS: Rebuild native modules for the target arch, verify, then package.
       # npmRebuild: false in package.json prevents electron-builder from re-running npm rebuild,
@@ -369,6 +428,14 @@ jobs:
             find "$UNPACKED_DIR" -name "*.node" 2>/dev/null || echo "Directory not found"
             exit 1
           fi
+
+      # Guard the glibc floor: fail the build if any shipped x64 native module
+      # requires a glibc newer than Ubuntu 22.04 provides (glibc 2.35). This is a
+      # backstop against runner/toolchain drift silently re-breaking 22.04 users,
+      # and runs regardless of which image built the package.
+      - name: Verify GLIBC floor (Linux x64)
+        if: matrix.platform == 'linux'
+        run: .github/scripts/verify-glibc-floor.sh 2.35 release/linux-unpacked/resources/app.asar.unpacked
 
       # Verify native modules are correctly included in unpacked resources (Linux ARM64)
       - name: Verify native modules in package (Linux ARM64)

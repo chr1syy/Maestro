@@ -1,4 +1,5 @@
-import { lazy, Suspense, memo } from 'react';
+import { lazy, Suspense, memo, useCallback } from 'react';
+import type React from 'react';
 import type {
 	Theme,
 	Session,
@@ -8,16 +9,29 @@ import type {
 	RightPanelTab,
 	SettingsTab,
 	BatchRunConfig,
+	SnoozeContent,
 	ThinkingMode,
+	QueuedItemEditPatch,
 } from '../../types';
 import type { FileNode } from '../../types/fileTree';
+import type { MainPanelHandle } from '../MainPanel/types';
 import type { WizardStep } from '../Wizard/WizardContext';
 import type { FlatFileItem } from '../FileSearchModal';
+
+// Modal store (for reading per-modal data passed by callers)
+import { useModalStore, selectModalData, selectModalOpen } from '../../stores/modalStore';
+import type { GitLogModalData } from '../../stores/modalStore';
 
 // Utility Modal Components
 import { QuickActionsModal } from '../QuickActionsModal';
 import { TabSwitcherModal } from '../TabSwitcherModal';
 import { FileSearchModal } from '../FileSearchModal';
+import { CrossTabSearchModal } from '../CrossTabSearchModal';
+import type { CrossTabSearchJumpTarget } from '../CrossTabSearchModal';
+import { SnoozeTabModal } from '../SnoozeTabModal';
+import { ModelEffortModal } from '../ModelEffortModal';
+import { SnoozedTabsModal } from '../SnoozedTabsModal';
+import { snoozeTabWithMirror } from '../../services/snoozeActions';
 import { PromptComposerModal } from '../PromptComposerModal';
 import { ExecutionQueueBrowser } from '../ExecutionQueueBrowser';
 import { BatchRunnerModal } from '../BatchRunnerModal';
@@ -61,6 +75,8 @@ export interface AppUtilityModalsProps {
 	setRenameGroupId: (id: string) => void;
 	setRenameGroupValue: (value: string) => void;
 	setRenameGroupEmoji: (emoji: string) => void;
+	setRenameGroupIcon: (icon: string | undefined) => void;
+	setRenameGroupColor: (color: string | undefined) => void;
 	setRenameGroupModalOpen: (open: boolean) => void;
 	setCreateGroupModalOpen: (open: boolean) => void;
 	setLeftSidebarOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
@@ -75,21 +91,22 @@ export interface AppUtilityModalsProps {
 	setLogViewerOpen: (open: boolean) => void;
 	setProcessMonitorOpen: (open: boolean) => void;
 	setUsageDashboardOpen?: (open: boolean) => void;
+	setAgentRunDashboardOpen?: (open: boolean) => void;
 	setActiveRightTab: (tab: RightPanelTab) => void;
 	setAgentSessionsOpen: (open: boolean) => void;
+	setMemoryViewerOpen?: (open: boolean) => void;
 	setActiveAgentSessionId: (id: string | null) => void;
-	setGitDiffPreview: (diff: string | null) => void;
-	setGitLogOpen: (open: boolean) => void;
 	isAiMode: boolean;
 	onRenameTab: () => void;
 	onToggleReadOnlyMode: () => void;
 	onToggleTabShowThinking: () => void;
+	onToggleTabEnterToSend: () => void;
 	onOpenTabSwitcher: () => void;
 	// Bulk tab close operations
 	onCloseAllTabs?: () => void;
-	onCloseOtherTabs?: () => void;
-	onCloseTabsLeft?: () => void;
-	onCloseTabsRight?: () => void;
+	onCloseOtherTabs?: (pivotTabId?: string) => void;
+	onCloseTabsLeft?: (pivotTabId?: string) => void;
+	onCloseTabsRight?: (pivotTabId?: string) => void;
 	setPlaygroundOpen?: (open: boolean) => void;
 	onRefreshGitFileState: () => Promise<void>;
 	onDebugReleaseQueuedItem: () => void;
@@ -98,8 +115,8 @@ export interface AppUtilityModalsProps {
 	setUpdateCheckModalOpen?: (open: boolean) => void;
 	openWizard: () => void;
 	wizardGoToStep: (step: WizardStep) => void;
-	setDebugWizardModalOpen?: (open: boolean) => void;
 	setDebugPackageModalOpen?: (open: boolean) => void;
+	setDebugApplicationStatsOpen?: (open: boolean) => void;
 	startTour: () => void;
 	setFuzzyFileSearchOpen: (open: boolean) => void;
 	onEditAgent: (session: Session) => void;
@@ -115,26 +132,32 @@ export interface AppUtilityModalsProps {
 			| 'supportsSlashCommands'
 			| 'supportsContextMerge'
 			| 'supportsThinkingDisplay'
+			| 'supportsProjectMemory'
 	) => boolean;
 	onOpenMergeSession: () => void;
 	onOpenSendToAgent: () => void;
 	onQuickCreateWorktree: (session: Session) => void;
 	onOpenCreatePR: (session: Session) => void;
 	onSummarizeAndContinue: () => void;
+	/** Send a plugin command-macro's templated prompt to the active agent. */
+	onRunPromptMacro?: (prompt: string) => void;
 	canSummarizeActiveTab: boolean;
 	onToggleRemoteControl: () => Promise<void>;
 	autoRunSelectedDocument: string | null;
 	autoRunCompletedTaskCount: number;
 	onAutoRunResetTasks: () => void;
+	onToggleAutoRunExpanded?: () => void;
 	onClearActiveTerminal?: () => void;
 
 	// Tab-level actions (for QuickActionsModal)
 	onCloseCurrentTab?: () => void;
 	onMoveTabToFirst?: () => void;
 	onMoveTabToLast?: () => void;
+	onFocusActiveTab?: () => void;
 	onCopyTabContext?: (tabId: string) => void;
 	onExportTabHtml?: (tabId: string) => void;
 	onPublishTabGist?: (tabId: string) => void;
+	mainPanelRef?: React.RefObject<MainPanelHandle | null>;
 
 	// Gist publishing (for QuickActionsModal)
 	isFilePreviewOpen: boolean;
@@ -144,6 +167,9 @@ export interface AppUtilityModalsProps {
 	// Document Graph - quick re-open last graph
 	lastGraphFocusFile?: string;
 	onOpenLastDocumentGraph?: () => void;
+	// Document Graph - view the active markdown file
+	currentGraphFile?: string;
+	onOpenCurrentFileInGraph?: () => void;
 
 	// Symphony
 	onOpenSymphony?: () => void;
@@ -153,6 +179,8 @@ export interface AppUtilityModalsProps {
 
 	// Maestro Cue
 	onOpenMaestroCue?: () => void;
+	// Pianola
+	onOpenPianola?: () => void;
 	onConfigureCue?: (session: Session) => void;
 
 	// LightboxModal
@@ -162,15 +190,25 @@ export interface AppUtilityModalsProps {
 	onCloseLightbox: () => void;
 	onNavigateLightbox: (img: string) => void;
 	onDeleteLightboxImage?: (img: string) => void;
+	onUpdateLightboxImage?: (oldImg: string, newDataUrl: string) => void;
 
 	// GitDiffViewer
 	gitDiffPreview: string | null;
+	/** Repo the diff came from, when taken for a non-active agent. */
+	gitDiffCwd?: string | null;
+	/** Agent the diff was taken for, so the viewer can name it. */
+	gitDiffSessionId?: string | null;
 	gitViewerCwd: string;
 	onCloseGitDiff: () => void;
 
 	// GitLogViewer
 	gitLogOpen: boolean;
+	/** Explicit repo to show, when opened for a non-active agent. */
+	gitLogTarget?: GitLogModalData | null;
 	onCloseGitLog: () => void;
+
+	// Shared by both git viewers: open a clicked file path as a preview tab.
+	onOpenGitFile?: (absolutePath: string, fileName: string) => void;
 
 	// AutoRunSetupModal
 	autoRunSetupModalOpen: boolean;
@@ -200,6 +238,7 @@ export interface AppUtilityModalsProps {
 	onTabSelect: (tabId: string) => void;
 	onFileTabSelect?: (tabId: string) => void;
 	onTerminalTabSelect?: (tabId: string) => void;
+	onBrowserTabSelect?: (tabId: string) => void;
 	onNamedSessionSelect: (
 		agentSessionId: string,
 		projectPath: string,
@@ -209,10 +248,14 @@ export interface AppUtilityModalsProps {
 	/** Whether colorblind-friendly colors should be used for extension badges */
 	colorBlindMode?: boolean;
 
+	// CrossTabSearchModal
+	crossTabSearchOpen: boolean;
+	onCloseCrossTabSearch: () => void;
+	onCrossTabSearchJump: (target: CrossTabSearchJumpTarget) => void;
+
 	// FileSearchModal
 	fuzzyFileSearchOpen: boolean;
 	filteredFileTree: FileNode[];
-	fileExplorerExpanded?: string[];
 	onCloseFileSearch: () => void;
 	onFileSearchSelect: (file: FlatFileItem) => void;
 
@@ -244,10 +287,26 @@ export interface AppUtilityModalsProps {
 
 	// ExecutionQueueBrowser
 	queueBrowserOpen: boolean;
+	onOpenQueueBrowser: () => void;
 	onCloseQueueBrowser: () => void;
 	onRemoveQueueItem: (sessionId: string, itemId: string) => void;
 	onSwitchQueueSession: (sessionId: string, tabId?: string) => void;
 	onReorderQueueItems: (sessionId: string, fromIndex: number, toIndex: number) => void;
+	onTogglePauseQueueItem: (sessionId: string, itemId: string) => void;
+	onEditQueueItem: (sessionId: string, itemId: string, patch: QueuedItemEditPatch) => void;
+	onForceSendQueueItem: (sessionId: string, itemId: string) => void;
+	// New tab creation (for QuickActionsModal)
+	onQuickActionsNewTab?: () => void;
+	onQuickActionsNewFileTab?: () => void;
+	onQuickActionsNewBrowserTab?: () => void;
+	onQuickActionsNewTerminalTab?: () => void;
+	// Next unread / draft tab navigation (shared with Alt+Cmd+Down)
+	onGoToNextUnread?: () => void;
+	// Previous unread / draft tab navigation (shared with a second Alt+Cmd+Up)
+	onGoToPreviousUnread?: () => void;
+	// Session/tab history navigation (shared with Cmd+Shift+, / Cmd+Shift+.)
+	onNavBack?: () => void;
+	onNavForward?: () => void;
 }
 
 /**
@@ -286,6 +345,8 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	setRenameGroupId,
 	setRenameGroupValue,
 	setRenameGroupEmoji,
+	setRenameGroupIcon,
+	setRenameGroupColor,
 	setRenameGroupModalOpen,
 	setCreateGroupModalOpen,
 	setLeftSidebarOpen,
@@ -300,15 +361,16 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	setLogViewerOpen,
 	setProcessMonitorOpen,
 	setUsageDashboardOpen,
+	setAgentRunDashboardOpen,
 	setActiveRightTab,
 	setAgentSessionsOpen,
+	setMemoryViewerOpen,
 	setActiveAgentSessionId,
-	setGitDiffPreview,
-	setGitLogOpen,
 	isAiMode,
 	onRenameTab,
 	onToggleReadOnlyMode,
 	onToggleTabShowThinking,
+	onToggleTabEnterToSend,
 	onOpenTabSwitcher,
 	// Bulk tab close operations
 	onCloseAllTabs,
@@ -323,8 +385,8 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	setUpdateCheckModalOpen,
 	openWizard,
 	wizardGoToStep,
-	setDebugWizardModalOpen,
 	setDebugPackageModalOpen,
+	setDebugApplicationStatsOpen,
 	startTour,
 	setFuzzyFileSearchOpen,
 	onEditAgent,
@@ -340,19 +402,23 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	onQuickCreateWorktree,
 	onOpenCreatePR,
 	onSummarizeAndContinue,
+	onRunPromptMacro,
 	canSummarizeActiveTab,
 	onToggleRemoteControl,
 	autoRunSelectedDocument,
 	autoRunCompletedTaskCount,
 	onAutoRunResetTasks,
+	onToggleAutoRunExpanded,
 	onClearActiveTerminal,
 	// Tab-level actions
 	onCloseCurrentTab,
 	onMoveTabToFirst,
 	onMoveTabToLast,
+	onFocusActiveTab,
 	onCopyTabContext,
 	onExportTabHtml,
 	onPublishTabGist,
+	mainPanelRef,
 	// Gist publishing
 	isFilePreviewOpen,
 	ghCliAvailable,
@@ -360,12 +426,17 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	// Document Graph - quick re-open last graph
 	lastGraphFocusFile,
 	onOpenLastDocumentGraph,
+	// Document Graph - view the active markdown file
+	currentGraphFile,
+	onOpenCurrentFileInGraph,
 	// Symphony
 	onOpenSymphony,
 	// Director's Notes
 	onOpenDirectorNotes,
 	// Maestro Cue
 	onOpenMaestroCue,
+	// Pianola
+	onOpenPianola,
 	onConfigureCue,
 	// LightboxModal
 	lightboxImage,
@@ -373,14 +444,19 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	stagedImages,
 	onCloseLightbox,
 	onNavigateLightbox,
+	onUpdateLightboxImage,
 	onDeleteLightboxImage,
 	// GitDiffViewer
 	gitDiffPreview,
+	gitDiffCwd,
+	gitDiffSessionId,
 	gitViewerCwd,
 	onCloseGitDiff,
 	// GitLogViewer
 	gitLogOpen,
+	gitLogTarget,
 	onCloseGitLog,
+	onOpenGitFile,
 	// AutoRunSetupModal
 	autoRunSetupModalOpen,
 	onCloseAutoRunSetup,
@@ -399,15 +475,18 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	// TabSwitcherModal
 	tabSwitcherOpen,
 	onCloseTabSwitcher,
+	crossTabSearchOpen,
+	onCloseCrossTabSearch,
+	onCrossTabSearchJump,
 	onTabSelect,
 	onFileTabSelect,
 	onTerminalTabSelect,
+	onBrowserTabSelect,
 	onNamedSessionSelect,
 	colorBlindMode,
 	// FileSearchModal
 	fuzzyFileSearchOpen,
 	filteredFileTree,
-	fileExplorerExpanded,
 	onCloseFileSearch,
 	onFileSearchSelect,
 	// PromptComposerModal
@@ -433,11 +512,59 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 	onPromptToggleEnterToSend,
 	// ExecutionQueueBrowser
 	queueBrowserOpen,
+	onOpenQueueBrowser,
 	onCloseQueueBrowser,
 	onRemoveQueueItem,
 	onSwitchQueueSession,
 	onReorderQueueItems,
+	onTogglePauseQueueItem,
+	onEditQueueItem,
+	onForceSendQueueItem,
+	// New tab creation (for QuickActionsModal)
+	onQuickActionsNewTab,
+	onQuickActionsNewFileTab,
+	onQuickActionsNewBrowserTab,
+	onQuickActionsNewTerminalTab,
+	onGoToNextUnread,
+	onGoToPreviousUnread,
+	onNavBack,
+	onNavForward,
 }: AppUtilityModalsProps) {
+	// Read per-modal data from the modal store for modals that support it.
+	// `presetDocuments` is set by the inline wizard's "Start Auto Run" button so
+	// the BatchRunnerModal opens with all freshly generated docs pre-selected.
+	const batchRunnerData = useModalStore(selectModalData('batchRunner'));
+	const batchRunnerPresetDocuments = batchRunnerData?.presetDocuments;
+
+	// Snooze modals subscribe to the modal store directly rather than taking
+	// open/close props - they need no state from App.tsx beyond the theme.
+	const snoozeTabOpen = useModalStore(selectModalOpen('snoozeTab'));
+	const snoozeTabData = useModalStore(selectModalData('snoozeTab'));
+	const snoozedTabsOpen = useModalStore(selectModalOpen('snoozedTabs'));
+	// Model & effort picker (Opt+Cmd+.) - same deal: it resolves the tab, agent,
+	// and option lists itself, so all it needs from here is the theme.
+	const modelEffortOpen = useModalStore(selectModalOpen('modelEffort'));
+	const modelEffortData = useModalStore(selectModalData('modelEffort'));
+	const closeModelEffort = useCallback(
+		() => useModalStore.getState().closeModal('modelEffort'),
+		[]
+	);
+	const closeSnoozeTab = useCallback(() => useModalStore.getState().closeModal('snoozeTab'), []);
+	const closeSnoozedTabs = useCallback(
+		() => useModalStore.getState().closeModal('snoozedTabs'),
+		[]
+	);
+
+	const handleSnoozeConfirm = useCallback(
+		(tabId: string, wakeAt: number, content: SnoozeContent) => {
+			// The transcript mirror and the ack ride along inside the service, which
+			// `maestro-cli snooze` shares, so a scripted snooze and a clicked one
+			// leave the same state behind.
+			snoozeTabWithMirror(tabId, wakeAt, content);
+		},
+		[]
+	);
+
 	return (
 		<>
 			{/* --- QUICK ACTIONS MODAL (Cmd+K) --- */}
@@ -459,6 +586,8 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					setRenameGroupId={setRenameGroupId}
 					setRenameGroupValue={setRenameGroupValue}
 					setRenameGroupEmoji={setRenameGroupEmoji}
+					setRenameGroupIcon={setRenameGroupIcon}
+					setRenameGroupColor={setRenameGroupColor}
 					setRenameGroupModalOpen={setRenameGroupModalOpen}
 					setCreateGroupModalOpen={setCreateGroupModalOpen}
 					setLeftSidebarOpen={setLeftSidebarOpen}
@@ -473,16 +602,17 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					setLogViewerOpen={setLogViewerOpen}
 					setProcessMonitorOpen={setProcessMonitorOpen}
 					setUsageDashboardOpen={setUsageDashboardOpen}
+					setAgentRunDashboardOpen={setAgentRunDashboardOpen}
 					setActiveRightTab={setActiveRightTab}
 					setAgentSessionsOpen={setAgentSessionsOpen}
+					setMemoryViewerOpen={setMemoryViewerOpen}
 					setActiveAgentSessionId={setActiveAgentSessionId}
-					setGitDiffPreview={setGitDiffPreview}
-					setGitLogOpen={setGitLogOpen}
 					isAiMode={isAiMode}
 					tabShortcuts={tabShortcuts}
 					onRenameTab={onRenameTab}
 					onToggleReadOnlyMode={onToggleReadOnlyMode}
 					onToggleTabShowThinking={onToggleTabShowThinking}
+					onToggleTabEnterToSend={onToggleTabEnterToSend}
 					onOpenTabSwitcher={onOpenTabSwitcher}
 					onCloseAllTabs={onCloseAllTabs}
 					onCloseOtherTabs={onCloseOtherTabs}
@@ -496,8 +626,8 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					setUpdateCheckModalOpen={setUpdateCheckModalOpen}
 					openWizard={openWizard}
 					wizardGoToStep={wizardGoToStep}
-					setDebugWizardModalOpen={setDebugWizardModalOpen}
 					setDebugPackageModalOpen={setDebugPackageModalOpen}
+					setDebugApplicationStatsOpen={setDebugApplicationStatsOpen}
 					startTour={startTour}
 					setFuzzyFileSearchOpen={setFuzzyFileSearchOpen}
 					onEditAgent={onEditAgent}
@@ -513,28 +643,44 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					onQuickCreateWorktree={onQuickCreateWorktree}
 					onOpenCreatePR={onOpenCreatePR}
 					onSummarizeAndContinue={onSummarizeAndContinue}
+					onRunPromptMacro={onRunPromptMacro}
 					canSummarizeActiveTab={canSummarizeActiveTab}
 					onToggleRemoteControl={onToggleRemoteControl}
 					autoRunSelectedDocument={autoRunSelectedDocument}
 					autoRunCompletedTaskCount={autoRunCompletedTaskCount}
 					onAutoRunResetTasks={onAutoRunResetTasks}
+					onToggleAutoRunExpanded={onToggleAutoRunExpanded}
 					onClearActiveTerminal={onClearActiveTerminal}
 					onCloseCurrentTab={onCloseCurrentTab}
 					onMoveTabToFirst={onMoveTabToFirst}
 					onMoveTabToLast={onMoveTabToLast}
+					onFocusActiveTab={onFocusActiveTab}
 					onCopyTabContext={onCopyTabContext}
 					onExportTabHtml={onExportTabHtml}
 					onPublishTabGist={onPublishTabGist}
+					mainPanelRef={mainPanelRef}
 					isFilePreviewOpen={isFilePreviewOpen}
 					ghCliAvailable={ghCliAvailable}
 					onPublishGist={onPublishGist}
 					onOpenPlaybookExchange={onOpenMarketplace}
 					lastGraphFocusFile={lastGraphFocusFile}
 					onOpenLastDocumentGraph={onOpenLastDocumentGraph}
+					currentGraphFile={currentGraphFile}
+					onOpenCurrentFileInGraph={onOpenCurrentFileInGraph}
 					onOpenSymphony={onOpenSymphony}
 					onOpenDirectorNotes={onOpenDirectorNotes}
 					onOpenMaestroCue={onOpenMaestroCue}
+					onOpenPianola={onOpenPianola}
 					onConfigureCue={onConfigureCue}
+					onOpenQueueBrowser={onOpenQueueBrowser}
+					onNewTab={onQuickActionsNewTab}
+					onNewFileTab={onQuickActionsNewFileTab}
+					onNewBrowserTab={onQuickActionsNewBrowserTab}
+					onNewTerminalTab={onQuickActionsNewTerminalTab}
+					onGoToNextUnread={onGoToNextUnread}
+					onGoToPreviousUnread={onGoToPreviousUnread}
+					onNavBack={onNavBack}
+					onNavForward={onNavForward}
 				/>
 			)}
 
@@ -546,35 +692,48 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					onClose={onCloseLightbox}
 					onNavigate={onNavigateLightbox}
 					onDelete={onDeleteLightboxImage}
+					onUpdateImage={onUpdateLightboxImage}
 					theme={theme}
 				/>
 			)}
 
-			{/* --- GIT DIFF VIEWER (lazy-loaded) --- */}
-			{gitDiffPreview && activeSession && (
+			{/* --- GIT DIFF VIEWER (lazy-loaded) ---
+			    `gitDiffCwd` is set when the diff was taken for a specific agent
+			    (Left Bar right-click); otherwise it follows the active agent. */}
+			{gitDiffPreview && (gitDiffCwd || activeSession) && (
 				<Suspense fallback={null}>
 					<GitDiffViewer
 						diffText={gitDiffPreview}
-						cwd={gitViewerCwd}
+						cwd={gitDiffCwd ?? gitViewerCwd}
+						// Falls back to the active agent, matching the cwd fallback
+						// above: the header names whichever agent's repo is on screen.
+						sessionId={gitDiffSessionId ?? activeSession?.id}
 						theme={theme}
 						onClose={onCloseGitDiff}
+						onOpenFile={onOpenGitFile}
 					/>
 				</Suspense>
 			)}
 
-			{/* --- GIT LOG VIEWER (lazy-loaded) --- */}
-			{gitLogOpen && activeSession && (
+			{/* --- GIT LOG VIEWER (lazy-loaded) ---
+			    `gitLogTarget` is set when the log was opened for a specific agent
+			    (Left Bar right-click); otherwise it follows the active agent. */}
+			{gitLogOpen && (gitLogTarget || activeSession) && (
 				<Suspense fallback={null}>
 					<GitLogViewer
-						cwd={gitViewerCwd}
+						cwd={gitLogTarget?.cwd ?? gitViewerCwd}
+						sessionId={gitLogTarget?.sessionId ?? activeSession?.id}
 						theme={theme}
 						onClose={onCloseGitLog}
+						onOpenFile={onOpenGitFile}
 						sshRemoteId={
-							activeSession?.sshRemoteId ||
-							(activeSession?.sessionSshRemoteConfig?.enabled
-								? activeSession.sessionSshRemoteConfig.remoteId
-								: undefined) ||
-							undefined
+							gitLogTarget
+								? gitLogTarget.sshRemoteId
+								: activeSession?.sshRemoteId ||
+									(activeSession?.sessionSshRemoteConfig?.enabled
+										? activeSession.sessionSshRemoteConfig.remoteId
+										: undefined) ||
+									undefined
 						}
 					/>
 				</Suspense>
@@ -610,7 +769,7 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					lastModifiedAt={activeSession.batchRunnerPromptModifiedAt}
 					showConfirmation={showConfirmation}
 					folderPath={activeSession.autoRunFolderPath}
-					currentDocument={activeSession.autoRunSelectedFile || ''}
+					presetDocuments={batchRunnerPresetDocuments}
 					allDocuments={autoRunDocumentList}
 					documentTree={autoRunDocumentTree}
 					getDocumentTaskCount={getDocumentTaskCount}
@@ -627,18 +786,33 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					tabs={activeSession.aiTabs}
 					fileTabs={activeSession.filePreviewTabs}
 					terminalTabs={activeSession.terminalTabs}
+					browserTabs={activeSession.browserTabs}
 					activeTabId={activeSession.activeTabId}
 					activeFileTabId={activeSession.activeFileTabId}
 					activeTerminalTabId={activeSession.activeTerminalTabId}
+					activeBrowserTabId={activeSession.activeBrowserTabId}
 					projectRoot={activeSession.projectRoot}
 					agentId={activeSession.toolType}
 					shortcut={tabShortcuts.tabSwitcher}
 					onTabSelect={onTabSelect}
 					onFileTabSelect={onFileTabSelect}
 					onTerminalTabSelect={onTerminalTabSelect}
+					onBrowserTabSelect={onBrowserTabSelect}
 					onNamedSessionSelect={onNamedSessionSelect}
 					onClose={onCloseTabSwitcher}
 					colorBlindMode={colorBlindMode}
+				/>
+			)}
+
+			{/* --- CROSS-TAB MESSAGE SEARCH MODAL --- */}
+			{crossTabSearchOpen && activeSession?.aiTabs && (
+				<CrossTabSearchModal
+					theme={theme}
+					tabs={activeSession.aiTabs}
+					activeTabId={activeSession.activeTabId}
+					shortcut={shortcuts.searchAllTabs}
+					onJump={onCrossTabSearchJump}
+					onClose={onCloseCrossTabSearch}
 				/>
 			)}
 
@@ -647,7 +821,6 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 				<FileSearchModal
 					theme={theme}
 					fileTree={filteredFileTree}
-					expandedFolders={fileExplorerExpanded}
 					shortcut={shortcuts.fuzzyFileSearch}
 					onFileSelect={onFileSearchSelect}
 					onClose={onCloseFileSearch}
@@ -678,9 +851,9 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					supportsThinking={promptSupportsThinking}
 					enterToSend={promptEnterToSend}
 					onToggleEnterToSend={onPromptToggleEnterToSend}
-					activeSession={activeSession}
-					sessions={sessions}
-					groups={groups}
+					activeSession={activeGroupChatId ? undefined : activeSession}
+					sessions={activeGroupChatId ? sessions : undefined}
+					groups={activeGroupChatId ? groups : undefined}
 				/>
 			)}
 
@@ -695,6 +868,37 @@ export const AppUtilityModals = memo(function AppUtilityModals({
 					onRemoveItem={onRemoveQueueItem}
 					onSwitchSession={onSwitchQueueSession}
 					onReorderItems={onReorderQueueItems}
+					onToggleItemPause={onTogglePauseQueueItem}
+					onEditItem={onEditQueueItem}
+					onForceSendItem={onForceSendQueueItem}
+				/>
+			)}
+
+			{/* --- SNOOZE TAB (pick a wake time) --- */}
+			{snoozeTabOpen && snoozeTabData && (
+				<SnoozeTabModal
+					theme={theme}
+					tabLabel={snoozeTabData.tabLabel}
+					canRunWakePrompt={snoozeTabData.canRunWakePrompt}
+					onClose={closeSnoozeTab}
+					onConfirm={(wakeAt, content) => {
+						handleSnoozeConfirm(snoozeTabData.tabId, wakeAt, content);
+						closeSnoozeTab();
+					}}
+				/>
+			)}
+
+			{/* --- MODEL & EFFORT (keyboard-only per-tab tuning) --- */}
+			{modelEffortOpen && modelEffortData && (
+				<ModelEffortModal theme={theme} tabId={modelEffortData.tabId} onClose={closeModelEffort} />
+			)}
+
+			{/* --- SNOOZED TABS (list across all agents) --- */}
+			{snoozedTabsOpen && (
+				<SnoozedTabsModal
+					theme={theme}
+					onClose={closeSnoozedTabs}
+					onJumpToTab={onSwitchQueueSession}
 				/>
 			)}
 		</>

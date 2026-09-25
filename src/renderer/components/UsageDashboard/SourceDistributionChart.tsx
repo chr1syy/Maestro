@@ -1,32 +1,56 @@
 /**
  * SourceDistributionChart
  *
- * Donut/pie chart showing Interactive vs Auto breakdown.
- * Displays the distribution of usage sources with toggle between count and duration views.
+ * Donut/pie chart showing where activity came from: Interactive vs Auto Run,
+ * plus an optional Cue slice when Cue stats are available. Toggles between
+ * count and duration views.
+ *
+ * Interactive and Auto Run live in the `query_events` table (source
+ * `user`/`auto`); Cue runs are tracked in a separate stats system and passed
+ * in via `cueTotals`. The two data sources are merged here for a single
+ * unified breakdown.
  *
  * Features:
  * - Donut/pie chart visualization
  * - Toggle between count-based and duration-based views
  * - Center label showing total
  * - Legend with percentages
- * - Theme-aware colors (accent for user/interactive, secondary for auto)
+ * - Theme-aware colors (accent for interactive, muted slate for auto, warning for Cue)
  * - Tooltip on hover with exact values
  */
 
 import { memo, useState, useMemo } from 'react';
 import type { Theme } from '../../types';
 import type { StatsAggregation } from '../../hooks/stats/useStats';
-import { COLORBLIND_BINARY_PALETTE } from '../../constants/colorblindPalettes';
+import {
+	COLORBLIND_BINARY_PALETTE,
+	COLORBLIND_AGENT_PALETTE,
+} from '../../constants/colorblindPalettes';
+import { formatDurationHuman as formatDuration, formatNumber } from '../../../shared/formatters';
+import { MetricModeToggle, formatMetricValue, type ChartMetricMode } from './MetricModeToggle';
+import { useTokenSeries } from './TokenSeriesContext';
+import { ChartLoadingOverlay } from './ChartLoadingOverlay';
+import { DONUT_CHART, describeDonutArc } from './chartUtils';
 
 // Metric display mode
-type MetricMode = 'count' | 'duration';
+type MetricMode = ChartMetricMode;
+
+type SourceKey = 'interactive' | 'auto' | 'cue';
 
 interface SourceData {
-	source: 'interactive' | 'auto';
+	source: SourceKey;
 	label: string;
 	value: number;
 	percentage: number;
 	color: string;
+}
+
+/** Subset of Cue aggregation totals needed to render the Cue slice. */
+export interface CueSourceTotals {
+	occurrences: number;
+	totalDurationMs: number;
+	/** Input + output tokens across Cue runs, for the chart's Tokens mode. */
+	tokens: number;
 }
 
 interface SourceDistributionChartProps {
@@ -36,37 +60,12 @@ interface SourceDistributionChartProps {
 	theme: Theme;
 	/** Enable colorblind-friendly colors */
 	colorBlindMode?: boolean;
-}
-
-/**
- * Format duration in milliseconds to human-readable string
- */
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.floor(ms / 1000);
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-
-	if (hours > 0) {
-		return `${hours}h ${minutes}m`;
-	}
-	if (minutes > 0) {
-		return `${minutes}m ${seconds}s`;
-	}
-	return `${seconds}s`;
-}
-
-/**
- * Format large numbers with K/M suffixes
- */
-function formatNumber(num: number): string {
-	if (num >= 1000000) {
-		return `${(num / 1000000).toFixed(1)}M`;
-	}
-	if (num >= 1000) {
-		return `${(num / 1000).toFixed(1)}K`;
-	}
-	return num.toString();
+	/**
+	 * Cue run totals, when the Cue Encore feature is enabled. When provided, a
+	 * third "Cue" slice is shown (even at zero usage, so the category stays
+	 * visible). Omit/null to render the plain Interactive vs Auto Run split.
+	 */
+	cueTotals?: CueSourceTotals | null;
 }
 
 /**
@@ -115,114 +114,99 @@ function getAutoColor(theme: Theme): string {
 	}
 }
 
-/**
- * SVG arc path generator for donut chart segments
- */
-function describeArc(
-	x: number,
-	y: number,
-	outerRadius: number,
-	innerRadius: number,
-	startAngle: number,
-	endAngle: number
-): string {
-	// Handle full circle case (nearly 360 degrees)
-	if (endAngle - startAngle >= 359.99) {
-		// Draw two half arcs to create a full circle
-		const midAngle = startAngle + 180;
-		return `
-      ${describeArc(x, y, outerRadius, innerRadius, startAngle, midAngle)}
-      ${describeArc(x, y, outerRadius, innerRadius, midAngle, endAngle)}
-    `;
-	}
-
-	const startRad = (startAngle - 90) * (Math.PI / 180);
-	const endRad = (endAngle - 90) * (Math.PI / 180);
-
-	const startOuterX = x + outerRadius * Math.cos(startRad);
-	const startOuterY = y + outerRadius * Math.sin(startRad);
-	const endOuterX = x + outerRadius * Math.cos(endRad);
-	const endOuterY = y + outerRadius * Math.sin(endRad);
-
-	const startInnerX = x + innerRadius * Math.cos(startRad);
-	const startInnerY = y + innerRadius * Math.sin(startRad);
-	const endInnerX = x + innerRadius * Math.cos(endRad);
-	const endInnerY = y + innerRadius * Math.sin(endRad);
-
-	const largeArcFlag = endAngle - startAngle > 180 ? 1 : 0;
-
-	return `
-    M ${startOuterX} ${startOuterY}
-    A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${endOuterX} ${endOuterY}
-    L ${endInnerX} ${endInnerY}
-    A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${startInnerX} ${startInnerY}
-    Z
-  `;
-}
-
 export const SourceDistributionChart = memo(function SourceDistributionChart({
 	data,
 	theme,
 	colorBlindMode = false,
+	cueTotals = null,
 }: SourceDistributionChartProps) {
 	const [metricMode, setMetricMode] = useState<MetricMode>('count');
-	const [hoveredSource, setHoveredSource] = useState<'interactive' | 'auto' | null>(null);
+	const { series: tokenSeries, loading: tokensLoading } = useTokenSeries(metricMode === 'tokens');
+	const [hoveredSource, setHoveredSource] = useState<SourceKey | null>(null);
 
 	// Calculate source data based on mode
 	const sourceData = useMemo((): SourceData[] => {
-		const interactiveValue =
-			metricMode === 'count'
-				? data.bySource.user
-				: (data.bySource.user / (data.bySource.user + data.bySource.auto || 1)) *
-					data.totalDuration;
-		const autoValue =
-			metricMode === 'count'
-				? data.bySource.auto
-				: (data.bySource.auto / (data.bySource.user + data.bySource.auto || 1)) *
-					data.totalDuration;
+		const userCount = data.bySource.user;
+		const autoCount = data.bySource.auto;
+		const queryCount = userCount + autoCount;
+		const cueCount = cueTotals?.occurrences ?? 0;
 
-		const total = interactiveValue + autoValue;
+		// Interactive/Auto durations are not stored per-source: `query_events`
+		// only carries a single global `totalDuration`, so we split it by query
+		// count. Cue tracks its own real wall-clock duration separately.
+		const interactiveDuration = queryCount > 0 ? (userCount / queryCount) * data.totalDuration : 0;
+		const autoDuration = queryCount > 0 ? (autoCount / queryCount) * data.totalDuration : 0;
+		const cueDuration = cueTotals?.totalDurationMs ?? 0;
 
-		const sources: SourceData[] = [];
+		// Token totals come from the transcript-derived series (user/auto by how the
+		// session was started) and, for Cue, from Cue's own stats - mirroring how
+		// the count and duration slices above are already sourced independently.
+		const interactiveTokens = tokenSeries?.bySource?.user ?? 0;
+		const autoTokens = tokenSeries?.bySource?.auto ?? 0;
+		const cueTokens = cueTotals?.tokens ?? 0;
+
+		const pick = (count: number, duration: number, tokens: number) =>
+			metricMode === 'count' ? count : metricMode === 'tokens' ? tokens : duration;
+
+		const interactiveValue = pick(userCount, interactiveDuration, interactiveTokens);
+		const autoValue = pick(autoCount, autoDuration, autoTokens);
+		const cueValue = pick(cueCount, cueDuration, cueTokens);
+
+		const total = interactiveValue + autoValue + cueValue;
+		const pct = (v: number) => (total > 0 ? (v / total) * 100 : 0);
 
 		// Use colorblind-safe colors when colorblind mode is enabled
 		const interactiveColor = colorBlindMode
 			? COLORBLIND_BINARY_PALETTE.primary
 			: theme.colors.accent;
 		const autoColor = colorBlindMode ? COLORBLIND_BINARY_PALETTE.secondary : getAutoColor(theme);
+		// Teal (Wong palette index 2) contrasts with the blue/orange binary pair.
+		const cueColor = colorBlindMode ? COLORBLIND_AGENT_PALETTE[2] : theme.colors.warning;
 
-		if (interactiveValue > 0 || autoValue === 0) {
-			sources.push({
+		const candidates: SourceData[] = [
+			{
 				source: 'interactive',
 				label: 'Interactive',
 				value: interactiveValue,
-				percentage: total > 0 ? (interactiveValue / total) * 100 : total === 0 ? 50 : 0,
+				percentage: pct(interactiveValue),
 				color: interactiveColor,
-			});
-		}
-
-		if (autoValue > 0 || interactiveValue === 0) {
-			sources.push({
+			},
+			{
 				source: 'auto',
 				label: 'Auto Run',
 				value: autoValue,
-				percentage: total > 0 ? (autoValue / total) * 100 : total === 0 ? 50 : 0,
+				percentage: pct(autoValue),
 				color: autoColor,
+			},
+		];
+
+		// Only consider a Cue slice when Cue stats were supplied (feature enabled).
+		if (cueTotals != null) {
+			candidates.push({
+				source: 'cue',
+				label: 'Cue',
+				value: cueValue,
+				percentage: pct(cueValue),
+				color: cueColor,
 			});
 		}
 
-		return sources;
-	}, [data, metricMode, theme, colorBlindMode]);
+		// Hide zero-value contributors so the donut and legend only show real
+		// usage (matches the original two-way behavior). The all-zero empty
+		// state is handled separately via `hasData`.
+		return candidates.filter((s) => s.value > 0);
+	}, [data, metricMode, theme, colorBlindMode, cueTotals, tokenSeries]);
+
+	// Cue participates in the breakdown only when it has activity in range.
+	const hasCueSlice = useMemo(() => sourceData.some((s) => s.source === 'cue'), [sourceData]);
 
 	// Calculate total for center label
 	const total = useMemo(() => {
 		return sourceData.reduce((sum, s) => sum + s.value, 0);
 	}, [sourceData]);
 
-	// Donut chart configuration
-	const size = 160;
-	const outerRadius = 70;
-	const innerRadius = 45;
+	// Donut chart configuration (shared with LocationDistributionChart)
+	const { size, outerRadius, innerRadius, hoverExpansion, centerLabelWidth } = DONUT_CHART;
 	const centerX = size / 2;
 	const centerY = size / 2;
 
@@ -243,57 +227,38 @@ export const SourceDistributionChart = memo(function SourceDistributionChart({
 	}, [sourceData]);
 
 	// Check if there's any data
-	const hasData = data.bySource.user > 0 || data.bySource.auto > 0;
+	const hasData =
+		data.bySource.user > 0 || data.bySource.auto > 0 || (cueTotals?.occurrences ?? 0) > 0;
+
+	// Title reflects scope: with a Cue slice it's an activity-source breakdown,
+	// otherwise the original interactive-vs-auto session split.
+	const title = hasCueSlice ? 'Activity Source' : 'Session Type';
+	const breakdownLabel = hasCueSlice
+		? 'Interactive, Auto Run, and Cue activity'
+		: 'Interactive and Auto Run sessions';
 
 	return (
 		<div
 			className="p-4 rounded-lg"
 			style={{ backgroundColor: theme.colors.bgMain }}
 			role="figure"
-			aria-label={`Session type chart showing ${metricMode === 'count' ? 'query counts' : 'duration'} breakdown between Interactive and Auto Run sessions.`}
+			aria-label={`${title} chart showing ${metricMode === 'count' ? 'query counts' : 'duration'} breakdown across ${breakdownLabel}.`}
 		>
 			{/* Header with title and metric toggle */}
 			<div className="flex items-center justify-between mb-4">
-				<h3 className="text-sm font-medium" style={{ color: theme.colors.textMain }}>
-					Session Type
+				<h3
+					className="text-sm font-medium"
+					style={{ color: theme.colors.textMain, animation: 'card-enter 0.4s ease both' }}
+				>
+					{title}
 				</h3>
-				<div className="flex items-center gap-2">
-					<span className="text-xs" style={{ color: theme.colors.textDim }}>
-						Show:
-					</span>
-					<div
-						className="flex rounded overflow-hidden border"
-						style={{ borderColor: theme.colors.border }}
-					>
-						<button
-							onClick={() => setMetricMode('count')}
-							className="px-2 py-1 text-xs transition-colors"
-							style={{
-								backgroundColor:
-									metricMode === 'count' ? `${theme.colors.accent}20` : 'transparent',
-								color: metricMode === 'count' ? theme.colors.accent : theme.colors.textDim,
-							}}
-							aria-pressed={metricMode === 'count'}
-							aria-label="Show query count"
-						>
-							Count
-						</button>
-						<button
-							onClick={() => setMetricMode('duration')}
-							className="px-2 py-1 text-xs transition-colors"
-							style={{
-								backgroundColor:
-									metricMode === 'duration' ? `${theme.colors.accent}20` : 'transparent',
-								color: metricMode === 'duration' ? theme.colors.accent : theme.colors.textDim,
-								borderLeft: `1px solid ${theme.colors.border}`,
-							}}
-							aria-pressed={metricMode === 'duration'}
-							aria-label="Show total duration"
-						>
-							Duration
-						</button>
-					</div>
-				</div>
+				<MetricModeToggle
+					mode={metricMode}
+					onChange={setMetricMode}
+					theme={theme}
+					variant="subtle"
+					tokensLoading={tokensLoading}
+				/>
 			</div>
 
 			{/* Chart container */}
@@ -309,6 +274,7 @@ export const SourceDistributionChart = memo(function SourceDistributionChart({
 					<>
 						{/* Donut chart */}
 						<div className="relative">
+							<ChartLoadingOverlay visible={tokensLoading} theme={theme} />
 							<svg
 								width={size}
 								height={size}
@@ -319,10 +285,10 @@ export const SourceDistributionChart = memo(function SourceDistributionChart({
 								{arcs.map((arc) => (
 									<path
 										key={arc.source}
-										d={describeArc(
+										d={describeDonutArc(
 											centerX,
 											centerY,
-											hoveredSource === arc.source ? outerRadius + 4 : outerRadius,
+											hoveredSource === arc.source ? outerRadius + hoverExpansion : outerRadius,
 											innerRadius,
 											arc.startAngle,
 											arc.endAngle
@@ -344,8 +310,11 @@ export const SourceDistributionChart = memo(function SourceDistributionChart({
 								className="absolute inset-0 flex flex-col items-center justify-center"
 								style={{ pointerEvents: 'none' }}
 							>
-								<span className="text-lg font-semibold" style={{ color: theme.colors.textMain }}>
-									{metricMode === 'count' ? formatNumber(total) : formatDuration(total)}
+								<span
+									className="text-lg font-semibold leading-tight text-center truncate"
+									style={{ color: theme.colors.textMain, maxWidth: centerLabelWidth }}
+								>
+									{formatMetricValue(metricMode, total)}
 								</span>
 								<span className="text-xs" style={{ color: theme.colors.textDim }}>
 									{metricMode === 'count' ? 'total' : 'time'}
@@ -384,7 +353,9 @@ export const SourceDistributionChart = memo(function SourceDistributionChart({
 											{source.percentage.toFixed(1)}% •{' '}
 											{metricMode === 'count'
 												? formatNumber(source.value)
-												: formatDuration(source.value)}
+												: metricMode === 'tokens'
+													? formatMetricValue('tokens', source.value)
+													: formatDuration(source.value)}
 										</span>
 									</div>
 								</div>

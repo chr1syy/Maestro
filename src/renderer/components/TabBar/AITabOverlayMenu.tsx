@@ -13,10 +13,15 @@ import {
 	Share2,
 	ChevronsLeft,
 	ChevronsRight,
+	Clock,
 	X,
 } from 'lucide-react';
 import type { AITab, Theme } from '../../types';
 import { buildSessionDeepLink } from '../../../shared/deep-link-urls';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { hasThinkingEntries } from '../../utils/contextExtractor';
+import type { CopyContextOptions } from '../../hooks/tabs/useTabExportHandlers';
+import { ShortcutHint } from '../ui/ShortcutHint';
 
 export interface AITabOverlayMenuProps {
 	tab: AITab;
@@ -33,7 +38,9 @@ export interface AITabOverlayMenuProps {
 	onRenameClick: (e: React.MouseEvent) => void;
 	onMarkUnreadClick: (e: React.MouseEvent) => void;
 	onExportHtmlClick: (e: React.MouseEvent) => void;
+	onSnoozeClick: (e: React.MouseEvent) => void;
 	onCopyContextClick: (e: React.MouseEvent) => void;
+	onCopyContextWithReasoningClick: (e: React.MouseEvent) => void;
 	onSummarizeAndContinueClick: (e: React.MouseEvent) => void;
 	onMergeWithClick: (e: React.MouseEvent) => void;
 	onSendToAgentClick: (e: React.MouseEvent) => void;
@@ -48,8 +55,9 @@ export interface AITabOverlayMenuProps {
 	onMergeWith?: (tabId: string) => void;
 	onSendToAgent?: (tabId: string) => void;
 	onSummarizeAndContinue?: (tabId: string) => void;
-	onCopyContext?: (tabId: string) => void;
+	onCopyContext?: (tabId: string, options?: CopyContextOptions) => void;
 	onExportHtml?: (tabId: string) => void;
+	onSnooze?: (tabId: string) => void;
 	onPublishGist?: (tabId: string) => void;
 	onMoveToFirst?: (tabId: string) => void;
 	onMoveToLast?: (tabId: string) => void;
@@ -60,7 +68,7 @@ export interface AITabOverlayMenuProps {
 
 /**
  * Overlay menu content for AI tabs.
- * Pure presentational — all handlers passed as props.
+ * Pure presentational - all handlers passed as props.
  */
 export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 	tab,
@@ -76,7 +84,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 	onRenameClick,
 	onMarkUnreadClick,
 	onExportHtmlClick,
+	onSnoozeClick,
 	onCopyContextClick,
+	onCopyContextWithReasoningClick,
 	onSummarizeAndContinueClick,
 	onMergeWithClick,
 	onSendToAgentClick,
@@ -92,6 +102,7 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 	onSummarizeAndContinue,
 	onCopyContext,
 	onExportHtml,
+	onSnooze,
 	onPublishGist,
 	onMoveToFirst,
 	onMoveToLast,
@@ -99,9 +110,12 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 	onCloseTabsLeft,
 	onCloseTabsRight,
 }: AITabOverlayMenuProps) {
+	const shortcuts = useSettingsStore((s) => s.shortcuts);
+	const tabShortcuts = useSettingsStore((s) => s.tabShortcuts);
+
 	return (
 		<div
-			className="shadow-xl overflow-hidden"
+			className="shadow-xl overflow-hidden whitespace-nowrap"
 			style={{
 				backgroundColor: theme.colors.bgSidebar,
 				borderLeft: `1px solid ${theme.colors.border}`,
@@ -109,7 +123,7 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 				borderBottom: `1px solid ${theme.colors.border}`,
 				borderBottomLeftRadius: '8px',
 				borderBottomRightRadius: '8px',
-				minWidth: '220px',
+				minWidth: '13.75rem',
 			}}
 		>
 			{/* Header with session name and ID - only show for tabs with sessions */}
@@ -129,7 +143,7 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					)}
 
 					{/* Session ID display */}
-					<div className="px-3 py-2 text-[10px] font-mono" style={{ color: theme.colors.textDim }}>
+					<div className="px-3 py-2 text-2xs font-mono" style={{ color: theme.colors.textDim }}>
 						{tab.agentSessionId}
 					</div>
 				</div>
@@ -173,6 +187,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 							style={{ color: tab.starred ? theme.colors.warning : theme.colors.textDim }}
 						/>
 						{tab.starred ? 'Unstar Session' : 'Star Session'}
+						{shortcuts.toggleTabStar && (
+							<ShortcutHint keys={shortcuts.toggleTabStar.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -184,6 +201,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 				>
 					<Edit2 className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 					Rename Tab
+					{tabShortcuts.renameTab && (
+						<ShortcutHint keys={tabShortcuts.renameTab.keys} theme={theme} />
+					)}
 				</button>
 
 				{/* Mark as Unread button - only show for tabs with established session */}
@@ -195,6 +215,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<Mail className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Mark as Unread
+						{tabShortcuts.toggleTabUnread && (
+							<ShortcutHint keys={tabShortcuts.toggleTabUnread.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -207,6 +230,21 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<Download className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Export as HTML
+					</button>
+				)}
+
+				{/* Snooze - hide the tab until a chosen moment, then bring it back */}
+				{onSnooze && (
+					<button
+						onClick={onSnoozeClick}
+						className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+						style={{ color: theme.colors.textMain }}
+					>
+						<Clock className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+						Snooze Tab
+						{tabShortcuts.snoozeTab && (
+							<ShortcutHint keys={tabShortcuts.snoozeTab.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -225,6 +263,18 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<Clipboard className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Context: Copy to Clipboard
+					</button>
+				)}
+
+				{/* Context: Copy with Reasoning - only when the tab has reasoning blocks */}
+				{onCopyContext && hasThinkingEntries(tab.logs) && (
+					<button
+						onClick={onCopyContextWithReasoningClick}
+						className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+						style={{ color: theme.colors.textMain }}
+					>
+						<Clipboard className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+						Context: Copy with Reasoning
 					</button>
 				)}
 
@@ -290,6 +340,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Move to First Position
+						{tabShortcuts.moveTabToStart && (
+							<ShortcutHint keys={tabShortcuts.moveTabToStart.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -302,6 +355,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<ChevronsRight className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Move to Last Position
+						{tabShortcuts.moveTabToEnd && (
+							<ShortcutHint keys={tabShortcuts.moveTabToEnd.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -319,6 +375,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 				>
 					<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 					Close Tab
+					{tabShortcuts.closeTab && (
+						<ShortcutHint keys={tabShortcuts.closeTab.keys} theme={theme} />
+					)}
 				</button>
 
 				{/* Close Other Tabs */}
@@ -333,6 +392,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Close Other Tabs
+						{tabShortcuts.closeOtherTabs && (
+							<ShortcutHint keys={tabShortcuts.closeOtherTabs.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -348,6 +410,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Close Tabs to Left
+						{tabShortcuts.closeTabsLeft && (
+							<ShortcutHint keys={tabShortcuts.closeTabsLeft.keys} theme={theme} />
+						)}
 					</button>
 				)}
 
@@ -363,6 +428,9 @@ export const AITabOverlayMenu = memo(function AITabOverlayMenu({
 					>
 						<ChevronsRight className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
 						Close Tabs to Right
+						{tabShortcuts.closeTabsRight && (
+							<ShortcutHint keys={tabShortcuts.closeTabsRight.keys} theme={theme} />
+						)}
 					</button>
 				)}
 			</div>

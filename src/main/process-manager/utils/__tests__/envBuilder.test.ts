@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { buildChildProcessEnv, buildPtyTerminalEnv } from '../envBuilder';
+import { buildChildProcessEnv, buildPtyTerminalEnv, collectMaestroEnvVars } from '../envBuilder';
 
 describe('envBuilder - Global Environment Variables', () => {
 	let originalProcessEnv: NodeJS.ProcessEnv;
@@ -202,6 +202,13 @@ describe('envBuilder - Global Environment Variables', () => {
 			process.env.CLAUDE_CODE_ENTRYPOINT = '/path/to/entrypoint';
 			process.env.CLAUDE_AGENT_SDK_VERSION = '1.0.0';
 			process.env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING = 'true';
+			// Claude session-identity markers: leaking these into a spawned
+			// claude-code turn (or the maestro-p TUI it drives) makes the child
+			// claude run as a nested session that never writes its own JSONL
+			// transcript, breaking maestro-p capture (empty synopsis -> no
+			// History entry).
+			process.env.CLAUDE_CODE_SESSION_ID = 'parent-session-uuid';
+			process.env.CLAUDE_CODE_CHILD_SESSION = '1';
 
 			const env = buildChildProcessEnv();
 
@@ -212,6 +219,8 @@ describe('envBuilder - Global Environment Variables', () => {
 			expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
 			expect(env.CLAUDE_AGENT_SDK_VERSION).toBeUndefined();
 			expect(env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING).toBeUndefined();
+			expect(env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+			expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
 		});
 
 		it('should preserve non-Electron variables from process env', () => {
@@ -295,6 +304,83 @@ describe('envBuilder - Global Environment Variables', () => {
 		});
 	});
 
+	describe('Test 2.5b-browser: BROWSER neutering (no browser-tab hijack)', () => {
+		it('forces BROWSER to a no-op so a self-healing claude cannot open a tab', () => {
+			const env = buildChildProcessEnv();
+
+			expect(env.BROWSER).toBe('/usr/bin/true');
+		});
+
+		it('neuters an inherited BROWSER from the parent process', () => {
+			const prev = process.env.BROWSER;
+			process.env.BROWSER = '/Applications/Google Chrome.app';
+			try {
+				const env = buildChildProcessEnv();
+				expect(env.BROWSER).toBe('/usr/bin/true');
+			} finally {
+				if (prev === undefined) delete process.env.BROWSER;
+				else process.env.BROWSER = prev;
+			}
+		});
+
+		it('lets an explicit global BROWSER override win', () => {
+			const env = buildChildProcessEnv(undefined, false, { BROWSER: '/usr/bin/open' });
+
+			expect(env.BROWSER).toBe('/usr/bin/open');
+		});
+
+		it('lets an explicit session-level BROWSER override win over global', () => {
+			const env = buildChildProcessEnv({ BROWSER: '/usr/bin/firefox' }, false, {
+				BROWSER: '/usr/bin/open',
+			});
+
+			expect(env.BROWSER).toBe('/usr/bin/firefox');
+		});
+	});
+
+	describe('Test 2.5b2: MAESTRO_QUERY_SOURCE Marker', () => {
+		it('defaults to user when no caller claims the turn', () => {
+			expect(buildChildProcessEnv().MAESTRO_QUERY_SOURCE).toBe('user');
+		});
+
+		it('carries the claimed origin for Auto Run and Cue turns', () => {
+			expect(
+				buildChildProcessEnv(undefined, false, undefined, undefined, 'auto').MAESTRO_QUERY_SOURCE
+			).toBe('auto');
+			expect(
+				buildChildProcessEnv(undefined, false, undefined, undefined, 'cue').MAESTRO_QUERY_SOURCE
+			).toBe('cue');
+		});
+
+		it('is not overridable by global or session env vars', () => {
+			// A stray var of the same name in Settings would otherwise relabel every
+			// turn on the machine, which is worse than the var not existing at all.
+			const env = buildChildProcessEnv(
+				{ MAESTRO_QUERY_SOURCE: 'user' },
+				false,
+				{ MAESTRO_QUERY_SOURCE: 'user' },
+				undefined,
+				'cue'
+			);
+
+			expect(env.MAESTRO_QUERY_SOURCE).toBe('cue');
+		});
+
+		it('is absent from terminal PTY env - a shell is not an agent turn', () => {
+			expect(buildPtyTerminalEnv().MAESTRO_QUERY_SOURCE).toBeUndefined();
+		});
+
+		it('is dropped even when the marker is already in the parent env', () => {
+			// Maestro launched from an agent shell inherits the marker, which is the
+			// normal case in development. The PTY env spreads process.env, so
+			// without an explicit delete every Command Terminal would announce
+			// itself as an agent turn. The Windows branch is the sharper edge: it
+			// inherits process.env wholesale and strips nothing else.
+			process.env.MAESTRO_QUERY_SOURCE = 'user';
+			expect(buildPtyTerminalEnv().MAESTRO_QUERY_SOURCE).toBeUndefined();
+		});
+	});
+
 	describe('Test 2.5c: PATH Handling', () => {
 		it('should set PATH to expanded path', () => {
 			const env = buildChildProcessEnv();
@@ -304,6 +390,23 @@ describe('envBuilder - Global Environment Variables', () => {
 			expect(typeof env.PATH).toBe('string');
 			// The actual value depends on the system, but it should exist
 			expect((env.PATH as string).length).toBeGreaterThan(0);
+		});
+
+		it('should prepend extraPathDirs ahead of the expanded PATH', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin' });
+
+			try {
+				const env = buildChildProcessEnv(undefined, false, undefined, ['/Users/me/opt/node/bin']);
+				const parts = (env.PATH as string).split(path.delimiter);
+
+				// extraPathDirs entry must come first
+				expect(parts[0]).toBe('/Users/me/opt/node/bin');
+				// hardcoded expanded paths still present after
+				expect(parts).toContain('/opt/homebrew/bin');
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		it('should include detected Node version manager bins in PATH', () => {
@@ -436,17 +539,135 @@ describe('envBuilder - Global Environment Variables', () => {
 
 			expect(env.TERM).toBe('xterm-256color');
 		});
+
+		it('should set a default VIMINIT for terminal sessions', () => {
+			delete process.env.VIMINIT;
+			const env = buildPtyTerminalEnv({});
+
+			expect(env.VIMINIT).toBe('set nocompatible | set esckeys');
+		});
+
+		it('should respect explicit VIMINIT from shell env vars', () => {
+			const env = buildPtyTerminalEnv({
+				VIMINIT: 'set compatible',
+			});
+
+			expect(env.VIMINIT).toBe('set compatible');
+		});
+
+		it('should preserve VIMINIT from process env when present', () => {
+			process.env.VIMINIT = 'set compatible';
+			const env = buildPtyTerminalEnv({});
+
+			expect(env.VIMINIT).toBe('set compatible');
+		});
+
+		it('should inherit parent process environment on Unix', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'linux' });
+
+			try {
+				process.env.ZSH_CUSTOM_VAR = 'zsh-value';
+				process.env.XDG_CONFIG_HOME = '/home/test/.config';
+
+				const env = buildPtyTerminalEnv({});
+
+				expect(env.ZSH_CUSTOM_VAR).toBe('zsh-value');
+				expect(env.XDG_CONFIG_HOME).toBe('/home/test/.config');
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+				delete process.env.ZSH_CUSTOM_VAR;
+				delete process.env.XDG_CONFIG_HOME;
+			}
+		});
+
+		it('should include common user install locations in PATH on Unix', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'linux' });
+
+			try {
+				process.env.PATH = '/usr/bin:/bin';
+				const env = buildPtyTerminalEnv({});
+				const pathParts = (env.PATH as string).split(path.delimiter);
+				const home = os.homedir();
+
+				// These directories must be in PATH so tools installed by the user
+				// (claude, codex, opencode installers) are reachable without relying
+				// on the shell sourcing an rc file to extend PATH. Regression test
+				// for zsh-without-.zshrc yielding `command not found`.
+				expect(pathParts).toContain(`${home}/.local/bin`);
+				expect(pathParts).toContain(`${home}/.opencode/bin`);
+				expect(pathParts).toContain(`${home}/.claude/local`);
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
+		it('should strip Electron/IDE variables from PTY environment on Unix', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'linux' });
+
+			try {
+				process.env.ELECTRON_RUN_AS_NODE = '1';
+				process.env.ELECTRON_NO_ASAR = '1';
+				process.env.ELECTRON_EXTRA_LAUNCH_ARGS = '--enable-features=something';
+				process.env.CLAUDECODE = 'true';
+				process.env.CLAUDE_CODE_ENTRYPOINT = '/path/to/entrypoint';
+				process.env.CLAUDE_AGENT_SDK_VERSION = '1.0.0';
+				process.env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING = 'true';
+				process.env.NODE_ENV = 'test';
+
+				const env = buildPtyTerminalEnv({});
+
+				expect(env.ELECTRON_RUN_AS_NODE).toBeUndefined();
+				expect(env.ELECTRON_NO_ASAR).toBeUndefined();
+				expect(env.ELECTRON_EXTRA_LAUNCH_ARGS).toBeUndefined();
+				expect(env.CLAUDECODE).toBeUndefined();
+				expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+				expect(env.CLAUDE_AGENT_SDK_VERSION).toBeUndefined();
+				expect(env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING).toBeUndefined();
+				expect(env.NODE_ENV).toBeUndefined();
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
 	});
 
 	describe('Test 2.9: Edge Cases and Special Values', () => {
-		it('should handle empty string values', () => {
+		it('should treat a blank value as "unset", not as an empty export', () => {
+			// A blank field in the env editor is an absence, not a value. Exporting
+			// FOO='' hands the agent a set-but-empty variable, which is how a blank
+			// CLAUDE_CONFIG_DIR made Claude Code call mkdir('') and die before it
+			// ever reached the provider.
 			const globalVars = {
 				EMPTY_VAR: '',
+				WHITESPACE_VAR: '   ',
 			};
 
 			const env = buildChildProcessEnv(undefined, false, globalVars);
 
-			expect(env.EMPTY_VAR).toBe('');
+			expect('EMPTY_VAR' in env).toBe(false);
+			expect('WHITESPACE_VAR' in env).toBe(false);
+		});
+
+		it('should let a blank session value cancel a global value', () => {
+			// "Blank means unset" only holds if the unset actually wins - dropping the
+			// blank before the merge would leave the global value in place.
+			const env = buildChildProcessEnv({ CLAUDE_CONFIG_DIR: '' }, false, {
+				CLAUDE_CONFIG_DIR: '/global/config',
+			});
+
+			expect('CLAUDE_CONFIG_DIR' in env).toBe(false);
+		});
+
+		it('should let a blank value remove an inherited process.env value', () => {
+			process.env.INHERITED_TO_CLEAR = '/inherited';
+			try {
+				const env = buildChildProcessEnv({ INHERITED_TO_CLEAR: '' }, false, undefined);
+				expect('INHERITED_TO_CLEAR' in env).toBe(false);
+			} finally {
+				delete process.env.INHERITED_TO_CLEAR;
+			}
 		});
 
 		it('should handle very long values', () => {
@@ -532,6 +753,65 @@ describe('envBuilder - Global Environment Variables', () => {
 
 			expect(env2.VAR2).toBe('value2');
 			expect(env2.VAR1).toBeUndefined();
+		});
+	});
+
+	describe('collectMaestroEnvVars', () => {
+		it('returns an empty object when no inputs are provided', () => {
+			expect(collectMaestroEnvVars()).toEqual({});
+		});
+
+		it('merges global and custom env vars with custom taking precedence', () => {
+			const result = collectMaestroEnvVars(
+				{ DEBUG: 'global', PROXY: 'http://global' },
+				{ DEBUG: 'session' }
+			);
+			expect(result).toEqual({ DEBUG: 'session', PROXY: 'http://global' });
+		});
+
+		it('expands ~/ paths in both global and custom values', () => {
+			const result = collectMaestroEnvVars({ WORKSPACE: '~/work' }, { CACHE_DIR: '~/cache' });
+			expect(result.WORKSPACE).toBe(path.join(os.homedir(), 'work'));
+			expect(result.CACHE_DIR).toBe(path.join(os.homedir(), 'cache'));
+		});
+
+		it('reports MAESTRO_QUERY_SOURCE only when the caller resolved one', () => {
+			// The list mirrors what the process actually received, so terminal PTYs
+			// (which never get the marker) must not advertise it.
+			expect(collectMaestroEnvVars(undefined, undefined, false).MAESTRO_QUERY_SOURCE).toBe(
+				undefined
+			);
+			expect(collectMaestroEnvVars(undefined, undefined, false, 'cue').MAESTRO_QUERY_SOURCE).toBe(
+				'cue'
+			);
+		});
+
+		it('includes MAESTRO_SESSION_RESUMED only when isResuming is true', () => {
+			expect(
+				collectMaestroEnvVars(undefined, undefined, false).MAESTRO_SESSION_RESUMED
+			).toBeUndefined();
+			expect(collectMaestroEnvVars(undefined, undefined, true).MAESTRO_SESSION_RESUMED).toBe('1');
+		});
+
+		it('does not include inherited process env', () => {
+			process.env.SOMETHING_INHERITED = 'inherited';
+			const result = collectMaestroEnvVars({ ONLY_GLOBAL: 'g' });
+			expect(result).toEqual({ ONLY_GLOBAL: 'g' });
+		});
+
+		it('omits blank values, because the process never received them', () => {
+			// This list is what the Process Details modal shows. A blank is dropped at
+			// spawn time, so reporting it here would describe a variable the running
+			// process does not actually have.
+			const result = collectMaestroEnvVars({ BLANK: '', PADDED: '  ', KEPT: 'v' });
+			expect(result).toEqual({ KEPT: 'v' });
+		});
+
+		it('lets a blank session value cancel a global one', () => {
+			// Same merge-then-strip ordering as buildChildProcessEnv: strip before the
+			// merge and the global value would survive a session-level blank.
+			const result = collectMaestroEnvVars({ DEBUG: 'global' }, { DEBUG: '' });
+			expect(result).toEqual({});
 		});
 	});
 });

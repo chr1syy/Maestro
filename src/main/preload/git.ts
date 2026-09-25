@@ -10,6 +10,11 @@
  */
 
 import { ipcRenderer } from 'electron';
+import type {
+	GitCommandOutputChunk,
+	GitRunCommandResult,
+	GitStreamingOperation,
+} from '../../shared/gitUtils';
 
 /**
  * Git worktree information
@@ -57,6 +62,19 @@ export interface GitLogEntry {
 }
 
 /**
+ * Git graph node - like GitLogEntry but with parent hashes for topology rendering.
+ */
+export interface GitGraphNode {
+	hash: string;
+	shortHash: string;
+	parents: string[];
+	author: string;
+	date: string;
+	refs: string[];
+	subject: string;
+}
+
+/**
  * Discovered worktree event data
  */
 export interface WorktreeDiscoveredData {
@@ -66,6 +84,74 @@ export interface WorktreeDiscoveredData {
 		name: string;
 		branch: string | null;
 	};
+}
+
+/**
+ * Removed worktree event data
+ */
+export interface WorktreeRemovedData {
+	sessionId: string;
+	worktreePath: string;
+}
+
+/**
+ * Result of the `git.worktreeSetup` IPC.
+ *
+ * Shared between the preload bridge and the renderer global declaration so
+ * the contract stays in one place.
+ *
+ * Named `GitWorktreeSetupResult` to avoid colliding with the higher-level
+ * `WorktreeSetupResult` exported from `renderer/hooks/batch/useWorktreeManager`.
+ */
+export interface GitWorktreeSetupResult {
+	success: boolean;
+	created?: boolean;
+	currentBranch?: string;
+	requestedBranch?: string;
+	branchMismatch?: boolean;
+	/** True when the branch was already attached to a worktree on disk. */
+	alreadyExisted?: boolean;
+	/** Path of the existing worktree when alreadyExisted is true. */
+	existingPath?: string;
+	error?: string;
+}
+
+/**
+ * Context passed to the post-create setup script, surfaced to it as MAESTRO_*
+ * environment variables.
+ */
+export interface WorktreeSetupScriptContext {
+	/** Absolute path of the newly created worktree (the script's cwd) */
+	worktreePath: string;
+	/** Branch checked out in the new worktree */
+	branchName: string;
+	/** Absolute path of the main repository the worktree was created from */
+	mainRepoPath: string;
+	/** Branch the new branch was based on, when one was specified */
+	baseBranch?: string;
+}
+
+/**
+ * Result of the `git.worktreeRunSetup` IPC.
+ */
+export interface GitWorktreeRunSetupResult {
+	/** True when the script ran and exited 0 (also true when nothing was configured) */
+	success: boolean;
+	/** False when no script was configured, so nothing was executed */
+	ran: boolean;
+	exitCode?: number | string;
+	stdout: string;
+	stderr: string;
+	error?: string;
+}
+
+/**
+ * Result of the `git.worktreeCheckout` IPC.
+ */
+export interface GitWorktreeCheckoutResult {
+	success: boolean;
+	hasUncommittedChanges: boolean;
+	error?: string;
 }
 
 /**
@@ -90,6 +176,32 @@ export function createGitApi() {
 		 */
 		isRepo: (cwd: string, sshRemoteId?: string, remoteCwd?: string): Promise<boolean> =>
 			ipcRenderer.invoke('git:isRepo', cwd, sshRemoteId, remoteCwd),
+
+		/**
+		 * Initialize a new git repository at the given directory.
+		 */
+		init: (
+			cwd: string,
+			sshRemoteId?: string,
+			remoteCwd?: string
+		): Promise<{ success: boolean; error?: string }> =>
+			ipcRenderer.invoke('git:init', cwd, sshRemoteId, remoteCwd),
+
+		/**
+		 * Stage all changes and commit them. A clean tree returns
+		 * { success: true, committed: false } (not an error).
+		 */
+		commitAll: (
+			cwd: string,
+			message: string,
+			sshRemoteId?: string,
+			remoteCwd?: string
+		): Promise<{
+			success: boolean;
+			committed: boolean;
+			commitHash?: string;
+			error?: string;
+		}> => ipcRenderer.invoke('git:commitAll', cwd, message, sshRemoteId, remoteCwd),
 
 		/**
 		 * Get git diff numstat
@@ -169,6 +281,73 @@ export function createGitApi() {
 		}> => ipcRenderer.invoke('git:log', cwd, options, sshRemoteId),
 
 		/**
+		 * Get topology graph data (commits with parent hashes) for graph rendering
+		 */
+		graph: (
+			cwd: string,
+			options?: { limit?: number },
+			sshRemoteId?: string,
+			remoteCwd?: string
+		): Promise<{ nodes: GitGraphNode[]; error: string | null }> =>
+			ipcRenderer.invoke('git:graph', cwd, options, sshRemoteId, remoteCwd),
+
+		/**
+		 * Switch the current working tree to an existing branch.
+		 * Returns success=false on dirty working tree (stderr contains git's message).
+		 */
+		switchBranch: (
+			cwd: string,
+			branchName: string,
+			sshRemoteId?: string,
+			remoteCwd?: string
+		): Promise<{ success: boolean; stdout: string; stderr: string }> =>
+			ipcRenderer.invoke('git:switch', cwd, branchName, sshRemoteId, remoteCwd),
+
+		/**
+		 * Run a network git operation (pull/push/fetch), streaming its output.
+		 *
+		 * Subscribe with `onCommandOutput` BEFORE calling this: chunks start
+		 * arriving as soon as the child process writes them.
+		 */
+		runCommand: (options: {
+			runId: string;
+			operation: GitStreamingOperation;
+			cwd: string;
+			sshRemoteId?: string;
+			remoteCwd?: string;
+			setUpstream?: boolean;
+		}): Promise<GitRunCommandResult> => ipcRenderer.invoke('git:runCommand', options),
+
+		/**
+		 * Terminate an in-flight `runCommand`.
+		 */
+		cancelCommand: (runId: string): Promise<{ success: boolean }> =>
+			ipcRenderer.invoke('git:cancelCommand', runId),
+
+		/**
+		 * Subscribe to streamed output from `runCommand`. Returns an unsubscribe.
+		 */
+		onCommandOutput: (callback: (data: GitCommandOutputChunk) => void): (() => void) => {
+			const handler = (_event: Electron.IpcRendererEvent, data: GitCommandOutputChunk) =>
+				callback(data);
+			ipcRenderer.on('git:commandOutput', handler);
+			return () => ipcRenderer.removeListener('git:commandOutput', handler);
+		},
+
+		/**
+		 * Check out a branch in the session's working tree.
+		 * Pass `createTracking` for a branch that only exists on origin.
+		 */
+		checkoutBranch: (
+			cwd: string,
+			branch: string,
+			createTracking?: boolean,
+			sshRemoteId?: string,
+			remoteCwd?: string
+		): Promise<{ success: boolean; output?: string; error?: string }> =>
+			ipcRenderer.invoke('git:checkoutBranch', cwd, branch, createTracking, sshRemoteId, remoteCwd),
+
+		/**
 		 * Get commit count
 		 */
 		commitCount: (
@@ -216,22 +395,39 @@ export function createGitApi() {
 			ipcRenderer.invoke('git:getRepoRoot', cwd, sshRemoteId),
 
 		/**
-		 * Setup a worktree (create if needed)
+		 * Setup a worktree (create if needed).
+		 *
+		 * `baseBranch` is honored only when the named branch does not already exist;
+		 * it is forwarded as the third positional arg to `git worktree add -b`.
+		 * Omitting it preserves the historical behavior of branching from the main
+		 * repo's current HEAD.
 		 */
 		worktreeSetup: (
 			mainRepoCwd: string,
 			worktreePath: string,
 			branchName: string,
+			sshRemoteId?: string,
+			baseBranch?: string
+		): Promise<GitWorktreeSetupResult> =>
+			ipcRenderer.invoke(
+				'git:worktreeSetup',
+				mainRepoCwd,
+				worktreePath,
+				branchName,
+				sshRemoteId,
+				baseBranch
+			),
+
+		/**
+		 * Run the configured post-create setup script inside a new worktree.
+		 * A blank script resolves to `{ success: true, ran: false }`.
+		 */
+		worktreeRunSetup: (
+			script: string,
+			context: WorktreeSetupScriptContext,
 			sshRemoteId?: string
-		): Promise<{
-			success: boolean;
-			created?: boolean;
-			currentBranch?: string;
-			requestedBranch?: string;
-			branchMismatch?: boolean;
-			error?: string;
-		}> =>
-			ipcRenderer.invoke('git:worktreeSetup', mainRepoCwd, worktreePath, branchName, sshRemoteId),
+		): Promise<GitWorktreeRunSetupResult> =>
+			ipcRenderer.invoke('git:worktreeRunSetup', script, context, sshRemoteId),
 
 		/**
 		 * Checkout a branch in a worktree
@@ -241,11 +437,7 @@ export function createGitApi() {
 			branchName: string,
 			createIfMissing: boolean,
 			sshRemoteId?: string
-		): Promise<{
-			success: boolean;
-			hasUncommittedChanges: boolean;
-			error?: string;
-		}> =>
+		): Promise<GitWorktreeCheckoutResult> =>
 			ipcRenderer.invoke(
 				'git:worktreeCheckout',
 				worktreePath,
@@ -312,7 +504,7 @@ export function createGitApi() {
 		scanWorktreeDirectory: (
 			parentPath: string,
 			sshRemoteId?: string
-		): Promise<{ gitSubdirs: GitSubdirEntry[] }> =>
+		): Promise<{ gitSubdirs: GitSubdirEntry[]; scanFailed?: boolean }> =>
 			ipcRenderer.invoke('git:scanWorktreeDirectory', parentPath, sshRemoteId),
 
 		/**
@@ -357,6 +549,13 @@ export function createGitApi() {
 				callback(data);
 			ipcRenderer.on('worktree:discovered', handler);
 			return () => ipcRenderer.removeListener('worktree:discovered', handler);
+		},
+
+		onWorktreeRemoved: (callback: (data: WorktreeRemovedData) => void): (() => void) => {
+			const handler = (_event: Electron.IpcRendererEvent, data: WorktreeRemovedData) =>
+				callback(data);
+			ipcRenderer.on('worktree:removed', handler);
+			return () => ipcRenderer.removeListener('worktree:removed', handler);
 		},
 	};
 }

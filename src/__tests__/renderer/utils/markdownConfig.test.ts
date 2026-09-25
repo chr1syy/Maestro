@@ -1,5 +1,6 @@
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
 
 // Mock react-syntax-highlighter before importing the module under test
 vi.mock('react-syntax-highlighter', () => ({
@@ -10,6 +11,20 @@ vi.mock('react-syntax-highlighter/dist/esm/styles/prism', () => ({
 	vs: {},
 }));
 
+// Mock openUrl so link-click tests can assert the exact options passed through
+// (specifically the translated `ctrlKey` modifier) without depending on the
+// settings store's useSystemBrowser default or whether an active session
+// exists. See bug #1060: cmd-click (metaKey) on macOS must translate to the
+// same ctrlKey:true inversion as ctrl-click.
+const { mockOpenUrl } = vi.hoisted(() => ({ mockOpenUrl: vi.fn() }));
+vi.mock('../../../renderer/utils/openUrl', () => ({
+	openUrl: mockOpenUrl,
+	openInSystemBrowser: vi.fn(),
+	openInMaestroBrowser: vi.fn(),
+}));
+
+import ReactMarkdown from 'react-markdown';
+import { rehypeSourceLine } from '../../../renderer/components/Markdown/rehypeSourceLine';
 import {
 	generateProseStyles,
 	generateAutoRunProseStyles,
@@ -23,6 +38,7 @@ import {
 } from '../../../renderer/utils/markdownConfig';
 import type { Theme } from '../../../shared/theme-types';
 
+import { mockTheme } from '../../helpers/mockTheme';
 /**
  * Tests for markdown configuration utilities.
  *
@@ -36,27 +52,6 @@ import type { Theme } from '../../../shared/theme-types';
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
-const mockTheme: Theme = {
-	id: 'dracula',
-	name: 'Dracula',
-	mode: 'dark',
-	colors: {
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentDim: 'rgba(0, 102, 255, 0.2)',
-		accentText: '#0066ff',
-		accentForeground: '#ffffff',
-		success: '#00cc00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-		bgMain: '#1a1a1a',
-		bgSidebar: '#2a2a2a',
-		bgActivity: '#333333',
-		border: '#444444',
-	},
-};
 
 // ---------------------------------------------------------------------------
 // generateProseStyles
@@ -98,6 +93,12 @@ describe('generateProseStyles', () => {
 			expect(css).toContain('.prose table');
 			expect(css).toContain('.prose th');
 			expect(css).toContain('.prose td');
+		});
+
+		it('should allow inline code to wrap when it cannot break cleanly', () => {
+			const css = generateProseStyles({ theme: mockTheme });
+			const codeRule = css.match(/\.prose code \{[^}]*\}/)?.[0] ?? '';
+			expect(codeRule).toContain('overflow-wrap: anywhere');
 		});
 
 		it('should include blockquote, link, and hr rules', () => {
@@ -348,9 +349,9 @@ describe('generateProseStyles', () => {
 			expect(css).toContain(`color: ${mockTheme.colors.textDim}`);
 		});
 
-		it('should inject accent into link color', () => {
+		it('should inject accentText into link color', () => {
 			const css = generateProseStyles({ theme: mockTheme });
-			expect(css).toContain(`.prose a { color: ${mockTheme.colors.accent}`);
+			expect(css).toContain(`.prose a { color: ${mockTheme.colors.accentText}`);
 		});
 
 		it('should inject bgActivity into code background', () => {
@@ -671,6 +672,12 @@ describe('generateInlineWizardPreviewProseStyles', () => {
 		expect(css).toContain('.doc-gen-view.prose, .doc-gen-view .prose');
 	});
 
+	it('should scope Bionify selectors to descendant prose blocks only', () => {
+		const css = generateInlineWizardPreviewProseStyles(mockTheme, '.doc-gen-view', 'document');
+		expect(css).toContain('.doc-gen-view .prose .bionify-word');
+		expect(css).not.toContain('.doc-gen-view.prose, .doc-gen-view .prose .bionify-word');
+	});
+
 	it('should normalize list item first paragraph inline and preserve subsequent paragraphs as blocks', () => {
 		const css = generateInlineWizardPreviewProseStyles(mockTheme, '.doc-gen-view', 'document');
 		expect(css).toContain(
@@ -730,7 +737,7 @@ describe('shared markdown presets', () => {
 });
 
 // ---------------------------------------------------------------------------
-// createMarkdownComponents — link handling (Fixes MAESTRO-F4, MAESTRO-E5, etc.)
+// createMarkdownComponents - link handling (Fixes MAESTRO-F4, MAESTRO-E5, etc.)
 // ---------------------------------------------------------------------------
 
 describe('createMarkdownComponents link handling', () => {
@@ -747,7 +754,7 @@ describe('createMarkdownComponents link handling', () => {
 		const element = aComponent({ node: null, href: 'https://example.com', children: 'link' });
 		const clickEvent = { preventDefault: vi.fn() } as any;
 		element.props.onClick(clickEvent);
-		expect(onExternalLinkClick).toHaveBeenCalledWith('https://example.com');
+		expect(onExternalLinkClick).toHaveBeenCalledWith('https://example.com', { ctrlKey: undefined });
 	});
 
 	it('should call onExternalLinkClick for mailto URLs', () => {
@@ -761,7 +768,41 @@ describe('createMarkdownComponents link handling', () => {
 		const element = aComponent({ node: null, href: 'mailto:test@example.com', children: 'email' });
 		const clickEvent = { preventDefault: vi.fn() } as any;
 		element.props.onClick(clickEvent);
-		expect(onExternalLinkClick).toHaveBeenCalledWith('mailto:test@example.com');
+		expect(onExternalLinkClick).toHaveBeenCalledWith('mailto:test@example.com', {
+			ctrlKey: undefined,
+		});
+	});
+
+	// Bug #1060: on macOS a Cmd+click sets metaKey (not ctrlKey). The handler
+	// must translate `metaKey || ctrlKey` into the ctrlKey option so the
+	// open-in-browser inversion still fires. Under the old `{ ctrlKey: e.ctrlKey }`
+	// code a metaKey-only click yielded ctrlKey:false, so this would fail.
+	it('should translate Cmd-click (metaKey) into ctrlKey:true for onExternalLinkClick', () => {
+		const onExternalLinkClick = vi.fn();
+		const components = createMarkdownComponents({
+			theme: mockTheme,
+			onExternalLinkClick,
+		});
+		const aComponent = components.a as any;
+
+		const element = aComponent({ node: null, href: 'https://example.com', children: 'link' });
+		const clickEvent = { preventDefault: vi.fn(), metaKey: true, ctrlKey: false } as any;
+		element.props.onClick(clickEvent);
+		expect(onExternalLinkClick).toHaveBeenCalledWith('https://example.com', { ctrlKey: true });
+	});
+
+	it('should pass ctrlKey:false to onExternalLinkClick on a plain click', () => {
+		const onExternalLinkClick = vi.fn();
+		const components = createMarkdownComponents({
+			theme: mockTheme,
+			onExternalLinkClick,
+		});
+		const aComponent = components.a as any;
+
+		const element = aComponent({ node: null, href: 'https://example.com', children: 'link' });
+		const clickEvent = { preventDefault: vi.fn(), metaKey: false, ctrlKey: false } as any;
+		element.props.onClick(clickEvent);
+		expect(onExternalLinkClick).toHaveBeenCalledWith('https://example.com', { ctrlKey: false });
 	});
 
 	it('should NOT call onExternalLinkClick for relative paths', () => {
@@ -821,6 +862,70 @@ describe('createMarkdownComponents link handling', () => {
 });
 
 // ---------------------------------------------------------------------------
+// createWizardBubbleMarkdownComponents - link handling (#1060)
+// ---------------------------------------------------------------------------
+
+describe('createWizardBubbleMarkdownComponents link handling', () => {
+	beforeEach(() => {
+		mockOpenUrl.mockClear();
+	});
+
+	// Under the old `{ ctrlKey: e.ctrlKey }` code a metaKey-only click yielded
+	// ctrlKey:false, so this guard would fail. See bug #1060.
+	it('should translate Cmd-click (metaKey) into ctrlKey:true for openUrl', () => {
+		const components = createWizardBubbleMarkdownComponents(mockTheme);
+		const aComponent = components.a as any;
+
+		const element = aComponent({ href: 'https://example.com', children: 'link' });
+		const clickEvent = { preventDefault: vi.fn(), metaKey: true, ctrlKey: false } as any;
+		element.props.onClick(clickEvent);
+		expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: true });
+	});
+
+	it('should pass ctrlKey:false to openUrl on a plain click', () => {
+		const components = createWizardBubbleMarkdownComponents(mockTheme);
+		const aComponent = components.a as any;
+
+		const element = aComponent({ href: 'https://example.com', children: 'link' });
+		const clickEvent = { preventDefault: vi.fn(), metaKey: false, ctrlKey: false } as any;
+		element.props.onClick(clickEvent);
+		expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: false });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// createReleaseNotesMarkdownComponents - link handling (#1060)
+// ---------------------------------------------------------------------------
+
+describe('createReleaseNotesMarkdownComponents link handling', () => {
+	beforeEach(() => {
+		mockOpenUrl.mockClear();
+	});
+
+	// Under the old `{ ctrlKey: e.ctrlKey }` code a metaKey-only click yielded
+	// ctrlKey:false, so this guard would fail. See bug #1060.
+	it('should translate Cmd-click (metaKey) into ctrlKey:true for openUrl', () => {
+		const components = createReleaseNotesMarkdownComponents(mockTheme);
+		const aComponent = components.a as any;
+
+		const element = aComponent({ href: 'https://example.com', children: 'link' });
+		const clickEvent = { preventDefault: vi.fn(), metaKey: true, ctrlKey: false } as any;
+		element.props.onClick(clickEvent);
+		expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: true });
+	});
+
+	it('should pass ctrlKey:false to openUrl on a plain click', () => {
+		const components = createReleaseNotesMarkdownComponents(mockTheme);
+		const aComponent = components.a as any;
+
+		const element = aComponent({ href: 'https://example.com', children: 'link' });
+		const clickEvent = { preventDefault: vi.fn(), metaKey: false, ctrlKey: false } as any;
+		element.props.onClick(clickEvent);
+		expect(mockOpenUrl).toHaveBeenCalledWith('https://example.com', { ctrlKey: false });
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Hex color swatch in inline code
 // ---------------------------------------------------------------------------
 
@@ -828,21 +933,24 @@ describe('hex color swatch in inline code', () => {
 	it('should render a color swatch span before hex color in createMarkdownComponents', () => {
 		const components = createMarkdownComponents({ theme: mockTheme });
 		const codeComponent = components.code as any;
-		const element = codeComponent({ children: '#FF0000' });
-		// Should have two children: the swatch span and the text
-		const children = React.Children.toArray(element.props.children);
-		expect(children).toHaveLength(2);
-		const swatch = children[0] as React.ReactElement;
-		expect(swatch.type).toBe('span');
-		expect(swatch.props.style.backgroundColor).toBe('#FF0000');
+		// Inline code now renders through the shared InlineCode leaf; render it to
+		// inspect the swatch in the DOM.
+		const { container } = render(codeComponent({ children: '#FF0000' }));
+		const code = container.querySelector('code');
+		expect(code).toBeInTheDocument();
+		const swatch = code!.querySelector('span');
+		expect(swatch).toBeInTheDocument();
+		expect(swatch!.getAttribute('style')).toContain('background-color');
+		expect(code!.textContent).toContain('#FF0000');
 	});
 
 	it('should not render swatch for non-hex inline code', () => {
 		const components = createMarkdownComponents({ theme: mockTheme });
 		const codeComponent = components.code as any;
-		const element = codeComponent({ children: 'console.log' });
-		const children = React.Children.toArray(element.props.children);
-		expect(children).toHaveLength(1);
+		const { container } = render(codeComponent({ children: 'console.log' }));
+		const code = container.querySelector('code');
+		expect(code!.querySelector('span')).toBeNull();
+		expect(code!.textContent).toBe('console.log');
 	});
 
 	it('should render swatch in wizard bubble inline code', () => {
@@ -868,5 +976,155 @@ describe('hex color swatch in inline code', () => {
 		) as React.ReactElement | undefined;
 		expect(swatch).toBeDefined();
 		expect(swatch!.props.style.backgroundColor).toBe('#00CC00');
+	});
+});
+
+describe('createMarkdownComponents reading mode', () => {
+	it('wraps paragraph prose in Bionify spans when enabled', () => {
+		const components = createMarkdownComponents({
+			theme: mockTheme,
+			enableBionifyReadingMode: true,
+		});
+		const Paragraph = components.p as any;
+
+		const { container } = render(Paragraph({ children: 'Readable prose only' }));
+
+		expect(document.querySelectorAll('.bionify-word').length).toBeGreaterThan(0);
+		expect(container.textContent).toBe('Readable prose only');
+	});
+
+	it('leaves inline code untouched while transforming surrounding emphasis content', () => {
+		const components = createMarkdownComponents({
+			theme: mockTheme,
+			enableBionifyReadingMode: true,
+		});
+		const Strong = components.strong as any;
+
+		render(
+			Strong({
+				children: React.createElement(
+					React.Fragment,
+					null,
+					'Before ',
+					React.createElement('code', null, 'const value = 1'),
+					' after'
+				),
+			})
+		);
+
+		expect(screen.getByText('const value = 1')).toBeInTheDocument();
+		expect(document.querySelector('code .bionify-word')).not.toBeInTheDocument();
+		expect(document.querySelectorAll('.bionify-word').length).toBeGreaterThan(0);
+	});
+});
+
+// Checking a task off in a rendered preview was impossible before `onTaskToggle`:
+// react-markdown renders the GFM checkbox `disabled`, so the box looked clickable
+// (the prose styles even give it a pointer cursor) but swallowed every click.
+// These render through real ReactMarkdown because the wiring under test spans
+// `rehypeSourceLine`, the `input` override, and the shared `<TaskCheckbox>`.
+describe('createMarkdownComponents task checkboxes', () => {
+	const renderTasks = (markdown: string, onTaskToggle?: (line: number) => Promise<boolean>) =>
+		render(
+			React.createElement(
+				ReactMarkdown,
+				{
+					remarkPlugins: REMARK_GFM_PLUGINS,
+					rehypePlugins: [rehypeSourceLine],
+					components: createMarkdownComponents({ theme: mockTheme, onTaskToggle }),
+				} as any,
+				markdown
+			)
+		);
+
+	it('leaves checkboxes read-only when no toggle handler is provided', () => {
+		const { container } = renderTasks('- [ ] one\n- [x] two\n');
+		const boxes = container.querySelectorAll('input[type="checkbox"]');
+
+		expect(boxes.length).toBe(2);
+		expect((boxes[0] as HTMLInputElement).disabled).toBe(true);
+	});
+
+	it('reports the source line of the clicked task', () => {
+		const onTaskToggle = vi.fn().mockResolvedValue(true);
+		const { container } = renderTasks(
+			'# Doc\n\n- [ ] first\n- [x] second\n- [ ] third\n',
+			onTaskToggle
+		);
+		const boxes = container.querySelectorAll('input[type="checkbox"]');
+
+		expect(boxes.length).toBe(3);
+		expect((boxes[0] as HTMLInputElement).disabled).toBe(false);
+
+		fireEvent.click(boxes[2]);
+		expect(onTaskToggle).toHaveBeenCalledWith(5);
+	});
+
+	// Nested tasks render inside their parent's <li>, so the line must come from
+	// the nearest list item rather than the outermost one.
+	it('reports the nested task line, not its parent', () => {
+		const onTaskToggle = vi.fn().mockResolvedValue(true);
+		const { container } = renderTasks('- [ ] parent\n\t- [ ] child\n', onTaskToggle);
+		const boxes = container.querySelectorAll('input[type="checkbox"]');
+
+		expect(boxes.length).toBe(2);
+		fireEvent.click(boxes[1]);
+		expect(onTaskToggle).toHaveBeenCalledWith(2);
+	});
+
+	// A loose list wraps each item's content in a paragraph, which is where the
+	// synthesized checkbox ends up.
+	it('handles loose lists', () => {
+		const onTaskToggle = vi.fn().mockResolvedValue(true);
+		const { container } = renderTasks('- [ ] first\n\n- [ ] second\n', onTaskToggle);
+
+		fireEvent.click(container.querySelectorAll('input[type="checkbox"]')[1]);
+		expect(onTaskToggle).toHaveBeenCalledWith(3);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// data-source-line passthrough
+//
+// `rehypeSourceLine` stamps `data-source-line` on every block, and
+// `lineSync.domGetTopLineByAttr` reads those tags to keep the preview and the
+// editor on the same source line across the toggle. A component override that
+// renders `React.createElement('p', null, ...)` silently eats the attribute, so
+// only HEADINGS stayed anchored - a document scrolled to the very top reported
+// the first heading's line, and hitting Edit jumped there.
+// ---------------------------------------------------------------------------
+
+describe('createMarkdownComponents source-line passthrough', () => {
+	const render1 = (tag: 'p' | 'li' | 'blockquote', extra: Record<string, unknown> = {}) => {
+		const components = createMarkdownComponents({ theme: mockTheme });
+		const Comp = components[tag] as any;
+		return Comp({ node: null, children: 'text', 'data-source-line': 7, ...extra });
+	};
+
+	it('forwards data-source-line on a paragraph', () => {
+		expect(render1('p').props['data-source-line']).toBe(7);
+	});
+
+	it('forwards data-source-line on a list item', () => {
+		expect(render1('li').props['data-source-line']).toBe(7);
+	});
+
+	it('forwards data-source-line on a plain blockquote, keeping its className', () => {
+		const el = render1('blockquote', { className: 'quote' });
+		expect(el.props['data-source-line']).toBe(7);
+		expect(el.props.className).toBe('quote');
+	});
+
+	// An alert callout renders a component rather than a <blockquote>, and its
+	// own wrapper owns the styling - the tag is not forwarded there on purpose.
+	it('still renders an alert callout for a tagged alert blockquote', () => {
+		const el = render1('blockquote', { className: 'markdown-alert markdown-alert-note' });
+		expect(typeof el.type).not.toBe('string');
+	});
+
+	it('does not leak the react-markdown node prop into the DOM', () => {
+		expect(render1('p').props.node).toBeUndefined();
+		expect(render1('li').props.node).toBeUndefined();
+		expect(render1('blockquote').props.node).toBeUndefined();
 	});
 });

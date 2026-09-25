@@ -13,12 +13,6 @@ export const MAESTRO_DIR = '.maestro';
 /** Playbook (Auto Run) documents folder */
 export const PLAYBOOKS_DIR = '.maestro/playbooks';
 
-/** Just the folder name (for display and path construction) */
-export const PLAYBOOKS_FOLDER_NAME = 'playbooks';
-
-/** Working copies created during Auto Run loops */
-export const PLAYBOOKS_RUNS_DIR = '.maestro/playbooks/runs';
-
 /** Shared history directory for cross-host history sync */
 export const SHARED_HISTORY_DIR = '.maestro/history';
 
@@ -28,30 +22,29 @@ export const CUE_CONFIG_PATH = '.maestro/cue.yaml';
 /** Default directory for Cue prompt files */
 export const CUE_PROMPTS_DIR = '.maestro/prompts';
 
-/** Default pipeline input prompt filename */
-export const PIPELINE_INPUT_PROMPT = 'pipeline-in.md';
+/**
+ * Where rendered diagrams (agent-authored inline SVG, Mermaid charts) are saved.
+ * Every "Save Image" surface writes here so diagrams land next to the project
+ * that produced them instead of scattering into ~/Downloads.
+ */
+export const DIAGRAMS_DIR = '.maestro/diagrams';
 
-/** Default pipeline output prompt filename */
-export const PIPELINE_OUTPUT_PROMPT = 'pipeline-out.md';
+/**
+ * Status file a running playbook / Auto Run can write to surface live progress
+ * (feature, phase, tests, summary) into the Maestro Auto Run panel. The main
+ * process watches this path; see the `PlaybookStatus` contract in shared/types.
+ */
+export const STATUS_PATH = '.maestro/STATUS.json';
 
 // ── Legacy paths (backwards compatibility, read-only fallback) ───────────────
 
 /** @deprecated Use PLAYBOOKS_DIR */
 export const LEGACY_PLAYBOOKS_DIR = 'Auto Run Docs';
 
-/** @deprecated Use PLAYBOOKS_RUNS_DIR */
-export const LEGACY_PLAYBOOKS_RUNS_DIR = 'Auto Run Docs/Runs';
-
 /** @deprecated Use CUE_CONFIG_PATH */
 export const LEGACY_CUE_CONFIG_PATH = 'maestro-cue.yaml';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Return all directory names within .maestro that should always be visible
- * in the file explorer (regardless of gitignore).
- */
-export const ALWAYS_VISIBLE_ENTRIES = new Set([MAESTRO_DIR]);
 
 /**
  * Generate a prompt file path for a Cue pipeline agent.

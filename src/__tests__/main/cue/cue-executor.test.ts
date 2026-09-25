@@ -11,24 +11,31 @@
  * - Successful completion and failure detection
  * - SSH remote execution wrapping
  * - stopCueRun process termination
- * - recordCueHistoryEntry construction
- * - History entry field population and response truncation
+ * - stdout clean extraction via the agent output parser
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
-import type { CueEvent, CueSubscription, CueRunResult } from '../../../main/cue/cue-types';
+import type { CueEvent, CueSubscription } from '../../../main/cue/cue-types';
 import type { SessionInfo } from '../../../shared/types';
 import type { TemplateContext } from '../../../shared/templateVariables';
 
 // --- Mocks ---
 
-// Mock fs
+// Mock fs - only `readFileSync` is overridden (the executor uses it for prompt
+// files). Other methods (e.g. `existsSync`) pass through to the real module
+// via `importOriginal`, because pulling in `cue-template-context-builder`
+// transitively imports `cue-github-poller`, which calls `getExpandedEnv()` at
+// module-load time and needs `fs.existsSync` for nvm/path detection.
 const mockReadFileSync = vi.fn();
-vi.mock('fs', () => ({
-	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
-}));
+vi.mock('fs', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('fs')>();
+	return {
+		...actual,
+		readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
+	};
+});
 
 // Mock crypto
 vi.mock('crypto', () => ({
@@ -70,7 +77,7 @@ vi.mock('../../../main/agents', () => ({
 }));
 
 // Mock buildAgentArgs and applyAgentConfigOverrides.
-// buildAgentArgs returns flags only — it does NOT append the prompt as a positional arg.
+// buildAgentArgs returns flags only - it does NOT append the prompt as a positional arg.
 // The executor is responsible for appending the prompt after applyAgentConfigOverrides.
 const mockBuildAgentArgs = vi.fn((_agent: unknown, _opts: unknown) => [
 	'--print',
@@ -97,13 +104,25 @@ vi.mock('../../../main/utils/ssh-spawn-wrapper', () => ({
 	wrapSpawnWithSsh: (...args: unknown[]) => mockWrapSpawnWithSsh(...args),
 }));
 
-// Mock parsers — default returns null (no parser), overridden per test as needed
+// Mock parsers - default returns null (no parser), overridden per test as needed
 const mockGetOutputParser = vi.fn(
 	() => null as ReturnType<typeof import('../../../main/parsers').getOutputParser>
 );
 vi.mock('../../../main/parsers', () => ({
 	getOutputParser: (...args: unknown[]) => mockGetOutputParser(...args),
 }));
+
+// Force the POSIX kill path (child.kill('SIGTERM')) in the underlying
+// cue-process-lifecycle so these SIGTERM → SIGKILL assertions hold regardless of
+// host OS. On Windows the product correctly uses taskkill /t /f instead, which
+// these tests don't assert. This mirrors what CI exercises on Unix.
+vi.mock('../../../shared/platformDetection', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../../../shared/platformDetection')>();
+	return {
+		...actual,
+		isWindows: () => false,
+	};
+});
 
 // Mock child_process.spawn
 class MockChildProcess extends EventEmitter {
@@ -115,6 +134,8 @@ class MockChildProcess extends EventEmitter {
 	stdout = new EventEmitter();
 	stderr = new EventEmitter();
 	killed = false;
+	exitCode: number | null = null;
+	signalCode: string | null = null;
 
 	kill(signal?: string) {
 		this.killed = true;
@@ -153,7 +174,6 @@ import {
 	stopCueRun,
 	getActiveProcesses,
 	getCueProcessList,
-	recordCueHistoryEntry,
 	type CueExecutionConfig,
 } from '../../../main/cue/cue-executor';
 
@@ -215,7 +235,7 @@ function createExecutionConfig(overrides: Partial<CueExecutionConfig> = {}): Cue
 		session: createMockSession(),
 		subscription: createMockSubscription(),
 		event: createMockEvent(),
-		// Inline prompt content — as of the Phase 2 cleanup, the executor no longer
+		// Inline prompt content - as of the Phase 2 cleanup, the executor no longer
 		// reads prompt files. The cue-config-normalizer resolves prompt_file at config
 		// load time and stores the resolved content here.
 		promptPath: 'Default test prompt body',
@@ -263,7 +283,7 @@ describe('cue-executor', () => {
 	});
 
 	describe('executeCuePrompt', () => {
-		// As of the Phase 2 cleanup, the executor no longer resolves prompt files —
+		// As of the Phase 2 cleanup, the executor no longer resolves prompt files -
 		// the cue-config-normalizer reads prompt_file at config-load time and stores
 		// the resolved content in `prompt`. The executor's `promptPath` parameter is
 		// now always inline prompt content.
@@ -337,6 +357,7 @@ describe('cue-executor', () => {
 				sourceExitCode: '',
 				sourceDuration: '',
 				sourceTriggeredBy: '',
+				fromAgent: '',
 			});
 
 			// Verify substituteTemplateVariables was called with the inline prompt content
@@ -397,7 +418,10 @@ describe('cue-executor', () => {
 				expect.any(Array),
 				expect.objectContaining({
 					cwd: '/projects/test',
-					stdio: ['pipe', 'pipe', 'pipe'],
+					// Local mode uses 'ignore' for stdin so agents like Codex don't
+					// emit "Reading additional input from stdin..." into the run
+					// output before observing EOF.
+					stdio: ['ignore', 'pipe', 'pipe'],
 				})
 			);
 
@@ -482,7 +506,7 @@ describe('cue-executor', () => {
 				await vi.advanceTimersByTimeAsync(0);
 
 				const [, spawnedArgs] = mockSpawn.mock.calls[0] as [string, string[], unknown];
-				// spawnArgs come from sshResult.args — the prompt appears exactly once
+				// spawnArgs come from sshResult.args - the prompt appears exactly once
 				const promptOccurrences = spawnedArgs.filter((a) => a.includes('Hello world')).length;
 				expect(promptOccurrences).toBe(1);
 
@@ -633,7 +657,7 @@ describe('cue-executor', () => {
 				await vi.advanceTimersByTimeAsync(5000);
 				expect(childKill).toHaveBeenCalledWith('SIGTERM');
 
-				// Reset to track SIGKILL — but killed is already true so SIGKILL won't fire
+				// Reset to track SIGKILL - but killed is already true so SIGKILL won't fire
 				// since child.killed is true. That's correct behavior.
 				mockChild.killed = false;
 
@@ -1030,179 +1054,6 @@ describe('cue-executor', () => {
 		});
 	});
 
-	describe('recordCueHistoryEntry', () => {
-		it('should construct a proper CUE history entry', () => {
-			const result: CueRunResult = {
-				runId: 'run-1',
-				sessionId: 'session-1',
-				sessionName: 'Test Session',
-				subscriptionName: 'Watch config',
-				event: createMockEvent(),
-				status: 'completed',
-				stdout: 'Task completed successfully',
-				stderr: '',
-				exitCode: 0,
-				durationMs: 5000,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:05.000Z',
-			};
-
-			const session = createMockSession();
-			const entry = recordCueHistoryEntry(result, session);
-
-			expect(entry.type).toBe('CUE');
-			expect(entry.id).toBe('test-uuid-1234');
-			expect(entry.summary).toBe('[CUE] "Watch config" (file.changed)');
-			expect(entry.fullResponse).toBe('Task completed successfully');
-			expect(entry.projectPath).toBe('/projects/test');
-			expect(entry.sessionId).toBe('session-1');
-			expect(entry.sessionName).toBe('Test Session');
-			expect(entry.success).toBe(true);
-			expect(entry.elapsedTimeMs).toBe(5000);
-			expect(entry.cueTriggerName).toBe('Watch config');
-			expect(entry.cueEventType).toBe('file.changed');
-		});
-
-		it('should set success to false for failed runs', () => {
-			const result: CueRunResult = {
-				runId: 'run-2',
-				sessionId: 'session-1',
-				sessionName: 'Test Session',
-				subscriptionName: 'Periodic check',
-				event: createMockEvent({ type: 'time.heartbeat' }),
-				status: 'failed',
-				stdout: '',
-				stderr: 'Error occurred',
-				exitCode: 1,
-				durationMs: 2000,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:02.000Z',
-			};
-
-			const entry = recordCueHistoryEntry(result, createMockSession());
-
-			expect(entry.success).toBe(false);
-			expect(entry.summary).toBe('[CUE] "Periodic check" (time.heartbeat)');
-		});
-
-		it('should truncate long stdout in fullResponse', () => {
-			const longOutput = 'x'.repeat(15000);
-			const result: CueRunResult = {
-				runId: 'run-3',
-				sessionId: 'session-1',
-				sessionName: 'Test Session',
-				subscriptionName: 'Large output',
-				event: createMockEvent(),
-				status: 'completed',
-				stdout: longOutput,
-				stderr: '',
-				exitCode: 0,
-				durationMs: 1000,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:01.000Z',
-			};
-
-			const entry = recordCueHistoryEntry(result, createMockSession());
-
-			expect(entry.fullResponse?.length).toBe(10000);
-		});
-
-		it('should set fullResponse to undefined when stdout is empty', () => {
-			const result: CueRunResult = {
-				runId: 'run-4',
-				sessionId: 'session-1',
-				sessionName: 'Test Session',
-				subscriptionName: 'Silent run',
-				event: createMockEvent(),
-				status: 'completed',
-				stdout: '',
-				stderr: '',
-				exitCode: 0,
-				durationMs: 500,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:00.500Z',
-			};
-
-			const entry = recordCueHistoryEntry(result, createMockSession());
-
-			expect(entry.fullResponse).toBeUndefined();
-		});
-
-		it('should populate cueSourceSession from agent.completed event payload', () => {
-			const result: CueRunResult = {
-				runId: 'run-5',
-				sessionId: 'session-1',
-				sessionName: 'Test Session',
-				subscriptionName: 'On build done',
-				event: createMockEvent({
-					type: 'agent.completed',
-					payload: {
-						sourceSession: 'builder-agent',
-					},
-				}),
-				status: 'completed',
-				stdout: 'Done',
-				stderr: '',
-				exitCode: 0,
-				durationMs: 3000,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:03.000Z',
-			};
-
-			const entry = recordCueHistoryEntry(result, createMockSession());
-
-			expect(entry.cueSourceSession).toBe('builder-agent');
-			expect(entry.cueEventType).toBe('agent.completed');
-		});
-
-		it('should set cueSourceSession to undefined when not present in payload', () => {
-			const result: CueRunResult = {
-				runId: 'run-6',
-				sessionId: 'session-1',
-				sessionName: 'Test Session',
-				subscriptionName: 'Timer check',
-				event: createMockEvent({
-					type: 'time.heartbeat',
-					payload: { interval_minutes: 5 },
-				}),
-				status: 'completed',
-				stdout: 'OK',
-				stderr: '',
-				exitCode: 0,
-				durationMs: 1000,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:01.000Z',
-			};
-
-			const entry = recordCueHistoryEntry(result, createMockSession());
-
-			expect(entry.cueSourceSession).toBeUndefined();
-		});
-
-		it('should use projectRoot for projectPath, falling back to cwd', () => {
-			const session = createMockSession({ projectRoot: '', cwd: '/fallback/cwd' });
-			const result: CueRunResult = {
-				runId: 'run-7',
-				sessionId: 'session-1',
-				sessionName: 'Test',
-				subscriptionName: 'Test',
-				event: createMockEvent(),
-				status: 'completed',
-				stdout: '',
-				stderr: '',
-				exitCode: 0,
-				durationMs: 100,
-				startedAt: '2026-03-01T00:00:00.000Z',
-				endedAt: '2026-03-01T00:00:00.100Z',
-			};
-
-			const entry = recordCueHistoryEntry(result, session);
-
-			// Empty string is falsy, so should fall back to cwd
-			expect(entry.projectPath).toBe('/fallback/cwd');
-		});
-	});
-
 	describe('stdout clean extraction via output parser', () => {
 		it('should return raw stdout when no parser is registered for the agent', async () => {
 			mockGetOutputParser.mockReturnValue(null);
@@ -1232,6 +1083,7 @@ describe('cue-executor', () => {
 			].join('\n');
 
 			mockGetOutputParser.mockReturnValue({
+				extractSessionId: () => null,
 				parseJsonLine: (line: string) => {
 					try {
 						const msg = JSON.parse(line);
@@ -1258,6 +1110,7 @@ describe('cue-executor', () => {
 
 		it('should join multiple result-event text chunks with newlines', async () => {
 			mockGetOutputParser.mockReturnValue({
+				extractSessionId: () => null,
 				parseJsonLine: (line: string) => {
 					try {
 						const msg = JSON.parse(line);
@@ -1290,6 +1143,7 @@ describe('cue-executor', () => {
 		it('should fall back to raw stdout when parser finds no result events', async () => {
 			// Parser that only returns system events (no result events)
 			mockGetOutputParser.mockReturnValue({
+				extractSessionId: () => null,
 				parseJsonLine: (_line: string) => ({ type: 'system', raw: {} }),
 			} as any);
 
@@ -1304,6 +1158,199 @@ describe('cue-executor', () => {
 			const result = await resultPromise;
 
 			expect(result.stdout).toBe(rawOutput);
+		});
+
+		it('should fall back to assistant text when result event has empty text', async () => {
+			// Simulates Claude Code output where the result event has an empty
+			// string but assistant messages contain the actual response text.
+			const msgId = 'msg_test123';
+			mockGetOutputParser.mockReturnValue({
+				extractSessionId: () => null,
+				parseJsonLine: (line: string) => {
+					try {
+						const msg = JSON.parse(line);
+						if (msg.type === 'assistant' && msg.message?.content) {
+							const textBlock = msg.message.content.find((b: any) => b.type === 'text');
+							return {
+								type: 'text',
+								text: textBlock?.text || '',
+								sessionId: msg.session_id,
+								isPartial: true,
+								raw: msg,
+							};
+						}
+						if (msg.type === 'result') {
+							return { type: 'result', text: msg.result || '', raw: msg };
+						}
+						return { type: 'system', raw: msg };
+					} catch {
+						return { type: 'system', raw: {} };
+					}
+				},
+			} as any);
+
+			const ndjson = [
+				JSON.stringify({
+					type: 'assistant',
+					message: {
+						id: msgId,
+						role: 'assistant',
+						content: [{ type: 'text', text: 'Here is the summary of your data.' }],
+					},
+					session_id: 'sess-1',
+				}),
+				JSON.stringify({
+					type: 'assistant',
+					message: {
+						id: msgId,
+						role: 'assistant',
+						content: [{ type: 'tool_use', id: 'tool_1', name: 'Bash', input: {} }],
+					},
+					session_id: 'sess-1',
+				}),
+				JSON.stringify({
+					type: 'result',
+					result: '',
+					session_id: 'sess-1',
+				}),
+			].join('\n');
+
+			const config = createExecutionConfig({ toolType: 'claude-code' });
+			const resultPromise = executeCuePrompt(config);
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', ndjson);
+			mockChild.emit('close', 0);
+			const result = await resultPromise;
+
+			expect(result.stdout).toBe('Here is the summary of your data.');
+		});
+
+		it('should deduplicate streaming assistant chunks by message ID', async () => {
+			// Claude Code streams assistant messages as chunks with increasing
+			// content. The same message ID appears multiple times. We should
+			// keep only the longest (latest) version per message ID.
+			const msgId = 'msg_dedup';
+			mockGetOutputParser.mockReturnValue({
+				extractSessionId: () => null,
+				parseJsonLine: (line: string) => {
+					try {
+						const msg = JSON.parse(line);
+						if (msg.type === 'assistant' && msg.message?.content) {
+							const textBlock = msg.message.content.find((b: any) => b.type === 'text');
+							return {
+								type: 'text',
+								text: textBlock?.text || '',
+								isPartial: true,
+								raw: msg,
+							};
+						}
+						if (msg.type === 'result') {
+							return { type: 'result', text: msg.result || '', raw: msg };
+						}
+						return { type: 'system', raw: msg };
+					} catch {
+						return { type: 'system', raw: {} };
+					}
+				},
+			} as any);
+
+			const ndjson = [
+				JSON.stringify({
+					type: 'assistant',
+					message: { id: msgId, content: [{ type: 'text', text: 'Hello' }] },
+				}),
+				JSON.stringify({
+					type: 'assistant',
+					message: {
+						id: msgId,
+						content: [{ type: 'text', text: 'Hello, here is a longer response.' }],
+					},
+				}),
+				JSON.stringify({ type: 'result', result: '' }),
+			].join('\n');
+
+			const config = createExecutionConfig({ toolType: 'claude-code' });
+			const resultPromise = executeCuePrompt(config);
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', ndjson);
+			mockChild.emit('close', 0);
+			const result = await resultPromise;
+
+			expect(result.stdout).toBe('Hello, here is a longer response.');
+		});
+	});
+
+	describe('provider session id extraction', () => {
+		it('returns the provider session id parsed from stdout (last id wins)', async () => {
+			// Each run produces one provider session; the parser may surface the id
+			// on several events. The last one (the authoritative `result` event,
+			// emitted last) is what we keep for token attribution.
+			mockGetOutputParser.mockReturnValue({
+				parseJsonLine: (line: string) => {
+					try {
+						return JSON.parse(line);
+					} catch {
+						return null;
+					}
+				},
+				extractSessionId: (event: any) => event?.session_id ?? null,
+			} as any);
+
+			const ndjson = [
+				JSON.stringify({ type: 'system', session_id: 'sess-init' }),
+				JSON.stringify({ type: 'assistant', message: {} }),
+				JSON.stringify({ type: 'result', session_id: 'sess-final' }),
+			].join('\n');
+
+			const config = createExecutionConfig({ toolType: 'claude-code' });
+			const resultPromise = executeCuePrompt(config);
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', ndjson);
+			mockChild.emit('close', 0);
+			const result = await resultPromise;
+
+			expect(result.providerSessionId).toBe('sess-final');
+		});
+
+		it('returns null provider session id when no parser is registered', async () => {
+			// Plain-text agents / command runs have no parser to mine an id from.
+			mockGetOutputParser.mockReturnValue(null);
+
+			const config = createExecutionConfig({ toolType: 'claude-code' });
+			const resultPromise = executeCuePrompt(config);
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', 'plain text output\n');
+			mockChild.emit('close', 0);
+			const result = await resultPromise;
+
+			expect(result.providerSessionId).toBeNull();
+		});
+
+		it('returns null provider session id when stdout carries no session id', async () => {
+			mockGetOutputParser.mockReturnValue({
+				parseJsonLine: (line: string) => {
+					try {
+						return JSON.parse(line);
+					} catch {
+						return null;
+					}
+				},
+				extractSessionId: () => null,
+			} as any);
+
+			const config = createExecutionConfig({ toolType: 'claude-code' });
+			const resultPromise = executeCuePrompt(config);
+			await vi.advanceTimersByTimeAsync(0);
+
+			mockChild.stdout.emit('data', JSON.stringify({ type: 'result', text: 'done' }));
+			mockChild.emit('close', 0);
+			const result = await resultPromise;
+
+			expect(result.providerSessionId).toBeNull();
 		});
 	});
 
@@ -1338,7 +1385,7 @@ describe('cue-executor', () => {
 			const resultPromise = executeCuePrompt(config);
 			await vi.advanceTimersByTimeAsync(0);
 
-			// Process is active — should appear in list
+			// Process is active - should appear in list
 			const activeEntry = getActiveProcesses().get('completed-run');
 			expect(activeEntry).toBeDefined();
 			expect(getCueProcessList().some((p) => p.runId === 'completed-run')).toBe(true);
@@ -1346,7 +1393,7 @@ describe('cue-executor', () => {
 			mockChild.emit('close', 0);
 			await resultPromise;
 
-			// Process completed — should be removed
+			// Process completed - should be removed
 			expect(getActiveProcesses().has('completed-run')).toBe(false);
 			expect(getCueProcessList().some((p) => p.runId === 'completed-run')).toBe(false);
 		});

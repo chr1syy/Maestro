@@ -12,9 +12,32 @@
  */
 
 /**
+ * Git operations that stream their output live to the renderer instead of
+ * returning only a buffered result (see `git:runCommand`).
+ */
+export type GitStreamingOperation = 'pull' | 'push' | 'fetch';
+
+/** One chunk of output from a streaming git command. */
+export interface GitCommandOutputChunk {
+	/** Correlates the chunk with the `runCommand` call that produced it. */
+	runId: string;
+	stream: 'stdout' | 'stderr';
+	chunk: string;
+}
+
+/** Final result of a streaming git command. */
+export interface GitRunCommandResult {
+	success: boolean;
+	exitCode: number | string;
+	/** True when the run ended because the user hit Cancel. */
+	cancelled: boolean;
+	error?: string;
+}
+
+/**
  * Represents a file change from git status output
  */
-export interface GitFileStatus {
+interface GitFileStatus {
 	path: string;
 	status: string;
 }
@@ -22,7 +45,7 @@ export interface GitFileStatus {
 /**
  * Represents a file with numstat information (additions/deletions)
  */
-export interface GitNumstatFile {
+interface GitNumstatFile {
 	path: string;
 	additions: number;
 	deletions: number;
@@ -31,7 +54,7 @@ export interface GitNumstatFile {
 /**
  * Behind/ahead counts relative to upstream
  */
-export interface GitBehindAhead {
+interface GitBehindAhead {
 	behind: number;
 	ahead: number;
 }
@@ -227,30 +250,6 @@ export function parseGitTags(stdout: string): string[] {
 }
 
 /**
- * Clean and normalize a branch name from git output
- *
- * @param stdout - Raw stdout from `git rev-parse --abbrev-ref HEAD`
- * @returns Trimmed branch name or empty string
- *
- * @internal Currently used only in tests; available for future use
- */
-export function cleanBranchName(stdout: string): string {
-	return stdout?.trim() || '';
-}
-
-/**
- * Clean and normalize a path from git output
- *
- * @param stdout - Raw stdout from git commands returning paths
- * @returns Trimmed path or empty string
- *
- * @internal Currently used only in tests; available for future use
- */
-export function cleanGitPath(stdout: string): string {
-	return stdout?.trim() || '';
-}
-
-/**
  * Convert a git remote URL to a browser-friendly URL
  * Supports GitHub, GitLab, Bitbucket, and other common hosts
  *
@@ -309,9 +308,175 @@ export function remoteUrlToBrowserUrl(remoteUrl: string): string | null {
 }
 
 /**
+ * Detect git's "branch is already used / already checked out" stderr message
+ * emitted by `git worktree add` when the requested branch is already attached
+ * to another worktree on disk.
+ *
+ * Modern git: `fatal: '<branch>' is already checked out at '<path>'`
+ * Older git:  `fatal: '<branch>' is already used by worktree at '<path>'`
+ *
+ * @param stderr - Raw stderr from `git worktree add`
+ * @returns True if the error indicates the branch is already attached elsewhere
+ */
+export function isWorktreeAlreadyUsedError(stderr: string): boolean {
+	if (!stderr) return false;
+	return /is already (used by worktree|checked out) at/i.test(stderr);
+}
+
+/**
+ * Whether git refused a command because the directory is not inside a repo:
+ * `fatal: not a git repository (or any of the parent directories): .git`.
+ *
+ * This is the one failure that proves the directory stopped being a repo
+ * (its `.git` was removed). An SSH drop, a missing directory, or a timeout
+ * prints something else, so none of them is mistaken for "not a repo".
+ * Git localizes the message; on a non-English git this returns false, which
+ * errs on the side of keeping the agent marked as a repo.
+ *
+ * @param stderr - Raw stderr from any git command run in the directory
+ */
+export function isNotAGitRepositoryError(stderr: string | undefined): boolean {
+	if (!stderr) return false;
+	return /not a git repository/i.test(stderr);
+}
+
+/**
+ * Parse `git worktree list --porcelain` output and return the absolute path
+ * of the worktree currently checked out on the given branch, or null.
+ *
+ * Porcelain blocks look like:
+ *   worktree /abs/path
+ *   HEAD <sha>
+ *   branch refs/heads/<branch>
+ *
+ * Detached worktrees lack a `branch` line and are skipped.
+ *
+ * @param stdout - Raw stdout from `git worktree list --porcelain`
+ * @param branchName - Branch to look up (without refs/heads/ prefix)
+ * @returns Absolute worktree path, or null if no match
+ */
+export function parseWorktreePathForBranch(stdout: string, branchName: string): string | null {
+	if (!stdout || !branchName) return null;
+	const blocks = stdout.split(/\r?\n\r?\n/);
+	for (const block of blocks) {
+		const lines = block.split(/\r?\n/);
+		let wtPath: string | null = null;
+		let branch: string | null = null;
+		for (const line of lines) {
+			if (line.startsWith('worktree ')) {
+				wtPath = line.slice('worktree '.length).trim();
+			} else if (line.startsWith('branch ')) {
+				branch = line
+					.slice('branch '.length)
+					.trim()
+					.replace(/^refs\/heads\//, '');
+			}
+		}
+		if (wtPath && branch === branchName) return wtPath;
+	}
+	return null;
+}
+
+/**
+ * Sanitize a user-entered string into a valid git branch name.
+ *
+ * Applies the rules `git check-ref-format` enforces: spaces and other illegal
+ * characters become hyphens; leading/trailing invalid ref suffixes are trimmed.
+ * Returns an empty string when nothing usable remains (caller should treat that
+ * as invalid).
+ *
+ * `allowIncomplete` is for controlled inputs. It keeps incomplete trailing
+ * characters like `/` or `.` while the user is still typing so branch names can
+ * be entered left-to-right without cursor backtracking.
+ *
+ * Used by both the WorktreeRunSection (Auto Run "Create New Worktree") and the
+ * CreateWorktreeModal so the same input - e.g. "Cue Dashboard" - produces the
+ * same sanitized branch ("Cue-Dashboard") regardless of entry point.
+ */
+// Built from string form so the source file doesn't carry raw control bytes.
+// Matches ASCII control characters (U+0000-U+001F, U+007F) which git rejects in refs.
+const GIT_REF_CONTROL_CHARS_RE = new RegExp('[\\u0000-\\u001f\\u007f]', 'g');
+
+export interface SanitizeGitBranchNameOptions {
+	allowIncomplete?: boolean;
+}
+
+export function sanitizeGitBranchName(
+	input: string,
+	options: SanitizeGitBranchNameOptions = {}
+): string {
+	if (!input) return '';
+	const { allowIncomplete = false } = options;
+	let s = input.normalize('NFKC');
+	// Strip ASCII control chars first so they can't survive later substitutions.
+	s = s.replace(GIT_REF_CONTROL_CHARS_RE, '');
+	if (!allowIncomplete) {
+		s = s.trim();
+	}
+	// Replace any whitespace run with a single hyphen
+	s = s.replace(/\s+/g, '-');
+	// Replace characters git forbids in ref names
+	s = s.replace(/[~^:?*[\\]/g, '-');
+	// `..` and `@{` are illegal sequences - flatten them
+	s = s.replace(/\.\.+/g, '.');
+	s = s.replace(/@\{/g, '-');
+	// No consecutive slashes
+	s = s.replace(/\/+/g, '/');
+	// Collapse hyphen runs that the substitutions above may have produced
+	s = s.replace(/-+/g, '-');
+	// Refs cannot begin with `-`, `/`, or `.`
+	s = s.replace(/^[-/.]+/, '');
+	if (!allowIncomplete) {
+		// Refs cannot end with `/`, `.`, or `.lock`. A trailing `-` is valid.
+		s = s.replace(/\.lock$/i, '');
+		s = s.replace(/[/.]+$/, '');
+	}
+	return s;
+}
+
+/**
+ * Uncommitted-change totals for one repo, as the renderer's git status polling
+ * reports them. Line-level counts are only collected for the active agent, so
+ * `additions`/`deletions`/`modified` are all 0 for every other agent even when
+ * `fileCount` is not - anything rendering these must fall back to the count.
+ */
+export interface GitChangeTotals {
+	/** Number of changed files in the working tree. */
+	fileCount: number;
+	/** Added lines (0 when line-level detail was not collected). */
+	additions: number;
+	/** Removed lines (0 when line-level detail was not collected). */
+	deletions: number;
+	/** Modified files (0 when line-level detail was not collected). */
+	modified: number;
+}
+
+/**
+ * One-line readout of a working tree's uncommitted changes, for tooltips and
+ * command-palette subtext.
+ *
+ * @param totals - Change totals from git status polling
+ * @returns e.g. `+206 −37 ~5 in 5 files`, `5 files changed`, or `No uncommitted changes`
+ */
+export function formatGitChangeSummary(totals: GitChangeTotals): string {
+	const { fileCount, additions, deletions, modified } = totals;
+	if (fileCount <= 0) return 'No uncommitted changes';
+
+	const files = `${fileCount} file${fileCount === 1 ? '' : 's'}`;
+	const parts: string[] = [];
+	if (additions > 0) parts.push(`+${additions}`);
+	if (deletions > 0) parts.push(`−${deletions}`);
+	if (modified > 0) parts.push(`~${modified}`);
+
+	// No line-level detail (a non-active agent, or untracked files only).
+	if (parts.length === 0) return `${files} changed`;
+	return `${parts.join(' ')} in ${files}`;
+}
+
+/**
  * Common image file extensions for git file handling
  */
-export const GIT_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico'];
+const GIT_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico'];
 
 /**
  * Check if a file path is an image based on extension
@@ -325,13 +490,20 @@ export function isImageFile(filePath: string): boolean {
 }
 
 /**
- * Get MIME type for an image extension
+ * Get MIME type for an image extension.
  *
- * @param ext - File extension (without dot)
+ * The mapping has to be exact, not `image/${ext}`: `image/jpg` and `image/ico`
+ * are not real MIME types, and Electron's `nativeImage.createFromDataURL()`
+ * matches the declared type literally, so a JPEG labeled `image/jpg` decodes to
+ * an empty image and cannot be copied to the clipboard.
+ *
+ * @param ext - File extension, with or without a leading dot
  * @returns MIME type string
  */
 export function getImageMimeType(ext: string): string {
-	if (ext === 'svg') return 'image/svg+xml';
-	if (ext === 'jpg') return 'image/jpeg';
-	return `image/${ext}`;
+	const normalized = ext.replace(/^\./, '').toLowerCase();
+	if (normalized === 'svg') return 'image/svg+xml';
+	if (normalized === 'jpg' || normalized === 'jpeg') return 'image/jpeg';
+	if (normalized === 'ico') return 'image/x-icon';
+	return `image/${normalized}`;
 }

@@ -1,11 +1,21 @@
 import React, { useState, useCallback, useEffect, useRef, memo, useMemo } from 'react';
-import { createPortal } from 'react-dom';
-import { X, Star, Pencil, Loader2 } from 'lucide-react';
+import { X, Star, Pencil, Loader2, AlertCircle, MessageSquare } from 'lucide-react';
 import type { AITab as AITabType, Theme } from '../../types';
+import type { CopyContextOptions } from '../../hooks/tabs/useTabExportHandlers';
 import { safeClipboardWrite } from '../../utils/clipboard';
 import { buildSessionDeepLink } from '../../../shared/deep-link-urls';
 import { useTabHoverOverlay } from '../../hooks/tabs/useTabHoverOverlay';
+import { setTabDragImage } from '../../utils/tabDragImage';
+import { isCoarsePointer } from '../../utils/touch';
+import { getTabKindColor } from './tabBarUtils';
+import { getConnectingColor } from '../../utils/theme';
 import { AITabOverlayMenu } from './AITabOverlayMenu';
+import { TabOverlayPortal } from './TabOverlayPortal';
+import { LongPressable } from '../shared/LongPressable';
+import { WizardIndicator } from '../SessionList/WizardIndicator';
+import { useTabHasActiveOutage } from '../../stores/retryStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { shortcutSuffix } from '../ui/ShortcutHint';
 
 export interface AITabProps {
 	tab: AITabType;
@@ -14,6 +24,8 @@ export interface AITabProps {
 	theme: Theme;
 	/** The Maestro session/agent ID that owns these tabs */
 	sessionId?: string;
+	/** Session-level agentSessionId fallback for tab title display */
+	sessionAgentSessionId?: string | null;
 	canClose: boolean;
 	/** Stable callback - receives tabId as first argument */
 	onSelect: (tabId: string) => void;
@@ -21,6 +33,13 @@ export interface AITabProps {
 	onClose: (tabId: string) => void;
 	/** Stable callback - receives tabId and event */
 	onDragStart: (tabId: string, e: React.DragEvent) => void;
+	/**
+	 * Stable callback - continuous drag sampling (HTML5 `onDrag`) used for
+	 * cross-window drag-out detection. No tabId: the dragged tab is already known
+	 * from onDragStart, and drag-out concerns the whole agent/window. Optional, so
+	 * tab types that can't be detached simply omit it.
+	 */
+	onDrag?: (e: React.DragEvent) => void;
 	/** Stable callback - receives tabId and event */
 	onDragOver: (tabId: string, e: React.DragEvent) => void;
 	onDragEnd: () => void;
@@ -40,10 +59,11 @@ export interface AITabProps {
 	onSendToAgent?: (tabId: string) => void;
 	/** Stable callback - receives tabId */
 	onSummarizeAndContinue?: (tabId: string) => void;
-	/** Stable callback - receives tabId */
-	onCopyContext?: (tabId: string) => void;
+	/** Stable callback - receives tabId (and optional CopyContextOptions for variants like "with reasoning") */
+	onCopyContext?: (tabId: string, options?: CopyContextOptions) => void;
 	/** Stable callback - receives tabId */
 	onExportHtml?: (tabId: string) => void;
+	onSnooze?: (tabId: string) => void;
 	/** Stable callback - receives tabId */
 	onPublishGist?: (tabId: string) => void;
 	/** Stable callback - receives tabId */
@@ -88,10 +108,12 @@ export const AITab = memo(function AITab({
 	isActive,
 	theme,
 	sessionId,
+	sessionAgentSessionId,
 	canClose,
 	onSelect,
 	onClose,
 	onDragStart,
+	onDrag,
 	onDragOver,
 	onDragEnd,
 	onDrop,
@@ -105,6 +127,7 @@ export const AITab = memo(function AITab({
 	onSummarizeAndContinue,
 	onCopyContext,
 	onExportHtml,
+	onSnooze,
 	onPublishGist,
 	onMoveToFirst,
 	onMoveToLast,
@@ -122,6 +145,13 @@ export const AITab = memo(function AITab({
 }: AITabProps) {
 	const [showCopied, setShowCopied] = useState<'sessionId' | 'deepLink' | false>(false);
 	const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// Agent Resilience: pulsing orange dot when this tab is stuck auto-retrying.
+	const hasActiveOutage = useTabHasActiveOutage(sessionId ?? '', tabId);
+	// Coarse pointer (a finger): the action menu opens on a long-press and native
+	// drag is off - a long-press is also how the OS starts an HTML5 drag, and the
+	// two cannot share the gesture. Reordering stays reachable from the menu.
+	const coarse = isCoarsePointer();
+	const closeTabKeys = useSettingsStore((s) => s.tabShortcuts.closeTab?.keys);
 
 	// Clear copy feedback timeout on unmount
 	useEffect(() => {
@@ -138,6 +168,7 @@ export const AITab = memo(function AITab({
 		setOverlayRef,
 		positionReady,
 		setTabRef,
+		openOverlay,
 		handleMouseEnter,
 		handleMouseLeave,
 		overlayMouseEnter,
@@ -147,7 +178,8 @@ export const AITab = memo(function AITab({
 		shouldOpen: () => {
 			// Only show overlay if there's something meaningful to show:
 			// - Tabs with sessions or logs: always show (for session/context actions)
-			// - Tabs without sessions or logs: show if there are move actions available
+			// - Tabs without sessions or logs: show only when a reorder action is
+			//   available (not the sole tab)
 			if (!tab.agentSessionId && !tab.logs?.length && isFirstTab && isLastTab) return false;
 			return true;
 		},
@@ -281,6 +313,15 @@ export const AITab = memo(function AITab({
 		[onCopyContext, tabId, setOverlayOpen]
 	);
 
+	const handleCopyContextWithReasoningClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onCopyContext?.(tabId, { includeThinking: true });
+			setOverlayOpen(false);
+		},
+		[onCopyContext, tabId, setOverlayOpen]
+	);
+
 	const handleExportHtmlClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
@@ -288,6 +329,17 @@ export const AITab = memo(function AITab({
 			setOverlayOpen(false);
 		},
 		[onExportHtml, tabId, setOverlayOpen]
+	);
+
+	const handleSnoozeClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			// Close the overlay first: the tab this menu belongs to is about to leave
+			// the tab bar, and the hover overlay would otherwise outlive its anchor.
+			setOverlayOpen(false);
+			onSnooze?.(tabId);
+		},
+		[onSnooze, tabId, setOverlayOpen]
 	);
 
 	const handlePublishGistClick = useCallback(
@@ -311,40 +363,59 @@ export const AITab = memo(function AITab({
 	const handleCloseOtherTabsClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tabId);
 			onCloseOtherTabs?.(tabId);
 			setOverlayOpen(false);
 		},
-		[onCloseOtherTabs, tabId, setOverlayOpen]
+		[onSelect, onCloseOtherTabs, tabId, setOverlayOpen]
 	);
 
 	const handleCloseTabsLeftClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tabId);
 			onCloseTabsLeft?.(tabId);
 			setOverlayOpen(false);
 		},
-		[onCloseTabsLeft, tabId, setOverlayOpen]
+		[onSelect, onCloseTabsLeft, tabId, setOverlayOpen]
 	);
 
 	const handleCloseTabsRightClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tabId);
 			onCloseTabsRight?.(tabId);
 			setOverlayOpen(false);
 		},
-		[onCloseTabsRight, tabId, setOverlayOpen]
+		[onSelect, onCloseTabsRight, tabId, setOverlayOpen]
 	);
 
 	// Handlers for drag events using stable tabId
+	// A tap selects, on any tab, active or not. Touch has no hover, so the action
+	// overlay opens on a LONG-PRESS instead (the chip is a LongPressable below);
+	// it used to open on a tap of the already-active tab, which read as the tab
+	// refusing to switch. Mouse/keyboard are unaffected.
 	const handleTabSelect = useCallback(() => {
 		onSelect(tabId);
 	}, [onSelect, tabId]);
 
 	const handleTabDragStart = useCallback(
 		(e: React.DragEvent) => {
+			// Floating themed preview that follows the cursor across windows / empty
+			// space during a drag-out (the OS renders it, unlike a clipped fixed div).
+			// getTabDisplayName is used inline rather than the memoized `displayName`
+			// below to avoid a temporal-dead-zone read in this earlier-declared callback.
+			setTabDragImage(e, { label: getTabDisplayName(tab, sessionAgentSessionId), theme });
 			onDragStart(tabId, e);
 		},
-		[onDragStart, tabId]
+		[onDragStart, tabId, tab, sessionAgentSessionId, theme]
+	);
+
+	const handleTabDrag = useCallback(
+		(e: React.DragEvent) => {
+			onDrag?.(e);
+		},
+		[onDrag]
 	);
 
 	const handleTabDragOver = useCallback(
@@ -362,9 +433,17 @@ export const AITab = memo(function AITab({
 	);
 
 	// Memoize display name to avoid recalculation on every render.
-	// Deps are the specific fields getTabDisplayName reads (name, agentSessionId) —
+	// Deps are the specific fields getTabDisplayName reads (name, agentSessionId, fallback) -
 	// using [tab] would invalidate on every logs/state change which is too aggressive.
-	const displayName = useMemo(() => getTabDisplayName(tab), [tab.name, tab.agentSessionId]);
+	const displayName = useMemo(
+		() => getTabDisplayName(tab, sessionAgentSessionId),
+		[tab.name, tab.agentSessionId, sessionAgentSessionId]
+	);
+
+	// Wizard tabs show the purple wand instead of the chat-kind bubble; once the
+	// wizard converts back to a regular chat the wand disappears and the bubble
+	// takes its place (swap, not stacked - avoids two icons crowding the tab).
+	const isWizard = !!(tab.wizardState?.isActive || tab.wizardState?.isGeneratingDocs);
 
 	// Hover background varies by theme mode for proper contrast
 	const hoverBgColor = theme.mode === 'light' ? 'rgba(0, 0, 0, 0.06)' : 'rgba(255, 255, 255, 0.08)';
@@ -405,8 +484,9 @@ export const AITab = memo(function AITab({
 	// Browser-style tab: all tabs have borders, active tab "connects" to content
 	// Active tab is bright and obvious, inactive tabs are more muted
 	return (
-		<div
-			ref={setTabRef}
+		<LongPressable
+			innerRef={setTabRef}
+			onLongPress={openOverlay}
 			data-tab-id={tab.id}
 			tabIndex={0}
 			role="tab"
@@ -414,6 +494,7 @@ export const AITab = memo(function AITab({
 			className={`
         relative flex items-center gap-1.5 px-3 py-1.5 cursor-pointer
         transition-all duration-150 select-none shrink-0 outline-none
+        ${isActive ? 'chrome-raised-active' : ''}
         ${isDragging ? 'opacity-50' : ''}
         ${isDragOver ? 'ring-2 ring-inset' : ''}
       `}
@@ -428,19 +509,44 @@ export const AITab = memo(function AITab({
 					handleTabSelect();
 				}
 			}}
-			draggable
+			draggable={!coarse}
 			onDragStart={handleTabDragStart}
+			onDrag={handleTabDrag}
 			onDragOver={handleTabDragOver}
 			onDragEnd={onDragEnd}
 			onDrop={handleTabDrop}
 		>
+			{/* Agent error pill - highlights tabs that have an active error for quick triage */}
+			{tab.agentError && (
+				<div
+					className="flex items-center gap-0.5 px-1 py-0.5 rounded text-3xs font-bold uppercase shrink-0"
+					style={{ backgroundColor: theme.colors.error + '30', color: theme.colors.error }}
+					title={`Error: ${tab.agentError.message}`}
+				>
+					<AlertCircle className="w-2.5 h-2.5" />
+					ERR
+				</div>
+			)}
+
+			{/* Agent Resilience outage - pulsing orange dot for tabs stuck auto-retrying */}
+			{hasActiveOutage && (
+				<div
+					className="w-2 h-2 rounded-full shrink-0 animate-pulse"
+					style={{ backgroundColor: getConnectingColor(theme) }}
+					title="Stuck - auto-retrying after an outage"
+				/>
+			)}
+
 			{/* Busy indicator - pulsing dot for tabs in write mode */}
-			{tab.state === 'busy' && (
+			{!hasActiveOutage && tab.state === 'busy' && (
 				<div
 					className="w-2 h-2 rounded-full shrink-0 animate-pulse"
 					style={{ backgroundColor: theme.colors.warning }}
 				/>
 			)}
+
+			{/* Inline wizard indicator - purple wand (sparkles while generating Auto Run docs) */}
+			<WizardIndicator active={isWizard} generatingDocs={!!tab.wizardState?.isGeneratingDocs} />
 
 			{/* Generating name indicator - spinning loader while tab name is being generated */}
 			{/* Show regardless of busy state since tab naming runs in parallel with the main request */}
@@ -477,7 +583,7 @@ export const AITab = memo(function AITab({
 			{/* Shortcut hint badge - shows tab number for Cmd+1-9 navigation */}
 			{shortcutHint !== null && shortcutHint !== undefined && (
 				<span
-					className="w-4 h-4 flex items-center justify-center rounded text-[10px] font-medium shrink-0 opacity-50"
+					className="w-4 h-4 flex items-center justify-center rounded text-2xs font-medium shrink-0 opacity-50"
 					style={{
 						backgroundColor: theme.colors.border,
 						color: theme.colors.textMain,
@@ -487,9 +593,21 @@ export const AITab = memo(function AITab({
 				</span>
 			)}
 
-			{/* Tab name - show full name for active tab, truncate inactive tabs */}
+			{/* Kind icon - identifies this as an AI chat tab. Suppressed in wizard mode
+			    since the wand above already marks the tab; it returns (swapping in for
+			    the wand) once the wizard converts to a regular chat. */}
+			{!isWizard && (
+				<MessageSquare
+					className="w-3.5 h-3.5 shrink-0"
+					style={{ color: getTabKindColor('ai', theme) }}
+					aria-hidden="true"
+				/>
+			)}
+
+			{/* Tab name - always show the full name; the bar scrolls when crowded */}
 			<span
-				className={`text-xs font-medium ${isActive ? 'whitespace-nowrap' : 'truncate max-w-[120px]'}`}
+				data-tab-label
+				className="text-xs font-medium whitespace-nowrap"
 				style={{ color: isActive ? theme.colors.textMain : theme.colors.textDim }}
 			>
 				{displayName}
@@ -499,69 +617,68 @@ export const AITab = memo(function AITab({
 			{canClose && (isHovered || isActive) && (
 				<button
 					onClick={handleCloseClick}
+					data-tab-close
 					className="p-0.5 rounded hover:bg-white/10 transition-colors shrink-0"
-					title="Close tab"
+					title={`Close tab${shortcutSuffix(closeTabKeys)}`}
 				>
 					<X className="w-3 h-3" style={{ color: theme.colors.textDim }} />
 				</button>
 			)}
 
-			{/* Hover overlay with session info and actions - rendered via portal to escape stacking context */}
-			{overlayOpen &&
-				overlayPosition &&
-				createPortal(
-					<div
-						ref={setOverlayRef}
-						className="fixed z-[100]"
-						style={{
-							top: overlayPosition.top,
-							left: overlayPosition.left,
-							opacity: positionReady ? 1 : 0,
-						}}
-						onClick={(e) => e.stopPropagation()}
-						onMouseEnter={overlayMouseEnter}
-						onMouseLeave={overlayMouseLeave}
-					>
-						<AITabOverlayMenu
-							tab={tab}
-							tabId={tabId}
-							sessionId={sessionId}
-							theme={theme}
-							showCopied={showCopied}
-							totalTabs={totalTabs}
-							tabIndex={tabIndex}
-							onCopySessionId={handleCopySessionId}
-							onCopyDeepLink={handleCopyDeepLink}
-							onStarClick={handleStarClick}
-							onRenameClick={handleRenameClick}
-							onMarkUnreadClick={handleMarkUnreadClick}
-							onExportHtmlClick={handleExportHtmlClick}
-							onCopyContextClick={handleCopyContextClick}
-							onSummarizeAndContinueClick={handleSummarizeAndContinueClick}
-							onMergeWithClick={handleMergeWithClick}
-							onSendToAgentClick={handleSendToAgentClick}
-							onPublishGistClick={handlePublishGistClick}
-							onMoveToFirstClick={handleMoveToFirstClick}
-							onMoveToLastClick={handleMoveToLastClick}
-							onCloseTabClick={handleCloseTabClick}
-							onCloseOtherTabsClick={handleCloseOtherTabsClick}
-							onCloseTabsLeftClick={handleCloseTabsLeftClick}
-							onCloseTabsRightClick={handleCloseTabsRightClick}
-							onMergeWith={onMergeWith}
-							onSendToAgent={onSendToAgent}
-							onSummarizeAndContinue={onSummarizeAndContinue}
-							onCopyContext={onCopyContext}
-							onExportHtml={onExportHtml}
-							onPublishGist={onPublishGist}
-							onMoveToFirst={onMoveToFirst}
-							onMoveToLast={onMoveToLast}
-							onCloseOtherTabs={onCloseOtherTabs}
-							onCloseTabsLeft={onCloseTabsLeft}
-							onCloseTabsRight={onCloseTabsRight}
-						/>
-					</div>,
-					document.body
-				)}
-		</div>
+			{/* Hover / long-press overlay with session info and actions - a portal
+			    (anchored popover on desktop, bottom sheet on a phone) to escape the
+			    tab bar's stacking context */}
+			<TabOverlayPortal
+				open={overlayOpen}
+				position={overlayPosition}
+				positionReady={positionReady}
+				setOverlayRef={setOverlayRef}
+				onMouseEnter={overlayMouseEnter}
+				onMouseLeave={overlayMouseLeave}
+				onClose={() => setOverlayOpen(false)}
+				theme={theme}
+			>
+				<AITabOverlayMenu
+					tab={tab}
+					tabId={tabId}
+					sessionId={sessionId}
+					theme={theme}
+					showCopied={showCopied}
+					totalTabs={totalTabs}
+					tabIndex={tabIndex}
+					onCopySessionId={handleCopySessionId}
+					onCopyDeepLink={handleCopyDeepLink}
+					onStarClick={handleStarClick}
+					onRenameClick={handleRenameClick}
+					onMarkUnreadClick={handleMarkUnreadClick}
+					onExportHtmlClick={handleExportHtmlClick}
+					onSnoozeClick={handleSnoozeClick}
+					onCopyContextClick={handleCopyContextClick}
+					onCopyContextWithReasoningClick={handleCopyContextWithReasoningClick}
+					onSummarizeAndContinueClick={handleSummarizeAndContinueClick}
+					onMergeWithClick={handleMergeWithClick}
+					onSendToAgentClick={handleSendToAgentClick}
+					onPublishGistClick={handlePublishGistClick}
+					onMoveToFirstClick={handleMoveToFirstClick}
+					onMoveToLastClick={handleMoveToLastClick}
+					onCloseTabClick={handleCloseTabClick}
+					onCloseOtherTabsClick={handleCloseOtherTabsClick}
+					onCloseTabsLeftClick={handleCloseTabsLeftClick}
+					onCloseTabsRightClick={handleCloseTabsRightClick}
+					onMergeWith={onMergeWith}
+					onSendToAgent={onSendToAgent}
+					onSummarizeAndContinue={onSummarizeAndContinue}
+					onCopyContext={onCopyContext}
+					onExportHtml={onExportHtml}
+					onSnooze={onSnooze}
+					onPublishGist={onPublishGist}
+					onMoveToFirst={onMoveToFirst}
+					onMoveToLast={onMoveToLast}
+					onCloseOtherTabs={onCloseOtherTabs}
+					onCloseTabsLeft={onCloseTabsLeft}
+					onCloseTabsRight={onCloseTabsRight}
+				/>
+			</TabOverlayPortal>
+		</LongPressable>
 	);
 });

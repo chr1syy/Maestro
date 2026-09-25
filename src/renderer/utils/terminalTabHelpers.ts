@@ -1,14 +1,19 @@
-// Terminal tab helper functions — pure functions for managing TerminalTab state in Maestro sessions.
-// Follows the same pattern as tabHelpers.ts: take a Session, return a new Session (immutable).
+// Terminal tab helper functions - pure functions for managing TerminalTab state in Maestro sessions.
+// Follows the same pattern as tabHelpers: take a Session, return a new Session (immutable).
 // No React hooks, no side effects, no IPC.
 
 import { Session, TerminalTab, ClosedTabEntry, UnifiedTabRef } from '../types';
 import { generateId } from './ids';
+import {
+	getNavigableUnifiedTabOrder,
+	insertAfterActiveInUnifiedTabOrder,
+} from './unifiedTabOrderUtils';
+import { terminalTabFocusFields } from './tabFocusFields';
 
 /** Maximum number of closed terminal tab entries to expose via the public API (e.g., for UI limits). */
 export const MAX_CLOSED_TERMINAL_TABS = 10;
 
-/** Maximum entries in unifiedClosedTabHistory — matches tabHelpers.ts MAX_CLOSED_TAB_HISTORY. */
+/** Maximum entries in unifiedClosedTabHistory - matches tabHelpers MAX_CLOSED_TAB_HISTORY. */
 const MAX_CLOSED_UNIFIED_HISTORY = 25;
 
 // ─── Factory ────────────────────────────────────────────────────────────────
@@ -70,6 +75,55 @@ export function hasRunningTerminalProcess(session: Session): boolean {
 	return (session.terminalTabs || []).some((tab) => tab.state === 'busy');
 }
 
+/**
+ * Resolve which terminal tab a remote caller (CLI / web) meant.
+ *
+ * `ref` is matched as an id first and searched across ALL sessions, because tab
+ * ids are unique and `open-terminal` hands one back without the caller having to
+ * remember which agent owns it. Only if no id matches do we fall back to a
+ * display-name match, and that one is scoped to `targetSessionId` - names are
+ * user-chosen and routinely collide across agents ("Dev server" in three
+ * projects), so a cross-agent name match would silently type into the wrong
+ * shell.
+ *
+ * With no `ref`, the agent's active terminal tab wins (the terminal they used
+ * last), falling back to the only tab when there is exactly one. Ambiguity
+ * returns null rather than guessing - typing a command into the wrong terminal
+ * is not a recoverable mistake.
+ */
+export function resolveTerminalTab(
+	sessions: Session[],
+	targetSessionId: string,
+	ref?: string
+): { session: Session; tab: TerminalTab } | null {
+	const trimmedRef = ref?.trim();
+
+	if (trimmedRef) {
+		for (const session of sessions) {
+			const tab = (session.terminalTabs || []).find((t) => t.id === trimmedRef);
+			if (tab) return { session, tab };
+		}
+		const target = sessions.find((s) => s.id === targetSessionId);
+		if (!target) return null;
+		const tabs = target.terminalTabs || [];
+		const byName = tabs.filter(
+			(tab, index) =>
+				getTerminalTabDisplayName(tab, index).toLowerCase() === trimmedRef.toLowerCase()
+		);
+		// Two tabs sharing a name is ambiguous - make the caller pass an id.
+		return byName.length === 1 ? { session: target, tab: byName[0] } : null;
+	}
+
+	const target = sessions.find((s) => s.id === targetSessionId);
+	if (!target) return null;
+	const tabs = target.terminalTabs || [];
+	if (target.activeTerminalTabId) {
+		const active = tabs.find((t) => t.id === target.activeTerminalTabId);
+		if (active) return { session: target, tab: active };
+	}
+	return tabs.length === 1 ? { session: target, tab: tabs[0] } : null;
+}
+
 // ─── Session ID Helpers ──────────────────────────────────────────────────────
 
 /**
@@ -103,23 +157,82 @@ export function parseTerminalSessionId(
 
 // ─── CRUD Mutations ──────────────────────────────────────────────────────────
 
+/** Options for {@link addTerminalTab}. */
+export interface AddTerminalTabOptions {
+	/** When false, append the tab without making it visible (background create).
+	 *  Every active-* selection and `inputMode` are left untouched. Default true. */
+	activate?: boolean;
+}
+
+/**
+ * Mint the next `coworkingId` for a terminal tab plus the bumped session
+ * counter. Shared by addTerminalTab and the reopen-closed-tab restore path so
+ * every terminal tab (new or restored) draws a stable, monotonic, never-reused
+ * `term:N` id from the same source. Clamps the persisted counter against the
+ * max id already present to survive legacy / corrupted sessions.
+ */
+export function nextTerminalCoworkingId(session: Session): {
+	coworkingId: number;
+	nextCoworkingId: number;
+} {
+	const maxExistingCoworkingId = (session.terminalTabs ?? []).reduce(
+		(max, t) => (typeof t.coworkingId === 'number' && t.coworkingId > max ? t.coworkingId : max),
+		0
+	);
+	const coworkingId = Math.max(session.nextCoworkingId ?? 1, maxExistingCoworkingId + 1);
+	return { coworkingId, nextCoworkingId: coworkingId + 1 };
+}
+
 /**
  * Add a terminal tab to a session.
- * Appends the tab to terminalTabs, adds it to unifiedTabOrder, and makes it the active terminal tab.
+ * Appends the tab to terminalTabs, inserts it into unifiedTabOrder directly to
+ * the right of the currently active tab, and (unless `activate` is false) makes
+ * it the active terminal tab.
+ *
+ * Activation also sets `inputMode: 'terminal'` via terminalTabFocusFields: a
+ * terminal tab renders in terminal mode only, so activating one without the mode
+ * would select a tab the user cannot see. A BACKGROUND add deliberately leaves
+ * the mode alone - flipping an agent into terminal mode is itself a view change.
+ *
+ * Mints a stable, monotonic, never-reused `coworkingId` (used by the coworking
+ * MCP server to address terminals as "term:N") via the session-level counter
+ * `nextCoworkingId`. The counter increments on every add and never decrements,
+ * so closed-tab ids are never reused within the same session lifetime.
  *
  * @param session - The Maestro session to add the tab to
  * @param tab - The TerminalTab to add (created via createTerminalTab)
- * @returns New session with the tab added and set as active
+ * @param options.activate - When false, the tab is added and ordered but no
+ *   active-tab id changes and `activeGroupId` is left alone. Used by the
+ *   tile-below commands, which mint a terminal that goes straight into a pane:
+ *   activating it would clear the very group the caller is about to build, and
+ *   pointing `activeTerminalTabId` at a tiled tab would leave the single view
+ *   aimed at a tab it does not own.
+ * @returns New session with the tab added (and, by default, set as active)
  */
-export function addTerminalTab(session: Session, tab: TerminalTab): Session {
+export function addTerminalTab(
+	session: Session,
+	tab: TerminalTab,
+	options: AddTerminalTabOptions = {}
+): Session {
+	const { activate = true } = options;
+	// Mint the base id + bumped counter from the shared source, then let an
+	// explicit tab.coworkingId (e.g. a restored tab) win if it's higher so we
+	// never hand out a duplicate term:N.
+	const { coworkingId: mintedCoworkingId, nextCoworkingId: bumpedCounter } =
+		nextTerminalCoworkingId(session);
+	const tabWithCoworkingId: TerminalTab = {
+		...tab,
+		coworkingId: tab.coworkingId ?? mintedCoworkingId,
+	};
 	const newTabRef: UnifiedTabRef = { type: 'terminal', id: tab.id };
 	return {
 		...session,
-		terminalTabs: [...(session.terminalTabs || []), tab],
-		activeTerminalTabId: tab.id,
-		activeFileTabId: null,
-		activeBrowserTabId: null,
-		unifiedTabOrder: [...(session.unifiedTabOrder || []), newTabRef],
+		terminalTabs: [...(session.terminalTabs || []), tabWithCoworkingId],
+		...(activate ? terminalTabFocusFields(tab.id) : {}),
+		unifiedTabOrder: insertAfterActiveInUnifiedTabOrder(session, newTabRef),
+		// Bump strictly past the larger of the bumped counter and the chosen id so
+		// we never hand out the same id twice within a session.
+		nextCoworkingId: Math.max(bumpedCounter, (tabWithCoworkingId.coworkingId ?? 0) + 1),
 	};
 }
 
@@ -163,12 +276,19 @@ export function closeTerminalTab(session: Session, tabId: string): Session {
 	let fallbackRef: UnifiedTabRef | null = null;
 	let newActiveTerminalTabId = session.activeTerminalTabId;
 	if (session.activeTerminalTabId === tabId) {
-		if (updatedUnifiedTabOrder.length > 0 && unifiedIndex !== -1) {
-			const fallbackIndex = Math.max(0, unifiedIndex - 1);
-			fallbackRef =
-				updatedUnifiedTabOrder[Math.min(fallbackIndex, updatedUnifiedTabOrder.length - 1)];
+		// The neighbor to activate comes from the NAVIGABLE order (what the tab strip
+		// renders), while `unifiedIndex` above stays in stored-order coordinates so a
+		// reopen lands back in the same slot. Handing focus to a hidden ref would show
+		// a conversation with no chip to click back from.
+		const navigableRemaining = getNavigableUnifiedTabOrder(session, updatedUnifiedTabOrder);
+		const navigableIndex = getNavigableUnifiedTabOrder(session, unifiedOrder).findIndex(
+			(ref) => ref.type === 'terminal' && ref.id === tabId
+		);
+		if (navigableRemaining.length > 0 && navigableIndex !== -1) {
+			const fallbackIndex = Math.max(0, navigableIndex - 1);
+			fallbackRef = navigableRemaining[Math.min(fallbackIndex, navigableRemaining.length - 1)];
 		} else {
-			// unifiedTabOrder out of sync — fall back to terminalTabs position
+			// unifiedTabOrder out of sync - fall back to terminalTabs position
 			const newIndex = Math.max(0, tabIndex - 1);
 			newActiveTerminalTabId = updatedTerminalTabs[newIndex]?.id ?? null;
 		}
@@ -250,6 +370,8 @@ export function selectTerminalTab(session: Session, tabId: string): Session {
 		activeTerminalTabId: tabId,
 		activeFileTabId: null,
 		activeBrowserTabId: null,
+		// Selecting a standalone terminal tab leaves any active tiled group.
+		activeGroupId: null,
 	};
 }
 
@@ -278,7 +400,7 @@ export function renameTerminalTab(session: Session, tabId: string, name: string)
 /**
  * Reorder terminal tabs within the terminalTabs array.
  * Note: The visual order in the tab bar is determined by unifiedTabOrder and is reordered separately
- * (via reorderUnifiedTabs in tabHelpers.ts). This function updates the underlying array order.
+ * (via reorderUnifiedTabs in tabHelpers). This function updates the underlying array order.
  *
  * @param session - The Maestro session
  * @param fromIndex - Zero-based index of the tab to move
@@ -346,6 +468,63 @@ export function updateTerminalTabPid(session: Session, tabId: string, pid: numbe
 	return {
 		...session,
 		terminalTabs: terminalTabs.map((tab) => (tab.id === tabId ? { ...tab, pid } : tab)),
+	};
+}
+
+/**
+ * Reset an exited terminal tab so it can be re-spawned, and select it.
+ * Clears the dead PID and exit code and returns the tab to 'idle' so the spawn
+ * effects in TerminalView pick it up again. Selecting the tab ensures the
+ * active-tab spawn path fires even for a terminal with no startup command.
+ *
+ * @param session - The Maestro session
+ * @param tabId - The ID of the terminal tab to restart
+ * @returns New session with the tab reset and selected, or original if not found
+ */
+export function restartTerminalTab(session: Session, tabId: string): Session {
+	const terminalTabs = session.terminalTabs || [];
+	if (!terminalTabs.find((tab) => tab.id === tabId)) {
+		return session;
+	}
+	return {
+		...session,
+		terminalTabs: terminalTabs.map((tab) =>
+			tab.id === tabId ? { ...tab, pid: 0, state: 'idle', exitCode: undefined } : tab
+		),
+		activeTerminalTabId: tabId,
+		activeFileTabId: null,
+		activeBrowserTabId: null,
+	};
+}
+
+/**
+ * Configure the startup command and (optional) cwd for a terminal tab.
+ * Empty `command` clears the configuration.
+ * Empty `cwd` clears the override (PTY falls back to tab.cwd / session.cwd).
+ */
+export function setTerminalTabStartupCommand(
+	session: Session,
+	tabId: string,
+	command: string,
+	cwd: string
+): Session {
+	const terminalTabs = session.terminalTabs || [];
+	if (!terminalTabs.find((tab) => tab.id === tabId)) {
+		return session;
+	}
+	const trimmedCommand = command.trim();
+	const trimmedCwd = cwd.trim();
+	return {
+		...session,
+		terminalTabs: terminalTabs.map((tab) =>
+			tab.id === tabId
+				? {
+						...tab,
+						startupCommand: trimmedCommand === '' ? undefined : trimmedCommand,
+						startupCommandCwd: trimmedCwd === '' ? undefined : trimmedCwd,
+					}
+				: tab
+		),
 	};
 }
 

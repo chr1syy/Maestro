@@ -18,6 +18,8 @@ const mockReadFileSync = vi.fn();
 const mockWriteFileSync = vi.fn();
 const mockMkdirSync = vi.fn();
 const mockUnlinkSync = vi.fn();
+const mockReaddirSync = vi.fn();
+const mockRmdirSync = vi.fn();
 
 vi.mock('fs', () => ({
 	existsSync: (...args: unknown[]) => mockExistsSync(...args),
@@ -25,6 +27,12 @@ vi.mock('fs', () => ({
 	writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
 	mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
 	unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
+	readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
+	rmdirSync: (...args: unknown[]) => mockRmdirSync(...args),
+}));
+
+vi.mock('../../../main/utils/sentry', () => ({
+	captureException: vi.fn(),
 }));
 
 vi.mock('chokidar', () => ({
@@ -37,6 +45,8 @@ vi.mock('chokidar', () => ({
 import {
 	deleteCueConfigFile,
 	readCueConfigFile,
+	readCuePromptFile,
+	removeEmptyPromptsDir,
 	resolveCueConfigPath,
 	writeCueConfigFile,
 	writeCuePromptFile,
@@ -46,7 +56,11 @@ const PROJECT_ROOT = '/projects/test';
 const CANONICAL = path.join(PROJECT_ROOT, '.maestro/cue.yaml');
 const LEGACY = path.join(PROJECT_ROOT, 'maestro-cue.yaml');
 const MAESTRO_DIR = path.join(PROJECT_ROOT, '.maestro');
-const PROMPTS_DIR = path.join(PROJECT_ROOT, '.maestro/prompts');
+// Prompt-file operations in the product canonicalize via `path.resolve(...)`
+// for their containment guard, so on Windows these carry the CWD drive letter.
+// Route the expected value through the same primitive so the assertion stays
+// platform-symmetric (a no-op transform on POSIX).
+const PROMPTS_DIR = path.resolve(path.join(PROJECT_ROOT, '.maestro/prompts'));
 
 describe('cue-config-repository', () => {
 	beforeEach(() => {
@@ -105,6 +119,51 @@ describe('cue-config-repository', () => {
 
 			expect(readCueConfigFile(PROJECT_ROOT)).toBeNull();
 			expect(mockReadFileSync).not.toHaveBeenCalled();
+		});
+
+		// MAESTRO-X9: readFileSync surfaces EINTR instead of restarting the
+		// syscall, which aborted CueEngine.start('system-boot') and left Cue
+		// disabled for the whole session.
+		it('retries when the read is interrupted by a signal (EINTR)', () => {
+			mockExistsSync.mockImplementation((p: string) => p === CANONICAL);
+			const eintr = Object.assign(new Error('EINTR: interrupted system call, read'), {
+				code: 'EINTR',
+			});
+			mockReadFileSync.mockImplementationOnce(() => {
+				throw eintr;
+			});
+			mockReadFileSync.mockReturnValue('subscriptions: []\n');
+
+			const result = readCueConfigFile(PROJECT_ROOT);
+
+			expect(result).toEqual({ filePath: CANONICAL, raw: 'subscriptions: []\n' });
+			expect(mockReadFileSync).toHaveBeenCalledTimes(2);
+		});
+
+		it('gives up after the retry bound when EINTR persists', () => {
+			mockExistsSync.mockImplementation((p: string) => p === CANONICAL);
+			const eintr = Object.assign(new Error('EINTR: interrupted system call, read'), {
+				code: 'EINTR',
+			});
+			mockReadFileSync.mockImplementation(() => {
+				throw eintr;
+			});
+
+			expect(() => readCueConfigFile(PROJECT_ROOT)).toThrow(/EINTR/);
+			expect(mockReadFileSync).toHaveBeenCalledTimes(3);
+		});
+
+		it('does not retry non-EINTR read errors', () => {
+			mockExistsSync.mockImplementation((p: string) => p === CANONICAL);
+			const eacces = Object.assign(new Error('EACCES: permission denied, read'), {
+				code: 'EACCES',
+			});
+			mockReadFileSync.mockImplementation(() => {
+				throw eacces;
+			});
+
+			expect(() => readCueConfigFile(PROJECT_ROOT)).toThrow(/EACCES/);
+			expect(mockReadFileSync).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -176,7 +235,7 @@ describe('cue-config-repository', () => {
 
 			const result = writeCuePromptFile(PROJECT_ROOT, '.maestro/prompts/sub-1.md', 'prompt body 1');
 
-			const expectedAbs = path.join(PROJECT_ROOT, '.maestro/prompts/sub-1.md');
+			const expectedAbs = path.resolve(path.join(PROJECT_ROOT, '.maestro/prompts/sub-1.md'));
 			expect(result).toBe(expectedAbs);
 			expect(mockWriteFileSync).toHaveBeenCalledWith(expectedAbs, 'prompt body 1', 'utf-8');
 		});
@@ -191,7 +250,7 @@ describe('cue-config-repository', () => {
 
 		it('creates parent directories for nested prompt paths', () => {
 			const nested = '.maestro/prompts/nested/dir/sub.md';
-			const expectedParent = path.join(PROJECT_ROOT, '.maestro/prompts/nested/dir');
+			const expectedParent = path.resolve(path.join(PROJECT_ROOT, '.maestro/prompts/nested/dir'));
 			mockExistsSync.mockImplementation((p: string) => p !== expectedParent);
 
 			writeCuePromptFile(PROJECT_ROOT, nested, 'nested body');
@@ -200,7 +259,7 @@ describe('cue-config-repository', () => {
 			// intermediate directories (including .maestro/prompts) in one call.
 			expect(mockMkdirSync).toHaveBeenCalledWith(expectedParent, { recursive: true });
 			expect(mockWriteFileSync).toHaveBeenCalledWith(
-				path.join(PROJECT_ROOT, nested),
+				path.resolve(path.join(PROJECT_ROOT, nested)),
 				'nested body',
 				'utf-8'
 			);
@@ -233,6 +292,81 @@ describe('cue-config-repository', () => {
 				writeCuePromptFile(PROJECT_ROOT, '.maestro/prompts/../../etc/passwd', 'content')
 			).toThrow('resolves outside the prompts directory');
 			expect(mockWriteFileSync).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('readCuePromptFile', () => {
+		it('returns the file content when the prompt file exists', () => {
+			mockReadFileSync.mockReturnValue('body on disk');
+
+			const result = readCuePromptFile(PROJECT_ROOT, '.maestro/prompts/sub-1.md');
+
+			expect(result).toBe('body on disk');
+			expect(mockReadFileSync).toHaveBeenCalledWith(
+				path.resolve(path.join(PROJECT_ROOT, '.maestro/prompts/sub-1.md')),
+				'utf-8'
+			);
+		});
+
+		it('returns null when the prompt file is missing (read throws)', () => {
+			mockReadFileSync.mockImplementation(() => {
+				throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+			});
+
+			expect(readCuePromptFile(PROJECT_ROOT, '.maestro/prompts/missing.md')).toBeNull();
+		});
+
+		it('returns null for a path outside the prompts directory without reading', () => {
+			expect(readCuePromptFile(PROJECT_ROOT, '.maestro/other/file.md')).toBeNull();
+			expect(mockReadFileSync).not.toHaveBeenCalled();
+		});
+
+		it('returns null for an absolute path without reading', () => {
+			expect(readCuePromptFile(PROJECT_ROOT, '/etc/passwd')).toBeNull();
+			expect(mockReadFileSync).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('removeEmptyPromptsDir', () => {
+		it('removes .maestro/prompts/ when it exists and is empty', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReaddirSync.mockReturnValue([]);
+
+			const removed = removeEmptyPromptsDir(PROJECT_ROOT);
+
+			expect(removed).toBe(true);
+			expect(mockRmdirSync).toHaveBeenCalledWith(PROMPTS_DIR);
+		});
+
+		it('leaves the directory alone when non-empty', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReaddirSync.mockReturnValue(['stray.txt']);
+
+			const removed = removeEmptyPromptsDir(PROJECT_ROOT);
+
+			expect(removed).toBe(false);
+			expect(mockRmdirSync).not.toHaveBeenCalled();
+		});
+
+		it('returns false when the directory does not exist', () => {
+			mockExistsSync.mockReturnValue(false);
+
+			const removed = removeEmptyPromptsDir(PROJECT_ROOT);
+
+			expect(removed).toBe(false);
+			expect(mockRmdirSync).not.toHaveBeenCalled();
+		});
+
+		it('swallows rmdirSync errors and returns false', () => {
+			mockExistsSync.mockReturnValue(true);
+			mockReaddirSync.mockReturnValue([]);
+			mockRmdirSync.mockImplementation(() => {
+				throw new Error('EACCES');
+			});
+
+			const removed = removeEmptyPromptsDir(PROJECT_ROOT);
+
+			expect(removed).toBe(false);
 		});
 	});
 });

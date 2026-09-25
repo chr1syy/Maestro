@@ -1,14 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useFilePreviewHandlers } from '../../../renderer/hooks/mainPanel/useFilePreviewHandlers';
+import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import type { Session, FilePreviewTab } from '../../../renderer/types';
 
 const mockWriteFile = vi.fn().mockResolvedValue(undefined);
+const mockSaveFile = vi.fn().mockResolvedValue(null);
+const mockStat = vi.fn().mockResolvedValue({ modifiedAt: new Date().toISOString() });
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	// Default: stat succeeds, i.e. the file still exists at its cached path.
+	mockStat.mockResolvedValue({ modifiedAt: new Date().toISOString() });
 	(window as any).maestro = {
-		fs: { writeFile: mockWriteFile },
+		fs: { writeFile: mockWriteFile, stat: mockStat },
+		dialog: { saveFile: mockSaveFile },
 	};
 });
 
@@ -159,7 +165,14 @@ describe('useFilePreviewHandlers', () => {
 			'new content',
 			undefined
 		);
-		expect(onEditContent).toHaveBeenCalledWith('file-1', undefined, 'new content');
+		// The saved mtime rides along so the tab stops looking stale to the
+		// file-change poller after its own save.
+		expect(onEditContent).toHaveBeenCalledWith(
+			'file-1',
+			undefined,
+			'new content',
+			expect.any(Number)
+		);
 	});
 
 	it('handleFilePreviewSave passes sshRemoteId for SSH-backed previews', async () => {
@@ -309,5 +322,266 @@ describe('useFilePreviewHandlers', () => {
 
 		act(() => result.current.handleFilePreviewClose());
 		expect(onClose).not.toHaveBeenCalled();
+	});
+
+	describe('save-as for untitled files', () => {
+		it('shows save dialog when path is empty', async () => {
+			mockSaveFile.mockResolvedValue('/test/project/newfile.md');
+			const session = makeSession();
+			// Set up session store so the save-as handler can update tab metadata
+			useSessionStore.setState({
+				sessions: [
+					{
+						...session,
+						filePreviewTabs: [
+							makeFileTab({ id: 'file-1', path: '', name: 'Untitled', extension: '', content: '' }),
+						],
+						activeFileTabId: 'file-1',
+					} as Session,
+				],
+				activeSessionId: 'session-1',
+			});
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: session,
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab({ id: 'file-1', path: '', name: 'Untitled', extension: '' }),
+				})
+			);
+
+			await act(async () => {
+				await result.current.handleFilePreviewSave('', 'hello world');
+			});
+
+			expect(mockSaveFile).toHaveBeenCalledWith(expect.objectContaining({ title: 'Save File' }));
+			expect(mockWriteFile).toHaveBeenCalledWith(
+				'/test/project/newfile.md',
+				'hello world',
+				undefined
+			);
+		});
+
+		it('returns false and does not write when save dialog is cancelled', async () => {
+			mockSaveFile.mockResolvedValue(null);
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: makeSession(),
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab({ id: 'file-1', path: '', name: 'Untitled', extension: '' }),
+				})
+			);
+
+			let saveResult: boolean | void;
+			await act(async () => {
+				saveResult = await result.current.handleFilePreviewSave('', 'hello world');
+			});
+
+			expect(saveResult!).toBe(false);
+			expect(mockSaveFile).toHaveBeenCalled();
+			expect(mockWriteFile).not.toHaveBeenCalled();
+		});
+
+		it('updates tab metadata after save-as', async () => {
+			mockSaveFile.mockResolvedValue('/test/project/src/notes.md');
+			const writtenAt = new Date('2026-09-14T12:18:01.000Z');
+			// The untitled path skips the existence check, so the only stat is the
+			// post-write one that reads back the new file's mtime.
+			mockStat.mockResolvedValue({ modifiedAt: writtenAt.toISOString() });
+			const session = makeSession();
+			useSessionStore.setState({
+				sessions: [
+					{
+						...session,
+						filePreviewTabs: [
+							makeFileTab({ id: 'file-1', path: '', name: 'Untitled', extension: '', content: '' }),
+						],
+						activeFileTabId: 'file-1',
+					} as Session,
+				],
+				activeSessionId: 'session-1',
+			});
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: session,
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab({ id: 'file-1', path: '', name: 'Untitled', extension: '' }),
+				})
+			);
+
+			await act(async () => {
+				await result.current.handleFilePreviewSave('', 'my notes');
+			});
+
+			const updatedSession = useSessionStore.getState().sessions[0];
+			const updatedTab = updatedSession.filePreviewTabs.find(
+				(t: FilePreviewTab) => t.id === 'file-1'
+			);
+			expect(updatedTab).toMatchObject({
+				path: '/test/project/src/notes.md',
+				name: 'notes',
+				extension: '.md',
+				content: 'my notes',
+				editContent: undefined,
+				lastModified: writtenAt.getTime(),
+			});
+		});
+
+		it('skips save dialog for files with existing path', async () => {
+			const onEditContent = vi.fn();
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: makeSession(),
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab(),
+					onFileTabEditContentChange: onEditContent,
+				})
+			);
+
+			await act(async () => {
+				await result.current.handleFilePreviewSave('/test/project/src/test.ts', 'updated');
+			});
+
+			expect(mockSaveFile).not.toHaveBeenCalled();
+			expect(mockStat).toHaveBeenCalledWith('/test/project/src/test.ts', undefined);
+			expect(mockWriteFile).toHaveBeenCalledWith('/test/project/src/test.ts', 'updated', undefined);
+			expect(onEditContent).toHaveBeenCalledWith(
+				'file-1',
+				undefined,
+				'updated',
+				expect.any(Number)
+			);
+		});
+
+		it('hands the tab the post-write mtime so its own save is not seen as an external change', async () => {
+			const onEditContent = vi.fn();
+			const writtenAt = new Date('2026-09-14T12:18:01.000Z');
+			// First stat is the pre-write existence check, second reads the mtime the
+			// write just produced.
+			mockStat
+				.mockResolvedValueOnce({ modifiedAt: new Date('2026-09-14T12:16:36.000Z').toISOString() })
+				.mockResolvedValueOnce({ modifiedAt: writtenAt.toISOString() });
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: makeSession(),
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab(),
+					onFileTabEditContentChange: onEditContent,
+				})
+			);
+
+			await act(async () => {
+				await result.current.handleFilePreviewSave('/test/project/src/test.ts', 'updated');
+			});
+
+			expect(onEditContent).toHaveBeenCalledWith(
+				'file-1',
+				undefined,
+				'updated',
+				writtenAt.getTime()
+			);
+		});
+
+		it('falls back to the wall clock when the post-write stat fails', async () => {
+			const onEditContent = vi.fn();
+			mockStat
+				.mockResolvedValueOnce({ modifiedAt: new Date().toISOString() })
+				.mockRejectedValueOnce(new Error('EIO'));
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: makeSession(),
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab(),
+					onFileTabEditContentChange: onEditContent,
+				})
+			);
+
+			const before = Date.now();
+			await act(async () => {
+				await result.current.handleFilePreviewSave('/test/project/src/test.ts', 'updated');
+			});
+
+			const [, , , mtime] = onEditContent.mock.calls[0];
+			expect(mtime).toBeGreaterThanOrEqual(before);
+		});
+	});
+
+	describe('save when file was moved or deleted on disk', () => {
+		it('prompts for a destination instead of recreating a ghost at the stale path', async () => {
+			// Cached path no longer resolves on disk.
+			mockStat.mockRejectedValue(new Error('ENOENT'));
+			mockSaveFile.mockResolvedValue('/test/project/src/moved.ts');
+			const session = makeSession();
+			useSessionStore.setState({
+				sessions: [
+					{
+						...session,
+						filePreviewTabs: [makeFileTab({ id: 'file-1' })],
+						activeFileTabId: 'file-1',
+					} as Session,
+				],
+				activeSessionId: 'session-1',
+			});
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: session,
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab(),
+				})
+			);
+
+			await act(async () => {
+				await result.current.handleFilePreviewSave('/test/project/src/test.ts', 'updated');
+			});
+
+			expect(mockSaveFile).toHaveBeenCalledWith(
+				expect.objectContaining({ defaultPath: '/test/project/src/test.ts' })
+			);
+			// Writes to the user-chosen location, NOT the stale cached path.
+			expect(mockWriteFile).toHaveBeenCalledWith(
+				'/test/project/src/moved.ts',
+				'updated',
+				undefined
+			);
+
+			const updatedTab = useSessionStore
+				.getState()
+				.sessions[0].filePreviewTabs.find((t: FilePreviewTab) => t.id === 'file-1');
+			expect(updatedTab).toMatchObject({
+				path: '/test/project/src/moved.ts',
+				name: 'moved',
+				extension: '.ts',
+			});
+		});
+
+		it('returns false and does not write when the redirect dialog is cancelled', async () => {
+			mockStat.mockRejectedValue(new Error('ENOENT'));
+			mockSaveFile.mockResolvedValue(null);
+
+			const { result } = renderHook(() =>
+				useFilePreviewHandlers({
+					activeSession: makeSession(),
+					activeFileTabId: 'file-1',
+					activeFileTab: makeFileTab(),
+				})
+			);
+
+			let saveResult: boolean | void;
+			await act(async () => {
+				saveResult = await result.current.handleFilePreviewSave(
+					'/test/project/src/test.ts',
+					'updated'
+				);
+			});
+
+			expect(saveResult!).toBe(false);
+			expect(mockSaveFile).toHaveBeenCalled();
+			expect(mockWriteFile).not.toHaveBeenCalled();
+		});
 	});
 });

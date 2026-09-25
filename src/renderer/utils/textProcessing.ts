@@ -13,34 +13,17 @@
 import type Convert from 'ansi-to-html';
 import DOMPurify from 'dompurify';
 
+import { processCarriageReturns } from '../../shared/stringUtils';
+
 // ============================================================================
 // Terminal Text Processing
 // ============================================================================
 
 /**
- * Process carriage returns to simulate terminal line overwrites.
- * When a line contains \r, the text after the last \r replaces the entire line.
- * This mimics how terminals handle carriage returns for progress indicators.
- *
- * @param text - Raw text potentially containing carriage returns
- * @returns Processed text with carriage return overwrites applied
+ * Re-exported so the renderer's terminal-text helpers stay in one import, while
+ * the implementation lives in `shared/` where the main process can reach it.
  */
-export const processCarriageReturns = (text: string): string => {
-	const lines = text.split('\n');
-	const processedLines = lines.map((line) => {
-		if (line.includes('\r')) {
-			const segments = line.split('\r');
-			for (let i = segments.length - 1; i >= 0; i--) {
-				if (segments[i].trim()) {
-					return segments[i];
-				}
-			}
-			return '';
-		}
-		return line;
-	});
-	return processedLines.join('\n');
-};
+export { processCarriageReturns };
 
 /**
  * Filter out bash prompt lines and apply carriage return processing.
@@ -175,48 +158,7 @@ export function clearAnsiCache(): void {
 // Markdown Processing
 // ============================================================================
 
-/**
- * Strip markdown formatting to show plain text.
- * Removes code blocks, inline code, bold/italic, headers, blockquotes,
- * horizontal rules, links, images, strikethrough, and normalizes lists.
- *
- * @param text - Markdown-formatted text
- * @returns Plain text with markdown formatting removed
- */
-export const stripMarkdown = (text: string): string => {
-	return (
-		text
-			// Remove code blocks (```...```)
-			.replace(/```[\s\S]*?```/g, (match) => {
-				// Extract just the code content without the fence
-				const lines = match.split('\n');
-				// Remove first line (```lang) and last line (```)
-				return lines.slice(1, -1).join('\n');
-			})
-			// Remove inline code backticks
-			.replace(/`([^`]+)`/g, '$1')
-			// Remove bold/italic (***text***, **text**, *text*, ___text___, __text__, _text_)
-			.replace(/\*\*\*(.+?)\*\*\*/g, '$1')
-			.replace(/\*\*(.+?)\*\*/g, '$1')
-			.replace(/\*(.+?)\*/g, '$1')
-			.replace(/___(.+?)___/g, '$1')
-			.replace(/__(.+?)__/g, '$1')
-			.replace(/_(.+?)_/g, '$1')
-			// Remove headers (# text)
-			.replace(/^#{1,6}\s+/gm, '')
-			// Remove blockquotes (> text)
-			.replace(/^>\s*/gm, '')
-			// Remove horizontal rules
-			.replace(/^[-*_]{3,}\s*$/gm, '---')
-			// Remove link formatting [text](url) -> text
-			.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-			// Remove image formatting ![alt](url) -> alt
-			.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-			// Remove strikethrough
-			.replace(/~~(.+?)~~/g, '$1')
-			// Clean up bullet points - convert to simple dashes
-			.replace(/^[\s]*[-*+]\s+/gm, '- ')
-			// Clean up numbered lists - keep the numbers
-			.replace(/^[\s]*(\d+)\.\s+/gm, '$1. ')
-	);
-};
+// Re-export from shared so renderer callers don't need to change imports.
+// Canonical definition lives in src/shared/markdown.ts (used by main-process
+// code paths like Cue history excerpt extraction).
+export { stripMarkdown } from '../../shared/markdown';

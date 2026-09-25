@@ -60,6 +60,12 @@ vi.mock('lucide-react', () => ({
 	Zap: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
 		<svg data-testid="zap-icon" className={className} style={style} />
 	),
+	ExternalLink: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="external-link-icon" className={className} style={style} />
+	),
+	MessagesSquare: ({ className, style }: { className?: string; style?: React.CSSProperties }) => (
+		<svg data-testid="messages-square-icon" className={className} style={style} />
+	),
 }));
 
 // Create a mock theme
@@ -125,8 +131,8 @@ describe('HistoryHelpModal', () => {
 		it('renders the modal container with theme-based styling', () => {
 			const { container } = render(<HistoryHelpModal {...defaultProps} />);
 
-			// Modal component uses inline width style
-			const modalContainer = container.querySelector('[style*="width: 672px"]');
+			// Modal renders a resizable frame keyed by resizeKey
+			const modalContainer = container.querySelector('[data-modal-resize-key="history-guide"]');
 			expect(modalContainer).toBeInTheDocument();
 			expect(modalContainer).toHaveStyle({
 				backgroundColor: mockTheme.colors.bgSidebar,
@@ -190,8 +196,8 @@ describe('HistoryHelpModal', () => {
 			const onClose = vi.fn();
 			const { container } = render(<HistoryHelpModal {...defaultProps} onClose={onClose} />);
 
-			// Clicking on modal content (the inner container with width style) should not close
-			const modalContent = container.querySelector('[style*="width: 672px"]');
+			// Clicking on modal content (the resizable frame) should not close
+			const modalContent = container.querySelector('[data-modal-resize-key="history-guide"]');
 			fireEvent.click(modalContent!);
 
 			// Only the backdrop should close the modal, not the content area itself
@@ -234,7 +240,7 @@ describe('HistoryHelpModal', () => {
 				'px-2',
 				'py-0.5',
 				'rounded-full',
-				'text-[10px]',
+				'text-2xs',
 				'font-bold',
 				'uppercase'
 			);
@@ -244,14 +250,14 @@ describe('HistoryHelpModal', () => {
 			const { container } = render(<HistoryHelpModal {...defaultProps} />);
 
 			// Find AUTO badge by looking for the element with the specific badge styling
-			const autoBadges = container.querySelectorAll('.rounded-full.text-\\[10px\\]');
+			const autoBadges = container.querySelectorAll('.rounded-full.text-2xs');
 			const autoBadge = Array.from(autoBadges).find((el) => el.textContent?.includes('AUTO'));
 			expect(autoBadge).toBeTruthy();
 			expect(autoBadge).toHaveClass(
 				'px-2',
 				'py-0.5',
 				'rounded-full',
-				'text-[10px]',
+				'text-2xs',
 				'font-bold',
 				'uppercase'
 			);
@@ -306,7 +312,7 @@ describe('HistoryHelpModal', () => {
 
 			const { container } = render(<HistoryHelpModal {...defaultProps} />);
 
-			const cueBadges = container.querySelectorAll('.rounded-full.text-\\[10px\\]');
+			const cueBadges = container.querySelectorAll('.rounded-full.text-2xs');
 			const cueBadge = Array.from(cueBadges).find((el) => el.textContent?.includes('CUE'));
 			expect(cueBadge).toBeFalsy();
 		});
@@ -316,7 +322,7 @@ describe('HistoryHelpModal', () => {
 
 			const { container } = render(<HistoryHelpModal {...defaultProps} />);
 
-			const cueBadges = container.querySelectorAll('.rounded-full.text-\\[10px\\]');
+			const cueBadges = container.querySelectorAll('.rounded-full.text-2xs');
 			const cueBadge = Array.from(cueBadges).find((el) => el.textContent?.includes('CUE'));
 			expect(cueBadge).toBeTruthy();
 		});
@@ -845,7 +851,7 @@ describe('HistoryHelpModal', () => {
 			const { container } = render(<HistoryHelpModal {...defaultProps} />);
 
 			// Find AUTO badge by looking for the element with specific styling
-			const autoBadges = container.querySelectorAll('.rounded-full.text-\\[10px\\]');
+			const autoBadges = container.querySelectorAll('.rounded-full.text-2xs');
 			const autoBadge = Array.from(autoBadges).find((el) => el.textContent?.includes('AUTO'));
 			expect(autoBadge).toBeTruthy();
 			// The badge should have warning-based colors

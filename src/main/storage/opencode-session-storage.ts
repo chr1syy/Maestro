@@ -35,6 +35,8 @@ import type {
 import { BaseSessionStorage, type SearchableMessage } from './base-session-storage';
 import type { ToolType, SshRemoteConfig } from '../../shared/types';
 import { isWindows } from '../../shared/platformDetection';
+import { ModelUsageAccumulator } from '../../shared/modelUsage';
+import type { ModelTokenUsage } from '../../shared/tokenUsage';
 
 const LOG_CONTEXT = '[OpenCodeSessionStorage]';
 
@@ -42,16 +44,42 @@ const LOG_CONTEXT = '[OpenCodeSessionStorage]';
 const TRAILING_SEP_RE = new RegExp(`${path.sep.replace('\\', '\\\\')}+$`);
 
 /**
- * Get OpenCode data base directory (platform-specific)
- * - Linux/macOS: ~/.local/share/opencode
- * - Windows: %APPDATA%\opencode
+ * Candidate OpenCode data base directories, in preference order.
+ *
+ * OpenCode (Go binary) uses XDG-style paths on all platforms - including
+ * Windows, where `opencode db path` resolves to `%USERPROFILE%\.local\share\opencode`
+ * rather than `%APPDATA%`. We keep `%APPDATA%\opencode` as a Windows-only
+ * fallback for any legacy/alternate installs.
+ */
+function getOpenCodeDataDirCandidates(): string[] {
+	const candidates: string[] = [];
+	const home = os.homedir();
+
+	if (process.env.XDG_DATA_HOME) {
+		candidates.push(path.join(process.env.XDG_DATA_HOME, 'opencode'));
+	}
+	candidates.push(path.join(home, '.local', 'share', 'opencode'));
+
+	if (isWindows()) {
+		const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+		candidates.push(path.join(appData, 'opencode'));
+	}
+
+	return candidates;
+}
+
+/**
+ * Pick the first candidate that exists on disk. If none exist, return the
+ * preferred candidate so callers still get a sensible default path to log.
  */
 function getOpenCodeDataDir(): string {
-	if (isWindows()) {
-		const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-		return path.join(appData, 'opencode');
+	const candidates = getOpenCodeDataDirCandidates();
+	for (const candidate of candidates) {
+		if (fsSync.existsSync(candidate)) {
+			return candidate;
+		}
 	}
-	return path.join(os.homedir(), '.local', 'share', 'opencode');
+	return candidates[0];
 }
 
 /**
@@ -62,10 +90,20 @@ function getOpenCodeStorageDir(): string {
 }
 
 /**
- * Get OpenCode SQLite database path (v1.2+)
+ * Get OpenCode SQLite database path (v1.2+).
+ *
+ * Checks each candidate data dir for an existing `opencode.db` and returns
+ * the first hit. Falls back to the preferred candidate's path when none exist,
+ * so callers still get a deterministic value (existence is re-checked at use).
  */
 function getOpenCodeDbPath(): string {
-	return path.join(getOpenCodeDataDir(), 'opencode.db');
+	for (const candidate of getOpenCodeDataDirCandidates()) {
+		const dbPath = path.join(candidate, 'opencode.db');
+		if (fsSync.existsSync(dbPath)) {
+			return dbPath;
+		}
+	}
+	return path.join(getOpenCodeDataDirCandidates()[0], 'opencode.db');
 }
 
 const OPENCODE_STORAGE_DIR = getOpenCodeStorageDir();
@@ -617,6 +655,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 		totalCacheReadTokens: number;
 		totalCacheWriteTokens: number;
 		totalCost: number;
+		byModel: ModelTokenUsage[] | undefined;
 	}> {
 		const messageDir = this.getMessageDir(sessionId);
 		const messages: OpenCodeMessage[] = [];
@@ -626,6 +665,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 		let totalCacheReadTokens = 0;
 		let totalCacheWriteTokens = 0;
 		let totalCost = 0;
+		const modelAcc = new ModelUsageAccumulator();
 
 		try {
 			const messageFiles = await listJsonFiles(messageDir);
@@ -644,6 +684,18 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 					}
 					if (msg.cost) {
 						totalCost += msg.cost;
+					}
+					if (msg.tokens || msg.cost) {
+						modelAcc.add(
+							msg.model?.modelID,
+							{
+								inputTokens: msg.tokens?.input || 0,
+								outputTokens: msg.tokens?.output || 0,
+								cacheReadTokens: msg.tokens?.cache?.read || 0,
+								cacheCreationTokens: msg.tokens?.cache?.write || 0,
+							},
+							msg.cost
+						);
 					}
 
 					// Load parts for this message
@@ -680,6 +732,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 			totalCacheReadTokens,
 			totalCacheWriteTokens,
 			totalCost,
+			byModel: modelAcc.isEmpty ? undefined : modelAcc.finalize(),
 		};
 	}
 
@@ -791,7 +844,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 
 			const normalizedPath = path.resolve(projectPath).replace(TRAILING_SEP_RE, '');
 
-			// Find matching project(s) — exact match or subdirectory match
+			// Find matching project(s) - exact match or subdirectory match
 			const projects = db.prepare('SELECT id, worktree FROM project').all() as Array<{
 				id: string;
 				worktree: string;
@@ -800,7 +853,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 			const matchingProjectIds: string[] = [];
 			let hasGlobalProject = false;
 			for (const proj of projects) {
-				// Skip the 'global' project (worktree '/') from project-level matching —
+				// Skip the 'global' project (worktree '/') from project-level matching -
 				// it matches everything. Its sessions are filtered by directory below.
 				if (proj.id === 'global') {
 					hasGlobalProject = true;
@@ -953,6 +1006,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 			let totalCost = 0;
 			let firstMessage = row.title || '';
 			let durationSeconds = 0;
+			const modelAcc = new ModelUsageAccumulator();
 
 			if (messages.length >= 2) {
 				const first = messages[0].time_created;
@@ -976,6 +1030,18 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 				}
 				if (data.cost) {
 					totalCost += data.cost;
+				}
+				if (data.tokens || data.cost) {
+					modelAcc.add(
+						data.modelID,
+						{
+							inputTokens: data.tokens?.input || 0,
+							outputTokens: data.tokens?.output || 0,
+							cacheReadTokens: data.tokens?.cache?.read || 0,
+							cacheCreationTokens: data.tokens?.cache?.write || 0,
+						},
+						data.cost
+					);
 				}
 
 				if (!foundPreview && data.role === 'assistant') {
@@ -1025,6 +1091,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 				cacheReadTokens: totalCacheReadTokens,
 				cacheCreationTokens: totalCacheWriteTokens,
 				durationSeconds,
+				byModel: modelAcc.isEmpty ? undefined : modelAcc.finalize(),
 			});
 		}
 
@@ -1209,7 +1276,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 		projectPath: string,
 		sshConfig?: SshRemoteConfig
 	): Promise<AgentSessionInfo[]> {
-		// Use SSH remote access if config provided (JSON only for SSH — no remote SQLite)
+		// Use SSH remote access if config provided (JSON only for SSH - no remote SQLite)
 		if (sshConfig) {
 			return this.listSessionsRemote(projectPath, sshConfig);
 		}
@@ -1238,7 +1305,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 			return sqliteSessions;
 		}
 
-		// SQLite unavailable or empty — use JSON results
+		// SQLite unavailable or empty - use JSON results
 		return jsonSessions;
 	}
 
@@ -1285,6 +1352,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 				totalCacheReadTokens,
 				totalCacheWriteTokens,
 				totalCost,
+				byModel,
 			} = await this.loadSessionMessages(sessionData.id);
 
 			// Get preview message - prefer first assistant response, fall back to user message or title
@@ -1350,6 +1418,7 @@ export class OpenCodeSessionStorage extends BaseSessionStorage {
 				cacheReadTokens: totalCacheReadTokens,
 				cacheCreationTokens: totalCacheWriteTokens,
 				durationSeconds,
+				byModel,
 			});
 		}
 

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { Wordmark } from './ui/Wordmark';
 import {
 	Wand2,
 	Bot,
@@ -12,11 +13,14 @@ import {
 	BookOpen,
 	ExternalLink,
 } from 'lucide-react';
+import { GhostIconButton } from './ui/GhostIconButton';
 import type { Theme, Shortcut } from '../types';
 import { formatShortcutKeys } from '../utils/shortcutFormatter';
 import { useClickOutside } from '../hooks';
 import { WelcomeContent } from './WelcomeContent';
 import { buildMaestroUrl } from '../utils/buildMaestroUrl';
+import { openUrl } from '../utils/openUrl';
+import { PluginUiItemsSlot } from './plugins/PluginUiItemsSlot';
 
 interface EmptyStateViewProps {
 	theme: Theme;
@@ -72,24 +76,19 @@ export function EmptyStateView({
 				{/* Left: Logo and Name */}
 				<div className="flex items-center gap-2">
 					<Wand2 className="w-5 h-5" style={{ color: theme.colors.accent }} />
-					<h1
-						className="font-bold tracking-widest text-lg"
-						style={{ color: theme.colors.textMain }}
-					>
-						MAESTRO
-					</h1>
+					<Wordmark as="h1" className="text-lg" style={{ color: theme.colors.textMain }} />
 				</div>
 
 				{/* Right: Hamburger Menu */}
 				<div className="relative" ref={menuRef}>
-					<button
+					<GhostIconButton
 						onClick={() => setMenuOpen(!menuOpen)}
-						className="p-2 rounded hover:bg-white/10 transition-colors"
-						style={{ color: theme.colors.textDim }}
+						padding="p-2"
 						title="Menu"
+						color={theme.colors.textDim}
 					>
 						<Menu className="w-5 h-5" />
-					</button>
+					</GhostIconButton>
 
 					{/* Menu Overlay */}
 					{menuOpen && (
@@ -220,7 +219,7 @@ export function EmptyStateView({
 
 								<button
 									onClick={() => {
-										window.maestro.shell.openExternal(buildMaestroUrl('https://runmaestro.ai'));
+										openUrl(buildMaestroUrl('https://runmaestro.ai'));
 										setMenuOpen(false);
 									}}
 									className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-white/10 transition-colors text-left"
@@ -239,9 +238,7 @@ export function EmptyStateView({
 
 								<button
 									onClick={() => {
-										window.maestro.shell.openExternal(
-											buildMaestroUrl('https://docs.runmaestro.ai')
-										);
+										openUrl(buildMaestroUrl('https://docs.runmaestro.ai'));
 										setMenuOpen(false);
 									}}
 									className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-white/10 transition-colors text-left"
@@ -285,25 +282,19 @@ export function EmptyStateView({
 			<div className="flex-1 flex flex-col items-center justify-center px-4">
 				<WelcomeContent theme={theme} showGetStarted />
 
-				{/* Action Buttons */}
-				<div className="flex items-center gap-4 mt-8">
+				{/* Action Button */}
+				<div className="flex items-center justify-center mt-8">
 					<button
 						onClick={onNewAgent}
 						className="flex items-center justify-center gap-3 px-8 py-4 rounded-lg text-base font-bold transition-colors hover:opacity-90 min-w-[180px]"
 						style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
 					>
 						<Bot className="w-5 h-5" />
-						New Agent
-					</button>
-					<button
-						onClick={onOpenWizard}
-						className="flex items-center justify-center gap-3 px-8 py-4 rounded-lg text-base font-bold transition-colors hover:opacity-90 min-w-[180px]"
-						style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentForeground }}
-					>
-						<Wand2 className="w-5 h-5" />
-						Wizard
+						Create your first agent
 					</button>
 				</div>
+
+				<PluginUiItemsSlot surface="emptyState" className="mt-3 justify-center" />
 			</div>
 		</div>
 	);

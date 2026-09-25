@@ -10,30 +10,10 @@ import { RenameSessionModal } from '../../../renderer/components/RenameSessionMo
 import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext';
 import type { Theme, Session } from '../../../renderer/types';
 
+import { createMockTheme } from '../../helpers/mockTheme';
+
 // Mock the window.maestro API
 vi.mock('../../../renderer/services/process', () => ({}));
-
-// Create a mock theme for testing
-const createMockTheme = (): Theme => ({
-	id: 'test-theme',
-	name: 'Test Theme',
-	mode: 'dark',
-	colors: {
-		bgMain: '#1a1a1a',
-		bgPanel: '#252525',
-		bgSidebar: '#202020',
-		bgActivity: '#2d2d2d',
-		textMain: '#ffffff',
-		textDim: '#888888',
-		accent: '#0066ff',
-		accentForeground: '#ffffff',
-		border: '#333333',
-		highlight: '#0066ff33',
-		success: '#00aa00',
-		warning: '#ffaa00',
-		error: '#ff0000',
-	},
-});
 
 // Create mock sessions
 const createMockSessions = (): Session[] => [
@@ -135,6 +115,47 @@ describe('RenameSessionModal', () => {
 			);
 
 			expect(screen.getByText('Rename Agent')).toBeInTheDocument();
+		});
+
+		// The header shows the CURRENT name of the agent being renamed; the input
+		// already shows the new one being typed.
+		it('names the agent being renamed in the header', () => {
+			render(
+				<TestWrapper>
+					<RenameSessionModal
+						theme={mockTheme}
+						value="Session 1"
+						setValue={mockSetValue}
+						onClose={mockOnClose}
+						sessions={mockSessions}
+						setSessions={mockSetSessions}
+						activeSessionId="session-1"
+					/>
+				</TestWrapper>
+			);
+
+			expect(screen.getByTestId('modal-subtitle')).toHaveTextContent('Session 1');
+			expect(screen.queryByText(/Rename Agent . Session 1/)).not.toBeInTheDocument();
+		});
+
+		// Right-clicking a row that is not highlighted renames THAT row.
+		it('names the right-clicked agent, not the active one', () => {
+			render(
+				<TestWrapper>
+					<RenameSessionModal
+						theme={mockTheme}
+						value="Session 2"
+						setValue={mockSetValue}
+						onClose={mockOnClose}
+						sessions={mockSessions}
+						setSessions={mockSetSessions}
+						activeSessionId="session-1"
+						targetSessionId="session-2"
+					/>
+				</TestWrapper>
+			);
+
+			expect(screen.getByTestId('modal-subtitle')).toHaveTextContent(mockSessions[1].name);
 		});
 
 		it('renders input with current value', () => {
@@ -718,10 +739,11 @@ describe('RenameSessionModal', () => {
 				</TestWrapper>
 			);
 
-			// The Modal component now uses inline width style instead of Tailwind class
-			const modalBox = container.querySelector('.border.rounded-lg');
+			// The Modal component uses an inline width style that scales with the
+			// Cmd+= font setting by default (no-op at the baseline font scale).
+			const modalBox = container.querySelector('.border.rounded-lg') as HTMLElement;
 			expect(modalBox).toBeInTheDocument();
-			expect(modalBox).toHaveStyle({ width: '400px' });
+			expect(modalBox.style.width).toBe('min(calc(400px * var(--font-scale, 1)), 95vw)');
 		});
 	});
 });

@@ -29,12 +29,12 @@ export const TemplateAutocompleteDropdown = forwardRef<
 				left: state.position.left,
 				backgroundColor: theme.colors.bgSidebar,
 				borderColor: theme.colors.border,
-				minWidth: '280px',
-				maxWidth: '380px',
-				maxHeight: '240px',
+				minWidth: '17.5rem',
+				maxWidth: '23.75rem',
+				maxHeight: '15rem',
 			}}
 		>
-			<div className="overflow-y-auto scrollbar-thin" style={{ maxHeight: '240px' }}>
+			<div className="overflow-y-auto scrollbar-thin" style={{ maxHeight: '15rem' }}>
 				{state.filteredVariables.map((item, index) => (
 					<div
 						key={item.variable}
@@ -82,21 +82,21 @@ export const TemplateAutocompleteDropdown = forwardRef<
 				}}
 			>
 				<kbd
-					className="px-1 py-0.5 rounded text-[10px]"
+					className="px-1 py-0.5 rounded text-2xs"
 					style={{ backgroundColor: theme.colors.bgActivity }}
 				>
 					↑↓
 				</kbd>{' '}
 				navigate{' '}
 				<kbd
-					className="px-1 py-0.5 rounded text-[10px]"
+					className="px-1 py-0.5 rounded text-2xs"
 					style={{ backgroundColor: theme.colors.bgActivity }}
 				>
 					Tab
 				</kbd>{' '}
 				select{' '}
 				<kbd
-					className="px-1 py-0.5 rounded text-[10px]"
+					className="px-1 py-0.5 rounded text-2xs"
 					style={{ backgroundColor: theme.colors.bgActivity }}
 				>
 					Esc

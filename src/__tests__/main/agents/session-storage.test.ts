@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'path';
+import fs from 'fs/promises';
 import type Store from 'electron-store';
 import type { ClaudeSessionOriginsData } from '../../../main/storage/claude-session-storage';
 import {
@@ -302,6 +303,45 @@ describe('OpenCodeSessionStorage', () => {
 });
 
 describe('CodexSessionStorage', () => {
+	/** A second CODEX_HOME account, used by the account fan-out test. */
+	const codexWorkAccountDir = path.join('/tmp/maestro-session-storage-home', '.codex-work');
+
+	afterEach(async () => {
+		await fs.rm(codexWorkAccountDir, { recursive: true, force: true });
+	});
+
+	it('reads a second CODEX_HOME account only when asked for it', async () => {
+		const dayDir = path.join(codexWorkAccountDir, 'sessions', '2026', '09', '14');
+		await fs.mkdir(dayDir, { recursive: true });
+		await fs.writeFile(
+			path.join(dayDir, 'rollout-2026-09-14T00-00-00-session-work.jsonl'),
+			[
+				JSON.stringify({
+					type: 'session_meta',
+					payload: {
+						id: 'session-work',
+						cwd: '/test/project',
+						timestamp: '2026-09-14T00:00:00.000Z',
+					},
+				}),
+			].join('\n'),
+			'utf8'
+		);
+
+		const { CodexSessionStorage } = await import('../../../main/storage/codex-session-storage');
+		const storage = new CodexSessionStorage();
+
+		// Felipe's case: his transcripts live under a per-account CODEX_HOME, so
+		// a read of the default ~/.codex reports nothing at all for them.
+		expect(await storage.listSessions('/test/project')).toEqual([]);
+
+		const scoped = await storage.listSessions('/test/project', undefined, codexWorkAccountDir);
+		expect(scoped).toHaveLength(1);
+		// The storage canonicalizes the rollout's cwd, so route the expectation
+		// through the same primitive rather than hardcoding a POSIX literal.
+		expect(scoped[0].projectPath).toBe(path.resolve('/test/project'));
+	});
+
 	it('should be importable', async () => {
 		const { CodexSessionStorage } = await import('../../../main/storage/codex-session-storage');
 		expect(CodexSessionStorage).toBeDefined();
@@ -368,6 +408,220 @@ describe('CodexSessionStorage', () => {
 
 		const searchWhitespace = await storage.searchSessions('/test/project', '   ', 'all');
 		expect(searchWhitespace).toEqual([]);
+	});
+});
+
+describe('CopilotSessionStorage', () => {
+	let originalCopilotHome: string | undefined;
+	const copilotSessionStateDir = path.join(
+		'/tmp/maestro-session-storage-home',
+		'.copilot',
+		'session-state'
+	);
+
+	/** A second COPILOT_HOME account, used by the account fan-out test. */
+	const copilotWorkAccountDir = path.join('/tmp/maestro-session-storage-home', '.copilot-work');
+
+	async function writeCopilotSessionFixture(
+		sessionId: string,
+		workspaceContent: string,
+		eventsContent?: string
+	): Promise<void> {
+		const sessionDir = path.join(copilotSessionStateDir, sessionId);
+		await fs.mkdir(sessionDir, { recursive: true });
+		await fs.writeFile(path.join(sessionDir, 'workspace.yaml'), workspaceContent, 'utf8');
+		if (eventsContent !== undefined) {
+			await fs.writeFile(path.join(sessionDir, 'events.jsonl'), eventsContent, 'utf8');
+		}
+	}
+
+	beforeEach(async () => {
+		originalCopilotHome = process.env.COPILOT_HOME;
+		delete process.env.COPILOT_HOME;
+		await fs.rm(path.join('/tmp/maestro-session-storage-home', '.copilot'), {
+			recursive: true,
+			force: true,
+		});
+		await fs.rm(copilotWorkAccountDir, { recursive: true, force: true });
+	});
+
+	afterEach(async () => {
+		await fs.rm(path.join('/tmp/maestro-session-storage-home', '.copilot'), {
+			recursive: true,
+			force: true,
+		});
+		await fs.rm(copilotWorkAccountDir, { recursive: true, force: true });
+		if (originalCopilotHome === undefined) {
+			delete process.env.COPILOT_HOME;
+		} else {
+			process.env.COPILOT_HOME = originalCopilotHome;
+		}
+	});
+
+	it('should be importable', async () => {
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		expect(CopilotSessionStorage).toBeDefined();
+	});
+
+	it('should have copilot as agentId', async () => {
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+		expect(storage.agentId).toBe('copilot-cli');
+	});
+
+	it('should return empty results for non-existent projects', async () => {
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+
+		const sessions = await storage.listSessions('/test/nonexistent/project');
+		expect(sessions).toEqual([]);
+
+		const messages = await storage.readSessionMessages('/test/nonexistent/project', 'session-123');
+		expect(messages.messages).toEqual([]);
+		expect(messages.total).toBe(0);
+	});
+
+	it('reads a second COPILOT_HOME account only when asked for it', async () => {
+		const sessionDir = path.join(copilotWorkAccountDir, 'session-state', 'session-work');
+		await fs.mkdir(sessionDir, { recursive: true });
+		await fs.writeFile(
+			path.join(sessionDir, 'workspace.yaml'),
+			['id: session-work', 'cwd: /test/project', 'git_root: /test/project'].join('\n'),
+			'utf8'
+		);
+		await fs.writeFile(
+			path.join(sessionDir, 'events.jsonl'),
+			JSON.stringify({
+				type: 'assistant.message',
+				id: 'assistant-1',
+				timestamp: '2026-09-14T00:00:00.000Z',
+				data: { content: 'Ready', phase: 'final_answer' },
+			}),
+			'utf8'
+		);
+
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+
+		// The default account has no such session, so a merged read would be a
+		// silent undercount of this user's Copilot spend.
+		expect(await storage.listSessions('/test/project')).toEqual([]);
+
+		const scoped = await storage.listSessions('/test/project', undefined, copilotWorkAccountDir);
+		expect(scoped.map((session) => session.sessionId)).toEqual(['session-work']);
+	});
+
+	it('should return local events path for getSessionPath', async () => {
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+
+		const sessionPath = storage.getSessionPath('/test/project', 'session-123');
+		expect(sessionPath).toContain('.copilot');
+		expect(sessionPath).toContain('session-state');
+		expect(sessionPath).toContain('session-123');
+		expect(sessionPath).toContain('events.jsonl');
+	});
+
+	it('should return remote events path for getSessionPath with sshConfig', async () => {
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+
+		const sessionPath = storage.getSessionPath('/test/project', 'session-123', {
+			id: 'test-ssh',
+			name: 'Test SSH Server',
+			host: 'test-server.example.com',
+			port: 22,
+			username: 'testuser',
+			useSshConfig: false,
+			enabled: true,
+		});
+		expect(sessionPath).toBe('~/.copilot/session-state/session-123/events.jsonl');
+	});
+
+	it('should report delete as unsupported', async () => {
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+
+		const result = await storage.deleteMessagePair('/test/project', 'session-123', 'uuid-456');
+		expect(result.success).toBe(false);
+		expect(result.error).toContain('not supported');
+	});
+
+	it('should parse camelCase workspace metadata keys when loading sessions', async () => {
+		await writeCopilotSessionFixture(
+			'session-camel',
+			[
+				'id: session-camel',
+				'cwd: /test/project',
+				'gitRoot: /test/project',
+				'createdAt: 2026-03-13T00:00:00.000Z',
+				'updatedAt: 2026-03-13T00:05:00.000Z',
+				'summary: Camel case metadata',
+			].join('\n'),
+			[
+				JSON.stringify({
+					type: 'user.message',
+					id: 'user-1',
+					timestamp: '2026-03-13T00:00:00.000Z',
+					data: { content: 'Hello from Copilot' },
+				}),
+			].join('\n')
+		);
+
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+		const sessions = await storage.listSessions('/test/project');
+
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]).toEqual(
+			expect.objectContaining({
+				sessionId: 'session-camel',
+				projectPath: '/test/project',
+				timestamp: '2026-03-13T00:00:00.000Z',
+				modifiedAt: '2026-03-13T00:05:00.000Z',
+				firstMessage: 'Hello from Copilot',
+				messageCount: 1,
+			})
+		);
+	});
+
+	it('should skip missing, empty, and malformed Copilot event logs', async () => {
+		await writeCopilotSessionFixture(
+			'session-valid',
+			['id: session-valid', 'cwd: /test/project', 'git_root: /test/project'].join('\n'),
+			[
+				JSON.stringify({
+					type: 'assistant.message',
+					id: 'assistant-1',
+					timestamp: '2026-03-13T00:00:00.000Z',
+					data: { content: 'Ready', phase: 'final_answer' },
+				}),
+			].join('\n')
+		);
+
+		await writeCopilotSessionFixture(
+			'session-empty',
+			['id: session-empty', 'cwd: /test/project', 'git_root: /test/project'].join('\n'),
+			'   \n'
+		);
+
+		await writeCopilotSessionFixture(
+			'session-malformed',
+			['id: session-malformed', 'cwd: /test/project', 'git_root: /test/project'].join('\n'),
+			'not-json\nstill-not-json\n'
+		);
+
+		await writeCopilotSessionFixture(
+			'session-missing-events',
+			['id: session-missing-events', 'cwd: /test/project', 'git_root: /test/project'].join('\n')
+		);
+
+		const { CopilotSessionStorage } = await import('../../../main/storage/copilot-session-storage');
+		const storage = new CopilotSessionStorage();
+		const sessions = await storage.listSessions('/test/project');
+
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]?.sessionId).toBe('session-valid');
 	});
 });
 
@@ -453,7 +707,6 @@ describe('CodexSessionStorage SSH Remote Support', () => {
 		host: 'test-server.example.com',
 		port: 22,
 		username: 'testuser',
-		privateKeyPath: '',
 		useSshConfig: false,
 		enabled: true,
 	};
@@ -796,7 +1049,6 @@ describe('OpenCodeSessionStorage SSH Remote Support', () => {
 		host: 'test-server.example.com',
 		port: 22,
 		username: 'testuser',
-		privateKeyPath: '',
 		useSshConfig: false,
 		enabled: true,
 	};
@@ -1111,7 +1363,6 @@ describe('FactoryDroidSessionStorage SSH Remote Support', () => {
 		host: 'test-server.example.com',
 		port: 22,
 		username: 'testuser',
-		privateKeyPath: '',
 		useSshConfig: false,
 		enabled: true,
 	};
@@ -1558,7 +1809,6 @@ describe('SSH Config Integration Flow Verification', () => {
 		host: 'dev-server.internal.example.com',
 		port: 22,
 		username: 'developer',
-		privateKeyPath: '',
 		useSshConfig: true,
 		enabled: true,
 	};
@@ -1570,7 +1820,6 @@ describe('SSH Config Integration Flow Verification', () => {
 		host: '192.168.1.100',
 		port: 2222,
 		username: 'admin',
-		privateKeyPath: '',
 		useSshConfig: false,
 		enabled: true,
 	};
@@ -1832,7 +2081,6 @@ describe('SSH Config Integration Flow Verification', () => {
 				host: 'full.example.com',
 				port: 22,
 				username: 'fulluser',
-				privateKeyPath: '',
 				useSshConfig: true,
 				enabled: true,
 			};
@@ -1860,7 +2108,6 @@ describe('SSH Config Integration Flow Verification', () => {
 				host: 'min.example.com',
 				port: 22,
 				username: 'user',
-				privateKeyPath: '',
 				useSshConfig: false,
 				enabled: true,
 			};

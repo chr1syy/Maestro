@@ -10,8 +10,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { FileText, Trash2, ArrowRight } from 'lucide-react';
 import type { Theme } from '../../types';
-import { useLayerStack } from '../../contexts/LayerStackContext';
+import { useModalLayer } from '../../hooks/ui/useModalLayer';
+import { useResizableModal } from '../../hooks/ui/useResizableModal';
 import { MODAL_PRIORITIES } from '../../constants/modalPriorities';
+import { logger } from '../../utils/logger';
+import { ResizeHandles } from '../ui/ResizeHandles';
 
 interface ExistingDocsModalProps {
 	theme: Theme;
@@ -38,8 +41,6 @@ export function ExistingDocsModal({
 	onContinue,
 	onCancel,
 }: ExistingDocsModalProps): JSX.Element {
-	const { registerLayer, unregisterLayer, updateLayerHandler } = useLayerStack();
-	const layerIdRef = useRef<string>();
 	const continueButtonRef = useRef<HTMLButtonElement>(null);
 	const onCancelRef = useRef(onCancel);
 	onCancelRef.current = onCancel;
@@ -52,36 +53,14 @@ export function ExistingDocsModal({
 		continueButtonRef.current?.focus();
 	}, []);
 
-	// Register with layer stack
-	useEffect(() => {
-		const id = registerLayer({
-			type: 'modal',
-			priority: MODAL_PRIORITIES.EXISTING_AUTORUN_DOCS,
-			blocksLowerLayers: true,
-			capturesFocus: true,
-			focusTrap: 'strict',
-			ariaLabel: 'Existing Playbook Documents Found',
-			onEscape: () => onCancelRef.current(),
-		});
-		layerIdRef.current = id;
-		return () => {
-			if (layerIdRef.current) {
-				unregisterLayer(layerIdRef.current);
-			}
-		};
-	}, [registerLayer, unregisterLayer]);
-
-	// Update escape handler when onCancel changes
-	useEffect(() => {
-		if (layerIdRef.current) {
-			updateLayerHandler(layerIdRef.current, () => onCancelRef.current());
-		}
-	}, [onCancel, updateLayerHandler]);
+	useModalLayer(MODAL_PRIORITIES.EXISTING_AUTORUN_DOCS, 'Existing Playbook Documents Found', () =>
+		onCancelRef.current()
+	);
 
 	// Handle keyboard navigation
 	const handleKeyDown = (e: React.KeyboardEvent) => {
-		if (e.key === 'Tab') {
-			// Let natural tab flow work
+		if (e.key === 'Tab' || e.key === 'Escape') {
+			// Let Tab flow naturally, let Escape reach the layer stack
 			return;
 		}
 		e.stopPropagation();
@@ -104,13 +83,18 @@ export function ExistingDocsModal({
 			// Success - notify parent
 			onStartFresh();
 		} catch (error) {
-			console.error('Failed to delete existing docs:', error);
+			logger.error('Failed to delete existing docs:', undefined, error);
 			setDeleteError(
 				error instanceof Error ? error.message : 'Failed to delete existing documents'
 			);
 			setIsDeleting(false);
 		}
 	};
+	const resizableModal = useResizableModal({
+		resizeKey: 'existing-docs',
+		defaultSize: { width: 520, height: 580 },
+		minSize: { width: 360, height: 320 },
+	});
 
 	return (
 		<div
@@ -123,12 +107,22 @@ export function ExistingDocsModal({
 			onKeyDown={handleKeyDown}
 		>
 			<div
-				className="w-[520px] border rounded-xl shadow-2xl overflow-hidden"
+				ref={resizableModal.modalRef}
+				className="relative border rounded-xl shadow-2xl overflow-hidden flex flex-col"
 				style={{
+					...resizableModal.style,
 					backgroundColor: theme.colors.bgSidebar,
 					borderColor: theme.colors.border,
 				}}
+				data-modal-resize-key="existing-docs"
 			>
+				<ResizeHandles
+					onResizeStart={resizableModal.onResizeStart}
+					accentColor={theme.colors.accent}
+					onResetSize={resizableModal.onResetSize}
+					canReset={resizableModal.canReset}
+				/>
+
 				{/* Header */}
 				<div
 					className="p-4 border-b flex items-center gap-3"
@@ -147,7 +141,7 @@ export function ExistingDocsModal({
 				</div>
 
 				{/* Content */}
-				<div className="p-6">
+				<div className="p-6 flex-1 min-h-0 overflow-y-auto">
 					<p
 						id="existing-docs-description"
 						className="text-sm leading-relaxed"

@@ -37,7 +37,12 @@ vi.mock('crypto', () => ({
 	}),
 }));
 
-import { extractPendingTasks, createCueTaskScanner } from '../../../main/cue/cue-task-scanner';
+import {
+	extractPendingTasks,
+	createCueTaskScanner,
+	scanTaskFilesNow,
+	buildTaskPendingPayload,
+} from '../../../main/cue/cue-task-scanner';
 
 describe('cue-task-scanner', () => {
 	describe('extractPendingTasks', () => {
@@ -107,6 +112,86 @@ describe('cue-task-scanner', () => {
 		});
 	});
 
+	describe('buildTaskPendingPayload', () => {
+		it('maps a file and its tasks into the task.pending payload shape', () => {
+			const tasks = [
+				{ line: 2, text: 'First' },
+				{ line: 5, text: 'Second' },
+			];
+			const payload = buildTaskPendingPayload(
+				'/project/research.md',
+				'research.md',
+				'- [ ] First\n',
+				tasks
+			);
+			expect(payload).toMatchObject({
+				path: '/project/research.md',
+				filename: 'research.md',
+				directory: '/project',
+				extension: '.md',
+				taskCount: 2,
+				taskList: 'L2: First\nL5: Second',
+				tasks,
+			});
+		});
+
+		it('truncates content to 10K chars', () => {
+			const long = 'x'.repeat(20000);
+			const payload = buildTaskPendingPayload('/p/a.md', 'a.md', long, [{ line: 1, text: 't' }]);
+			expect((payload.content as string).length).toBe(10000);
+		});
+	});
+
+	describe('scanTaskFilesNow', () => {
+		beforeEach(() => {
+			vi.clearAllMocks();
+		});
+
+		it('returns files that currently have pending tasks, with no hash dedup', () => {
+			mockReaddirSync.mockImplementation((_dir: string, opts: { withFileTypes: boolean }) => {
+				if (opts?.withFileTypes) {
+					return [{ name: 'research.md', isDirectory: () => false, isFile: () => true }];
+				}
+				return [];
+			});
+			mockReadFileSync.mockReturnValue('- [ ] open task\n');
+
+			const result = scanTaskFilesNow('/project', '**/*.md');
+			expect(result).toHaveLength(1);
+			expect(result[0].relPath).toBe('research.md');
+			expect(result[0].tasks).toHaveLength(1);
+			expect(result[0].tasks[0].text).toBe('open task');
+
+			// Calling again returns the same result - unlike the polling scanner,
+			// there is no seeding or content-hash suppression.
+			expect(scanTaskFilesNow('/project', '**/*.md')).toHaveLength(1);
+		});
+
+		it('skips files with no pending tasks', () => {
+			mockReaddirSync.mockImplementation((_dir: string, opts: { withFileTypes: boolean }) => {
+				if (opts?.withFileTypes) {
+					return [{ name: 'done.md', isDirectory: () => false, isFile: () => true }];
+				}
+				return [];
+			});
+			mockReadFileSync.mockReturnValue('- [x] done\n');
+
+			expect(scanTaskFilesNow('/project', '**/*.md')).toHaveLength(0);
+		});
+
+		it('skips files that do not match the watch glob', () => {
+			mockReaddirSync.mockImplementation((_dir: string, opts: { withFileTypes: boolean }) => {
+				if (opts?.withFileTypes) {
+					return [{ name: 'notes.txt', isDirectory: () => false, isFile: () => true }];
+				}
+				return [];
+			});
+			mockReadFileSync.mockReturnValue('- [ ] open\n');
+
+			expect(scanTaskFilesNow('/project', '**/*.md')).toHaveLength(0);
+		});
+	});
+
 	describe('createCueTaskScanner', () => {
 		beforeEach(() => {
 			vi.clearAllMocks();
@@ -172,7 +257,7 @@ describe('cue-task-scanner', () => {
 			// Advance past initial delay
 			await vi.advanceTimersByTimeAsync(3000);
 
-			// First scan seeds hashes — should NOT fire events
+			// First scan seeds hashes - should NOT fire events
 			expect(onEvent).not.toHaveBeenCalled();
 		});
 
@@ -300,6 +385,88 @@ describe('cue-task-scanner', () => {
 			expect(onLog).toHaveBeenCalledWith('error', expect.stringContaining('Task scan error'));
 
 			cleanup();
+		});
+
+		// PR-B 1.4: visibility-aware pause
+		describe('isActive gate', () => {
+			it('skips the directory walk when isActive returns false', async () => {
+				const onEvent = vi.fn();
+				let active = false;
+
+				const cleanup = createCueTaskScanner({
+					watchGlob: '**/*.md',
+					pollMinutes: 1,
+					projectRoot: '/project',
+					onEvent,
+					onLog: vi.fn(),
+					triggerName: 'test-scanner',
+					isActive: () => active,
+				});
+
+				await vi.advanceTimersByTimeAsync(3000);
+
+				expect(onEvent).not.toHaveBeenCalled();
+				// Walk never happened - readdirSync should not have been called
+				expect(mockReaddirSync).not.toHaveBeenCalled();
+				expect(mockReadFileSync).not.toHaveBeenCalled();
+
+				cleanup();
+			});
+
+			it('resumes scanning on the next interval when isActive flips back to true', async () => {
+				const onEvent = vi.fn();
+				let active = false;
+
+				mockReaddirSync.mockImplementation((_dir: string, opts: { withFileTypes: boolean }) => {
+					if (opts?.withFileTypes) {
+						return [{ name: 'task.md', isDirectory: () => false, isFile: () => true }];
+					}
+					return [];
+				});
+				mockReadFileSync.mockReturnValue('- [ ] task\n');
+
+				const cleanup = createCueTaskScanner({
+					watchGlob: '**/*.md',
+					pollMinutes: 1,
+					projectRoot: '/project',
+					onEvent,
+					onLog: vi.fn(),
+					triggerName: 'test-scanner',
+					isActive: () => active,
+				});
+
+				// Initial scan happens but is paused
+				await vi.advanceTimersByTimeAsync(3000);
+				expect(mockReaddirSync).not.toHaveBeenCalled();
+
+				// Activate - next interval tick should now scan
+				active = true;
+				await vi.advanceTimersByTimeAsync(60_000); // pollMinutes * 60_000 = 1 min
+				expect(mockReaddirSync).toHaveBeenCalled();
+
+				cleanup();
+			});
+
+			it('defaults to always-active when isActive is omitted', async () => {
+				const onEvent = vi.fn();
+
+				mockReaddirSync.mockImplementation(() => []);
+
+				const cleanup = createCueTaskScanner({
+					watchGlob: '**/*.md',
+					pollMinutes: 1,
+					projectRoot: '/project',
+					onEvent,
+					onLog: vi.fn(),
+					triggerName: 'test-scanner',
+					// No isActive - should behave as always-active.
+				});
+
+				await vi.advanceTimersByTimeAsync(3000);
+				expect(mockReaddirSync).toHaveBeenCalled();
+
+				cleanup();
+			});
 		});
 	});
 });

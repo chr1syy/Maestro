@@ -4,12 +4,12 @@
  * Replaces the imperative if/else ladder that previously lived in
  * `cue-session-runtime-service.ts:131-146`. The runtime now iterates a
  * subscription list, calls `createTriggerSource(eventType, ctx)`, and pushes
- * the returned source onto the session's `triggerSources` array — no more
+ * the returned source onto the session's `triggerSources` array - no more
  * per-event-type setup functions.
  *
  * Returns `null` when:
  *  - the event type has no corresponding source (e.g. `agent.completed`,
- *    `app.startup` — those are handled directly by the runtime, not via a
+ *    `app.startup` - those are handled directly by the runtime, not via a
  *    timer/watcher)
  *  - the subscription is missing required fields (e.g. `time.heartbeat`
  *    without `interval_minutes`, `file.changed` without `watch`)
@@ -21,9 +21,11 @@ import type { CueEventType } from '../cue-types';
 import { createCueFileWatcherTriggerSource } from './cue-file-watcher-trigger-source';
 import { createCueGitHubPollerTriggerSource } from './cue-github-poller-trigger-source';
 import { createCueHeartbeatTriggerSource } from './cue-heartbeat-trigger-source';
+import { createCueOnceTriggerSource } from './cue-once-trigger-source';
 import { createCueScheduledTriggerSource } from './cue-scheduled-trigger-source';
 import { createCueTaskScannerTriggerSource } from './cue-task-scanner-trigger-source';
 import type { CueTriggerSource, CueTriggerSourceContext } from './cue-trigger-source';
+import { createCueWebhookTriggerSource } from './cue-webhook-trigger-source';
 
 export function createTriggerSource(
 	eventType: CueEventType,
@@ -34,17 +36,23 @@ export function createTriggerSource(
 			return createCueHeartbeatTriggerSource(ctx);
 		case 'time.scheduled':
 			return createCueScheduledTriggerSource(ctx);
+		case 'time.once':
+			return createCueOnceTriggerSource(ctx);
 		case 'file.changed':
 			return createCueFileWatcherTriggerSource(ctx);
 		case 'task.pending':
 			return createCueTaskScannerTriggerSource(ctx);
 		case 'github.pull_request':
 		case 'github.issue':
+		case 'github.label':
 			return createCueGitHubPollerTriggerSource(ctx);
+		case 'webhook.received':
+			return createCueWebhookTriggerSource(ctx);
 		case 'agent.completed':
 		case 'app.startup':
-			// These are not timer/watcher-driven — the runtime handles them
-			// directly via the completion service / startup loop.
+		case 'cli.trigger':
+			// These are not timer/watcher-driven - the runtime handles them
+			// directly via the completion service / startup loop / CLI command.
 			return null;
 		default: {
 			const unsupported: never = eventType;

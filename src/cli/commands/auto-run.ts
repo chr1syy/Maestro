@@ -2,18 +2,28 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { withMaestroClient, resolveSessionId } from '../services/maestro-client';
-import { resolveAgentId } from '../services/storage';
+import { withMaestroClient, resolveTargetSessionId } from '../services/maestro-client';
 
 interface AutoRunOptions {
 	agent?: string;
-	session?: string;
 	prompt?: string;
 	loop?: boolean;
 	maxLoops?: string;
 	saveAs?: string;
 	launch?: boolean;
 	resetOnCompletion?: boolean;
+	worktree?: boolean;
+	branch?: string;
+	baseBranch?: string;
+	worktreePath?: string;
+	createPr?: boolean;
+	prTargetBranch?: string;
+	// Run-scoped overrides: they win over the agent's configured model/effort for
+	// this run only and are never written back to the session.
+	model?: string;
+	effort?: string;
+	/** Skip the documents' MAESTRO:MODEL markers for this run (--ignore-model-hints). */
+	ignoreModelHints?: boolean;
 }
 
 export async function autoRun(docs: string[], options: AutoRunOptions): Promise<void> {
@@ -40,22 +50,7 @@ export async function autoRun(docs: string[], options: AutoRunOptions): Promise<
 		resolvedPaths.push(absolutePath);
 	}
 
-	if (options.session) {
-		console.warn('Warning: --session is deprecated for auto-run, use --agent instead');
-	}
-
-	let sessionId: string;
-	const agentId = options.agent || options.session;
-	if (agentId) {
-		try {
-			sessionId = resolveAgentId(agentId);
-		} catch (error) {
-			console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-			return process.exit(1);
-		}
-	} else {
-		sessionId = resolveSessionId({});
-	}
+	const sessionId = resolveTargetSessionId(options.agent);
 
 	const documents = resolvedPaths.map((d) => ({
 		filename: d,
@@ -75,6 +70,57 @@ export async function autoRun(docs: string[], options: AutoRunOptions): Promise<
 		process.exit(1);
 	}
 
+	// Worktree configuration: requires --launch and --branch.
+	// The desktop app handles worktree creation, branch checkout, and (optionally)
+	// PR creation on completion via the same code path used by the Auto Run UI.
+	let worktree:
+		| {
+				enabled: boolean;
+				path: string;
+				branchName: string;
+				baseBranch: string;
+				createPROnCompletion: boolean;
+				prTargetBranch: string;
+		  }
+		| undefined;
+	if (options.worktree) {
+		if (!options.launch) {
+			console.error('Error: --worktree requires --launch');
+			process.exit(1);
+		} else if (!options.branch || options.branch.trim() === '') {
+			console.error('Error: --worktree requires --branch <name>');
+			process.exit(1);
+		} else if (!options.worktreePath || options.worktreePath.trim() === '') {
+			console.error('Error: --worktree requires --worktree-path <path>');
+			process.exit(1);
+		} else {
+			worktree = {
+				enabled: true,
+				path: path.resolve(options.worktreePath),
+				branchName: options.branch.trim(),
+				baseBranch: options.baseBranch?.trim() || '',
+				createPROnCompletion: options.createPr || false,
+				prTargetBranch: options.prTargetBranch?.trim() || '',
+			};
+		}
+	} else if (
+		options.branch ||
+		options.baseBranch ||
+		options.worktreePath ||
+		options.createPr ||
+		options.prTargetBranch
+	) {
+		console.error(
+			'Error: --branch, --base-branch, --worktree-path, --create-pr, and --pr-target-branch require --worktree'
+		);
+		process.exit(1);
+	}
+
+	// Run-scoped model/effort overrides. Sent only when set so an omitted flag
+	// leaves the agent's configured default untouched.
+	const runModel = options.model?.trim() || undefined;
+	const runEffort = options.effort?.trim() || undefined;
+
 	try {
 		const result = await withMaestroClient(async (client) => {
 			return client.sendCommand<{
@@ -92,6 +138,10 @@ export async function autoRun(docs: string[], options: AutoRunOptions): Promise<
 					maxLoops,
 					saveAsPlaybook: options.saveAs,
 					launch: options.launch,
+					worktree,
+					...(runModel && { model: runModel }),
+					...(runEffort && { effort: runEffort }),
+					...(options.ignoreModelHints && { ignoreModelHints: true }),
 				},
 				'configure_auto_run_result'
 			);

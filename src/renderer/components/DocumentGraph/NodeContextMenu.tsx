@@ -73,7 +73,7 @@ export function NodeContextMenu({
 	}, []);
 
 	// Measure menu and adjust position to stay within viewport
-	const { left, top, ready } = useContextMenuPosition(menuRef, x, y);
+	const { left, top, maxHeight, ready } = useContextMenuPosition(menuRef, x, y);
 
 	const isDocument = nodeData.nodeType === 'document';
 	const isExternal = nodeData.nodeType === 'external';
@@ -115,14 +115,19 @@ export function NodeContextMenu({
 	return (
 		<div
 			ref={menuRef}
-			className="fixed z-[10000] py-1 rounded-md shadow-xl border"
+			className="fixed z-[10000] py-1 rounded-md shadow-xl border whitespace-nowrap"
 			style={{
 				left,
 				top,
+				// A menu taller than the viewport pins to the top edge and runs off
+				// the bottom; the container is overflow-hidden, so those items are
+				// simply unreachable. Scroll instead of clipping.
+				maxHeight,
+				overflowY: 'auto',
 				opacity: ready ? 1 : 0,
 				backgroundColor: theme.colors.bgSidebar,
 				borderColor: theme.colors.border,
-				minWidth: '160px',
+				minWidth: '10rem',
 			}}
 		>
 			{/* Open */}

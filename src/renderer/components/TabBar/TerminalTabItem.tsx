@@ -1,9 +1,29 @@
 import React, { useCallback, memo, useMemo } from 'react';
-import { createPortal } from 'react-dom';
-import { X, Pencil, Terminal, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import {
+	X,
+	Pencil,
+	Terminal,
+	ChevronsLeft,
+	Clock,
+	ChevronsRight,
+	Clipboard,
+	ArrowRightCircle,
+	Share2,
+	Play,
+	RotateCw,
+} from 'lucide-react';
 import type { TerminalTab, Theme } from '../../types';
 import { getTerminalTabDisplayName } from '../../utils/terminalTabHelpers';
 import { useTabHoverOverlay } from '../../hooks/tabs/useTabHoverOverlay';
+import { isCoarsePointer } from '../../utils/touch';
+import { safeClipboardWrite } from '../../utils/clipboard';
+import { LongPressable } from '../shared/LongPressable';
+import { TabOverlayPortal } from './TabOverlayPortal';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { useTabStore } from '../../stores/tabStore';
+import { flashCopiedToClipboard } from '../../utils/flashCopiedToClipboard';
+import { captureException } from '../../utils/sentry';
+import { ShortcutHint, shortcutSuffix } from '../ui/ShortcutHint';
 
 /**
  * Props for the TerminalTabItem component.
@@ -25,6 +45,8 @@ export interface TerminalTabItemProps {
 	isDragging: boolean;
 	isDragOver: boolean;
 	registerRef?: (el: HTMLDivElement | null) => void;
+	/** Park this tab until a chosen moment. Omitted when snoozing is unavailable. */
+	onSnooze?: (tabId: string) => void;
 	onMoveToFirst?: (tabId: string) => void;
 	onMoveToLast?: (tabId: string) => void;
 	isFirstTab?: boolean;
@@ -32,6 +54,14 @@ export interface TerminalTabItemProps {
 	onCloseOtherTabs?: (tabId: string) => void;
 	onCloseTabsLeft?: (tabId: string) => void;
 	onCloseTabsRight?: (tabId: string) => void;
+	/** Copy the full terminal buffer to the clipboard. */
+	onCopyBuffer?: (tabId: string) => void;
+	/** Publish the terminal buffer as a GitHub Gist. */
+	onPublishBufferGist?: (tabId: string) => void;
+	/** Send the terminal buffer to another agent. */
+	onSendBufferToAgent?: (tabId: string) => void;
+	/** Open the startup-command configuration modal for this tab. */
+	onConfigureStartupCommand?: (tabId: string) => void;
 	totalTabs?: number;
 	tabIndex?: number;
 	shortcutHint?: number | null;
@@ -57,6 +87,7 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 	isDragging,
 	isDragOver,
 	registerRef,
+	onSnooze,
 	onMoveToFirst,
 	onMoveToLast,
 	isFirstTab,
@@ -64,6 +95,10 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 	onCloseOtherTabs,
 	onCloseTabsLeft,
 	onCloseTabsRight,
+	onCopyBuffer,
+	onPublishBufferGist,
+	onSendBufferToAgent,
+	onConfigureStartupCommand,
 	totalTabs,
 	tabIndex,
 	shortcutHint,
@@ -76,12 +111,46 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 		setOverlayRef,
 		positionReady,
 		setTabRef,
+		openOverlay,
 		handleMouseEnter,
 		handleMouseLeave,
 		overlayMouseEnter,
 		overlayMouseLeave,
 		isOverOverlayRef,
 	} = useTabHoverOverlay({ registerRef });
+
+	const tabShortcuts = useSettingsStore((s) => s.tabShortcuts);
+	const coworkingEnabled = useSettingsStore((s) => s.encoreFeatures?.coworking ?? false);
+	const coworkingPillId =
+		coworkingEnabled && typeof tab.coworkingId === 'number' ? `term:${tab.coworkingId}` : null;
+	const handleCoworkingPillClick = useCallback(
+		async (e: React.MouseEvent) => {
+			if (!coworkingPillId) return;
+			e.stopPropagation();
+			if (await safeClipboardWrite(coworkingPillId)) {
+				flashCopiedToClipboard();
+				return;
+			}
+			// safeClipboardWrite has already tried every path it has (browser API,
+			// host bridge, execCommand) and swallowed their errors, so the cause is
+			// gone by the time we get here. All that is left to report is that the
+			// copy never landed; capture that so a clipboard broken for this pill
+			// still shows up in production instead of failing silently.
+			void captureException(new Error('clipboard write refused'), {
+				extra: { context: 'TerminalTabItem.copyCoworkingId', coworkingPillId },
+			});
+		},
+		[coworkingPillId]
+	);
+	const restartTerminalTab = useTabStore((s) => s.restartTerminalTab);
+
+	const handleRestartClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			restartTerminalTab(tab.id);
+		},
+		[restartTerminalTab, tab.id]
+	);
 
 	const handleMouseDown = useCallback(
 		(e: React.MouseEvent) => {
@@ -105,7 +174,14 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 		[onClose, tab.id]
 	);
 
-	const handleTabSelect = useCallback(() => onSelect(tab.id), [onSelect, tab.id]);
+	// A tap selects, on any tab. Touch has no hover, so the action overlay opens
+	// on a LONG-PRESS instead (the chip is a LongPressable below). Mouse/keyboard
+	// unchanged.
+	const handleTabSelect = useCallback(() => {
+		onSelect(tab.id);
+	}, [onSelect, tab.id]);
+	// Coarse pointer: long-press owns the gesture, so native drag is off.
+	const coarse = isCoarsePointer();
 
 	const handleTabDragStart = useCallback(
 		(e: React.DragEvent) => onDragStart(tab.id, e),
@@ -126,6 +202,15 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 		},
 		[onRename, tab.id, setOverlayOpen]
 	);
+	const handleSnoozeClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onSnooze?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onSnooze, tab.id, setOverlayOpen]
+	);
+
 	const handleMoveToFirstClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
@@ -153,26 +238,61 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 	const handleCloseOtherTabsClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tab.id);
 			onCloseOtherTabs?.(tab.id);
 			setOverlayOpen(false);
 		},
-		[onCloseOtherTabs, tab.id, setOverlayOpen]
+		[onSelect, onCloseOtherTabs, tab.id, setOverlayOpen]
 	);
 	const handleCloseTabsLeftClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tab.id);
 			onCloseTabsLeft?.(tab.id);
 			setOverlayOpen(false);
 		},
-		[onCloseTabsLeft, tab.id, setOverlayOpen]
+		[onSelect, onCloseTabsLeft, tab.id, setOverlayOpen]
 	);
 	const handleCloseTabsRightClick = useCallback(
 		(e: React.MouseEvent) => {
 			e.stopPropagation();
+			onSelect(tab.id);
 			onCloseTabsRight?.(tab.id);
 			setOverlayOpen(false);
 		},
-		[onCloseTabsRight, tab.id, setOverlayOpen]
+		[onSelect, onCloseTabsRight, tab.id, setOverlayOpen]
+	);
+	const handleCopyBufferClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onCopyBuffer?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onCopyBuffer, tab.id, setOverlayOpen]
+	);
+	const handlePublishBufferGistClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onPublishBufferGist?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onPublishBufferGist, tab.id, setOverlayOpen]
+	);
+	const handleSendBufferToAgentClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onSendBufferToAgent?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onSendBufferToAgent, tab.id, setOverlayOpen]
+	);
+	const handleConfigureStartupCommandClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onConfigureStartupCommand?.(tab.id);
+			setOverlayOpen(false);
+		},
+		[onConfigureStartupCommand, tab.id, setOverlayOpen]
 	);
 
 	// Determine icon state color
@@ -218,8 +338,9 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 	);
 
 	return (
-		<div
-			ref={setTabRef}
+		<LongPressable
+			innerRef={setTabRef}
+			onLongPress={openOverlay}
 			data-tab-id={tab.id}
 			tabIndex={0}
 			role="tab"
@@ -231,7 +352,10 @@ export const TerminalTabItem = memo(function TerminalTabItem({
         ${isDragOver ? 'ring-2 ring-inset' : ''}
       `}
 			style={tabStyle}
-			title={tab.cwd ? `${tab.shellType} — ${tab.cwd}` : tab.shellType}
+			title={
+				(tab.cwd ? `${tab.shellType} - ${tab.cwd}` : tab.shellType) +
+				(tab.startupCommand ? `\nStartup: ${tab.startupCommand}` : '')
+			}
 			onClick={handleTabSelect}
 			onFocus={handleMouseEnter}
 			onBlur={() => {
@@ -250,7 +374,7 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 			onMouseDown={handleMouseDown}
 			onMouseEnter={handleMouseEnter}
 			onMouseLeave={handleMouseLeave}
-			draggable
+			draggable={!coarse}
 			onDragStart={handleTabDragStart}
 			onDragOver={handleTabDragOver}
 			onDragEnd={onDragEnd}
@@ -259,7 +383,7 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 			{/* Shortcut hint badge */}
 			{shortcutHint !== null && shortcutHint !== undefined && (
 				<span
-					className="w-4 h-4 flex items-center justify-center rounded text-[10px] font-medium shrink-0 opacity-50"
+					className="w-4 h-4 flex items-center justify-center rounded text-2xs font-medium shrink-0 opacity-50"
 					style={{ backgroundColor: theme.colors.border, color: theme.colors.textMain }}
 				>
 					{shortcutHint}
@@ -269,18 +393,46 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 			{/* Terminal icon with state color */}
 			<Terminal className="w-3.5 h-3.5 shrink-0" style={{ color: iconColor }} />
 
+			{/* Startup command marker - signals the tab will auto-run a command on
+				 next PTY spawn. Subtle accent-colored Play icon next to the terminal icon. */}
+			{tab.startupCommand && (
+				<Play
+					className="w-3 h-3 shrink-0"
+					style={{ color: theme.colors.accent, opacity: 0.85 }}
+					aria-label={`Startup command: ${tab.startupCommand}`}
+				/>
+			)}
+
 			{/* Tab display name */}
 			<span
-				className={`text-xs font-medium ${isActive ? 'whitespace-nowrap' : 'truncate max-w-[150px]'}`}
+				data-tab-label
+				className="text-xs font-medium whitespace-nowrap"
 				style={{ color: isActive ? theme.colors.textMain : theme.colors.textDim }}
 			>
 				{displayName}
 			</span>
 
-			{/* Exit code badge — only when exited with non-zero code */}
+			{/* Coworking id pill - agents address terminals via this id (e.g. "term:3"). Click to copy. */}
+			{coworkingPillId && (
+				<button
+					type="button"
+					onClick={handleCoworkingPillClick}
+					className="px-1 py-px rounded text-3xs font-mono shrink-0 transition-colors hover:bg-white/10"
+					title={`Coworking id - click to copy "${coworkingPillId}"`}
+					style={{
+						backgroundColor: theme.colors.bgActivity,
+						color: theme.colors.textDim,
+						border: `1px solid ${theme.colors.border}`,
+					}}
+				>
+					{coworkingPillId}
+				</button>
+			)}
+
+			{/* Exit code badge - only when exited with non-zero code */}
 			{tab.state === 'exited' && (tab.exitCode ?? 0) !== 0 && (
 				<span
-					className="px-1 rounded text-[9px] font-semibold shrink-0"
+					className="px-1 rounded text-3xs font-semibold shrink-0"
 					style={{
 						backgroundColor: theme.colors.error + '30',
 						color: theme.colors.error,
@@ -292,149 +444,237 @@ export const TerminalTabItem = memo(function TerminalTabItem({
 				</span>
 			)}
 
-			{/* Close button — visible on hover or active */}
+			{/* Restart button - only for an exited terminal, so the tab is recoverable
+				 (e.g. after an SSH drop) instead of being a dead husk. */}
+			{tab.state === 'exited' && (
+				<button
+					onClick={handleRestartClick}
+					className="p-0.5 rounded hover:bg-white/10 transition-colors shrink-0"
+					title="Restart terminal"
+				>
+					<RotateCw className="w-3 h-3" style={{ color: theme.colors.accent }} />
+				</button>
+			)}
+
+			{/* Close button - visible on hover or active */}
 			{(isHovered || isActive) && (
 				<button
 					onClick={handleCloseClick}
+					data-tab-close
 					className="p-0.5 rounded hover:bg-white/10 transition-colors shrink-0"
-					title="Close tab"
+					title={`Close tab${shortcutSuffix(tabShortcuts.closeTab?.keys)}`}
 				>
 					<X className="w-3 h-3" style={{ color: theme.colors.textDim }} />
 				</button>
 			)}
 
-			{/* Hover overlay with tab actions */}
-			{overlayOpen &&
-				overlayPosition &&
-				createPortal(
-					<div
-						ref={setOverlayRef}
-						className="fixed z-[100]"
-						style={{
-							top: overlayPosition.top,
-							left: overlayPosition.left,
-							opacity: positionReady ? 1 : 0,
-						}}
-						onClick={(e) => e.stopPropagation()}
-						onMouseEnter={overlayMouseEnter}
-						onMouseLeave={overlayMouseLeave}
-					>
-						<div
-							className="shadow-xl overflow-hidden"
-							style={{
-								backgroundColor: theme.colors.bgSidebar,
-								borderLeft: `1px solid ${theme.colors.border}`,
-								borderRight: `1px solid ${theme.colors.border}`,
-								borderBottom: `1px solid ${theme.colors.border}`,
-								borderBottomLeftRadius: '8px',
-								borderBottomRightRadius: '8px',
-								minWidth: '200px',
-							}}
+			{/* Hover / long-press overlay with tab actions - a portal (anchored popover
+			    on desktop, bottom sheet on a phone) */}
+			<TabOverlayPortal
+				open={overlayOpen}
+				position={overlayPosition}
+				positionReady={positionReady}
+				setOverlayRef={setOverlayRef}
+				onMouseEnter={overlayMouseEnter}
+				onMouseLeave={overlayMouseLeave}
+				onClose={() => setOverlayOpen(false)}
+				theme={theme}
+			>
+				<div
+					className="shadow-xl overflow-hidden whitespace-nowrap"
+					style={{
+						backgroundColor: theme.colors.bgSidebar,
+						borderLeft: `1px solid ${theme.colors.border}`,
+						borderRight: `1px solid ${theme.colors.border}`,
+						borderBottom: `1px solid ${theme.colors.border}`,
+						borderBottomLeftRadius: '8px',
+						borderBottomRightRadius: '8px',
+						minWidth: '12.5rem',
+					}}
+				>
+					<div className="p-1">
+						{/* Rename */}
+						{onRename && (
+							<button
+								onClick={handleRenameClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Pencil className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Rename
+							</button>
+						)}
+
+						{/* Startup Command */}
+						{onConfigureStartupCommand && (
+							<button
+								onClick={handleConfigureStartupCommandClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+								title={
+									tab.startupCommand
+										? `Current: ${tab.startupCommand}`
+										: 'Configure a command to run when this terminal starts'
+								}
+							>
+								<Play className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Startup Command…
+							</button>
+						)}
+
+						{onSnooze && (
+							<button
+								onClick={handleSnoozeClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors hover:bg-white/10"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Clock className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Snooze Tab
+								{tabShortcuts.snoozeTab && (
+									<ShortcutHint keys={tabShortcuts.snoozeTab.keys} theme={theme} />
+								)}
+							</button>
+						)}
+
+						{/* Move to First/Last */}
+						{(onMoveToFirst || onMoveToLast) && (
+							<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+						)}
+						{onMoveToFirst && !isFirstTab && (
+							<button
+								onClick={handleMoveToFirstClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Move to First Position
+								{tabShortcuts.moveTabToStart && (
+									<ShortcutHint keys={tabShortcuts.moveTabToStart.keys} theme={theme} />
+								)}
+							</button>
+						)}
+						{onMoveToLast && !isLastTab && (
+							<button
+								onClick={handleMoveToLastClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<ChevronsRight className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Move to Last Position
+								{tabShortcuts.moveTabToEnd && (
+									<ShortcutHint keys={tabShortcuts.moveTabToEnd.keys} theme={theme} />
+								)}
+							</button>
+						)}
+
+						{/* Buffer actions - operate on the terminal's full scrollback */}
+						{(onCopyBuffer || onSendBufferToAgent || onPublishBufferGist) && (
+							<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+						)}
+
+						{onCopyBuffer && (
+							<button
+								onClick={handleCopyBufferClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Clipboard className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Buffer: Copy to Clipboard
+							</button>
+						)}
+
+						{onSendBufferToAgent && (
+							<button
+								onClick={handleSendBufferToAgentClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<ArrowRightCircle className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Buffer: Send to Agent
+							</button>
+						)}
+
+						{onPublishBufferGist && (
+							<button
+								onClick={handlePublishBufferGistClick}
+								className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+								style={{ color: theme.colors.textMain }}
+							>
+								<Share2 className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Buffer: Publish as GitHub Gist
+							</button>
+						)}
+
+						{/* Close actions */}
+						<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+
+						<button
+							onClick={handleCloseTabClick}
+							className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
+							style={{ color: theme.colors.textMain }}
 						>
-							<div className="p-1">
-								{/* Rename */}
-								{onRename && (
-									<button
-										onClick={handleRenameClick}
-										className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-										style={{ color: theme.colors.textMain }}
-									>
-										<Pencil className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-										Rename
-									</button>
-								)}
+							<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+							Close Tab
+							{tabShortcuts.closeTab && (
+								<ShortcutHint keys={tabShortcuts.closeTab.keys} theme={theme} />
+							)}
+						</button>
 
-								{/* Move to First/Last */}
-								{(onMoveToFirst || onMoveToLast) && (
-									<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
+						{onCloseOtherTabs && (
+							<button
+								onClick={handleCloseOtherTabsClick}
+								className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
+									totalTabs === 1 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
+								}`}
+								style={{ color: theme.colors.textMain }}
+								disabled={totalTabs === 1}
+							>
+								<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Close Other Tabs
+								{tabShortcuts.closeOtherTabs && (
+									<ShortcutHint keys={tabShortcuts.closeOtherTabs.keys} theme={theme} />
 								)}
-								{onMoveToFirst && !isFirstTab && (
-									<button
-										onClick={handleMoveToFirstClick}
-										className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-										style={{ color: theme.colors.textMain }}
-									>
-										<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-										Move to First Position
-									</button>
-								)}
-								{onMoveToLast && !isLastTab && (
-									<button
-										onClick={handleMoveToLastClick}
-										className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-										style={{ color: theme.colors.textMain }}
-									>
-										<ChevronsRight
-											className="w-3.5 h-3.5"
-											style={{ color: theme.colors.textDim }}
-										/>
-										Move to Last Position
-									</button>
-								)}
+							</button>
+						)}
 
-								{/* Close actions */}
-								<div className="my-1 border-t" style={{ borderColor: theme.colors.border }} />
-
-								<button
-									onClick={handleCloseTabClick}
-									className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-white/10 transition-colors"
-									style={{ color: theme.colors.textMain }}
-								>
-									<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-									Close Tab
-								</button>
-
-								{onCloseOtherTabs && (
-									<button
-										onClick={handleCloseOtherTabsClick}
-										className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
-											totalTabs === 1 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
-										}`}
-										style={{ color: theme.colors.textMain }}
-										disabled={totalTabs === 1}
-									>
-										<X className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-										Close Other Tabs
-									</button>
+						{onCloseTabsLeft && (
+							<button
+								onClick={handleCloseTabsLeftClick}
+								className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
+									tabIndex === 0 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
+								}`}
+								style={{ color: theme.colors.textMain }}
+								disabled={tabIndex === 0}
+							>
+								<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Close Tabs to Left
+								{tabShortcuts.closeTabsLeft && (
+									<ShortcutHint keys={tabShortcuts.closeTabsLeft.keys} theme={theme} />
 								)}
+							</button>
+						)}
 
-								{onCloseTabsLeft && (
-									<button
-										onClick={handleCloseTabsLeftClick}
-										className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
-											tabIndex === 0 ? 'opacity-40 cursor-default' : 'hover:bg-white/10'
-										}`}
-										style={{ color: theme.colors.textMain }}
-										disabled={tabIndex === 0}
-									>
-										<ChevronsLeft className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
-										Close Tabs to Left
-									</button>
+						{onCloseTabsRight && (
+							<button
+								onClick={handleCloseTabsRightClick}
+								className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
+									tabIndex === (totalTabs ?? 1) - 1
+										? 'opacity-40 cursor-default'
+										: 'hover:bg-white/10'
+								}`}
+								style={{ color: theme.colors.textMain }}
+								disabled={tabIndex === (totalTabs ?? 1) - 1}
+							>
+								<ChevronsRight className="w-3.5 h-3.5" style={{ color: theme.colors.textDim }} />
+								Close Tabs to Right
+								{tabShortcuts.closeTabsRight && (
+									<ShortcutHint keys={tabShortcuts.closeTabsRight.keys} theme={theme} />
 								)}
-
-								{onCloseTabsRight && (
-									<button
-										onClick={handleCloseTabsRightClick}
-										className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors ${
-											tabIndex === (totalTabs ?? 1) - 1
-												? 'opacity-40 cursor-default'
-												: 'hover:bg-white/10'
-										}`}
-										style={{ color: theme.colors.textMain }}
-										disabled={tabIndex === (totalTabs ?? 1) - 1}
-									>
-										<ChevronsRight
-											className="w-3.5 h-3.5"
-											style={{ color: theme.colors.textDim }}
-										/>
-										Close Tabs to Right
-									</button>
-								)}
-							</div>
-						</div>
-					</div>,
-					document.body
-				)}
-		</div>
+							</button>
+						)}
+					</div>
+				</div>
+			</TabOverlayPortal>
+		</LongPressable>
 	);
 });

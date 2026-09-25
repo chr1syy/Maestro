@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	pipelineToYamlSubscriptions,
 	pipelinesToYaml,
+	pipelinesToYamlByOwnerCwd,
 	ensureSourceOutputVariable,
 } from '../../../../../renderer/components/CuePipelineEditor/utils/pipelineToYaml';
 import type { CuePipeline } from '../../../../../shared/cue-pipeline-types';
@@ -321,6 +322,224 @@ describe('pipelineToYamlSubscriptions', () => {
 	});
 });
 
+describe('pipelineToYamlSubscriptions - target_node_key emission', () => {
+	it('emits target_node_key on a single-target trigger sub when the agent has a nodeKey', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'worker',
+						toolType: 'claude-code',
+						inputPrompt: 'Do work',
+						nodeKey: 'agent-key-1',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' }],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs).toHaveLength(1);
+		expect(subs[0].target_node_key).toBe('agent-key-1');
+	});
+
+	it('omits target_node_key when the agent has no nodeKey (legacy in-memory state)', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'worker',
+						toolType: 'claude-code',
+						inputPrompt: 'Do work',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' }],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs[0].target_node_key).toBeUndefined();
+	});
+
+	it('emits fan_out_node_keys positionally when every fan-out target carries a key', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'worker',
+						toolType: 'claude-code',
+						inputPrompt: 'A',
+						nodeKey: 'k-A',
+					},
+				},
+				{
+					id: 'a2',
+					type: 'agent',
+					position: { x: 300, y: 200 },
+					data: {
+						sessionId: 's2',
+						sessionName: 'worker-2',
+						toolType: 'claude-code',
+						inputPrompt: 'A',
+						nodeKey: 'k-B',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' },
+				{ id: 'e2', source: 't1', target: 'a2', mode: 'pass' },
+			],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs[0].fan_out).toEqual(['worker', 'worker-2']);
+		expect(subs[0].fan_out_node_keys).toEqual(['k-A', 'k-B']);
+	});
+
+	it('omits fan_out_node_keys when any fan-out position lacks a key (mixed = legacy fallback)', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'worker',
+						toolType: 'claude-code',
+						inputPrompt: 'A',
+						nodeKey: 'k-A',
+					},
+				},
+				{
+					id: 'a2',
+					type: 'agent',
+					position: { x: 300, y: 200 },
+					data: {
+						sessionId: 's2',
+						sessionName: 'worker-2',
+						toolType: 'claude-code',
+						inputPrompt: 'A',
+						// No nodeKey on this one - partial population would
+						// produce ambiguous YAML, so the serializer skips the
+						// field entirely and the loader falls back to legacy
+						// dedup behavior.
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' },
+				{ id: 'e2', source: 't1', target: 'a2', mode: 'pass' },
+			],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs[0].fan_out_node_keys).toBeUndefined();
+	});
+
+	it('emits target_node_key on chain subs (downstream agent in an A → B chain)', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'A',
+						toolType: 'claude-code',
+						inputPrompt: 'do A',
+						nodeKey: 'a-key',
+					},
+				},
+				{
+					id: 'a2',
+					type: 'agent',
+					position: { x: 600, y: 0 },
+					data: {
+						sessionId: 's2',
+						sessionName: 'B',
+						toolType: 'claude-code',
+						inputPrompt: 'do B',
+						nodeKey: 'b-key',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' },
+				{ id: 'e2', source: 'a1', target: 'a2', mode: 'pass' },
+			],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs).toHaveLength(2);
+		expect(subs[0].target_node_key).toBe('a-key');
+		expect(subs[1].target_node_key).toBe('b-key');
+	});
+});
+
 describe('pipelinesToYaml', () => {
 	it('produces valid YAML with prompt_file references', () => {
 		const pipeline = makePipeline({
@@ -351,7 +570,12 @@ describe('pipelinesToYaml', () => {
 		});
 
 		const { yaml: yamlStr, promptFiles } = pipelinesToYaml([pipeline]);
-		expect(yamlStr).toContain('# Pipeline: test-pipeline (color: #06b6d4)');
+		// Pipeline identity is carried by the `pipeline_name` / `pipeline_color`
+		// fields on each subscription (authoritative, round-tripped). The
+		// human-only `# Pipeline: X (color: Y)` header was removed to
+		// eliminate the duplicate source of truth.
+		expect(yamlStr).toContain('pipeline_name: test-pipeline');
+		expect(yamlStr).toContain("pipeline_color: '#06b6d4'");
 		expect(yamlStr).toContain('subscriptions:');
 		expect(yamlStr).toContain('name: test-pipeline');
 		expect(yamlStr).toContain('event: time.heartbeat');
@@ -361,6 +585,47 @@ describe('pipelinesToYaml', () => {
 
 		// Prompt content saved to external file
 		expect(promptFiles.get('.maestro/prompts/worker-test-pipeline.md')).toBe('Do stuff');
+	});
+
+	it('writes prompt: "" inline when the subscription has no prompt (defensive)', () => {
+		// Empty prompts can reach pipelinesToYaml if a debounce race wipes the
+		// node's inputPrompt before handleSave reads state. Without the
+		// inline-empty fallback, the loader-side validator rejects the whole
+		// YAML ("prompt or prompt_file is required") and the user sees their
+		// pipeline "vanish" on the next modal open. Writing an empty string
+		// keeps the YAML valid so the editor can reload it and surface a
+		// proper "missing prompt" validation error on the next save attempt.
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Timer',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'worker',
+						toolType: 'claude-code',
+						inputPrompt: '',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' }],
+		});
+
+		const { yaml: yamlStr, promptFiles } = pipelinesToYaml([pipeline]);
+		expect(yamlStr).toContain("prompt: ''");
+		expect(yamlStr).not.toContain('prompt_file:');
+		expect(promptFiles.size).toBe(0);
 	});
 
 	it('includes settings block when provided', () => {
@@ -481,8 +746,8 @@ describe('pipelinesToYaml', () => {
 		});
 
 		const { yaml: yamlStr } = pipelinesToYaml([p1, p2]);
-		expect(yamlStr).toContain('# Pipeline: pipeline-a');
-		expect(yamlStr).toContain('# Pipeline: pipeline-b');
+		expect(yamlStr).toContain('pipeline_name: pipeline-a');
+		expect(yamlStr).toContain('pipeline_name: pipeline-b');
 		expect(yamlStr).toContain('name: pipeline-a');
 		expect(yamlStr).toContain('name: pipeline-b');
 	});
@@ -667,6 +932,46 @@ describe('pipelinesToYaml', () => {
 
 		const subs = pipelineToYamlSubscriptions(pipeline);
 		expect(subs[0].label).toBe('Morning Check');
+	});
+
+	// Asymmetric save/load was the "vanishing pipeline" failure mode: the UI
+	// accepts `6:30`, the YAML loader's validator rejects it as
+	// non-`HH:MM`, every subscription drops, and the pipeline editor reopens
+	// empty. Pad on the way out so the on-disk shape always matches the
+	// canonical format the loader and trigger source expect.
+	it('pads single-digit schedule_times hours to HH:MM on save', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.scheduled',
+						label: 'Scheduled',
+						// `6:30` exercises the pad path; `17:00` confirms already-canonical
+						// values pass through untouched. Minutes must be `\d{2}` per the
+						// validator, so the function intentionally only pads hours.
+						config: { schedule_times: ['6:30', '17:00'] },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'worker',
+						toolType: 'claude-code',
+						inputPrompt: 'Run',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' as const }],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs[0].schedule_times).toEqual(['06:30', '17:00']);
 	});
 
 	it('creates separate subscriptions for multiple triggers targeting same agent with edge prompts', () => {
@@ -1019,6 +1324,8 @@ describe('fan-out with per-edge prompts', () => {
 		expect(subs).toHaveLength(1);
 		expect(subs[0].fan_out).toEqual(['worker-1', 'worker-2']);
 		expect(subs[0].fan_out_prompts).toEqual(['edge prompt 1', 'edge prompt 2']);
+		// Stable-id mirror - dispatcher uses these to resolve renamed agents.
+		expect(subs[0].fan_out_ids).toEqual(['s1', 's2']);
 	});
 
 	it('falls back to agent inputPrompt when edges have no prompt', () => {
@@ -1284,5 +1591,944 @@ describe('fan-out to fan-in pipeline', () => {
 		expect(fanInSub).toBeDefined();
 		expect(fanInSub!).not.toHaveProperty('fan_in_timeout_minutes');
 		expect(fanInSub!).not.toHaveProperty('fan_in_timeout_on_fail');
+	});
+});
+
+describe('command node serialization', () => {
+	it('emits action: command with shell mode for trigger -> command(shell)', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'file.changed',
+						label: 'File Change',
+						config: { watch: 'src/**/*.ts' },
+					},
+				},
+				{
+					id: 'cmd1',
+					type: 'command',
+					position: { x: 300, y: 0 },
+					data: {
+						name: 'lint-on-save',
+						mode: 'shell',
+						shell: 'npm run lint',
+						owningSessionId: 'sess-A',
+						owningSessionName: 'agent-A',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'cmd1', mode: 'pass' }],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs).toHaveLength(1);
+		expect(subs[0].name).toBe('lint-on-save');
+		expect(subs[0].event).toBe('file.changed');
+		expect(subs[0].action).toBe('command');
+		expect(subs[0].command).toEqual({ mode: 'shell', shell: 'npm run lint' });
+		expect(subs[0].watch).toBe('src/**/*.ts');
+	});
+
+	it('emits action: command with cli mode for trigger -> command(cli)', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: { eventType: 'cli.trigger', label: 'CLI', config: {} },
+				},
+				{
+					id: 'cmd1',
+					type: 'command',
+					position: { x: 300, y: 0 },
+					data: {
+						name: 'forward-output',
+						mode: 'cli',
+						cliCommand: 'send',
+						cliTarget: '{{CUE_FROM_AGENT}}',
+						cliMessage: 'msg: {{CUE_SOURCE_OUTPUT}}',
+						owningSessionId: 'sess-deploy',
+						owningSessionName: 'deployer',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'cmd1', mode: 'pass' }],
+		});
+
+		const { yaml: out } = pipelinesToYaml([pipeline]);
+		expect(out).toContain('action: command');
+		expect(out).toContain('mode: cli');
+		expect(out).toContain('command: send');
+		expect(out).toContain("target: '{{CUE_FROM_AGENT}}'");
+		expect(out).toContain("message: 'msg: {{CUE_SOURCE_OUTPUT}}'");
+		expect(out).toContain('agent_id: sess-deploy');
+		// Command subs should NOT emit prompt_file.
+		expect(out).not.toContain('prompt_file:');
+	});
+
+	it('chains agent -> command with source_session = upstream agent name', () => {
+		const pipeline = makePipeline({
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: { eventType: 'time.heartbeat', label: 'Sched', config: { interval_minutes: 10 } },
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's-agent',
+						sessionName: 'researcher',
+						toolType: 'claude-code',
+						inputPrompt: 'go',
+					},
+				},
+				{
+					id: 'cmd1',
+					type: 'command',
+					position: { x: 600, y: 0 },
+					data: {
+						name: 'persist',
+						mode: 'shell',
+						shell: 'echo done >> log.txt',
+						owningSessionId: 's-agent',
+						owningSessionName: 'researcher',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' },
+				{ id: 'e2', source: 'a1', target: 'cmd1', mode: 'pass' },
+			],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs).toHaveLength(2);
+		const cmdSub = subs.find((s) => s.action === 'command');
+		expect(cmdSub).toBeDefined();
+		expect(cmdSub!.name).toBe('persist');
+		expect(cmdSub!.event).toBe('agent.completed');
+		expect(cmdSub!.source_session).toBe('researcher');
+		expect(cmdSub!.command).toEqual({ mode: 'shell', shell: 'echo done >> log.txt' });
+	});
+
+	describe('unbound command nodes', () => {
+		it('excludes unbound commands dropped from the standalone pill', () => {
+			// Pipeline validation flags this case at save time; this is a
+			// defense-in-depth check that YAML output never contains a
+			// subscription with an empty agent_id. Without the filter the engine
+			// would reject the whole config on load.
+			const pipeline = makePipeline({
+				nodes: [
+					{
+						id: 't1',
+						type: 'trigger',
+						position: { x: 0, y: 0 },
+						data: {
+							eventType: 'time.heartbeat',
+							label: 'tick',
+							config: { interval_minutes: 1 },
+						},
+					},
+					{
+						id: 'cmd1',
+						type: 'command',
+						position: { x: 300, y: 0 },
+						data: {
+							name: 'unbound-lint',
+							mode: 'shell',
+							shell: 'npm run lint',
+							owningSessionId: '',
+							owningSessionName: '',
+						},
+					},
+				],
+				edges: [{ id: 'e1', source: 't1', target: 'cmd1', mode: 'pass' }],
+			});
+
+			const subs = pipelineToYamlSubscriptions(pipeline);
+			// Unbound command is filtered; trigger becomes a dangling trigger
+			// with no targets, which also yields no subscriptions.
+			expect(subs).toEqual([]);
+		});
+
+		it('serializes a bound command node normally', () => {
+			const pipeline = makePipeline({
+				nodes: [
+					{
+						id: 't1',
+						type: 'trigger',
+						position: { x: 0, y: 0 },
+						data: {
+							eventType: 'time.heartbeat',
+							label: 'tick',
+							config: { interval_minutes: 1 },
+						},
+					},
+					{
+						id: 'cmd1',
+						type: 'command',
+						position: { x: 300, y: 0 },
+						data: {
+							name: 'bound-lint',
+							mode: 'shell',
+							shell: 'npm run lint',
+							owningSessionId: 's-owner',
+							owningSessionName: 'Lint Owner',
+						},
+					},
+				],
+				edges: [{ id: 'e1', source: 't1', target: 'cmd1', mode: 'pass' }],
+			});
+
+			const subs = pipelineToYamlSubscriptions(pipeline);
+			expect(subs).toHaveLength(1);
+			expect(subs[0].action).toBe('command');
+			expect(subs[0].command).toEqual({ mode: 'shell', shell: 'npm run lint' });
+		});
+	});
+});
+
+describe('fan-out per-agent prompt externalization', () => {
+	// Regression guard for the "one prompt file for three fan-out agents"
+	// asymmetry: when fan-out targets have different prompts, each agent's
+	// prompt must live in its own .md file (`fan_out_prompt_files`) rather
+	// than being crammed into an inline `fan_out_prompts` array in the YAML.
+
+	function makeFanOutPipeline(prompts: [string, string, string]) {
+		return makePipeline({
+			name: 'Pipeline 1',
+			nodes: [
+				{
+					id: 'trigger-1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: { eventType: 'app.startup', label: 'Startup', config: {} },
+				},
+				{
+					id: 'agent-1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'Codex 1',
+						toolType: 'codex',
+						inputPrompt: prompts[0],
+					},
+				},
+				{
+					id: 'agent-2',
+					type: 'agent',
+					position: { x: 300, y: 100 },
+					data: {
+						sessionId: 's2',
+						sessionName: 'OpenCode 1',
+						toolType: 'opencode',
+						inputPrompt: prompts[1],
+					},
+				},
+				{
+					id: 'agent-3',
+					type: 'agent',
+					position: { x: 300, y: 200 },
+					data: {
+						sessionId: 's3',
+						sessionName: 'Claude 1',
+						toolType: 'claude-code',
+						inputPrompt: prompts[2],
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 'trigger-1', target: 'agent-1', mode: 'pass' },
+				{ id: 'e2', source: 'trigger-1', target: 'agent-2', mode: 'pass' },
+				{ id: 'e3', source: 'trigger-1', target: 'agent-3', mode: 'pass' },
+			],
+		});
+	}
+
+	it('emits fan_out_prompt_files (not inline fan_out_prompts) when per-agent prompts differ', () => {
+		const pipeline = makeFanOutPipeline(['codex work', 'opencode work', 'claude work']);
+		const { yaml: yamlStr, promptFiles } = pipelinesToYaml([pipeline]);
+
+		expect(yamlStr).toContain('fan_out_prompt_files:');
+		// Inline array MUST NOT be emitted when files take over - that was the
+		// asymmetric legacy shape.
+		expect(yamlStr).not.toMatch(/^\s*fan_out_prompts:/m);
+
+		// One .md per agent, content matches.
+		expect(promptFiles.get('.maestro/prompts/codex_1-pipeline_1.md')).toBe('codex work');
+		expect(promptFiles.get('.maestro/prompts/opencode_1-pipeline_1.md')).toBe('opencode work');
+		expect(promptFiles.get('.maestro/prompts/claude_1-pipeline_1.md')).toBe('claude work');
+	});
+
+	it('collapses to a single prompt_file when all fan-out agents share the same prompt', () => {
+		const pipeline = makeFanOutPipeline(['shared', 'shared', 'shared']);
+		const { yaml: yamlStr, promptFiles } = pipelinesToYaml([pipeline]);
+
+		expect(yamlStr).toContain('prompt_file:');
+		expect(yamlStr).not.toContain('fan_out_prompt_files:');
+		expect(yamlStr).not.toMatch(/^\s*fan_out_prompts:/m);
+		// Exactly one prompt file, content "shared".
+		const entries = Array.from(promptFiles.entries());
+		expect(entries).toHaveLength(1);
+		expect(entries[0][1]).toBe('shared');
+	});
+
+	it('writes an empty file for agents with empty prompts to preserve positional mapping', () => {
+		const pipeline = makeFanOutPipeline(['has content', '', 'also content']);
+		const { promptFiles } = pipelinesToYaml([pipeline]);
+
+		// Middle agent gets an empty file - dropping the entry would shift
+		// the positional mapping against `fan_out` and mis-route prompts at
+		// runtime.
+		expect(promptFiles.get('.maestro/prompts/codex_1-pipeline_1.md')).toBe('has content');
+		expect(promptFiles.get('.maestro/prompts/opencode_1-pipeline_1.md')).toBe('');
+		expect(promptFiles.get('.maestro/prompts/claude_1-pipeline_1.md')).toBe('also content');
+	});
+
+	it('does not emit a redundant single prompt_file when per-agent files are in use', () => {
+		// `sub.prompt` is retained as an engine fallback but must NOT appear
+		// as `prompt_file` in the record - that would double-write the first
+		// agent's prompt to two files and confuse readers.
+		const pipeline = makeFanOutPipeline(['a', 'b', 'c']);
+		const { yaml: yamlStr } = pipelinesToYaml([pipeline]);
+
+		const lines = yamlStr.split('\n');
+		const promptFileLines = lines.filter((l) => /^\s{4}prompt_file:/.test(l));
+		expect(promptFileLines).toHaveLength(0);
+	});
+});
+
+describe('fan-out with command targets (per-branch emission)', () => {
+	// When a trigger fans out to command nodes, the engine's `fan_out` field
+	// can't address them (commands have no session identity). The serializer
+	// must emit ONE full subscription per direct target instead - each
+	// re-carrying the trigger event config so they arm independently.
+
+	function makeCommandFanOutPipeline() {
+		return makePipeline({
+			name: 'Pipeline 1',
+			nodes: [
+				{
+					id: 'trigger-1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.scheduled',
+						label: 'Scheduled',
+						config: { schedule_times: ['07:00'] },
+					},
+				},
+				{
+					id: 'cmd-1',
+					type: 'command',
+					position: { x: 300, y: 0 },
+					data: {
+						name: 'run-script-1',
+						mode: 'shell',
+						shell: './script1.sh',
+						owningSessionId: 's1',
+						owningSessionName: 'Cue Test 1',
+					},
+				},
+				{
+					id: 'cmd-2',
+					type: 'command',
+					position: { x: 300, y: 100 },
+					data: {
+						name: 'run-script-2',
+						mode: 'shell',
+						shell: './script2.sh',
+						owningSessionId: 's2',
+						owningSessionName: 'Cue Test 2',
+					},
+				},
+				{
+					id: 'agent-1',
+					type: 'agent',
+					position: { x: 600, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'Cue Test 1',
+						toolType: 'claude-code',
+						inputPrompt: 'Report the script1 output',
+					},
+				},
+				{
+					id: 'agent-2',
+					type: 'agent',
+					position: { x: 600, y: 100 },
+					data: {
+						sessionId: 's2',
+						sessionName: 'Cue Test 2',
+						toolType: 'claude-code',
+						inputPrompt: 'Report the script2 output',
+					},
+				},
+				{
+					id: 'agent-main',
+					type: 'agent',
+					position: { x: 900, y: 50 },
+					data: {
+						sessionId: 's-main',
+						sessionName: 'Cue Test Main',
+						toolType: 'claude-code',
+						inputPrompt: 'Combine both reports',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 'trigger-1', target: 'cmd-1', mode: 'pass' },
+				{ id: 'e2', source: 'trigger-1', target: 'cmd-2', mode: 'pass' },
+				{ id: 'e3', source: 'cmd-1', target: 'agent-1', mode: 'pass' },
+				{ id: 'e4', source: 'cmd-2', target: 'agent-2', mode: 'pass' },
+				{ id: 'e5', source: 'agent-1', target: 'agent-main', mode: 'pass' },
+				{ id: 'e6', source: 'agent-2', target: 'agent-main', mode: 'pass' },
+			],
+		});
+	}
+
+	it('emits one sub per direct command target, no fan_out array', () => {
+		const pipeline = makeCommandFanOutPipeline();
+		const subs = pipelineToYamlSubscriptions(pipeline);
+
+		// Collect the two branch subs by looking at initial-trigger subs (event=time.scheduled).
+		const branchSubs = subs.filter((s) => s.event === 'time.scheduled');
+		expect(branchSubs).toHaveLength(2);
+
+		// None of the branch subs should use fan_out - per-branch is the
+		// opposite of fan_out; they're independent subs sharing trigger config.
+		for (const sub of branchSubs) {
+			expect(sub.fan_out).toBeUndefined();
+			expect(sub.action).toBe('command');
+			expect(sub.schedule_times).toEqual(['07:00']);
+		}
+
+		// The two branches carry different command specs for their respective
+		// targets (not a single command run twice).
+		expect(
+			branchSubs.map((s) => (s.command?.mode === 'shell' ? s.command.shell : '')).sort()
+		).toEqual(['./script1.sh', './script2.sh']);
+	});
+
+	it('chain subs after command branches carry source_sub naming the command sub', () => {
+		const pipeline = makeCommandFanOutPipeline();
+		const subs = pipelineToYamlSubscriptions(pipeline);
+
+		// Each agent chain sub has source_sub pointing at its upstream command sub.
+		// Without source_sub, Cmd1's completion would match the chain sub's
+		// source_session AND the chain sub's own completion would re-trigger it.
+		const agentChains = subs.filter(
+			(s) => s.event === 'agent.completed' && !Array.isArray(s.source_session)
+		);
+		// Two single-source chains (one per command→agent branch) + main fan-in not in this filter.
+		expect(agentChains.length).toBeGreaterThanOrEqual(2);
+
+		for (const sub of agentChains) {
+			// source_sub is the name of the command sub that runs before this agent.
+			expect(sub.source_sub).toBeDefined();
+			expect(typeof sub.source_sub === 'string').toBe(true);
+			// And that name matches one of the actual branch sub names.
+			expect(['run-script-1', 'run-script-2']).toContain(sub.source_sub as string);
+		}
+	});
+
+	it('fan-in chain sub lists both upstream agent subs in source_sub', () => {
+		const pipeline = makeCommandFanOutPipeline();
+		const subs = pipelineToYamlSubscriptions(pipeline);
+
+		// The Main agent aggregates Agent1 + Agent2 via fan-in.
+		const fanInSub = subs.find(
+			(s) => s.event === 'agent.completed' && Array.isArray(s.source_session)
+		);
+		expect(fanInSub).toBeDefined();
+		expect(Array.isArray(fanInSub!.source_sub)).toBe(true);
+		const sourceSubs = fanInSub!.source_sub as string[];
+		expect(sourceSubs).toHaveLength(2);
+		// The upstream subs are the chain subs that run Agent1 and Agent2 -
+		// NOT the command subs. Main fires on agent completion, not command.
+		// Every entry must name a sub that actually exists in the output.
+		const allNames = new Set(subs.map((s) => s.name));
+		for (const name of sourceSubs) {
+			expect(allNames.has(name)).toBe(true);
+		}
+	});
+
+	it('preserves each branch trigger event config so branches arm independently', () => {
+		const pipeline = makeCommandFanOutPipeline();
+		const subs = pipelineToYamlSubscriptions(pipeline);
+
+		// Both branch subs must carry the schedule config - the engine arms
+		// each subscription separately, so an absent schedule_times on the
+		// second branch would leave that branch dormant.
+		const branchSubs = subs.filter((s) => s.event === 'time.scheduled');
+		for (const sub of branchSubs) {
+			expect(sub.schedule_times).toEqual(['07:00']);
+		}
+	});
+});
+
+describe('source_sub emission on agent chain subs', () => {
+	// Ensures chain subs generated from plain agent chains also carry
+	// source_sub so completion filtering is always precise, not only when
+	// commands are involved. Prevents regression: if source_sub were only
+	// emitted for command branches, a pure Schedule → A → B chain would
+	// still self-loop on B's completion matching its own source_session.
+
+	it('multiple triggers pointing at the same agent all appear in downstream source_sub', () => {
+		// Regression: when N triggers share the same downstream agent, the
+		// previous Map<string, string> implementation overwrote subNameForNode
+		// on each iteration, leaving only the LAST trigger's sub name in
+		// source_sub. Completions from any earlier trigger then failed the
+		// source_sub filter and the pipeline stalled silently.
+		const pipeline = makePipeline({
+			name: 'Pipeline 1',
+			nodes: [
+				{
+					id: 'trigger-startup',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: { eventType: 'app.startup', label: 'Startup', config: {} },
+				},
+				{
+					id: 'trigger-heartbeat',
+					type: 'trigger',
+					position: { x: 0, y: 100 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 30 },
+					},
+				},
+				{
+					id: 'agent-a',
+					type: 'agent',
+					position: { x: 300, y: 50 },
+					data: {
+						sessionId: 's-a',
+						sessionName: 'Agent A',
+						toolType: 'claude-code',
+						inputPrompt: 'do work',
+					},
+				},
+				{
+					id: 'agent-b',
+					type: 'agent',
+					position: { x: 600, y: 50 },
+					data: {
+						sessionId: 's-b',
+						sessionName: 'Agent B',
+						toolType: 'claude-code',
+						inputPrompt: 'follow-up',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 'trigger-startup', target: 'agent-a', mode: 'pass' },
+				{ id: 'e2', source: 'trigger-heartbeat', target: 'agent-a', mode: 'pass' },
+				{ id: 'e3', source: 'agent-a', target: 'agent-b', mode: 'pass' },
+			],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		// 2 trigger subs (startup + heartbeat) + 1 chain sub for Agent B = 3
+		expect(subs).toHaveLength(3);
+
+		const triggerNames = subs.filter((s) => s.event !== 'agent.completed').map((s) => s.name);
+		expect(triggerNames).toHaveLength(2);
+
+		const chainSub = subs.find((s) => s.event === 'agent.completed');
+		expect(chainSub).toBeDefined();
+		expect(chainSub!.source_session).toBe('Agent A');
+
+		// source_sub must contain ALL upstream trigger sub names so Agent B fires
+		// regardless of which trigger kicked off Agent A.
+		const sourceSub = chainSub!.source_sub;
+		const sourceSubArray = Array.isArray(sourceSub) ? sourceSub : [sourceSub];
+		for (const triggerName of triggerNames) {
+			expect(sourceSubArray).toContain(triggerName);
+		}
+	});
+
+	it('single trigger -> agent -> agent chain emits source_sub on the downstream chain', () => {
+		const pipeline = makePipeline({
+			name: 'Pipeline 1',
+			nodes: [
+				{
+					id: 'trigger-1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.heartbeat',
+						label: 'Heartbeat',
+						config: { interval_minutes: 5 },
+					},
+				},
+				{
+					id: 'agent-a',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's-a',
+						sessionName: 'A',
+						toolType: 'claude-code',
+						inputPrompt: 'step A',
+					},
+				},
+				{
+					id: 'agent-b',
+					type: 'agent',
+					position: { x: 600, y: 0 },
+					data: {
+						sessionId: 's-b',
+						sessionName: 'B',
+						toolType: 'claude-code',
+						inputPrompt: 'step B',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e1', source: 'trigger-1', target: 'agent-a', mode: 'pass' },
+				{ id: 'e2', source: 'agent-a', target: 'agent-b', mode: 'pass' },
+			],
+		});
+
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		expect(subs).toHaveLength(2);
+		// Trigger sub runs A directly; no source_sub on initial trigger.
+		expect(subs[0].event).toBe('time.heartbeat');
+		expect(subs[0].source_sub).toBeUndefined();
+		// Chain sub runs B after A completes. source_sub names the trigger
+		// sub that actually ran A - so B fires on A's completion only, not
+		// on B's own future completion.
+		expect(subs[1].event).toBe('agent.completed');
+		expect(subs[1].source_session).toBe('A');
+		expect(subs[1].source_sub).toBe('Pipeline 1');
+	});
+});
+
+describe('pipelinesToYamlByOwnerCwd - owner id resolution', () => {
+	// Regression: an agent node bound by NAME only (empty/stale sessionId, e.g.
+	// a legacy pipeline or an agent deleted-and-recreated under the same name)
+	// passed the save-time root validation (which falls back to name) but failed
+	// emission, which read sessionId directly and produced agent_id=<missing>.
+	// The "Unresolvable agent_id" save failure. The resolver closes that gap.
+	const makeNameOnlyPipeline = (): CuePipeline =>
+		makePipeline({
+			name: 'Pedsidian',
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: {
+						eventType: 'time.scheduled',
+						label: 'S',
+						config: { schedule_times: ['06:30'] },
+					},
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: '',
+						sessionName: 'Pedsidian',
+						toolType: 'claude-code',
+						inputPrompt: 'go',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' }],
+		});
+
+	const sessionsById = new Map([['live-id-123', { projectRoot: '/Users/pedram' }]]);
+
+	it('reports unresolved without a resolver (the pre-fix behavior)', () => {
+		const { unresolved } = pipelinesToYamlByOwnerCwd(
+			[makeNameOnlyPipeline()],
+			undefined,
+			sessionsById
+		);
+		expect(unresolved).toEqual([{ subName: 'Pedsidian', agentId: '' }]);
+	});
+
+	it('resolves a name-only node to the live agent_id via the resolver', () => {
+		const resolveOwnerId = (id?: string, name?: string): string | undefined => {
+			if (id && sessionsById.has(id)) return id;
+			if (name === 'Pedsidian') return 'live-id-123';
+			return id;
+		};
+		const { byCwd, unresolved } = pipelinesToYamlByOwnerCwd(
+			[makeNameOnlyPipeline()],
+			undefined,
+			sessionsById,
+			resolveOwnerId
+		);
+		expect(unresolved).toEqual([]);
+		expect([...byCwd.keys()]).toEqual(['/Users/pedram']);
+		expect(byCwd.get('/Users/pedram')?.yaml).toContain('agent_id: live-id-123');
+	});
+});
+
+describe('pipelinesToYamlByOwnerCwd - command-name / chain-name collision', () => {
+	// Regression for the "Unresolvable agent_id ... (agent_id=<missing>)" save
+	// failure. agent_id used to be recovered via a SECOND name-keyed graph
+	// traversal (buildSubAgentIdMap). When a command node was named exactly like
+	// the `<pipeline>-chain-N` auto-naming scheme, that name-keyed map collapsed
+	// the colliding entry, its `Map.size`-driven chain counter drifted out of
+	// sync with the emitter, and a LATER subscription was looked up under a name
+	// the map never held - yielding no agent_id. Owners are now stamped per-sub
+	// at emission time (by object identity), so the collision is harmless.
+	const makeCollidingPipeline = (): CuePipeline =>
+		makePipeline({
+			name: 'P',
+			nodes: [
+				{
+					id: 't0',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: { eventType: 'time.scheduled', label: 'S0', config: { schedule_times: ['01:00'] } },
+				},
+				{
+					// Command node named exactly like the auto-generated chain name.
+					id: 'cmd',
+					type: 'command',
+					position: { x: 300, y: 0 },
+					data: {
+						name: 'P-chain-1',
+						mode: 'shell',
+						shell: 'echo hi',
+						owningSessionId: 's1',
+						owningSessionName: 'Worker',
+					},
+				},
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 150 },
+					data: { eventType: 'time.scheduled', label: 'S1', config: { schedule_times: ['02:00'] } },
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 150 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'Worker',
+						toolType: 'claude-code',
+						inputPrompt: 'a',
+					},
+				},
+				{
+					id: 't2',
+					type: 'trigger',
+					position: { x: 0, y: 300 },
+					data: { eventType: 'time.scheduled', label: 'S2', config: { schedule_times: ['03:00'] } },
+				},
+				{
+					id: 'a2',
+					type: 'agent',
+					position: { x: 300, y: 300 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'Worker',
+						toolType: 'claude-code',
+						inputPrompt: 'b',
+					},
+				},
+			],
+			edges: [
+				{ id: 'e0', source: 't0', target: 'cmd', mode: 'pass' },
+				{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' },
+				{ id: 'e2', source: 't2', target: 'a2', mode: 'pass' },
+			],
+		});
+
+	it('emits agent_id for every sub despite the colliding command name', () => {
+		const pipeline = makeCollidingPipeline();
+		const sessionsById = new Map([['s1', { projectRoot: '/r1' }]]);
+		const { byCwd, unresolved } = pipelinesToYamlByOwnerCwd([pipeline], undefined, sessionsById);
+		// Nothing dropped - the whole point of the fix.
+		expect(unresolved).toEqual([]);
+		// All work lands in the single owning root, every sub bound to s1.
+		expect([...byCwd.keys()]).toEqual(['/r1']);
+		const yaml = byCwd.get('/r1')!.yaml;
+		const agentIdLines = yaml.split('\n').filter((l) => l.includes('agent_id:'));
+		expect(agentIdLines).toHaveLength(3);
+		expect(agentIdLines.every((l) => l.includes('s1'))).toBe(true);
+	});
+});
+
+describe('pipelinesToYamlByOwnerCwd - owner_agent_id preservation', () => {
+	// Regression: owner_agent_id is a PER-ROOT field (set via Edit YAML for a
+	// shared root). The editor doesn't manage it, but the save fully overwrites
+	// each cue.yaml. Without re-injecting the existing owner, a save would strip
+	// it and revert a shared root to fragile "first agent wins" ownership.
+	const makePipelineForRoot = (): CuePipeline =>
+		makePipeline({
+			name: 'Shared',
+			nodes: [
+				{
+					id: 't1',
+					type: 'trigger',
+					position: { x: 0, y: 0 },
+					data: { eventType: 'time.scheduled', label: 'S', config: { schedule_times: ['09:00'] } },
+				},
+				{
+					id: 'a1',
+					type: 'agent',
+					position: { x: 300, y: 0 },
+					data: {
+						sessionId: 's1',
+						sessionName: 'Owner',
+						toolType: 'claude-code',
+						inputPrompt: 'go',
+					},
+				},
+			],
+			edges: [{ id: 'e1', source: 't1', target: 'a1', mode: 'pass' }],
+		});
+
+	const sessionsById = new Map([['s1', { projectRoot: '/shared' }]]);
+	const globalSettings = {
+		timeout_minutes: 60,
+		timeout_on_fail: 'continue' as const,
+		max_concurrent: 1,
+	};
+
+	it('re-attaches a preserved owner_agent_id into the cwd settings block', () => {
+		const ownerByCwd = new Map([['/shared', 'owner-agent-uuid']]);
+		const { byCwd } = pipelinesToYamlByOwnerCwd(
+			[makePipelineForRoot()],
+			globalSettings,
+			sessionsById,
+			undefined,
+			ownerByCwd
+		);
+		expect(byCwd.get('/shared')?.yaml).toContain('owner_agent_id: owner-agent-uuid');
+	});
+
+	it('omits owner_agent_id when the root had none', () => {
+		const { byCwd } = pipelinesToYamlByOwnerCwd(
+			[makePipelineForRoot()],
+			globalSettings,
+			sessionsById,
+			undefined,
+			new Map()
+		);
+		expect(byCwd.get('/shared')?.yaml).not.toContain('owner_agent_id');
+	});
+});
+
+describe('subscription name stability across node reorder', () => {
+	// Regression: Arrange rebuilds `pipeline.nodes` in a new order. The emitter
+	// used to assign `-chain-N` names by node-array order, so every Arrange+Save
+	// renamed the triggers and reshuffled which trigger owned which name. The
+	// layout store keys saved positions by subscription name, so the rename
+	// silently moved every saved position onto the wrong trigger - "the layout
+	// won't stay arranged" bug. Names must now be derived from each trigger's
+	// existing `subscriptionName`, so a re-save after a reorder is a no-op for
+	// the name->target mapping.
+	function multiTriggerPipeline(triggerOrder: number[]): CuePipeline {
+		const triggers = triggerOrder.map((n) => ({
+			id: `trigger-${n}`,
+			type: 'trigger' as const,
+			position: { x: 0, y: n * 100 },
+			data: {
+				eventType: 'time.scheduled' as const,
+				label: 'Scheduled',
+				config: { schedule_times: ['09:00'] },
+				// The stable identity carried across reloads. trigger 0 owns the
+				// pipeline-named sub; the rest own -chain-N.
+				subscriptionName: n === 0 ? 'multi' : `multi-chain-${n}`,
+			},
+		}));
+		const agents = triggerOrder.map((n) => ({
+			id: `agent-${n}`,
+			type: 'agent' as const,
+			position: { x: 300, y: n * 100 },
+			data: {
+				sessionId: `sess-${n}`,
+				sessionName: `Agent ${n}`,
+				toolType: 'claude-code',
+				nodeKey: `key-${n}`,
+			},
+		}));
+		const edges = triggerOrder.map((n) => ({
+			id: `edge-${n}`,
+			source: `trigger-${n}`,
+			target: `agent-${n}`,
+			mode: 'pass' as const,
+		}));
+		return makePipeline({ name: 'multi', nodes: [...triggers, ...agents], edges });
+	}
+
+	function nameToTarget(pipeline: CuePipeline): Record<string, string | undefined> {
+		const subs = pipelineToYamlSubscriptions(pipeline);
+		const map: Record<string, string | undefined> = {};
+		for (const sub of subs) map[sub.name] = sub.target_node_key;
+		return map;
+	}
+
+	it('preserves each trigger subscription name regardless of node order', () => {
+		const inOrder = multiTriggerPipeline([0, 1, 2, 3]);
+		const reordered = multiTriggerPipeline([2, 0, 3, 1]);
+		// Same name -> same target node in both orderings.
+		expect(nameToTarget(reordered)).toEqual(nameToTarget(inOrder));
+	});
+
+	it('is idempotent across repeated saves after a reorder', () => {
+		const first = nameToTarget(multiTriggerPipeline([0, 1, 2, 3]));
+		const afterReorder = nameToTarget(multiTriggerPipeline([3, 2, 1, 0]));
+		expect(afterReorder).toEqual(first);
+	});
+
+	it('mints a fresh unique name only for a trigger with no prior subscriptionName', () => {
+		const pipeline = multiTriggerPipeline([0, 1]);
+		// A genuinely new trigger dropped on the canvas has no subscriptionName.
+		pipeline.nodes.push(
+			{
+				id: 'trigger-new',
+				type: 'trigger',
+				position: { x: 0, y: 999 },
+				data: {
+					eventType: 'time.scheduled',
+					label: 'Scheduled',
+					config: { schedule_times: ['12:00'] },
+				},
+			},
+			{
+				id: 'agent-new',
+				type: 'agent',
+				position: { x: 300, y: 999 },
+				data: {
+					sessionId: 'sess-new',
+					sessionName: 'Agent New',
+					toolType: 'claude-code',
+					nodeKey: 'key-new',
+				},
+			}
+		);
+		pipeline.edges.push({
+			id: 'edge-new',
+			source: 'trigger-new',
+			target: 'agent-new',
+			mode: 'pass',
+		});
+		const names = pipelineToYamlSubscriptions(pipeline).map((s) => s.name);
+		// Preserved names survive; the new trigger gets a unique, non-colliding name.
+		expect(names).toContain('multi');
+		expect(names).toContain('multi-chain-1');
+		expect(new Set(names).size).toBe(names.length); // all unique
 	});
 });
