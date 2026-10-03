@@ -105,7 +105,7 @@ export function registerBrowserTabCallbacks(
 	server.setOpenTerminalTabCallback(
 		async (
 			sessionId: string,
-			config: { cwd?: string; shell?: string; name?: string | null; command?: string },
+			config: { cwd?: string; shell?: string; name?: string | null; command?: string; inputRequired?: boolean },
 			options?: { background?: boolean }
 		) => {
 			const mainWindow = getMainWindow();

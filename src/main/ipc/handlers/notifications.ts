@@ -18,6 +18,7 @@ import { parseDeepLink, dispatchDeepLink } from '../../deep-links';
 import { buildSessionDeepLink } from '../../../shared/deep-link-urls';
 import { captureException } from '../../utils/sentry';
 import type { WindowRegistry } from '../../window-registry';
+import { parseToastClickAction, type ToastClickAction } from '../../../shared/toastClickAction';
 
 // ==========================================================================
 // Constants
@@ -465,9 +466,12 @@ export function registerNotificationsHandlers(deps?: NotificationsHandlerDepende
 			title: string,
 			body: string,
 			sessionId?: string,
-			tabId?: string
+			tabId?: string,
+			clickAction?: ToastClickAction
 		): Promise<NotificationShowResponse> => {
 			try {
+				const parsedAction = parseToastClickAction(clickAction);
+				if (parsedAction.error) return { success: false, error: parsedAction.error };
 				if (Notification.isSupported()) {
 					const notification = new Notification({
 						title,
@@ -482,13 +486,24 @@ export function registerNotificationsHandlers(deps?: NotificationsHandlerDepende
 					};
 					notification.on('close', releaseNotification);
 
-					// Wire click handler for navigation if session context is provided.
-					// Route the click to the window that currently owns the agent
-					// (resolved via the window registry) so a multi-window layout
-					// focuses the correct window instead of always the primary;
-					// resolveNotificationClickWindow falls back to the main window when
-					// there is no registry / owning window.
-					if (sessionId && deps?.getMainWindow) {
+					// Route the action to the window that owns its agent, falling back
+					// to the main window for actions without a session.
+					const action = parsedAction.action;
+					if (action && deps?.getMainWindow) {
+						notification.on('click', () => {
+							const target = resolveNotificationClickWindow(
+								'sessionId' in action ? action.sessionId : undefined,
+								deps
+							);
+							if (target && !target.isDestroyed()) {
+								if (target.isMinimized()) target.restore();
+								target.show();
+								target.focus();
+								target.webContents.send('notification:clickAction', action);
+							}
+							releaseNotification();
+						});
+					} else if (sessionId && deps?.getMainWindow) {
 						const deepLinkUrl = buildSessionDeepLink(sessionId, tabId);
 
 						notification.on('click', () => {
