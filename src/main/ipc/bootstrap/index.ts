@@ -534,7 +534,11 @@ export function setupIpcHandlers(deps: IpcBootstrapDependencies): void {
 	registerAgentErrorHandlers();
 
 	// Register notification handlers (extracted to handlers/notifications.ts)
-	registerNotificationsHandlers({ getMainWindow: deps.getMainWindow });
+	registerNotificationsHandlers({
+		getMainWindow: deps.getMainWindow,
+		getWindowRegistry: () => deps.windowRegistry,
+		ensureMainWindow: deps.ensureMainWindow,
+	});
 
 	// Register attachments handlers (extracted to handlers/attachments.ts)
 	registerAttachmentsHandlers({ app: deps.app });

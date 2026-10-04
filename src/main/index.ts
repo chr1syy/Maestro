@@ -3135,6 +3135,9 @@ app
 		setupIpcHandlers({
 			debugPackageDeps,
 			getMainWindow: () => mainWindow,
+			ensureMainWindow: () => {
+				if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+			},
 			getProcessManager: () => processManager,
 			getWebServer: () => webServer,
 			setWebServer: (server) => {

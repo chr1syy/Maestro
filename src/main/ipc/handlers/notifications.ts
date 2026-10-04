@@ -13,7 +13,7 @@
 import { ipcMain, Notification, BrowserWindow } from 'electron';
 import { spawn, type ChildProcess } from 'child_process';
 import { logger } from '../../utils/logger';
-import { createSafeSend, type SafeSendFn } from '../../utils/safe-send';
+import { createSafeSend, isWebContentsAvailable, type SafeSendFn } from '../../utils/safe-send';
 import { parseDeepLink, dispatchDeepLink } from '../../deep-links';
 import { buildSessionDeepLink } from '../../../shared/deep-link-urls';
 import { captureException } from '../../utils/sentry';
@@ -409,30 +409,11 @@ async function processNextNotification(): Promise<void> {
  */
 export interface NotificationsHandlerDependencies {
 	getMainWindow: () => BrowserWindow | null;
-	/**
-	 * Multi-window registry getter. When wired, a notification's click handler
-	 * resolves the window that currently owns the agent (via
-	 * {@link WindowRegistry.getWindowForSession}) and focuses THAT window instead
-	 * of always the primary. Optional: single-window builds, the web interface,
-	 * and tests omit it and fall back to {@link getMainWindow}.
-	 */
 	getWindowRegistry?: () => WindowRegistry | null;
+	ensureMainWindow?: () => void;
 }
 
-/**
- * Resolve the window a notification click should focus.
- *
- * When a session (agent) id is present and the multi-window registry is wired,
- * look up the window that currently owns that agent and return its
- * `BrowserWindow`, so clicking the notification focuses the right window in a
- * multi-window layout instead of always the primary. Resolution happens at
- * click-time (not when the notification is shown) so an agent that was moved to
- * another window after the notification fired still lands in the correct place.
- *
- * Falls back to the primary/main window when there is no session context, the
- * registry is not wired (single-window build, web), the agent is untracked, or
- * the owning window was destroyed.
- */
+/** Resolve the window that currently owns the agent, falling back to main. */
 export function resolveNotificationClickWindow(
 	sessionId: string | undefined,
 	deps?: NotificationsHandlerDependencies
@@ -442,9 +423,7 @@ export function resolveNotificationClickWindow(
 		const windowId = registry.getWindowForSession(sessionId);
 		if (windowId) {
 			const entry = registry.get(windowId);
-			if (entry && !entry.browserWindow.isDestroyed()) {
-				return entry.browserWindow;
-			}
+			if (entry && !entry.browserWindow.isDestroyed()) return entry.browserWindow;
 		}
 	}
 	return deps?.getMainWindow?.() ?? null;
@@ -454,9 +433,42 @@ export function resolveNotificationClickWindow(
  * Register all notification-related IPC handlers
  */
 export function registerNotificationsHandlers(deps?: NotificationsHandlerDependencies): void {
-	// Capture the window getter for the module-level queue helpers so completion
-	// events reach both the desktop renderer and web-desktop bridge clients.
+	// Completion events also reach the web-desktop bridge through this sender.
 	commandCompletedSafeSend = createSafeSend(deps?.getMainWindow ?? (() => null));
+
+	const pendingActions: ToastClickAction[] = [];
+	const readyRenderers = new WeakSet<Electron.WebContents>();
+	const flushActions = (): void => {
+		for (let index = 0; index < pendingActions.length; ) {
+			const action = pendingActions[index];
+			const target = resolveNotificationClickWindow(
+				'sessionId' in action ? action.sessionId : undefined,
+				deps
+			);
+			if (!target || !isWebContentsAvailable(target) || !readyRenderers.has(target.webContents)) {
+				index++;
+				continue;
+			}
+			if (target.isMinimized()) target.restore();
+			target.show();
+			target.focus();
+			target.webContents.send('notification:clickAction', action);
+			pendingActions.splice(index, 1);
+		}
+	};
+	// Recreated windows announce readiness after installing their click listener.
+	ipcMain.handle('notification:ready', (event) => {
+		const sender = event.sender;
+		const knownWindow = BrowserWindow.getAllWindows().some(
+			(window) => isWebContentsAvailable(window) && window.webContents === sender
+		);
+		if (!knownWindow) return;
+		if (!readyRenderers.has(sender)) {
+			readyRenderers.add(sender);
+			sender.once('did-start-loading', () => readyRenderers.delete(sender));
+		}
+		flushActions();
+	});
 
 	// Show OS notification (with optional click-to-navigate support)
 	ipcMain.handle(
@@ -491,16 +503,14 @@ export function registerNotificationsHandlers(deps?: NotificationsHandlerDepende
 					const action = parsedAction.action;
 					if (action && deps?.getMainWindow) {
 						notification.on('click', () => {
+							pendingActions.push(action);
+							if (pendingActions.length > NOTIFICATION_MAX_QUEUE_SIZE) pendingActions.shift();
 							const target = resolveNotificationClickWindow(
 								'sessionId' in action ? action.sessionId : undefined,
 								deps
 							);
-							if (target && !target.isDestroyed()) {
-								if (target.isMinimized()) target.restore();
-								target.show();
-								target.focus();
-								target.webContents.send('notification:clickAction', action);
-							}
+							if (!target || target.isDestroyed()) deps.ensureMainWindow?.();
+							flushActions();
 							releaseNotification();
 						});
 					} else if (sessionId && deps?.getMainWindow) {
