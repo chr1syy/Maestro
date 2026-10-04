@@ -258,7 +258,8 @@ const BOOTSTRAP_SOURCE = String.raw`(function bootstrap(bridge) {
 				list: function () { return hostCall('agents.list', {}); },
 				get: function (agentId) { return hostCall('agents.get', { agentId: agentId }); },
 				dispatch: function (agentId, prompt, opts) { return hostCall('agents.dispatch', { agentId: agentId, prompt: prompt, opts: opts }); },
-				send: function (agentId, prompt, opts) { return hostCall('agents.send', { agentId: agentId, prompt: prompt, opts: opts }); }
+				send: function (agentId, prompt, opts) { return hostCall('agents.send', { agentId: agentId, prompt: prompt, opts: opts }); },
+				generateTitle: function (agentId, firstMessage) { return hostCall('agents.generateTitle', { agentId: agentId, firstMessage: firstMessage }); }
 			}),
 			history: Object.freeze({
 				list: function (params) { return hostCall('history.list', params || {}); },

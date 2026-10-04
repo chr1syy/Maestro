@@ -419,7 +419,8 @@ export function describeCapability(capability: PluginCapability): string {
 // --- Host API version (from shared/plugins/host-api.ts) ---------------------
 
 /**
- * The host API version this Maestro build implements. Bumped to 1.17.0 for
+ * The host API version this Maestro build implements. Bumped to 1.18.0 for
+ * isolated `agents.generateTitle`. 1.17.0 added
  * `agents.send` and the verified plugin-tool caller context. 1.16.0 added three
  * backward-compatible additions: the metadata-only `session.activated` event
  * topic (`{ sessionId, tabId? }`, opaque ids only, fired when the focused agent
@@ -451,7 +452,7 @@ export function describeCapability(capability: PluginCapability): string {
  * `ui:contribute` / `ui:panel` / `ui:render-unsafe`; 1.3.0 added `tools` +
  * `keybindings`; 1.2.0 added `transcripts:read`.
  */
-export const HOST_API_VERSION = '1.17.0';
+export const HOST_API_VERSION = '1.18.0';
 
 /** Result of checking a plugin's declared host-API requirement. */
 export interface HostApiCompatibility {
@@ -1312,6 +1313,7 @@ export const HOST_API = {
 	'agents.get': { capability: 'agents:read' },
 	'agents.dispatch': { capability: 'agents:dispatch' },
 	'agents.send': { capability: 'agents:dispatch' },
+	'agents.generateTitle': { capability: 'agents:dispatch' },
 	'notifications.toast': { capability: 'notifications:toast' },
 	'settings.get': { capability: 'settings:read' },
 	'settings.set': { capability: 'settings:write' },
@@ -1467,6 +1469,8 @@ export interface MaestroAgentsApi {
 	list(): Promise<unknown>;
 	get(agentId: string): Promise<unknown>;
 	dispatch(agentId: string, prompt: string, opts?: unknown): Promise<unknown>;
+	/** Isolated cheap naming turn; never creates or resumes a provider conversation. */
+	generateTitle(agentId: string, firstMessage: string): Promise<string | null>;
 	/** Fresh provider session unless sessionId is supplied; never a desktop tab id. */
 	send(
 		agentId: string,
