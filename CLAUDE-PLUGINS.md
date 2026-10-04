@@ -22,7 +22,7 @@ Pure, bundle-safe contracts (no Electron, no fs) in `src/shared/plugins/`:
 | `plugin-manifest.ts`                                                                                   | `PluginManifest`, `PluginTier`, `PLUGIN_ID_PATTERN`, `validatePluginManifest`, entry-traversal guard                                        |
 | `permissions.ts`                                                                                       | `PluginCapability`, `PLUGIN_CAPABILITIES`, risk/scope maps, `PermissionRequest`/`PermissionGrant`, `isPermitted` (the default-deny matcher) |
 | `contributions.ts`                                                                                     | every contribution interface, host-view block-size contract, `collectContributions`, `aggregateContributions` (built-in-wins merge)         |
-| `events.ts`                                                                                            | `PLUGIN_EVENT_TOPICS`, `PluginEventPayloads` (metadata only)                                                                                |
+| `events.ts`                                                                                            | `PLUGIN_EVENT_TOPICS`, `PluginEventPayloads` (metadata only; includes the four `board.*` topics)                                            |
 | `host-api.ts`                                                                                          | `HOST_API_VERSION`, `isHostApiCompatible` (semver gate)                                                                                     |
 | `rpc-protocol.ts`                                                                                      | `HOST_API` method->capability table, `HostRequest`/`HostResponse`/`HostControlMessage`, `extractTarget`                                     |
 | `signing.ts`                                                                                           | `SIGNATURE_FILENAME`, `SignatureStatus`, canonical signing payload                                                                          |
@@ -211,11 +211,11 @@ Bundled plugins (e.g. `agent-flow`) ship trusted via a build-time signature, not
 The current host is `1.20.0`; `agents.send` now accepts an optional invocation-scoped public progress callback (see `docs/relay-host-contract.md`). 1.18.0 places settings panels in plugin details; 1.19.0 adds the isolated panel theme bridge. 1.17.0 added resumable `agents.send` and verified plugin-tool caller context. 1.16.0 added the metadata-only `session.activated`
 event topic, the `sessions.focus` method plus its narrow `sessions:focus`
 capability, and the `ui.openPanel` / `ui.closePanel` / `ui.togglePanel` methods
-plus the optional panel manifest field `size?: 'default' | 'full'`. (`1.15.0` is
-taken by the Board + Profiles work on this fork, so it is skipped here.)
-Earlier: `1.14.0` added the `tool.executed` event topic and the
-`ui.panelPost` host-to-panel push method; `1.13.0` added the
-host-mediated `PluginUiSurface` registry and trusted-chrome guard; `1.12.0`
+plus the optional panel manifest field `size?: 'default' | 'full'`. Earlier:
+`1.15.0` added the four metadata-only Board event topics
+(`board.cardStatusChanged` / `board.cardCompleted` / `board.cardBlocked` /
+`board.decomposed`); `1.14.0` added the `tool.executed` event topic and the
+`ui.panelPost` host-to-panel push method; `1.13.0` added the host-mediated `PluginUiSurface` registry and trusted-chrome guard; `1.12.0`
 added the `net:connect` capability and the `net.connect` / `net.send` /
 `net.close` methods; `1.11.0` added `groupings` + `ui:grouping`; `1.10.0` added
 `iconPacks`; `1.9.0` added `hostViews`, `ui:hostView`, and the
