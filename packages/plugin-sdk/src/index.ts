@@ -1539,7 +1539,14 @@ export interface MaestroNetApi {
 export type AgentSendProgressEvent =
 	| { type: 'activity'; text: string; at: string }
 	| { type: 'commentary'; text: string; at: string }
-	| { type: 'tool'; tool: string; status: 'started' | 'completed' | 'failed'; at: string };
+	| {
+			type: 'tool';
+			tool: string;
+			status: 'started' | 'completed' | 'failed';
+			at: string;
+			/** English public action, at most 120 chars, from allowlisted tool metadata. */
+			summary?: string;
+	  };
 
 export interface MaestroAgentsApi {
 	list(): Promise<unknown>;
