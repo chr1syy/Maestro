@@ -66,12 +66,12 @@ discover folders under pluginsDir()
   -> signature verify (verifyPluginSignature)
   -> apply persisted enable toggle
        (tier 0 auto-enables on first discovery; tier >= 1 stays DISABLED
-        until the user enables = consents; a stored toggle always wins)
+        until the user enables = consents; changed code identity forces disabled)
   -> reconcileSandboxes(): start runnable tier-1 children, stop the rest
 ```
 
-- `refresh()` rebuilds the registry from disk and is the ONLY place sandboxes are reconciled and `onChange` (-> `plugins:changed`) fires. It re-reads disk so manual installs/removes are picked up.
-- `isRunnable(record)` = `enabled && loadStatus === 'ok' && manifest && tier >= 1 && entry && signature.status !== 'invalid'`. Tampered (`invalid`) code is NEVER run.
+- `refresh()` rebuilds the registry from disk, rechecks the consented identity, and reconciles sandboxes. `setEnabled()` also reconciles; enabling a code-tier plugin first verifies its current on-disk identity against the sealed authorization ledger, before persisting the toggle or starting code.
+- `isRunnable(record)` = `enabled && loadStatus === 'ok' && manifest && tier >= 1 && entry && signature.status === 'trusted'`. Code without a trusted signature never runs.
 - `install(sourceDir)` copies a source folder into `pluginsDir()/<id>`, rejecting an invalid manifest, an id collision, or any symlink in the tree (a symlink could escape the plugin dir).
 - `uninstall(id)` stops the sandbox, removes the dir (only inside `pluginsDir()`), then purges everything the plugin owns: enable toggle (`forgetPlugin`), grants (`forgetGrants`), and via `purgePluginData` its KV store, `plugins.<id>.*` settings, and live event subscriptions. Uninstall leaves nothing behind.
 

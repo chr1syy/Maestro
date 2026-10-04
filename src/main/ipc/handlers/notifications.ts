@@ -459,9 +459,12 @@ export function registerNotificationsHandlers(deps?: NotificationsHandlerDepende
 	// Recreated windows announce readiness after installing their click listener.
 	ipcMain.handle('notification:ready', (event) => {
 		const sender = event.sender;
-		const knownWindow = BrowserWindow.getAllWindows().some(
-			(window) => isWebContentsAvailable(window) && window.webContents === sender
-		);
+		const mainWindow = deps?.getMainWindow();
+		const knownWindow =
+			(isWebContentsAvailable(mainWindow) && mainWindow.webContents === sender) ||
+			BrowserWindow.getAllWindows().some(
+				(window) => isWebContentsAvailable(window) && window.webContents === sender
+			);
 		if (!knownWindow) return;
 		if (!readyRenderers.has(sender)) {
 			readyRenderers.add(sender);

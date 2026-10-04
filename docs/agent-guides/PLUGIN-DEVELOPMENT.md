@@ -624,7 +624,7 @@ await maestro.ui.panelPost('my-panel', { nodes });
 
 ### Summoning your own panel
 
-A `modal` panel normally opens from Settings -> Encore -> Plugins. To open it yourself - e.g. bind a `keybindings` chord to a command that pops a full-window overlay - call `maestro.ui.openPanel(panelId)`, `maestro.ui.closePanel(panelId)`, or `maestro.ui.togglePanel(panelId)`. All three take the LOCAL panel id, require `ui:panel` (no extra consent), and act ONLY on your own `modal` panels: a docked (`left`/`right`/`main`/`settings`) panel is rejected, since it is always mounted and has its own hide control, and `closePanel` is a no-op unless that exact panel is the one currently open, so you can never dismiss another plugin's surface. Escape, the backdrop, and the close button dismiss the panel too. Requires `minHostApi: '1.16.0'`.
+A `modal` panel normally opens from Settings -> Encore -> Plugins. To open it yourself - e.g. bind a `keybindings` chord to a command that pops a full-window overlay - call `maestro.ui.openPanel(panelId)`, `maestro.ui.closePanel(panelId)`, or `maestro.ui.togglePanel(panelId)`. All three take the LOCAL panel id, require `ui:panel` (no extra consent), and act ONLY on your own `modal` panels: a non-modal (`left`/`right`/`main`/`settings`) panel is rejected, and `closePanel` is a no-op unless that exact panel is the one currently open, so you can never dismiss another plugin's surface. Escape, the backdrop, and the close button dismiss the panel too. Requires `minHostApi: '1.16.0'`.
 
 ```js
 maestro.commands.register('overlay', () => maestro.ui.togglePanel('flow'));

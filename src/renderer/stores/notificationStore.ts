@@ -471,8 +471,12 @@ export function showOsNotification(
 ): void {
 	if (!isWebDesktop()) {
 		// Desktop: unchanged host-notification bridge.
-		if (typeof window !== 'undefined' && window.maestro?.notification?.show) {
-			window.maestro.notification.show(title, body, sessionId, tabId, options.clickAction).catch((err) => {
+		if (typeof window !== 'undefined' && typeof window.maestro?.notification?.show === 'function') {
+			const notification = window.maestro.notification;
+			const request = options.clickAction
+				? notification.show(title, body, sessionId, tabId, options.clickAction)
+				: notification.show(title, body, sessionId, tabId);
+			request.catch((err) => {
 				logger.error('[notificationStore] Failed to show OS notification:', undefined, err);
 			});
 		}

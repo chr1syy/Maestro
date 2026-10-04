@@ -332,6 +332,10 @@ Deliver what was asked at the scope asked. A bug or cleanup opportunity you trip
 
 After refactoring, identify now-unreachable code and list it in your summary. Delete it in the same change when it is unambiguously dead (only your refactor referenced it); list it and leave it when there is any doubt. Don't leave corpses silently, and don't silently delete code you merely believe is unused.
 
+### Local Test Packages: Current RC Plus Own PRs
+
+For local Maestro test installers, start from the **latest remote `upstream/rc` head** and locally integrate the current heads of the authenticated user's open Maestro PRs. Refresh the remote refs and query the PR list immediately before integration; record the RC SHA, every PR number and exact head SHA, and the local integration commits in BUILD-NOTES. Check ancestry and equivalent changes first so an already included PR is not applied twice. For a PR based on `main`, bring over its PR commits without importing unrelated `main` history. Keep all merges and cherry-picks local: a test build never authorizes a push, upstream merge, publication, installation, or app restart. Preserve existing uncommitted work in its registered worktree and carry any still-needed fix into the new build deliberately. Verify the features in the actual package, not only in the source tree.
+
 ### Validate Before Push
 
 Before pushing any branch, re-run the relevant formatting, lint, type-check, and test commands for the changes you made. Fix any issues those commands surface, include the fixes in the branch, and only then push or update the PR.
