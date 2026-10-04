@@ -2804,6 +2804,10 @@ Some text with [x] in it that's not a checkbox
 						type: 'event_msg',
 						payload: { type: 'agent_message', phase: 'commentary', message: 'Working' },
 					},
+					{
+						type: 'event_msg',
+						payload: { type: 'agent_message', phase: 'analysis', message: 'PRIVATE' },
+					},
 					{ type: 'item.completed', item: { type: 'reasoning', text: 'PRIVATE' } },
 				]
 					.map(JSON.stringify)
