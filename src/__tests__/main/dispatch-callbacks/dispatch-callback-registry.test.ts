@@ -357,3 +357,48 @@ describe('dispose', () => {
 		vi.clearAllMocks();
 	});
 });
+
+// Characterize the boundary of the desktop API. These are deliberately NOT
+// guarantees of durable/exact-dispatch completion; see the headless API design.
+describe('headless completion boundary', () => {
+	it('does not retain callback registration after registry recreation', () => {
+		const oldHost = makeHarness();
+		register(oldHost.registry);
+		oldHost.registry.noteSpawn(KEY);
+		oldHost.registry.dispose();
+
+		const restartedHost = makeHarness();
+		restartedHost.registry.noteExit(KEY, 0);
+		restartedHost.runTimers();
+		expect(restartedHost.registry.list()).toEqual([]);
+		expect(restartedHost.fires).toEqual([]);
+	});
+
+	it('cannot distinguish an already queued predecessor spawning after registration', () => {
+		const h = makeHarness();
+		register(h.registry);
+		// P was queued before D. Neither has spawned when D's callback is armed.
+		// The registry receives only the tab key, so P's subsequent spawn/exit
+		// is indistinguishable from D. A new durable API must carry D's queue ID.
+		h.registry.noteSpawn(KEY);
+		h.registry.noteExit(KEY, 0);
+		h.runTimers();
+		expect(h.fires).toHaveLength(1);
+		expect(h.fires[0].status).toBe('completed');
+	});
+
+	it('cannot associate a new same-agent Auto Run with its initiating tab', () => {
+		const h = makeHarness();
+		register(h.registry);
+		h.registry.noteSpawn(KEY);
+		h.setNow(1_000_100);
+		// A different tab starts this batch after our spawn. The registry's
+		// probe has only agent ID and time; it cannot reject the unrelated batch.
+		h.setAutoRun(true);
+		h.registry.noteExit(KEY, 0);
+		h.runTimers();
+		expect(h.fires).toHaveLength(0);
+		h.registry.noteAutoRunFinal(TARGET, { tasksCompleted: 7, tasksTotal: 7 });
+		expect(h.fires[0].tasksCompleted).toBe(7);
+	});
+});
