@@ -1202,6 +1202,28 @@ describe('high-power act verbs (agents.dispatch / process.spawn)', () => {
 		expect(sendAgent).not.toHaveBeenCalled();
 	});
 
+	it.each(['origin', 'completion', 'threadId', 'callbackTab'])(
+		'rejects unsupported %s routing rather than acknowledging completion registration',
+		async (field) => {
+			const sendAgent = vi.fn();
+			const handlers = buildHostCallHandlers(
+				makeDeps({
+					broker: brokerFor(() => [scopedGrant('agents:dispatch', 'a')]),
+					dispatchUnattendedAllowed: () => true,
+					sendAgent,
+				})
+			);
+			await expect(
+				handlers['agents.send']!('p', {
+					agentId: 'a',
+					prompt: 'hello',
+					opts: { [field]: 'unverified-context' },
+				})
+			).rejects.toThrow();
+			expect(sendAgent).not.toHaveBeenCalled();
+		}
+	);
+
 	it('aborts an in-flight send when its plugin is stopped', async () => {
 		let cleanup: ((pluginId: string) => void) | undefined;
 		const sendAgent = vi.fn(

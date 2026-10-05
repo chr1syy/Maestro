@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as runIdentity from '../../../main/plugins/plugin-tool-run-identity';
 import type { SessionInfo } from '../../../shared/types';
-import { createPluginHeadlessAgentRunner } from '../../../main/plugins/plugin-headless-agent-runner';
+import {
+	createPluginHeadlessAgentRunner,
+	type PluginHeadlessRunnerDeps,
+} from '../../../main/plugins/plugin-headless-agent-runner';
 
 const agent = {
 	id: 'agent-a',
@@ -13,6 +16,93 @@ const agent = {
 } as SessionInfo;
 
 describe('plugin headless agent runner', () => {
+	it.each(['missing-tools', 'missing-receipt-reader', 'remote-agent'] as const)(
+		'refuses receipt-required reporting before issuing authority: %s',
+		async (unavailable) => {
+			const spawn = vi.fn();
+			const issueRunToken = vi.fn();
+			const run = createPluginHeadlessAgentRunner({
+				getAgent: () =>
+					unavailable === 'remote-agent'
+						? ({ ...agent, sessionSshRemoteConfig: { enabled: true } } as SessionInfo)
+						: agent,
+				detectAgent: async () => ({ available: true }),
+				hasPluginTools: () => unavailable !== 'missing-tools',
+				spawn,
+				prepareSystemPrompt: async () => undefined,
+				issueRunToken,
+				getRunReceipts: unavailable === 'missing-receipt-reader' ? undefined : () => [],
+				revokeRunToken: vi.fn(),
+				cliScriptPath: () => '/cli.js',
+				audit: vi.fn(),
+			});
+			expect(
+				await run(
+					'agent-a',
+					'report',
+					undefined,
+					undefined,
+					'auto',
+					undefined,
+					'sh.maestro.relay/send'
+				)
+			).toMatchObject({ success: false, error: 'Authenticated plugin tool receipt unavailable' });
+			expect(spawn).not.toHaveBeenCalled();
+			expect(issueRunToken).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each(['provider-failure', 'cancelled-after-send'] as const)(
+		'retains real receipts despite %s and does not retry the provider',
+		async (failure) => {
+			const identity = new runIdentity.PluginToolRunIdentity();
+			const controller = new AbortController();
+			const revokeRunToken = vi.fn((token: string) => identity.revoke(token));
+			const spawn = vi.fn(async (...args: Parameters<PluginHeadlessRunnerDeps['spawn']>) => {
+				const options = args[4]!;
+				const token = fs.readFileSync(options.pluginRunProofFile!, 'utf8');
+				identity.recordReceipt(token, 'sh.maestro.relay/send', { messageIds: ['401'] });
+				if (failure === 'cancelled-after-send') controller.abort();
+				return {
+					success: false,
+					error: 'Provider ended after the send',
+					agentSessionId: 'provider-1',
+				};
+			});
+			const run = createPluginHeadlessAgentRunner({
+				getAgent: () => agent,
+				detectAgent: async () => ({ available: true }),
+				hasPluginTools: () => true,
+				spawn,
+				prepareSystemPrompt: async () => undefined,
+				issueRunToken: (id, ttl, toolId) => identity.issue(id, ttl, toolId),
+				getRunReceipts: (token) => identity.getReceipts(token),
+				revokeRunToken,
+				cliScriptPath: () => '/cli.js',
+				audit: vi.fn(),
+			});
+			const result = await run(
+				'agent-a',
+				'report',
+				'provider-1',
+				controller.signal,
+				'auto',
+				undefined,
+				'sh.maestro.relay/send'
+			);
+			expect(result).toMatchObject({
+				success: false,
+				response: null,
+				toolReceipts: [
+					{ agentId: 'agent-a', toolId: 'sh.maestro.relay/send', messageIds: ['401'] },
+				],
+			});
+			expect(spawn).toHaveBeenCalledOnce();
+			expect(revokeRunToken).toHaveBeenCalledOnce();
+			expect(identity.resolve(revokeRunToken.mock.calls[0][0])).toEqual({ callerAgentId: null });
+		}
+	);
+
 	it('returns only receipts tied to its issued proof, independent of final prose', async () => {
 		const identity = new runIdentity.PluginToolRunIdentity();
 		const run = createPluginHeadlessAgentRunner({
