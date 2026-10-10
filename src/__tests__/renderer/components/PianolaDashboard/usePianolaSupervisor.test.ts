@@ -87,6 +87,68 @@ describe('usePianolaSupervisor', () => {
 		expect(notifyToast).toHaveBeenCalledWith(expect.objectContaining({ color: 'red' }));
 	});
 
+	it('restores the last known value when the save and recovery read both fail', async () => {
+		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
+		vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(false);
+		vi.mocked(window.maestro.settings.getAll).mockRejectedValueOnce(new Error('read failed'));
+		const { result } = renderHook(() => usePianolaSupervisor());
+		await act(async () => {
+			await result.current.setAutoWatchNewAgents(false);
+		});
+		expect(result.current.autoWatchNewAgents).toBe(true);
+		expect(notifyToast).toHaveBeenCalledWith(expect.objectContaining({ color: 'red' }));
+	});
+
+	it('does not roll back newer saves when an older recovery read fails', async () => {
+		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
+		const recovery = deferred<boolean>();
+		vi.mocked(window.maestro.settings.set)
+			.mockResolvedValueOnce(false)
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(true);
+		vi.mocked(window.maestro.settings.getAll).mockImplementationOnce(async () => {
+			await recovery.promise;
+			throw new Error('read failed');
+		});
+		const { result } = renderHook(() => usePianolaSupervisor());
+		let saving: Promise<void>;
+		await act(async () => {
+			saving = result.current.setAutoWatchNewAgents(false);
+			await Promise.resolve();
+		});
+		await act(async () => {
+			await result.current.setAutoWatchNewAgents(true);
+			await result.current.setAutoWatchNewAgents(false);
+			recovery.resolve(true);
+			await saving;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(false);
+	});
+
+	it('preserves a newer hydration even when it confirms the optimistic value', async () => {
+		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
+		const recovery = deferred<boolean>();
+		vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(false);
+		vi.mocked(window.maestro.settings.getAll)
+			.mockImplementationOnce(async () => {
+				await recovery.promise;
+				throw new Error('read failed');
+			})
+			.mockResolvedValueOnce({ pianolaAutoWatchNewAgents: false });
+		const { result } = renderHook(() => usePianolaSupervisor());
+		let saving: Promise<void>;
+		await act(async () => {
+			saving = result.current.setAutoWatchNewAgents(false);
+			await Promise.resolve();
+		});
+		await act(async () => {
+			await loadAllSettings();
+			recovery.resolve(true);
+			await saving;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(false);
+	});
+
 	it('recovers the stored setting when a save fails before initial hydration', async () => {
 		useSettingsStore.setState({ settingsLoaded: false });
 		const initialRead = deferred<Record<string, unknown>>();

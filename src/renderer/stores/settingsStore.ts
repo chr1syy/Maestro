@@ -721,6 +721,9 @@ export function resolveForceParallel(optionForce?: boolean): boolean {
 	return optionForce === true || s.forcedParallelAlways;
 }
 
+// Invalidates failed auto-watch saves when a newer save or hydration has landed.
+let pianolaAutoWatchRevision = 0;
+
 export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 	/** Monotonic counter to discard stale async completions in setPersistentWebLink */
 	let persistentWebLinkRequestSeq = 0;
@@ -1471,6 +1474,8 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 		},
 
 		setPianolaAutoWatchNewAgents: async (value) => {
+			const previousValue = get().pianolaAutoWatchNewAgents;
+			const revision = ++pianolaAutoWatchRevision;
 			set({ pianolaAutoWatchNewAgents: value });
 			try {
 				const saved = await window.maestro.settings.set('pianolaAutoWatchNewAgents', value);
@@ -1480,7 +1485,10 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 			} catch (error) {
 				// Re-read the persisted value rather than reverting to a possibly stale
 				// pre-save snapshot (including the default before initial hydration).
-				await loadAllSettings();
+				const recovered = await loadAllSettings();
+				if (!recovered && revision === pianolaAutoWatchRevision) {
+					set({ pianolaAutoWatchNewAgents: previousValue });
+				}
 				throw error;
 			}
 		},
@@ -1946,8 +1954,9 @@ export function selectIsLeaderboardRegistered(s: SettingsStoreState): boolean {
 /**
  * Batch-load all settings from electron-store and apply them to the Zustand store.
  * Called once on app startup and again on system resume from sleep.
+ * Returns whether hydration succeeded so a failed save can recover its prior value.
  */
-export async function loadAllSettings(): Promise<void> {
+export async function loadAllSettings(): Promise<boolean> {
 	// Snapshot before the awaited reads below. Anything the user changes while
 	// they are in flight must survive this load - see the filter before setState.
 	const beforeRead = useSettingsStore.getState() as unknown as Record<string, unknown>;
@@ -2677,6 +2686,9 @@ export async function loadAllSettings(): Promise<void> {
 			}
 		}
 
+		// Applying even an identical persisted value supersedes a failed save.
+		if (patch.pianolaAutoWatchNewAgents !== undefined) pianolaAutoWatchRevision++;
+
 		// Apply the entire patch in one setState call
 		patch.settingsLoaded = true;
 		useSettingsStore.setState(patch);
@@ -2684,10 +2696,12 @@ export async function loadAllSettings(): Promise<void> {
 		// Deliberately not awaited: it reads the Cue database over IPC and only
 		// refines a display subtotal, so it must not hold up settings load.
 		void backfillCueTimeIfNeeded(allSettings['cueTimeBackfillApplied'] === true);
+		return true;
 	} catch (error) {
 		logger.error('[Settings] Failed to load settings:', undefined, error);
 		// Mark settings as loaded even if there was an error (use defaults)
 		useSettingsStore.setState({ settingsLoaded: true });
+		return false;
 	}
 }
 
