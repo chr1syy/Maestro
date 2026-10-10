@@ -176,6 +176,46 @@ describe('reclaimOrphanedAutoRuns', () => {
 		);
 	});
 
+	it('releases the run when the restart returns without claiming it', async () => {
+		vi.mocked(window.maestro.web.takeOrphanedAutoRuns).mockResolvedValueOnce([mkRun()]);
+		// Main still holds the reclaim, so the restart never claimed the run.
+		vi.mocked(window.maestro.web.abandonAutoRunReclaim).mockResolvedValueOnce(true);
+
+		await reclaimOrphanedAutoRuns(start);
+
+		expect(start).toHaveBeenCalledTimes(1);
+		expect(window.maestro.web.abandonAutoRunReclaim).toHaveBeenCalledWith(
+			'agent-1',
+			getClientInstanceId()
+		);
+		expect(window.maestro.web.broadcastAutoRunState).toHaveBeenCalledWith('agent-1', null);
+	});
+
+	it('leaves a run the restart claimed alone', async () => {
+		vi.mocked(window.maestro.web.takeOrphanedAutoRuns).mockResolvedValueOnce([mkRun()]);
+		// The claim cleared the pending reclaim, so main has nothing to abandon.
+		vi.mocked(window.maestro.web.abandonAutoRunReclaim).mockResolvedValueOnce(false);
+
+		await reclaimOrphanedAutoRuns(start);
+
+		expect(start).toHaveBeenCalledTimes(1);
+		expect(window.maestro.web.broadcastAutoRunState).not.toHaveBeenCalled();
+	});
+
+	it('releases the run when the restart throws', async () => {
+		vi.mocked(window.maestro.web.takeOrphanedAutoRuns).mockResolvedValueOnce([mkRun()]);
+		vi.mocked(window.maestro.web.abandonAutoRunReclaim).mockResolvedValueOnce(true);
+		start.mockRejectedValueOnce(new Error('claim refused'));
+
+		await expect(reclaimOrphanedAutoRuns(start)).rejects.toThrow('claim refused');
+
+		expect(window.maestro.web.abandonAutoRunReclaim).toHaveBeenCalledWith(
+			'agent-1',
+			getClientInstanceId()
+		);
+		expect(window.maestro.web.broadcastAutoRunState).toHaveBeenCalledWith('agent-1', null);
+	});
+
 	it('does nothing when main cannot be asked', async () => {
 		vi.mocked(window.maestro.web.takeOrphanedAutoRuns).mockRejectedValueOnce(new Error('down'));
 		await reclaimOrphanedAutoRuns(start);

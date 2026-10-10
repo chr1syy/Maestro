@@ -132,6 +132,25 @@ function dropMirror(agentId: string): void {
 	});
 }
 
+/**
+ * Give a reclaimed run back to main. A no-op once the restart has claimed it:
+ * main only ends a run whose reclaim is still pending for this client.
+ */
+async function releaseReclaim(agentId: string, instanceId: string): Promise<void> {
+	try {
+		if (await window.maestro.web.abandonAutoRunReclaim(agentId, instanceId)) {
+			// Every other client is still mirroring the dead loop's last frame.
+			// Publishing the clear is what takes the run off their screens.
+			await window.maestro.web.broadcastAutoRunState(agentId, null);
+		}
+	} catch (error) {
+		window.maestro.logger.log('error', 'Failed to release Auto Run', 'BatchProcessor', {
+			sessionId: agentId,
+			error: String(error),
+		});
+	}
+}
+
 async function resumeOrphanedRun(
 	run: ReclaimedAutoRun,
 	instanceId: string,
@@ -151,18 +170,7 @@ async function resumeOrphanedRun(
 			sessionId: run.agentId,
 			reason: plan.reason,
 		});
-		try {
-			if (await window.maestro.web.abandonAutoRunReclaim(run.agentId, instanceId)) {
-				// Every other client is still mirroring the dead loop's last frame.
-				// Publishing the clear is what takes the run off their screens.
-				await window.maestro.web.broadcastAutoRunState(run.agentId, null);
-			}
-		} catch (error) {
-			window.maestro.logger.log('error', 'Failed to release Auto Run', 'BatchProcessor', {
-				sessionId: run.agentId,
-				error: String(error),
-			});
-		}
+		await releaseReclaim(run.agentId, instanceId);
 		dropMirror(run.agentId);
 		notifyToast({
 			color: 'yellow',
@@ -189,7 +197,15 @@ async function resumeOrphanedRun(
 
 	await waitForOrphanedTaskExit(run.agentId);
 	dropMirror(run.agentId);
-	await startBatchRun(run.agentId, plan.config, run.folderPath);
+	try {
+		await startBatchRun(run.agentId, plan.config, run.folderPath);
+	} finally {
+		// `startBatchRun` can return, or throw, before it claims the run (the
+		// agent or its documents went away during the wait, Auto Run was switched
+		// off, the claim was refused). Main would then hold the agent as running
+		// with nothing left to end it, and refuse every later start.
+		await releaseReclaim(run.agentId, instanceId);
+	}
 }
 
 /**
