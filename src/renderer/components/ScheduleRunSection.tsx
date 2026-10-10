@@ -52,6 +52,10 @@ export interface ScheduleRunSectionProps {
 	cueEnabled: boolean;
 	/** Opens Settings so the user can turn Cue on. */
 	onOpenEncoreSettings?: () => void;
+	/** Why the run cannot be scheduled as configured (see
+	 *  {@link scheduleBlockedReason}). Shown in place of the hint once a time
+	 *  is set. */
+	blockedReason?: string | null;
 }
 
 /**
@@ -67,12 +71,29 @@ export function validateScheduledStart(value: string, now: Date = new Date()): s
 	return null;
 }
 
+/**
+ * Why a run cannot be scheduled as configured, or null when it can.
+ *
+ * A scheduled run is launched by Cue in the owning agent's own checkout: the
+ * Auto Run payload a `time.once` subscription carries has no worktree target.
+ * Scheduling one anyway would quietly run the documents against the main
+ * checkout the user picked a worktree to keep them out of, so it is refused up
+ * front instead.
+ */
+export function scheduleBlockedReason(options: { hasWorktreeTarget: boolean }): string | null {
+	if (options.hasWorktreeTarget) {
+		return 'A scheduled run cannot dispatch to a worktree. Turn off the worktree target to schedule this run, or start it now.';
+	}
+	return null;
+}
+
 export function ScheduleRunSection({
 	theme,
 	value,
 	onChange,
 	cueEnabled,
 	onOpenEncoreSettings,
+	blockedReason,
 }: ScheduleRunSectionProps) {
 	const isEnabled = value !== '';
 
@@ -81,7 +102,12 @@ export function ScheduleRunSection({
 	// `validateScheduledStart` re-checks before the run is scheduled.
 	const minValue = useMemo(() => toDateTimeLocalValue(new Date()), []);
 
-	const error = useMemo(() => validateScheduledStart(value), [value]);
+	// A bad time is the user's to fix in this control, so it outranks a blocker
+	// that lives in another section of the window.
+	const error = useMemo(
+		() => validateScheduledStart(value) ?? blockedReason ?? null,
+		[value, blockedReason]
+	);
 
 	const handleToggle = useCallback(() => {
 		if (!cueEnabled) return;

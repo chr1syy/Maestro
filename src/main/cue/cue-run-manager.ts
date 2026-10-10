@@ -958,6 +958,7 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 						queuedAt,
 						chainRootId,
 						parentEventId,
+						autoRun,
 					});
 				}
 

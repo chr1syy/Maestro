@@ -16,6 +16,7 @@
 
 import type { CueAction, CueAutoRunConfig, CueScheduleDay } from './contracts';
 import { CUE_SCHEDULE_DAYS } from './contracts';
+import { getBasename } from '../formatters';
 
 /** Cue events that make a subscription a scheduled task. */
 export const SCHEDULED_TASK_EVENTS = ['time.once', 'time.scheduled', 'time.heartbeat'] as const;
@@ -211,6 +212,19 @@ export function truncateTaskLabel(text: string): string {
 	const collapsed = text.replace(/\s+/g, ' ').trim();
 	if (collapsed.length <= SCHEDULED_TASK_LABEL_MAX) return collapsed;
 	return collapsed.slice(0, SCHEDULED_TASK_LABEL_MAX - 1).trimEnd() + '…';
+}
+
+/**
+ * Human label for an Auto Run task: the document basenames, so the Scheduled
+ * Tasks row reads "Auto Run: ship-it.md" rather than an absolute path nobody
+ * can scan. Falls back to a count once the list stops fitting a label.
+ */
+export function autoRunTaskLabel(documents: string[]): string {
+	const names = documents.map((doc) => getBasename(doc));
+	const joined = names.join(', ');
+	return joined.length <= SCHEDULED_TASK_LABEL_MAX - 'Auto Run: '.length
+		? `Auto Run: ${joined}`
+		: `Auto Run: ${names.length} documents`;
 }
 
 /**

@@ -48,6 +48,7 @@ import { WorktreeRunSection } from './WorktreeRunSection';
 import {
 	ScheduleRunSection,
 	fromDateTimeLocalValue,
+	scheduleBlockedReason,
 	validateScheduledStart,
 } from './ScheduleRunSection';
 import { AutoRunnerHelpModal } from './AutoRun/AutoRunnerHelpModal';
@@ -463,7 +464,10 @@ export function BatchRunnerModal(props: BatchRunnerModalProps) {
 	// A scheduled run is only offered for Spec-Driven runs: the Cue autorun
 	// payload is a document list, and Goal-Driven runs have no documents.
 	const isScheduled = scheduledStart !== '' && !goalMode;
-	const scheduleError = isScheduled ? validateScheduledStart(scheduledStart) : null;
+	const scheduleBlocker = scheduleBlockedReason({ hasWorktreeTarget: worktreeTarget !== null });
+	const scheduleError = isScheduled
+		? (validateScheduledStart(scheduledStart) ?? scheduleBlocker)
+		: null;
 
 	// Whether the Go button should be disabled, branching on the active mode.
 	// Scheduling deliberately ignores `blocksLaunchWhileBusy` and
@@ -541,7 +545,9 @@ export function BatchRunnerModal(props: BatchRunnerModalProps) {
 	 * user would just find that their run never happened.
 	 */
 	const handleSchedule = async () => {
-		const validationError = validateScheduledStart(scheduledStart);
+		// The Schedule button is already disabled for both of these; re-checked
+		// here because this is the function that writes the subscription.
+		const validationError = validateScheduledStart(scheduledStart) ?? scheduleBlocker;
 		if (validationError) {
 			notifyToast({ color: 'red', title: 'Cannot schedule run', message: validationError });
 			return;
@@ -578,6 +584,11 @@ export function BatchRunnerModal(props: BatchRunnerModalProps) {
 					...(loopEnabled && maxLoops ? { max_loops: maxLoops } : {}),
 					...(runModel && { model: runModel }),
 					...(runEffort && { effort: runEffort }),
+					// Everything else the immediate path hands `onGo` for a
+					// Spec-Driven run. Left out, a scheduled run fires with the
+					// defaults instead of what this window was set to.
+					...(taskSelectionMode === 'document' && { task_selection_mode: 'document' as const }),
+					...(ignoreModelHints && { ignore_model_hints: true }),
 				},
 			});
 			notifyToast({
@@ -1054,6 +1065,7 @@ export function BatchRunnerModal(props: BatchRunnerModalProps) {
 							value={scheduledStart}
 							onChange={setScheduledStart}
 							cueEnabled={maestroCueEnabled}
+							blockedReason={scheduleBlocker}
 						/>
 					)}
 

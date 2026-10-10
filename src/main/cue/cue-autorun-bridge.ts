@@ -21,6 +21,7 @@ import { randomUUID } from 'crypto';
 import { BrowserWindow, ipcMain } from 'electron';
 import { isWebContentsAvailable } from '../utils/safe-send';
 import { logger } from '../utils/logger';
+import type { TaskSelectionMode } from '../../shared/types';
 
 /**
  * How long to wait for the renderer to accept a launch.
@@ -48,6 +49,8 @@ export interface CueAutoRunLaunchParams {
 	maxLoops?: number;
 	model?: string;
 	effort?: string;
+	taskSelectionMode?: TaskSelectionMode;
+	ignoreModelHints?: boolean;
 }
 
 export interface CueAutoRunLaunchResult {
@@ -108,6 +111,8 @@ export function launchCueAutoRun(
 				maxLoops: params.maxLoops,
 				...(params.model && { model: params.model }),
 				...(params.effort && { effort: params.effort }),
+				...(params.taskSelectionMode && { taskSelectionMode: params.taskSelectionMode }),
+				...(params.ignoreModelHints && { ignoreModelHints: true }),
 				launch: true,
 			},
 			responseChannel

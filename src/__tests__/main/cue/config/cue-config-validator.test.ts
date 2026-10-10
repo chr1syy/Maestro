@@ -316,6 +316,35 @@ describe('validateSubscription - action: autorun', () => {
 			)
 		).toBe(true);
 	});
+
+	it('accepts both task selection modes and the model-hint opt-out', () => {
+		for (const mode of ['task', 'document']) {
+			expect(
+				errs({
+					...base,
+					auto_run: { documents: ['/a.md'], task_selection_mode: mode, ignore_model_hints: true },
+				})
+			).toEqual([]);
+		}
+	});
+
+	// A typo must not fall back to the default: a per-document schedule would
+	// then run one task at a time with nobody watching.
+	it('rejects an unknown task_selection_mode', () => {
+		expect(
+			errs({ ...base, auto_run: { documents: ['/a.md'], task_selection_mode: 'file' } }).some((e) =>
+				/"auto_run\.task_selection_mode" must be "task" or "document"/.test(e)
+			)
+		).toBe(true);
+	});
+
+	it('rejects a non-boolean ignore_model_hints', () => {
+		expect(
+			errs({ ...base, auto_run: { documents: ['/a.md'], ignore_model_hints: 'yes' } }).some((e) =>
+				/"auto_run\.ignore_model_hints" must be a boolean when provided/.test(e)
+			)
+		).toBe(true);
+	});
 });
 
 // ────────────────────────────────────────────────────────────────────────────

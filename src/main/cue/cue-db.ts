@@ -192,7 +192,8 @@ const CREATE_CUE_EVENT_QUEUE_SQL = `
     chain_depth INTEGER DEFAULT 0,
     queued_at INTEGER NOT NULL,
     chain_root_id TEXT,
-    parent_event_id TEXT
+    parent_event_id TEXT,
+    auto_run_json TEXT
   )
 `;
 
@@ -200,7 +201,15 @@ const CREATE_CUE_EVENT_QUEUE_SQL = `
 // `cue_events` additive set because the two tables migrate independently:
 // queue rows are transient (deleted on dispatch), so the migration only needs
 // to keep schema in sync without backfilling values.
-const CUE_EVENT_QUEUE_ADDITIVE_COLUMNS = ['chain_root_id', 'parent_event_id'] as const;
+//
+// `auto_run_json` joined later for `action: autorun`: the captured document
+// list travels with the run rather than being re-read from the subscription,
+// so a queue row without it restores as an Auto Run with nothing to launch.
+const CUE_EVENT_QUEUE_ADDITIVE_COLUMNS = [
+	'chain_root_id',
+	'parent_event_id',
+	'auto_run_json',
+] as const;
 
 const CREATE_CUE_EVENT_QUEUE_INDEXES_SQL = `
   CREATE INDEX IF NOT EXISTS idx_cue_event_queue_session ON cue_event_queue(session_id);
@@ -382,7 +391,8 @@ function migrateCueEventsAdditiveColumns(database: Database.Database): void {
 /**
  * Idempotent migration: ensures the `cue_event_queue` table carries the Phase
  * 01 chain-lineage columns (`chain_root_id`, `parent_event_id`) so persisted
- * queue rows survive a crash with their lineage intact. Without this, recovery
+ * queue rows survive a crash with their lineage intact, and `auto_run_json` so
+ * a queued Auto Run survives one with its documents. Without this, recovery
  * would orphan resumed runs into fresh chain roots in stats. Mirrors the
  * conditional-ALTER pattern of `migrateCueEventsAdditiveColumns`.
  */
@@ -1273,6 +1283,9 @@ export interface CueQueuedEventRecord {
 	chainRootId: string | null;
 	/** Phase 01 - immediate parent's runId, NULL for roots. */
 	parentEventId: string | null;
+	/** Serialized `CueAutoRunConfig` for `action: autorun`, NULL for every
+	 *  other action and for rows persisted before the column existed. */
+	autoRunJson: string | null;
 }
 
 /** Persist a queued event. Throws on DB failure - use safePersistQueuedEvent for
@@ -1283,8 +1296,8 @@ export function persistQueuedEvent(record: CueQueuedEventRecord): void {
 			`INSERT OR REPLACE INTO cue_event_queue
 			 (id, session_id, subscription_name, event_json, prompt, output_prompt,
 			  cli_output_json, action, command_json, chain_depth, queued_at,
-			  chain_root_id, parent_event_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			  chain_root_id, parent_event_id, auto_run_json)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		)
 		.run(
 			record.id,
@@ -1299,7 +1312,8 @@ export function persistQueuedEvent(record: CueQueuedEventRecord): void {
 			record.chainDepth,
 			record.queuedAt,
 			record.chainRootId,
-			record.parentEventId
+			record.parentEventId,
+			record.autoRunJson
 		);
 }
 
@@ -1333,6 +1347,7 @@ export function getQueuedEvents(sessionId?: string): CueQueuedEventRecord[] {
 		queued_at: number;
 		chain_root_id: string | null;
 		parent_event_id: string | null;
+		auto_run_json: string | null;
 	}>;
 
 	return rows.map((row) => ({
@@ -1349,6 +1364,7 @@ export function getQueuedEvents(sessionId?: string): CueQueuedEventRecord[] {
 		queuedAt: row.queued_at,
 		chainRootId: row.chain_root_id,
 		parentEventId: row.parent_event_id,
+		autoRunJson: row.auto_run_json ?? null,
 	}));
 }
 

@@ -258,6 +258,7 @@ of taking a second round trip or trusting a value the caller guessed.
 | Toasts and center flashes                          | `notify toast`, `notify flash`                                                                   |
 | Save a pasted chat image (right-click)             | `image save` (`image list` to find it)                                                           |
 | Cue subscriptions and scheduled tasks              | `cue trigger`, `cue schedule`, `cue pipeline`                                                    |
+| Schedule an Auto Run to start at a set time        | `cue schedule --auto-run <documents...>` (read back with `cue schedule --list`)                  |
 | Snooze a tab, list / wake / dismiss what is parked | `snooze tab`, `snooze list`, `unsnooze`, `snooze dismiss`, `snooze reschedule`, `snooze history` |
 | Send Feedback modal (open / file / +1)             | `open feedback`, `feedback auth\|search\|submit\|subscribe`                                      |
 | Feedback: screenshots, support package box         | `feedback submit --attach <png...> --support-package`                                            |

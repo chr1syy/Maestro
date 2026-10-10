@@ -134,8 +134,22 @@ function validateAutoRunField(value: unknown, prefix: string, errors: string[]):
 		}
 	}
 
-	if (cfg.loop_enabled !== undefined && typeof cfg.loop_enabled !== 'boolean') {
-		errors.push(`${prefix}: "auto_run.loop_enabled" must be a boolean when provided`);
+	for (const key of ['loop_enabled', 'ignore_model_hints'] as const) {
+		if (cfg[key] !== undefined && typeof cfg[key] !== 'boolean') {
+			errors.push(`${prefix}: "auto_run.${key}" must be a boolean when provided`);
+		}
+	}
+
+	// Rejected rather than defaulted: a typo here would silently run a
+	// per-document schedule one task at a time, with nobody watching.
+	if (
+		cfg.task_selection_mode !== undefined &&
+		cfg.task_selection_mode !== 'task' &&
+		cfg.task_selection_mode !== 'document'
+	) {
+		errors.push(
+			`${prefix}: "auto_run.task_selection_mode" must be "task" or "document" when provided`
+		);
 	}
 
 	if (cfg.max_loops !== undefined) {

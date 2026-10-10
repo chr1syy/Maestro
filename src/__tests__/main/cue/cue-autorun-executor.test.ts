@@ -87,6 +87,29 @@ describe('executeCueAutoRun', () => {
 		expect(result.exitCode).toBe(0);
 	});
 
+	it('hands the task selection mode and the model-hint opt-out to the launch', async () => {
+		launchCueAutoRunMock.mockResolvedValue({ success: true });
+
+		await executeCueAutoRun({
+			runId: 'run-1',
+			session: createSession(),
+			subscription: createSubscription(),
+			event,
+			autoRun: {
+				documents: ['/proj/a.md'],
+				task_selection_mode: 'document',
+				ignore_model_hints: true,
+			},
+			mainWindow,
+			onLog: vi.fn(),
+		});
+
+		expect(launchCueAutoRunMock.mock.calls[0][1]).toMatchObject({
+			taskSelectionMode: 'document',
+			ignoreModelHints: true,
+		});
+	});
+
 	it('defaults resetOnCompletion to false when no flags were captured', async () => {
 		launchCueAutoRunMock.mockResolvedValue({ success: true });
 

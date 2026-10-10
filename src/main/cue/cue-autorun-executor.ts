@@ -69,6 +69,8 @@ export async function executeCueAutoRun(config: CueAutoRunExecutionConfig): Prom
 		maxLoops: autoRun.max_loops,
 		model: autoRun.model,
 		effort: autoRun.effort,
+		taskSelectionMode: autoRun.task_selection_mode,
+		ignoreModelHints: autoRun.ignore_model_hints,
 	});
 
 	const endedAt = new Date().toISOString();

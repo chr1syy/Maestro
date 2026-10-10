@@ -82,10 +82,10 @@ Auto Run supports running multiple documents in sequence:
 By default an Auto Run starts as soon as you press **Go**. The **Start** control
 in the Auto Run window switches that to a specific date and time:
 
-| Option            | Description                                                         |
-| ----------------- | ------------------------------------------------------------------- |
-| **Now**           | The default. Press Go and the run starts immediately.               |
-| **At a set time** | Pick a date and time; the run fires once, then the schedule is gone |
+| Option            | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
+| **Now**           | The default. Press Go and the run starts immediately.                       |
+| **At a set time** | Pick a date and time; the run fires once, and a run that starts is removed. |
 
 When a time is set the **Go** button becomes **Schedule**. The most common use
 is starting a run after your provider's token limit resets, so you wake up to
@@ -101,6 +101,12 @@ A few things worth knowing:
   actually fires, not when you schedule it.
 - Scheduling is one-shot. For a run that repeats, use a recurring
   [Maestro Cue](./maestro-cue) task instead.
+- A run that fails to start is kept, not removed. It stays under Scheduled Tasks
+  in the Cue window so you can see why it did not start and trigger it again.
+- A scheduled run starts in the agent's own checkout. It cannot dispatch to a
+  worktree, so the Schedule button is unavailable while a worktree target is set.
+- A script or another agent can schedule the same run with
+  `maestro-cli cue schedule --at <time> --agent <id> --auto-run <documents...>`.
 
 Scheduled runs are stored as Maestro Cue tasks, so **Start** requires the
 Maestro Cue Encore Feature. Pending runs appear under **Scheduled Tasks** in the

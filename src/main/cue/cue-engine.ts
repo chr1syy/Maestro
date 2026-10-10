@@ -681,7 +681,12 @@ export class CueEngine {
 					// chain root in stats. Roots and rows persisted before
 					// usageStats was enabled come back as undefined.
 					entry.chainRootId,
-					entry.parentEventId
+					entry.parentEventId,
+					// The queue table has no column for a notify payload, so a
+					// restored notify run still comes back without one.
+					undefined,
+					// The documents an `action: autorun` run was scheduled with.
+					entry.autoRun
 				);
 			}
 		}

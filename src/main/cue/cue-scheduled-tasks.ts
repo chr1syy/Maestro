@@ -20,7 +20,7 @@ import { CUE_CONFIG_PATH, LEGACY_CUE_CONFIG_PATH, MAESTRO_DIR } from '../../shar
 import {
 	DEFAULT_SCHEDULED_TASK_PIPELINE,
 	MAX_SCHEDULE_MINUTES,
-	SCHEDULED_TASK_LABEL_MAX,
+	autoRunTaskLabel,
 	eventForKind,
 	isScheduledTaskEvent,
 	kindForEvent,
@@ -247,19 +247,6 @@ export function collectScheduledTasks(agents: ScheduledTaskAgent[]): CollectSche
 	return { tasks, warnings };
 }
 
-/**
- * Human label for an Auto Run task: the document basenames, so the Scheduled
- * Tasks row reads "Run ship-it.md" rather than an absolute path nobody can
- * scan. Falls back to a count once the list stops fitting a label.
- */
-function autoRunTaskLabel(documents: string[]): string {
-	const names = documents.map((doc) => path.basename(doc));
-	const joined = names.join(', ');
-	return joined.length <= SCHEDULED_TASK_LABEL_MAX - 'Auto Run: '.length
-		? `Auto Run: ${joined}`
-		: `Auto Run: ${names.length} documents`;
-}
-
 /** Validate `input` and build the subscription object(s) it describes.
  *  A task with both a prompt and a notify becomes two subscriptions that share
  *  a fire time, named `<base>-prompt` and `<base>-notify`. */
@@ -367,6 +354,11 @@ export function buildScheduledTaskSubscriptions(
 		if (input.autoRun!.max_loops !== undefined) autoRunConfig.max_loops = input.autoRun!.max_loops;
 		if (input.autoRun!.model) autoRunConfig.model = input.autoRun!.model;
 		if (input.autoRun!.effort) autoRunConfig.effort = input.autoRun!.effort;
+		// `task` is what an absent field means, so only the non-default is written.
+		if (input.autoRun!.task_selection_mode === 'document') {
+			autoRunConfig.task_selection_mode = 'document';
+		}
+		if (input.autoRun!.ignore_model_hints) autoRunConfig.ignore_model_hints = true;
 		subs.push({
 			name: baseName,
 			event,

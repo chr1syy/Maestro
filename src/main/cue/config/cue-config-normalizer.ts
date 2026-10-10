@@ -247,6 +247,12 @@ function normalizeAutoRun(rawAutoRun: unknown): CueAutoRunConfig | undefined {
 	}
 	if (typeof raw.model === 'string') result.model = raw.model;
 	if (typeof raw.effort === 'string') result.effort = raw.effort;
+	if (raw.task_selection_mode === 'task' || raw.task_selection_mode === 'document') {
+		result.task_selection_mode = raw.task_selection_mode;
+	}
+	if (typeof raw.ignore_model_hints === 'boolean') {
+		result.ignore_model_hints = raw.ignore_model_hints;
+	}
 	return result;
 }
 

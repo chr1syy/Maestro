@@ -854,6 +854,11 @@ export function useAppRemoteEventListeners(deps: UseAppRemoteEventListenersDeps)
 					...(config.model && { model: config.model }),
 					...(config.effort && { effort: config.effort }),
 					...(config.ignoreModelHints && { ignoreModelHints: true }),
+					// Only the non-default is forwarded; `task` is what the batch
+					// processor does when the field is absent.
+					...(config.taskSelectionMode === 'document' && {
+						taskSelectionMode: 'document' as const,
+					}),
 				};
 
 				// Mirror desktop's useAutoRunHandlers: when worktree dispatch is enabled,

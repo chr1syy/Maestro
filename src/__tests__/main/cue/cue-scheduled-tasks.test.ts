@@ -104,6 +104,38 @@ describe('cue-scheduled-tasks', () => {
 			expect(subs[0].label).toBe('Auto Run: ship-it.md');
 		});
 
+		// The schedule has to fire with what the Auto Run window was set to, not
+		// with the engine's defaults.
+		it('writes the per-document mode and the model-hint opt-out', () => {
+			const subs = buildScheduledTaskSubscriptions(agent, {
+				agentId: agent.id,
+				kind: 'once',
+				fireAt: '2030-01-01T10:00:00.000Z',
+				autoRun: {
+					documents: ['/proj/a.md'],
+					task_selection_mode: 'document',
+					ignore_model_hints: true,
+				},
+			});
+
+			expect(subs[0].auto_run).toMatchObject({
+				task_selection_mode: 'document',
+				ignore_model_hints: true,
+			});
+		});
+
+		// `task` is what an absent field means, so it is not written.
+		it('writes neither option at its default', () => {
+			const subs = buildScheduledTaskSubscriptions(agent, {
+				agentId: agent.id,
+				kind: 'once',
+				fireAt: '2030-01-01T10:00:00.000Z',
+				autoRun: { documents: ['/proj/a.md'], task_selection_mode: 'task' },
+			});
+
+			expect(subs[0].auto_run).toEqual({ documents: ['/proj/a.md'] });
+		});
+
 		it('refuses to pair an Auto Run with a prompt or a notification', () => {
 			expect(() =>
 				buildScheduledTaskSubscriptions(agent, {

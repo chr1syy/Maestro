@@ -1061,7 +1061,21 @@ cue
 	.option('--pause <name>', 'Disable a task without deleting it')
 	.option('--resume <name>', 'Re-enable a paused task')
 	.option('-a, --agent <id-or-name>', 'Target agent (required when creating; scopes other modes)')
-	.option('-p, --prompt <text>', 'Prompt to send when the task fires')
+	.option(
+		'-p, --prompt <text>',
+		'Prompt to send when the task fires. With --auto-run: extra instructions for the run'
+	)
+	.option(
+		'--auto-run <documents...>',
+		"Launch an Auto Run of these .md documents (inside the agent's Auto Run folder) instead of sending a prompt. Kept on a failed launch"
+	)
+	.option('--reset-on-completion', 'With --auto-run: uncheck every task when the run finishes')
+	.option('--loop', 'With --auto-run: re-run the documents once every task is checked off')
+	.option('--max-loops <n>', 'With --auto-run: loop ceiling (implies --loop)')
+	.option('--model <id>', 'With --auto-run: model for this run only')
+	.option('--effort <level>', 'With --auto-run: reasoning effort for this run only')
+	.option('--per-document', 'With --auto-run: one agent turn per document instead of one per task')
+	.option('--ignore-model-hints', "With --auto-run: ignore the documents' MAESTRO:MODEL hints")
 	.option('--notify', 'Show a toast notification when the task fires')
 	.option('--sticky', 'Make the notify toast sticky (requires --notify)')
 	.option('-m, --message <text>', 'Body for the notify toast (defaults to label/prompt)')
