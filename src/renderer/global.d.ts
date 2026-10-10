@@ -1324,7 +1324,7 @@ interface MaestroAPI {
 			cwd: string,
 			sshRemoteId?: string,
 			remoteCwd?: string
-		) => Promise<{ stdout: string; stderr: string }>;
+		) => Promise<{ stdout: string; stderr: string; timedOut?: boolean }>;
 		diff: (
 			cwd: string,
 			file?: string,
@@ -1347,12 +1347,12 @@ interface MaestroAPI {
 			cwd: string,
 			sshRemoteId?: string,
 			remoteCwd?: string
-		) => Promise<{ stdout: string; stderr: string }>;
+		) => Promise<{ stdout: string; stderr: string; timedOut?: boolean }>;
 		branch: (
 			cwd: string,
 			sshRemoteId?: string,
 			remoteCwd?: string
-		) => Promise<{ stdout: string; stderr: string }>;
+		) => Promise<{ stdout: string; stderr: string; timedOut?: boolean }>;
 		/**
 		 * Get list of all branches
 		 */
@@ -1383,6 +1383,8 @@ interface MaestroAPI {
 			behind: number;
 			ahead: number;
 			uncommittedChanges: number;
+			/** One of the underlying queries timed out; the zero/empty fields are placeholders. */
+			timedOut?: boolean;
 		}>;
 		log: (
 			cwd: string,
