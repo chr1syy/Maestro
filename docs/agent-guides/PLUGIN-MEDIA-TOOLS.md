@@ -40,7 +40,8 @@ wildcard grants deny. No additional `net:fetch`, `fs:read`, `fs:write` or
 and Discord gateway/replies remain separate.
 
 All operations re-read grants and signature; a job polls them every 250 ms as an
-additional revocation backstop. Disable, plugin crash and uninstall invoke host
+additional revocation backstop without generating synthetic RPC audit decisions.
+Real RPC decisions retain normal auditing. Disable, plugin crash and uninstall invoke host
 resource cleanup immediately. `media.close` is release-only and is allowed after
 revocation; its ownership check cannot close another plugin's resource. Close
 also uses two separate bounded RPC cancellation slots and bypasses ordinary

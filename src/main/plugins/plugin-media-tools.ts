@@ -54,8 +54,8 @@ class MediaError extends Error {
 
 export interface PluginMediaToolsDeps {
 	egressGuard: EgressGuard;
-	/** Re-checks live broker grant and signature. May throw; errors are sanitized here. */
-	authorize: (pluginId: string) => void;
+	/** Re-checks live grant/signature; host-only polling can suppress synthetic RPC audits. */
+	authorize: (pluginId: string, options?: { audit?: boolean }) => void;
 	/** Host-only seams for tests/integrators; never reachable through the SDK. */
 	resolveRuntime?: () => Promise<Runtime>;
 	tempDir?: string;
@@ -117,9 +117,9 @@ export class PluginMediaTools {
 	constructor(private readonly deps: PluginMediaToolsDeps) {}
 
 	/** Sanitize failures from the live grant/signature check before they cross the RPC boundary. */
-	private authorize(pluginId: string): void {
+	private authorize(pluginId: string, options?: { audit?: boolean }): void {
 		try {
-			this.deps.authorize(pluginId);
+			this.deps.authorize(pluginId, options);
 		} catch {
 			throw new MediaError('MediaDenied');
 		}
@@ -218,7 +218,7 @@ export class PluginMediaTools {
 			}),
 			recheck: setInterval(() => {
 				try {
-					this.authorize(pluginId);
+					this.authorize(pluginId, { audit: false });
 				} catch {
 					void this.close(job, 'MediaDenied').catch(() => {});
 				}

@@ -77,6 +77,46 @@ function grant(capability: PermissionGrant['capability']): PermissionGrant {
 	return { capability, grantedAt: 1 };
 }
 
+describe('media authorization backstop', () => {
+	it.each(['grant', 'trust'])(
+		'quiet polling still closes jobs after %s revocation',
+		async (revoked) => {
+			vi.useFakeTimers();
+			let grants: PermissionGrant[] = [
+				{ capability: 'media:tools', scope: 'discord-voice', grantedAt: 1 },
+			];
+			let trusted = true;
+			const onDecision = vi.fn();
+			const handlers = buildHostCallHandlers(
+				makeDeps({
+					broker: new PermissionBroker({ getGrants: () => grants, onDecision }),
+					isPluginTrusted: () => trusted,
+				})
+			);
+			let jobId: string | undefined;
+			try {
+				({ jobId } = (await handlers['media.open']!('p', {})) as { jobId: string });
+				expect(onDecision).toHaveBeenCalledTimes(1);
+				await vi.advanceTimersByTimeAsync(1000);
+				expect(onDecision).toHaveBeenCalledTimes(1);
+				expect(handlers['media.close']!.ownsReleaseResource!('p', { jobId })).toBe(true);
+				if (revoked === 'grant') grants = [];
+				else trusted = false;
+				await vi.advanceTimersByTimeAsync(250);
+				expect(handlers['media.close']!.ownsReleaseResource!('p', { jobId })).toBe(false);
+				expect(onDecision).toHaveBeenCalledTimes(1);
+				await expect(handlers['media.open']!('p', {})).rejects.toMatchObject({
+					code: 'MediaDenied',
+				});
+				expect(onDecision).toHaveBeenCalledTimes(2); // Real calls still audit allow/deny.
+			} finally {
+				if (jobId) await handlers['media.close']!('p', { jobId });
+				vi.useRealTimers();
+			}
+		}
+	);
+});
+
 describe('settings.set', () => {
 	it('rejects keys outside the plugin namespace', async () => {
 		const settingsSet = vi.fn();

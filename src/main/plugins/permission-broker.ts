@@ -35,7 +35,7 @@ export interface PermissionBrokerDeps {
 	/** Returns the live grants for a plugin (re-read each call so a revoked grant
 	 * takes effect immediately, mirroring the Encore-flag re-read pattern). */
 	getGrants: (pluginId: string) => PermissionGrant[];
-	/** Optional audit sink for every decision (allow and deny). */
+	/** Optional audit sink for RPC decisions (allow and deny); host-only polling can opt out. */
 	onDecision?: (pluginId: string, method: HostMethod, decision: BrokerDecision) => void;
 	/** Absolute directory prefixes that fs:read AND fs:write must NEVER touch -
 	 * the userData/config tree (grants, enable-state, encoreFeatures settings,
@@ -75,8 +75,14 @@ export class PermissionBroker {
 	/**
 	 * Authorize one host call. Default deny: returns allowed only when a matching
 	 * grant covers the capability and (for scoped capabilities) the target.
+	 * Host-owned liveness checks may suppress the RPC audit without changing authorization.
 	 */
-	authorize(pluginId: string, method: HostMethod, params: unknown): BrokerDecision {
+	authorize(
+		pluginId: string,
+		method: HostMethod,
+		params: unknown,
+		options?: { audit?: boolean }
+	): BrokerDecision {
 		const capability = HOST_METHOD_CAPABILITY[method];
 		const target = extractTarget(method, params);
 		const grants = this.deps.getGrants(pluginId);
@@ -119,7 +125,7 @@ export class PermissionBroker {
 			...(target !== undefined ? { target } : {}),
 			...(reason !== undefined ? { reason } : {}),
 		};
-		this.deps.onDecision?.(pluginId, method, decision);
+		if (options?.audit !== false) this.deps.onDecision?.(pluginId, method, decision);
 		return decision;
 	}
 }

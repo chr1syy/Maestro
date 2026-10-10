@@ -581,9 +581,10 @@ function assertBrokerAllowed(
 	deps: Pick<HostHandlerDeps, 'broker'>,
 	pluginId: string,
 	method: HostMethod,
-	params: unknown
+	params: unknown,
+	options?: { audit?: boolean }
 ): void {
-	const decision = deps.broker.authorize(pluginId, method, params);
+	const decision = deps.broker.authorize(pluginId, method, params, options);
 	if (!decision.allowed) {
 		throw new Error(decision.reason ?? 'permission denied');
 	}
@@ -675,8 +676,8 @@ function resolveRealPath(target: string): string {
 export function buildHostCallHandlers(deps: HostHandlerDeps): HostCallHandlers {
 	const mediaTools = new PluginMediaTools({
 		egressGuard: deps.egressGuard,
-		authorize: (pluginId) => {
-			assertBrokerAllowed(deps, pluginId, 'media.open', {});
+		authorize: (pluginId, options) => {
+			assertBrokerAllowed(deps, pluginId, 'media.open', {}, options);
 			assertTrustedActVerb(deps, pluginId);
 		},
 	});
