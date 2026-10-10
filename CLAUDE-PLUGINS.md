@@ -11,7 +11,7 @@ A plugin is one folder under `<userData>/plugins/` containing a `plugin.json` ma
 - Entire system is gated on `encoreFeatures.plugins === true` (off by default), re-read per call.
 - Every `plugins:*` IPC channel throws the sentinel `'PluginsDisabled'` when the flag is off, so the renderer can distinguish "feature off" from "no plugins installed". The gate runs OUTSIDE `withIpcErrorLogging` so the sentinel is not logged as a real failure.
 - `PluginManager.getActiveRecords()`, `getContributions()`, and `getAgentRegistry()` all return empty when the flag is off, regardless of what is on disk.
-- `HOST_API_VERSION = '1.16.0'` (`src/shared/plugins/host-api.ts`) is the single source of truth for the host surface version.
+- `HOST_API_VERSION = '1.17.0'` (`src/shared/plugins/host-api.ts`) is the single source of truth for the host surface version.
 
 ## File map
 
@@ -206,12 +206,14 @@ Bundled plugins (e.g. `agent-flow`) ship trusted via a build-time signature, not
 
 `HOST_API_VERSION` is a permanent public contract once plugins ship. PATCH = host bug fix; MINOR = additive (new contribution point / manifest field / capability, older plugins keep working); MAJOR = remove or change the meaning of an existing one. A plugin pins `maestro.minHostApi`; the host loads it only when same-major and `host >= min`.
 
-The current host is `1.16.0`; it added the metadata-only `session.activated`
-event topic, the `sessions.focus` method plus its narrow `sessions:focus`
-capability, and the `ui.openPanel` / `ui.closePanel` / `ui.togglePanel` methods
-plus the optional panel manifest field `size?: 'default' | 'full'`. (`1.15.0` is
-taken by the Board + Profiles work on this fork, so it is skipped here.)
-Earlier: `1.14.0` added the `tool.executed` event topic and the
+The current host is `1.17.0`; it added `media:tools` with the exact
+`discord-voice` scope, opaque media jobs and fixed native profiles. STT remains
+in the plugin; tools and models are not bundled. (`1.15.0` is taken by the
+Board + Profiles work on this fork, so it is skipped here.)
+Earlier: `1.16.0` added the metadata-only `session.activated` event topic, the
+`sessions.focus` method plus its narrow `sessions:focus` capability, and the
+`ui.openPanel` / `ui.closePanel` / `ui.togglePanel` methods plus the optional
+panel manifest field `size?: 'default' | 'full'`. `1.14.0` added the `tool.executed` event topic and the
 `ui.panelPost` host-to-panel push method; `1.13.0` added the
 host-mediated `PluginUiSurface` registry and trusted-chrome guard; `1.12.0`
 added the `net:connect` capability and the `net.connect` / `net.send` /
@@ -272,3 +274,9 @@ grouping id; group ids are local, depth is at most two, unknown session ids are
 dropped, and snapshots are process-local and purged when the sandbox stops,
 the plugin is disabled/uninstalled, or the feature flag is off. `ui:grouping`
 is low-risk and unscoped because its only output is virtual presentation.
+
+## Bounded media tools
+
+Host API 1.17.0 adds `media:tools` (exact `discord-voice` scope), opaque media jobs
+and fixed native profiles. STT remains in the plugin; no tools/models are bundled.
+See [PLUGIN-MEDIA-TOOLS.md](docs/agent-guides/PLUGIN-MEDIA-TOOLS.md) for the contract and runtime prerequisites.
