@@ -7,10 +7,14 @@ import { MEDIA_LIMITS } from '../../../shared/plugins/media-tools';
 import { PermissionBroker } from '../../../main/plugins/permission-broker';
 import { parsePermissions } from '../../../shared/plugins/permissions';
 import type { PermissionGrant } from '../../../shared/plugins/permissions';
+import { logger } from '../../../main/utils/logger';
 
 const native = vi.hoisted(() => ({ execFile: vi.fn(), paths: vi.fn() }));
 vi.mock('node:child_process', () => ({ execFile: native.execFile }));
 vi.mock('../../../main/agents/path-prober', () => ({ findAllBinaryPaths: native.paths }));
+vi.mock('node:fs/promises', async (importOriginal) => ({
+	...(await importOriginal<typeof import('node:fs/promises')>()),
+}));
 
 const url = 'https://cdn.discordapp.com/attachments/123/456/voice.ogg?ex=SIGNED';
 let root: string;
@@ -111,6 +115,7 @@ beforeEach(async () => {
 	);
 });
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await tools.cleanupPlugin('p');
 	await tools.cleanupPlugin('other');
 	await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
@@ -269,7 +274,7 @@ describe('media tools boundary', () => {
 		).toEqual({ json: whisperJson });
 		const call = native.execFile.mock.calls.at(-1)!;
 		expect(call[0]).toBe('/approved/whisper-cli');
-		expect(call[1]).toContain('de');
+		expect(call[1]).toContain('auto');
 		expect(call[1]).not.toContain('-tr');
 		expect(call[2]).toMatchObject({
 			env: {},
@@ -279,6 +284,103 @@ describe('media tools boundary', () => {
 		});
 		await tools.call('p', 'media.close', { jobId });
 		expect(await fs.readdir(root)).toEqual([]);
+	});
+
+	it.each(['auto', 'de', 'eng'])(
+		'passes explicit language %s to the fixed profile',
+		async (language) => {
+			const jobId = await open();
+			const audioId = await download(jobId);
+			const pcm = (await tools.call('p', 'media.decode', { jobId, audioId })) as {
+				audioId: string;
+			};
+			await tools.call('p', 'media.run', {
+				jobId,
+				audioId: pcm.audioId,
+				options: { profile: 'whisper-cli', model: 'base', language },
+			});
+			const args = native.execFile.mock.calls.at(-1)![1] as string[];
+			expect(args[args.indexOf('-l') + 1]).toBe(language);
+			expect(args).not.toContain('-tr');
+		}
+	);
+
+	it('reports cleanup failure without private data and retries an explicit close', async () => {
+		const jobId = await open();
+		await download(jobId);
+		const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+		const rm = vi.spyOn(fs, 'rm').mockRejectedValueOnce(new Error('private recording path TOKEN'));
+		await expect(tools.call('p', 'media.close', { jobId })).rejects.toMatchObject({
+			code: 'MediaProcessFailed',
+			message: 'MediaProcessFailed',
+		});
+		expect(warn).toHaveBeenCalledWith('MediaProcessFailed', 'PluginMediaTools');
+		expect(tools.ownsCloseRequest('p', { jobId })).toBe(true);
+		expect(await fs.readdir(root)).toHaveLength(1);
+		rm.mockRestore();
+		await tools.call('p', 'media.close', { jobId });
+		expect(await fs.readdir(root)).toEqual([]);
+		expect(tools.ownsCloseRequest('p', { jobId })).toBe(false);
+	});
+
+	it.each([null, 'AUTO', 'en -tr'])(
+		'rejects invalid language %s before Whisper runs',
+		async (language) => {
+			const jobId = await open();
+			const audioId = await download(jobId);
+			const pcm = (await tools.call('p', 'media.decode', { jobId, audioId })) as {
+				audioId: string;
+			};
+			await expect(
+				tools.call('p', 'media.run', {
+					jobId,
+					audioId: pcm.audioId,
+					options: { profile: 'whisper-cli', model: 'base', language },
+				})
+			).rejects.toMatchObject({ code: 'MediaInvalid' });
+			expect(native.execFile.mock.calls.some(([binary]) => binary.endsWith('whisper-cli'))).toBe(
+				false
+			);
+			expect(await fs.readdir(root)).toEqual([]);
+		}
+	);
+
+	it('releases teardown slots, bounds orphan disk use and retries without the plugin', async () => {
+		vi.useFakeTimers();
+		const ids: string[] = [];
+		for (const pluginId of ['p', 'p', 'other', 'other']) {
+			const { jobId } = (await tools.call(pluginId, 'media.open', {})) as { jobId: string };
+			ids.push(jobId);
+			await tools.call(pluginId, 'media.download', { jobId, url });
+		}
+		vi.spyOn(logger, 'warn').mockImplementation(() => {});
+		const rm = vi.spyOn(fs, 'rm').mockRejectedValue(new Error('private directory TOKEN'));
+		for (const pluginId of ['p', 'other']) {
+			await expect(tools.cleanupPlugin(pluginId)).rejects.toMatchObject({
+				code: 'MediaProcessFailed',
+			});
+		}
+		for (const jobId of ids) {
+			expect(tools.ownsCloseRequest('p', { jobId })).toBe(false);
+			expect(tools.ownsCloseRequest('other', { jobId })).toBe(false);
+		}
+		const replacements: string[] = [];
+		for (const pluginId of ['p', 'p', 'other', 'other']) {
+			const { jobId } = (await tools.call(pluginId, 'media.open', {})) as { jobId: string };
+			replacements.push(jobId);
+		}
+		// Active capacity is free, but failed deletion cannot grow accepted disk usage.
+		await expect(download(replacements[0])).rejects.toMatchObject({ code: 'MediaBusy' });
+		expect(await fs.readdir(root)).toHaveLength(MEDIA_LIMITS.maxJobs);
+		expect(fetch).toHaveBeenCalledTimes(MEDIA_LIMITS.maxJobs);
+		// A failed host retry stays tracked and schedules another bounded attempt.
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(rm).toHaveBeenCalledTimes(8));
+		rm.mockRestore();
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(async () => expect(await fs.readdir(root)).toEqual([]));
+		await download(replacements[1]);
+		expect(await fs.readdir(root)).toHaveLength(1);
 	});
 
 	it.each([121, 120.0001, Infinity])(

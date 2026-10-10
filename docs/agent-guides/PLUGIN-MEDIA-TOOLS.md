@@ -1,8 +1,6 @@
-# Bounded plugin media tools (host API 1.22.0)
+# Bounded plugin media tools (host API 1.17.0)
 
-This contract was agreed with Maestro-Backstage agent
-`78582d73-395d-4839-a62d-e903f0f1cecc` for the Relay voice MVP. The host supplies
-media isolation and fixed native tool profiles. Relay owns admission, queueing,
+The host supplies media isolation and fixed native tool profiles. Relay owns admission, queueing,
 STT orchestration, model/language selection, Whisper JSON interpretation and
 transcript validation. No Whisper model or native media binary ships in Maestro.
 
@@ -19,19 +17,13 @@ or resource ownership. `invokeTool` is host-to-plugin, not an SDK plugin-to-plug
 service. A future separate transcription plugin needs a separately designed broker
 contract; the MVP keeps the small STT module in Relay.
 
-The media API is independently reviewable against RC. Its version skips 1.17-1.21,
-reserved by the existing Relay host work in upstream PR #1652. A product build
-for Relay must also include that PR's `agents.send`/progress/receipt contract;
-this media-only change does not implement those other additions. Do not use a
-version check alone to infer that a locally assembled build includes them.
-
 ## Permission and lifecycle
 
 A trusted signed code plugin declares:
 
 ```json
 {
-	"maestro": { "minHostApi": "1.22.0" },
+	"maestro": { "minHostApi": "1.17.0" },
 	"permissions": [
 		{
 			"capability": "media:tools",
@@ -45,8 +37,7 @@ A trusted signed code plugin declares:
 The broker requires exact allowlist membership in `discord-voice`; unscoped and
 wildcard grants deny. No additional `net:fetch`, `fs:read`, `fs:write` or
 `process:spawn` grant is needed for this API. Existing Relay permissions for text
-and Discord gateway/replies remain separate. Enabling or changing permissions is
-not part of this implementation/build task.
+and Discord gateway/replies remain separate.
 
 All operations re-read grants and signature; a job polls them every 250 ms as an
 additional revocation backstop. Disable, plugin crash and uninstall invoke host
@@ -103,7 +94,8 @@ Run selects only the fixed `whisper-cli` profile. The host builds every argv:
 `-m <approved-model> -l <language> -f <own-wav> -oj -of <own-result> -np -nt -t 4 -ng`.
 It uses no shell, stdin, inherited environment, caller-specified executable,
 argv, cwd, output path, initial prompt, translation flag or network URL.
-Language defaults to `de` and accepts lowercase two/three-letter language codes.
+Language defaults to `auto` and accepts `auto` or lowercase two/three-letter
+language codes. Plugins may explicitly select `de` or another supported language.
 Unsupported Whisper codes fail safely at execution. Model IDs are the
 multilingual `tiny`, `base`, `small`, `medium`, `large-v1`, `large-v2`, `large-v3`,
 `large-v3-turbo`; `.en`/arbitrary paths are rejected. A filename is not proof of
@@ -131,7 +123,13 @@ SIGKILL, waits for its exit callback, then deletes the directory. Lookup calls
 without cancellation support are raced against the job signal, and their late
 answers cannot cause I/O. Native tools are direct executable children, not shell
 pipelines. Explicit close returns success only after cleanup; a cleanup failure
-retains its job slot and reports failure so close can retry.
+retains its job slot and reports failure so close can retry. The host also retries
+failed cleanup every 30 seconds, with bounded filesystem retries per attempt and
+code-only warnings. On plugin teardown, failed jobs move to host-owned cleanup
+tracking and release their active job slots; retries continue without the plugin.
+Their directories still reserve disk capacity: at most four job directories,
+including failed cleanups and directory creation in flight, may exist globally.
+New jobs can open but fail `MediaBusy` before media I/O if disk capacity is full.
 
 SDK errors carry stable `error.code` (additive RPC `errorCode`) and code-only text:
 `MediaInvalid`, `MediaDenied`, `MediaUnavailable`, `MediaTooLarge`, `MediaTooLong`,
@@ -150,10 +148,4 @@ Set `MAESTRO_MEDIA_MODEL_DIR` in the host launch environment to an existing abso
 directory containing `ggml-<model-id>.bin`. Model symlinks escaping that directory
 are rejected. Only existing readable files appear in `status().models`.
 `status().missing` reports `ffprobe`, `ffmpeg`, `whisper-cli`, `model-directory`
-without revealing paths. No configuration is changed by this work.
-
-End-to-end voice still needs the Relay production adapter, permitted/signed plugin
-identity, model-directory configuration, a valid multilingual model and a voice
-message in an authorized bound thread. A source/unit/native smoke check does not
-prove live Discord delivery. Installation, update, desktop restart, plugin activation
-and independent Discord sends remain outside this authorized task.
+without revealing paths.

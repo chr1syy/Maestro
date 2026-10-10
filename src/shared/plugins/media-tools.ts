@@ -54,7 +54,7 @@ export interface MediaToolStatus {
 export interface MediaRunOptions {
 	profile: 'whisper-cli';
 	model: MediaModelId;
-	/** Lowercase Whisper language code; defaults to de. Translation is always off. */
+	/** Lowercase Whisper language code or auto (default). Translation is always off. */
 	language?: string;
 }
 export interface MaestroMediaApi {

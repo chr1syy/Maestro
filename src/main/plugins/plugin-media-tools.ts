@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import { findAllBinaryPaths } from '../agents/path-prober';
 import { fetchWithTimeout } from '../utils/fetchWithTimeout';
 import { createIdleWatchdog, type IdleWatchdog } from '../utils/idle-watchdog';
+import { logger } from '../utils/logger';
 import {
 	MEDIA_LIMITS,
 	MEDIA_MODEL_IDS,
@@ -38,6 +39,7 @@ interface Job {
 	audio: Map<string, Audio>;
 	operation?: Promise<unknown>;
 	closing?: Promise<void>;
+	cleanupRetry?: ReturnType<typeof setTimeout>;
 	downloaded: boolean;
 	decoded: boolean;
 	ran: boolean;
@@ -108,6 +110,9 @@ export async function resolveMediaRuntime(): Promise<Runtime> {
 
 export class PluginMediaTools {
 	private readonly jobs = new Map<string, Job>();
+	private readonly pendingCleanups = new Map<string, Job>();
+	// Reservations include mkdtemp in flight and failed deletion, not just active jobs.
+	private readonly directories = new Set<string>();
 	constructor(private readonly deps: PluginMediaToolsDeps) {}
 
 	private authorize(pluginId: string): void {
@@ -227,6 +232,8 @@ export class PluginMediaTools {
 
 	private close(job: Job, code: MediaErrorCode): Promise<void> {
 		if (job.closing) return job.closing;
+		clearTimeout(job.cleanupRetry);
+		job.cleanupRetry = undefined;
 		job.watchdog.disarm();
 		clearInterval(job.recheck);
 		// Abort synchronously: download signal and process kill listener fire before any await.
@@ -237,8 +244,18 @@ export class PluginMediaTools {
 				await fs.rm(job.dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 			job.audio.clear();
 			this.jobs.delete(job.id);
+			this.pendingCleanups.delete(job.id);
+			this.directories.delete(job.id);
 		})().catch(() => {
 			job.closing = undefined; // Retain the job/slot; a later close can retry cleanup.
+			logger.warn('MediaProcessFailed', 'PluginMediaTools');
+			// Host-owned recovery survives plugin teardown. Each attempt is bounded and
+			// the directory keeps its disk reservation until deletion succeeds.
+			job.cleanupRetry = setTimeout(() => {
+				job.cleanupRetry = undefined;
+				void this.close(job, code).catch(() => {}); // close logs and schedules the next attempt.
+			}, 30_000);
+			job.cleanupRetry.unref();
 			throw new MediaError('MediaProcessFailed');
 		});
 		return job.closing;
@@ -255,13 +272,24 @@ export class PluginMediaTools {
 		);
 	}
 
+	/** Drain native work; transfer failed deletions to host recovery without retaining active slots. */
 	cleanupPlugin(pluginId: string): Promise<void> {
-		const drain = Promise.all(
-			[...this.jobs.values()]
+		const drain = Promise.allSettled(
+			[...this.jobs.values(), ...this.pendingCleanups.values()]
 				.filter((job) => job.pluginId === pluginId)
-				.map((job) => this.close(job, 'MediaCancelled'))
-		).then(() => {});
-		void drain.catch(() => {});
+				.map((job) =>
+					this.close(job, 'MediaCancelled').catch((error) => {
+						job.audio.clear();
+						this.pendingCleanups.set(job.id, job);
+						this.jobs.delete(job.id);
+						throw error;
+					})
+				)
+		).then((results) => {
+			if (results.some((result) => result.status === 'rejected'))
+				throw new MediaError('MediaProcessFailed');
+		});
+		void drain.catch(() => {}); // close already logs; teardown callers may be fire-and-forget.
 		return drain;
 	}
 
@@ -285,6 +313,8 @@ export class PluginMediaTools {
 	private async execute(job: Job, method: string, p: Record<string, unknown>): Promise<unknown> {
 		this.check(job);
 		if (!job.dir) {
+			if (this.directories.size >= MEDIA_LIMITS.maxJobs) throw new MediaError('MediaBusy');
+			this.directories.add(job.id);
 			job.dir = await fs.mkdtemp(path.join(this.deps.tempDir ?? os.tmpdir(), 'maestro-media-'));
 			await fs.chmod(job.dir, 0o700);
 			this.check(job);
@@ -362,8 +392,8 @@ export class PluginMediaTools {
 				!MEDIA_MODEL_IDS.includes(o.model as MediaModelId)
 			)
 				throw new MediaError('MediaInvalid');
-			const language = o.language ?? 'de';
-			if (typeof language !== 'string' || !/^[a-z]{2,3}$/.test(language))
+			const language = o.language === undefined ? 'auto' : o.language;
+			if (typeof language !== 'string' || !/^(?:auto|[a-z]{2,3})$/.test(language))
 				throw new MediaError('MediaInvalid');
 			const model = runtime.models[o.model as MediaModelId];
 			if (!model) throw new MediaError('MediaUnavailable');

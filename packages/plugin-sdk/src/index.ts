@@ -425,10 +425,9 @@ export function describeCapability(capability: PluginCapability): string {
 // --- Host API version (from shared/plugins/host-api.ts) ---------------------
 
 /**
- * 1.22.0 adds the bounded media:tools job API (Discord attachments and fixed
- * local profiles). 1.17-1.21 are reserved by the separate Relay host work.
- * The host API version this Maestro build implements. 1.16.0 added three
- * backward-compatible additions: the metadata-only `session.activated` event
+ * The host API version this Maestro build implements. 1.17.0 adds the bounded
+ * media:tools job API (Discord attachments and fixed local profiles).
+ * 1.16.0 added three backward-compatible additions: the metadata-only `session.activated` event
  * topic (`{ sessionId, tabId? }`, opaque ids only, fired when the focused agent
  * changes), the `sessions.focus` method plus its narrow `sessions:focus`
  * capability (navigate to an existing session's AI tab; no tab create/close
@@ -458,7 +457,7 @@ export function describeCapability(capability: PluginCapability): string {
  * `ui:contribute` / `ui:panel` / `ui:render-unsafe`; 1.3.0 added `tools` +
  * `keybindings`; 1.2.0 added `transcripts:read`.
  */
-export const HOST_API_VERSION = '1.22.0';
+export const HOST_API_VERSION = '1.17.0';
 
 /** Result of checking a plugin's declared host-API requirement. */
 export interface HostApiCompatibility {
@@ -1699,8 +1698,6 @@ export interface MaestroBackgroundApi {
 	list(): Promise<MaestroBackgroundHealth>;
 }
 
-/** The full `maestro` runtime surface handed to `activate(maestro)`. Frozen and
- * namespaced exactly as the host injects it. */
 /** Bounded media primitives. STT orchestration and result interpretation belong to plugins. */
 export const MEDIA_LIMITS = {
 	maxDownloadBytes: 8 * 1024 * 1024,
@@ -1757,7 +1754,7 @@ export interface MediaToolStatus {
 export interface MediaRunOptions {
 	profile: 'whisper-cli';
 	model: MediaModelId;
-	/** Lowercase Whisper language code; defaults to de. Translation is always off. */
+	/** Lowercase Whisper language code or auto (default). Translation is always off. */
 	language?: string;
 }
 export interface MaestroMediaApi {
@@ -1772,6 +1769,8 @@ export interface MaestroMediaApi {
 	close(jobId: string): Promise<void>;
 }
 
+/** The full `maestro` runtime surface handed to `activate(maestro)`. Frozen and
+ * namespaced exactly as the host injects it. */
 export interface MaestroSdk {
 	readonly media: MaestroMediaApi;
 	readonly pluginId: string;

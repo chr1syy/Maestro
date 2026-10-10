@@ -1658,7 +1658,8 @@ export function buildHostCallHandlers(deps: HostHandlerDeps): HostCallHandlers {
 		'media.close',
 	] as const) {
 		handlers[method] = (pluginId, params) => {
-			// Close must always be able to cancel: bypass rate/concurrency, retain live permission.
+			// Per-job serialization bounds download/probe/decode; close uses reserved
+			// cancellation slots. Only status/open/run need the ActionGuard as well.
 			if (!['media.status', 'media.open', 'media.run'].includes(method))
 				return mediaTools.call(pluginId, method, params);
 			return underGuard(deps.actionGuard, pluginId, 'media:tools', 'discord-voice', () =>
