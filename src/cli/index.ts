@@ -1076,6 +1076,26 @@ cue
 	.option('--effort <level>', 'With --auto-run: reasoning effort for this run only')
 	.option('--per-document', 'With --auto-run: one agent turn per document instead of one per task')
 	.option('--ignore-model-hints', "With --auto-run: ignore the documents' MAESTRO:MODEL hints")
+	.option('--no-auto-resume', 'With --auto-run: stay paused after an agent error')
+	.option('--auto-resume-after <minutes>', 'With --auto-run: minutes between auto-resume attempts')
+	.option('--max-auto-resumes <n>', 'With --auto-run: auto-resume attempt ceiling')
+	.option(
+		'--worktree-branch <name>',
+		'With --auto-run: create a worktree on this branch when the run fires, and run there'
+	)
+	.option(
+		'--worktree-agent <id-or-name>',
+		'With --auto-run: run in this already-open worktree agent'
+	)
+	.option(
+		'--worktree-path <path>',
+		'With --auto-run: run in the worktree already on disk at this path'
+	)
+	.option(
+		'--base-branch <ref>',
+		'With a worktree flag: ref a new branch is cut from, and the pull request target'
+	)
+	.option('--create-pr', 'With a worktree flag: open a pull request when the run finishes')
 	.option('--notify', 'Show a toast notification when the task fires')
 	.option('--sticky', 'Make the notify toast sticky (requires --notify)')
 	.option('-m, --message <text>', 'Body for the notify toast (defaults to label/prompt)')
