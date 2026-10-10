@@ -167,6 +167,33 @@ describe('computeSortedSessions - hidden groups', () => {
 		expect(visibleSessions.map((s) => s.name).sort()).toEqual(['Parked', 'Working']);
 	});
 
+	// The render path drops a hidden group's agents before it builds the bookmark
+	// list, so a bookmarked one has no row. Left in these projections it would
+	// hold a jump slot and shift every badge after it onto the wrong agent.
+	it('drops a bookmarked agent in a hidden group from both projections', () => {
+		const { visibleSessions, navSessions, bookmarkNavSize } = computeSortedSessions({
+			sessions: [{ ...parked(), bookmarked: true }, working()],
+			groups: [hiddenGroup, openGroup],
+			bookmarksCollapsed: false,
+		});
+
+		expect(visibleSessions.map((s) => s.name)).toEqual(['Working']);
+		expect(navSessions.map((s) => s.name)).toEqual(['Working']);
+		expect(bookmarkNavSize).toBe(0);
+	});
+
+	it('keeps a bookmarked agent in a hidden group when "Show Hidden" is on', () => {
+		const { visibleSessions, bookmarkNavSize } = computeSortedSessions({
+			sessions: [{ ...parked(), bookmarked: true }, working()],
+			groups: [hiddenGroup, openGroup],
+			bookmarksCollapsed: false,
+			showHiddenGroups: true,
+		});
+
+		expect(visibleSessions.map((s) => s.name)).toEqual(['Parked', 'Parked', 'Working']);
+		expect(bookmarkNavSize).toBe(1);
+	});
+
 	// `sortedSessions` is the full ordering other callers index into, not a
 	// statement about what is drawn.
 	it('leaves the complete sorted ordering untouched', () => {

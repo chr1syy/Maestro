@@ -47,6 +47,7 @@ import {
 	canCreateGroupInside,
 	canSetGroupParent,
 	removeGroupAndPromoteChildren,
+	setGroupHidden,
 	setGroupParent,
 } from '../../../shared/groupHierarchy';
 import {
@@ -94,6 +95,9 @@ function applyGroupUpdate(
 		next = setGroupParent(next, groupId, request.parentGroupId);
 	} else if (clear.has('parent')) {
 		next = setGroupParent(next, groupId, undefined);
+	}
+	if (request.hidden !== undefined) {
+		next = setGroupHidden(next, groupId, request.hidden);
 	}
 
 	return next.map((group) => {

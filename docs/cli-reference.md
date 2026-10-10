@@ -968,7 +968,7 @@ Rename a group in the Maestro desktop app
 
 ## `maestro-cli update-group <group-id>`
 
-Update a group's name, icon, color, or parent in the Maestro desktop app
+Update a group's name, icon, color, parent, or Left Bar visibility in the Maestro desktop app
 
 | Option                | Description                                                                                            | Default |
 | --------------------- | ------------------------------------------------------------------------------------------------------ | ------- |
@@ -981,6 +981,8 @@ Update a group's name, icon, color, or parent in the Maestro desktop app
 | `--clear-icon`        | Remove the icon                                                                                        | -       |
 | `--clear-color`       | Remove the label color                                                                                 | -       |
 | `--clear-parent`      | Promote the group to the top level                                                                     | -       |
+| `--hide`              | Park the group out of the Left Bar. Its agents stay reachable through search and the switcher          | -       |
+| `--show`              | Bring a hidden group back into the Left Bar                                                            | -       |
 | `--json`              | Output as JSON (for scripting)                                                                         | -       |
 
 ## `maestro-cli create-worktree`

@@ -1,6 +1,9 @@
 import { useCallback, useState } from 'react';
 import type { Session, Group } from '../../types';
-import { setGroupParent as updateGroupParent } from '../../../shared/groupHierarchy';
+import {
+	setGroupHidden,
+	setGroupParent as updateGroupParent,
+} from '../../../shared/groupHierarchy';
 
 /**
  * State returned from useGroupManagement for modal management
@@ -107,7 +110,10 @@ export function useGroupManagement(deps: UseGroupManagementDeps): UseGroupManage
 	 */
 	const toggleGroupHidden = useCallback(
 		(groupId: string) => {
-			setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, hidden: !g.hidden } : g)));
+			setGroups((prev) => {
+				const group = prev.find((g) => g.id === groupId);
+				return group ? setGroupHidden(prev, groupId, !group.hidden) : prev;
+			});
 		},
 		[setGroups]
 	);

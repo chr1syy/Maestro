@@ -60,6 +60,7 @@ import { useInlineWizardContext } from '../../contexts/InlineWizardContext';
 import { useWindowContextOptional } from '../../contexts/WindowContext';
 import { rollUpWizardActivityToSessions } from '../../utils/wizardActivity';
 import { buildSessionJumpSlotMap } from '../../utils/sessionJumpSlots';
+import { collectHiddenGroupIds } from '../../utils/sidebarMembership';
 import { getModalActions, useModalStore } from '../../stores/modalStore';
 import { SessionContextMenu } from './SessionContextMenu';
 import { buildWindowMoveTargets, scopeSessionsToOwningWindow } from '../../utils/windowTargets';
@@ -1046,6 +1047,12 @@ function SessionListInner(props: SessionListProps) {
 		[sortedGroups]
 	);
 
+	// Every group that is parked, whether by its own flag or by its parent's.
+	// The fade reads this rather than `group.hidden`: a child renders as its own
+	// sibling row, so its parent's opacity never reaches it, and a revealed
+	// child drawn at full strength looks like a group that was never hidden.
+	const parkedGroupIds = useMemo(() => collectHiddenGroupIds(sortedGroups), [sortedGroups]);
+
 	// PERF: Cached callback maps to prevent SessionItem re-renders.
 	// These Maps store stable function references keyed by session id. They only
 	// depend on the *set of session ids* - not on per-session field changes - so
@@ -1951,10 +1958,11 @@ function SessionListInner(props: SessionListProps) {
 									data-group-depth={isNestedGroup ? 1 : 0}
 									className={`${isNestedGroup ? 'ml-4 ' : ''}mb-1 rounded`}
 									style={{
-										// A hidden group only reaches this list while "Show Hidden" is on, so
-										// it is drawn faded: without it a revealed group is indistinguishable
-										// from a normal one and the toggle reads as having done nothing.
-										...(group.hidden ? { opacity: 0.45 } : undefined),
+										// A parked group only reaches this list while "Show Hidden" is on
+										// (or while it holds the active agent), so it is drawn faded:
+										// without it a revealed group is indistinguishable from a normal
+										// one and the toggle reads as having done nothing.
+										...(parkedGroupIds.has(group.id) ? { opacity: 0.45 } : undefined),
 										...(dragOverTarget === group.id
 											? {
 													outline: `1px dashed ${theme.colors.accent}`,

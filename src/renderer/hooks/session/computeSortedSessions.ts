@@ -4,7 +4,7 @@ import {
 	sessionOrChildrenNeedAttention,
 	type AttentionContext,
 } from '../../utils/sessionAttention';
-import { resolveHiddenGroupIds } from '../../utils/sidebarMembership';
+import { passesHiddenGroupFilter, resolveHiddenGroupIds } from '../../utils/sidebarMembership';
 
 /**
  * Inputs for {@link computeSortedSessions}. Pure - safe to call from a Zustand
@@ -135,8 +135,12 @@ export function computeSortedSessions(input: ComputeSortedSessionsInput): Sorted
 		}
 	};
 
+	// A bookmark is a second ROW for an agent, not a second membership: the
+	// render path drops a hidden group's agents before it builds the bookmark
+	// list, so one that stayed here would hold a jump slot and be an arrow-key
+	// target with no row on screen.
 	const bookmarkedParents = sessions
-		.filter((s) => s.bookmarked && !s.parentSessionId)
+		.filter((s) => s.bookmarked && !s.parentSessionId && passesHiddenGroupFilter(s, hiddenGroupIds))
 		.sort((a, b) => compareNamesIgnoringEmojis(a.name, b.name));
 	for (const session of bookmarkedParents) {
 		addWithWorktrees(session, 'bookmark');
@@ -177,7 +181,13 @@ export function computeSortedSessions(input: ComputeSortedSessionsInput): Sorted
 	const visibleSessions: Session[] = [];
 	if (!bookmarksCollapsed) {
 		const bookmarkedSessions = sessions
-			.filter((s) => s.bookmarked && !s.parentSessionId && passesUnreadFilter(s))
+			.filter(
+				(s) =>
+					s.bookmarked &&
+					!s.parentSessionId &&
+					passesUnreadFilter(s) &&
+					passesHiddenGroupFilter(s, hiddenGroupIds)
+			)
 			.sort((a, b) => compareNamesIgnoringEmojis(a.name, b.name));
 		visibleSessions.push(...bookmarkedSessions);
 	}

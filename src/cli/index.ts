@@ -1294,7 +1294,9 @@ program
 // backward compatibility.
 program
 	.command('update-group <group-id>')
-	.description("Update a group's name, icon, color, or parent in the Maestro desktop app")
+	.description(
+		"Update a group's name, icon, color, parent, or Left Bar visibility in the Maestro desktop app"
+	)
 	.option('-n, --name <name>', 'New group name')
 	.option('-e, --emoji <emoji>', 'Emoji icon for the group. Mutually exclusive with --icon')
 	.option(
@@ -1307,6 +1309,11 @@ program
 	.option('--clear-icon', 'Remove the icon')
 	.option('--clear-color', 'Remove the label color')
 	.option('--clear-parent', 'Promote the group to the top level')
+	.option(
+		'--hide',
+		'Park the group out of the Left Bar. Its agents stay reachable through search and the switcher'
+	)
+	.option('--show', 'Bring a hidden group back into the Left Bar')
 	.option('--json', 'Output as JSON (for scripting)')
 	.action((groupId, options) => updateGroup(groupId, options));
 

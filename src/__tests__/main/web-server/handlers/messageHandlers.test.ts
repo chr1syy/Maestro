@@ -4764,6 +4764,28 @@ describe('WebSocketMessageHandler', () => {
 
 			expect(callbacks.updateGroup).not.toHaveBeenCalled();
 		});
+
+		it('forwards a hide request on update_group', async () => {
+			handler.handleMessage(client, { type: 'update_group', groupId: 'group-1', hidden: true });
+
+			await vi.waitFor(() => {
+				expect(callbacks.updateGroup).toHaveBeenCalledWith('group-1', { hidden: true });
+			});
+		});
+
+		it('forwards a show request on update_group', async () => {
+			handler.handleMessage(client, { type: 'update_group', groupId: 'group-1', hidden: false });
+
+			await vi.waitFor(() => {
+				expect(callbacks.updateGroup).toHaveBeenCalledWith('group-1', { hidden: false });
+			});
+		});
+
+		it('rejects an update_group whose hidden is not a boolean', () => {
+			handler.handleMessage(client, { type: 'update_group', groupId: 'group-1', hidden: 'true' });
+
+			expect(callbacks.updateGroup).not.toHaveBeenCalled();
+		});
 	});
 });
 
