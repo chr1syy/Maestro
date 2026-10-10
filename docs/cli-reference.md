@@ -1422,7 +1422,10 @@ Reset a setting to its default value
 
 ## `maestro-cli settings media-status`
 
-Report local Host Media tools and allowed models as JSON
+Report media tools available to this CLI process and allowed models as JSON
+
+Uses the same resolver as the desktop diagnostic, with this CLI process's PATH and
+environment variables. Results can differ from the running desktop's environment.
 
 ## `maestro-cli settings agent`
 

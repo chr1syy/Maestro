@@ -83,7 +83,7 @@ export function settingsGet(key: string, options: SettingsGetOptions): void {
 	}
 }
 
-/** Uses the same runtime resolver as the Host Media settings surface. */
+/** Uses the Host Media resolver in this CLI process's PATH and environment. */
 export async function settingsMediaStatus(): Promise<void> {
 	try {
 		console.log(

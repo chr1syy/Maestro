@@ -167,6 +167,10 @@ allowlisted readable model file was found, including an empty or invalid directo
 Status reveals no executable/model paths or media contents. Plugin grants/signature
 checks still apply to every SDK media operation; the diagnostic does not grant access.
 
+`maestro-cli settings media-status` uses the same resolver in the CLI process's
+PATH and environment. Its result can differ from the running desktop diagnostic
+when their launch environments differ.
+
 Only allowlisted multilingual filenames are considered. Model paths are canonicalized;
 symlinks escaping the approved directory, non-files and unreadable files are rejected.
 If status lists only `base`, Relay must select `base`; selecting `small` requires an

@@ -1779,7 +1779,7 @@ settings
 
 settings
 	.command('media-status')
-	.description('Report local Host Media tools and allowed models as JSON')
+	.description('Report media tools available to this CLI process and allowed models as JSON')
 	.action(settingsMediaStatus);
 
 // Agent-specific config subcommands
