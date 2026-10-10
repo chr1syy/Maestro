@@ -87,7 +87,7 @@ describe('usePianolaSupervisor', () => {
 		expect(notifyToast).toHaveBeenCalledWith(expect.objectContaining({ color: 'red' }));
 	});
 
-	it('restores the last known value when the save and recovery read both fail', async () => {
+	it('keeps the last known value when the save and recovery read both fail', async () => {
 		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
 		vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(false);
 		vi.mocked(window.maestro.settings.getAll).mockRejectedValueOnce(new Error('read failed'));
@@ -99,7 +99,7 @@ describe('usePianolaSupervisor', () => {
 		expect(notifyToast).toHaveBeenCalledWith(expect.objectContaining({ color: 'red' }));
 	});
 
-	it('does not roll back newer saves when an older recovery read fails', async () => {
+	it('preserves newer saves when an older recovery read fails', async () => {
 		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
 		const recovery = deferred<boolean>();
 		vi.mocked(window.maestro.settings.set)
@@ -125,7 +125,7 @@ describe('usePianolaSupervisor', () => {
 		expect(result.current.autoWatchNewAgents).toBe(false);
 	});
 
-	it('preserves a newer hydration even when it confirms the optimistic value', async () => {
+	it('preserves newer hydration when an older recovery read fails', async () => {
 		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
 		const recovery = deferred<boolean>();
 		vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(false);
@@ -147,6 +147,104 @@ describe('usePianolaSupervisor', () => {
 			await saving;
 		});
 		expect(result.current.autoWatchNewAgents).toBe(false);
+	});
+
+	it('keeps the persisted value when overlapping saves and both recovery reads fail', async () => {
+		useSettingsStore.setState({ pianolaAutoWatchNewAgents: true });
+		const firstSave = deferred<boolean>();
+		const secondSave = deferred<boolean>();
+		vi.mocked(window.maestro.settings.set)
+			.mockReturnValueOnce(firstSave.promise)
+			.mockReturnValueOnce(secondSave.promise);
+		vi.mocked(window.maestro.settings.getAll)
+			.mockRejectedValueOnce(new Error('first recovery failed'))
+			.mockRejectedValueOnce(new Error('second recovery failed'));
+		const { result } = renderHook(() => usePianolaSupervisor());
+		let first: Promise<void>;
+		let second: Promise<void>;
+		act(() => {
+			first = result.current.setAutoWatchNewAgents(false);
+			second = result.current.setAutoWatchNewAgents(true);
+		});
+		expect(result.current.autoWatchNewAgents).toBe(true);
+		await act(async () => {
+			firstSave.resolve(false);
+			secondSave.resolve(false);
+			await Promise.all([first, second]);
+		});
+		expect(result.current.autoWatchNewAgents).toBe(true);
+	});
+
+	it('retains an earlier confirmed save if a newer pending save and recovery fail', async () => {
+		const firstSave = deferred<boolean>();
+		const secondSave = deferred<boolean>();
+		vi.mocked(window.maestro.settings.set)
+			.mockReturnValueOnce(firstSave.promise)
+			.mockReturnValueOnce(secondSave.promise);
+		vi.mocked(window.maestro.settings.getAll).mockRejectedValueOnce(new Error('read failed'));
+		const { result } = renderHook(() => usePianolaSupervisor());
+		let first: Promise<void>;
+		let second: Promise<void>;
+		act(() => {
+			first = result.current.setAutoWatchNewAgents(true);
+			second = result.current.setAutoWatchNewAgents(false);
+		});
+		expect(result.current.autoWatchNewAgents).toBe(false);
+		await act(async () => {
+			firstSave.resolve(true);
+			await first;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(true);
+		await act(async () => {
+			secondSave.resolve(false);
+			await second;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(true);
+	});
+
+	it('keeps a newer confirmed save when acknowledgements arrive out of order', async () => {
+		const firstSave = deferred<boolean>();
+		const secondSave = deferred<boolean>();
+		vi.mocked(window.maestro.settings.set)
+			.mockReturnValueOnce(firstSave.promise)
+			.mockReturnValueOnce(secondSave.promise);
+		const { result } = renderHook(() => usePianolaSupervisor());
+		let first: Promise<void>;
+		let second: Promise<void>;
+		act(() => {
+			first = result.current.setAutoWatchNewAgents(true);
+			second = result.current.setAutoWatchNewAgents(false);
+		});
+		await act(async () => {
+			secondSave.resolve(true);
+			await second;
+			firstSave.resolve(true);
+			await first;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(false);
+	});
+
+	it('applies a confirmed save after an older hydration finishes', async () => {
+		const read = deferred<Record<string, unknown>>();
+		const save = deferred<boolean>();
+		vi.mocked(window.maestro.settings.getAll).mockReturnValueOnce(read.promise);
+		vi.mocked(window.maestro.settings.set).mockReturnValueOnce(save.promise);
+		const { result } = renderHook(() => usePianolaSupervisor());
+		const loading = loadAllSettings();
+		let saving: Promise<void>;
+		act(() => {
+			saving = result.current.setAutoWatchNewAgents(true);
+		});
+		await act(async () => {
+			read.resolve({ pianolaAutoWatchNewAgents: false, cueTimeBackfillApplied: true });
+			await loading;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(false);
+		await act(async () => {
+			save.resolve(true);
+			await saving;
+		});
+		expect(result.current.autoWatchNewAgents).toBe(true);
 	});
 
 	it('recovers the stored setting when a save fails before initial hydration', async () => {

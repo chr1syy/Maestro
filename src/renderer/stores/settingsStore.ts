@@ -721,8 +721,9 @@ export function resolveForceParallel(optionForce?: boolean): boolean {
 	return optionForce === true || s.forcedParallelAlways;
 }
 
-// Invalidates failed auto-watch saves when a newer save or hydration has landed.
+// Order confirmed auto-watch saves and hydration without exposing unsaved values.
 let pianolaAutoWatchRevision = 0;
+let pianolaAutoWatchAppliedRevision = 0;
 
 export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 	/** Monotonic counter to discard stale async completions in setPersistentWebLink */
@@ -1474,21 +1475,20 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 		},
 
 		setPianolaAutoWatchNewAgents: async (value) => {
-			const previousValue = get().pianolaAutoWatchNewAgents;
 			const revision = ++pianolaAutoWatchRevision;
-			set({ pianolaAutoWatchNewAgents: value });
 			try {
 				const saved = await window.maestro.settings.set('pianolaAutoWatchNewAgents', value);
 				if (saved === false) throw new Error('Setting was not saved');
-				// External hydration may already have applied a newer value. The save
-				// acknowledgement must not overwrite it.
-			} catch (error) {
-				// Re-read the persisted value rather than reverting to a possibly stale
-				// pre-save snapshot (including the default before initial hydration).
-				const recovered = await loadAllSettings();
-				if (!recovered && revision === pianolaAutoWatchRevision) {
-					set({ pianolaAutoWatchNewAgents: previousValue });
+				// Only confirmed values reach the checkbox. A newer confirmed save
+				// or external hydration must survive a delayed acknowledgement.
+				if (revision > pianolaAutoWatchAppliedRevision) {
+					pianolaAutoWatchAppliedRevision = revision;
+					set({ pianolaAutoWatchNewAgents: value });
 				}
+			} catch (error) {
+				// Re-read the persisted value. If that also fails, the store still
+				// holds its last confirmed value, even with overlapping failed saves.
+				await loadAllSettings();
 				throw error;
 			}
 		},
@@ -1954,12 +1954,12 @@ export function selectIsLeaderboardRegistered(s: SettingsStoreState): boolean {
 /**
  * Batch-load all settings from electron-store and apply them to the Zustand store.
  * Called once on app startup and again on system resume from sleep.
- * Returns whether hydration succeeded so a failed save can recover its prior value.
  */
-export async function loadAllSettings(): Promise<boolean> {
+export async function loadAllSettings(): Promise<void> {
 	// Snapshot before the awaited reads below. Anything the user changes while
 	// they are in flight must survive this load - see the filter before setState.
 	const beforeRead = useSettingsStore.getState() as unknown as Record<string, unknown>;
+	const pianolaRevisionAtRead = ++pianolaAutoWatchRevision;
 
 	try {
 		// Batch load all settings in a single IPC call
@@ -2686,8 +2686,14 @@ export async function loadAllSettings(): Promise<boolean> {
 			}
 		}
 
-		// Applying even an identical persisted value supersedes a failed save.
-		if (patch.pianolaAutoWatchNewAgents !== undefined) pianolaAutoWatchRevision++;
+		// Even an identical persisted value supersedes older save acknowledgements.
+		if (patch.pianolaAutoWatchNewAgents !== undefined) {
+			if (pianolaRevisionAtRead > pianolaAutoWatchAppliedRevision) {
+				pianolaAutoWatchAppliedRevision = pianolaRevisionAtRead;
+			} else {
+				delete patch.pianolaAutoWatchNewAgents;
+			}
+		}
 
 		// Apply the entire patch in one setState call
 		patch.settingsLoaded = true;
@@ -2696,12 +2702,10 @@ export async function loadAllSettings(): Promise<boolean> {
 		// Deliberately not awaited: it reads the Cue database over IPC and only
 		// refines a display subtotal, so it must not hold up settings load.
 		void backfillCueTimeIfNeeded(allSettings['cueTimeBackfillApplied'] === true);
-		return true;
 	} catch (error) {
 		logger.error('[Settings] Failed to load settings:', undefined, error);
 		// Mark settings as loaded even if there was an error (use defaults)
 		useSettingsStore.setState({ settingsLoaded: true });
-		return false;
 	}
 }
 
