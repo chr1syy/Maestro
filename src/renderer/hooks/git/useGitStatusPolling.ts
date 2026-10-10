@@ -304,10 +304,17 @@ export function useGitStatusPolling(
 	const isActiveRef = useRef<boolean>(true);
 	const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-	// Last published map, so a session whose git timed out keeps its last
-	// good counts instead of flashing to "no changes".
-	const gitStatusMapRef = useRef(gitStatusMap);
-	gitStatusMapRef.current = gitStatusMap;
+	// Each session's last published entry plus the folder and SSH remote it
+	// was read from, so a session whose git timed out keeps its last good
+	// counts instead of flashing to "no changes" - but only while it is still
+	// polling the same folder. A terminal-mode `cd` into another repo must not
+	// inherit the previous repo's branch and counts. Written at the end of
+	// every pass, so a queued pass sees it before React re-renders.
+	const lastGoodRef = useRef(new Map<string, { queryKey: string; data: GitStatusData }>());
+	// The non-git re-check is fire-and-forget so it never delays the git poll,
+	// which means nothing else stops it from overlapping itself on a slow
+	// folder. One at a time, the same rule `runPoll` applies to the main poll.
+	const transitionCheckInFlightRef = useRef(false);
 
 	// Poll git status for all Git sessions
 	const pollGitStatusOnce = useCallback(async () => {
@@ -315,9 +322,12 @@ export function useGitStatusPolling(
 		if (pauseWhenHidden && document.hidden) return;
 
 		const allSessions = sessionsRef.current;
-		const keepPrevious = (sessionId: string) => {
-			const previous = gitStatusMapRef.current.get(sessionId);
-			return previous ? ([sessionId, previous] as const) : null;
+		type PollResult = readonly [sessionId: string, data: GitStatusData, queryKey: string];
+		const keepPrevious = (sessionId: string, queryKey: string): PollResult | null => {
+			const previous = lastGoodRef.current.get(sessionId);
+			return previous && previous.queryKey === queryKey
+				? [sessionId, previous.data, queryKey]
+				: null;
 		};
 		const gitSessions = allSessions.filter((s) => s.isGitRepo);
 		const nonGitSessions = allSessions.filter((s) => !s.isGitRepo);
@@ -326,11 +336,15 @@ export function useGitStatusPolling(
 		// agent creation. On transition, update the session so the worktree
 		// menu and other git-gated features unlock without restart.
 		// Fire-and-forget - runs in parallel with the main git poll.
-		if (nonGitSessions.length > 0) {
-			void detectGitRepoTransitions(nonGitSessions);
+		if (nonGitSessions.length > 0 && !transitionCheckInFlightRef.current) {
+			transitionCheckInFlightRef.current = true;
+			void detectGitRepoTransitions(nonGitSessions).finally(() => {
+				transitionCheckInFlightRef.current = false;
+			});
 		}
 
 		if (gitSessions.length === 0) {
+			lastGoodRef.current = new Map();
 			setGitStatusMap((prev) => (prev.size === 0 ? prev : new Map()));
 			return;
 		}
@@ -343,7 +357,7 @@ export function useGitStatusPolling(
 			// Parallelize git status calls for better performance
 			// Sequential calls with 10 sessions = 1-2s, parallel = 200-300ms
 			const results = await Promise.all(
-				gitSessions.map(async (session) => {
+				gitSessions.map(async (session): Promise<PollResult | null> => {
 					try {
 						const cwd =
 							session.inputMode === 'terminal' ? session.shellCwd || session.cwd : session.cwd;
@@ -355,11 +369,12 @@ export function useGitStatusPolling(
 						// we must fall back to sessionSshRemoteConfig.remoteId. See CLAUDE.md "SSH Remote Sessions".
 						const sshRemoteId =
 							session.sshRemoteId || session.sessionSshRemoteConfig?.remoteId || undefined;
+						const queryKey = `${sshRemoteId ?? ''}\0${cwd}`;
 
 						// For non-active sessions, just get basic status (file count)
 						if (!isActiveSession) {
 							const status = await gitService.getStatus(cwd, sshRemoteId);
-							if (status.timedOut) return keepPrevious(session.id);
+							if (status.timedOut) return keepPrevious(session.id, queryKey);
 							if (status.notARepo) {
 								await demoteIfNoLongerGitRepo(session, cwd, sshRemoteId);
 								return null;
@@ -374,7 +389,7 @@ export function useGitStatusPolling(
 								modifiedCount: 0,
 								lastUpdated: Date.now(),
 							};
-							return [session.id, statusData] as const;
+							return [session.id, statusData, queryKey] as const;
 						}
 
 						// For active session, get comprehensive data including numstat
@@ -385,7 +400,9 @@ export function useGitStatusPolling(
 							gitService.getStatus(cwd, sshRemoteId),
 							gitService.getNumstat(cwd, sshRemoteId),
 						]);
-						if (status.timedOut || numstat.timedOut) return keepPrevious(session.id);
+						if (gitInfo.timedOut || status.timedOut || numstat.timedOut) {
+							return keepPrevious(session.id, queryKey);
+						}
 						if (status.notARepo) {
 							await demoteIfNoLongerGitRepo(session, cwd, sshRemoteId);
 							return null;
@@ -448,7 +465,7 @@ export function useGitStatusPolling(
 							lastUpdated: Date.now(),
 						};
 
-						return [session.id, statusData] as const;
+						return [session.id, statusData, queryKey] as const;
 					} catch {
 						return null;
 					}
@@ -456,11 +473,15 @@ export function useGitStatusPolling(
 			);
 
 			const newStatusMap = new Map<string, GitStatusData>();
+			const newLastGood = new Map<string, { queryKey: string; data: GitStatusData }>();
 			for (const result of results) {
 				if (result) {
-					newStatusMap.set(result[0], result[1]);
+					const [sessionId, data, queryKey] = result;
+					newStatusMap.set(sessionId, data);
+					newLastGood.set(sessionId, { queryKey, data });
 				}
 			}
+			lastGoodRef.current = newLastGood;
 
 			// PERF: Only update state if data actually changed to prevent cascade re-renders
 			setGitStatusMap((prev) => (gitStatusMapsEqual(prev, newStatusMap) ? prev : newStatusMap));

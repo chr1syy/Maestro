@@ -87,6 +87,15 @@ describe('gitService', () => {
 			expect(result.notARepo).toBeUndefined();
 		});
 
+		test('flags the result when only the branch query timed out', async () => {
+			mockGit.status.mockResolvedValue({ stdout: ' M a.ts\n', stderr: '' });
+			mockGit.branch.mockResolvedValue({ stdout: '', stderr: 'ETIMEDOUT', timedOut: true });
+
+			const result = await gitService.getStatus('/path/to/repo');
+
+			expect(result.timedOut).toBe(true);
+		});
+
 		test('returns empty files array when status is clean', async () => {
 			mockGit.status.mockResolvedValue({ stdout: '' });
 			mockGit.branch.mockResolvedValue({ stdout: 'main' });
