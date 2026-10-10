@@ -1420,6 +1420,10 @@ Reset a setting to its default value
 | -------- | ------------------------------ | ------- |
 | `--json` | Output as JSON (for scripting) | -       |
 
+## `maestro-cli settings media-status`
+
+Report local Host Media tools and allowed models as JSON
+
 ## `maestro-cli settings agent`
 
 View and manage per-agent configuration

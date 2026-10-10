@@ -272,6 +272,7 @@ of taking a second round trip or trusting a value the caller guessed.
 | Auto Run panel: progress                           | `auto-run-status -a <agent>`                                                                     |
 | Auto Run panel: Change folder                      | `auto-run-folder <path> -a <agent>`                                                              |
 | Playbook Exchange: browse, README, install         | `marketplace list`, `marketplace show <id>`, `marketplace import`                                |
+| Host media: Whisper models / readiness             | `settings set mediaModelDirectory <path>`, `settings media-status` (shared validation/resolver)  |
 
 ## Open gaps
 
