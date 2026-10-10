@@ -1317,8 +1317,9 @@ app
 				// notify message is pre-resolved by the dispatch service via the
 				// fallback chain (notify.message → label → prompt → name); falling
 				// back here to `prompt` (which the dispatcher uses as the carrier)
-				// covers the queue-restored corner where the in-memory `notify` was
-				// lost but the message survived in the persisted `prompt` slot.
+				// covers a queue row restored from before the queue table carried
+				// the notify config (`notify_json`), where only the message survived,
+				// in the persisted `prompt` slot.
 				if (action === 'notify') {
 					const sessionInfo = {
 						id: storedSession.id,
