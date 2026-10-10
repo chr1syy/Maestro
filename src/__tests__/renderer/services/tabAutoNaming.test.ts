@@ -255,4 +255,56 @@ describe('requestTabAutoNameForMessage', () => {
 
 		expect(generateTabName).not.toHaveBeenCalled();
 	});
+	it('reads the live tab, so a stale snapshot cannot start a second namer', () => {
+		// Remote dispatch holds the session it captured before awaiting the agent
+		// config and system prompt. A namer another send started during that gap
+		// is only visible in the store.
+		const tab = createMockAITab({ id: 'tab-1', name: null });
+		const staleSnapshot = createMockSession({ aiTabs: [tab], activeTabId: tab.id });
+		seedStore(staleSnapshot);
+
+		requestTabAutoNameForMessage(staleSnapshot, tab.id, 'rewrite the ingest pipeline');
+		requestTabAutoNameForMessage(staleSnapshot, tab.id, 'rewrite the ingest pipeline');
+
+		expect(generateTabName).toHaveBeenCalledTimes(1);
+	});
+
+	it('leaves a tab closed or named since the snapshot alone', () => {
+		const tab = createMockAITab({ id: 'tab-1', name: null });
+		const staleSnapshot = createMockSession({ aiTabs: [tab], activeTabId: tab.id });
+		seedStore({ ...staleSnapshot, aiTabs: [{ ...tab, name: 'Typed By User' }] });
+		requestTabAutoNameForMessage(staleSnapshot, tab.id, 'rewrite the ingest pipeline');
+
+		seedStore({ ...staleSnapshot, aiTabs: [] });
+		requestTabAutoNameForMessage(staleSnapshot, tab.id, 'rewrite the ingest pipeline');
+
+		expect(generateTabName).not.toHaveBeenCalled();
+	});
+
+	it('never names a hidden consult tab', () => {
+		// A consult tab has no chip, and its text was written by the asking agent.
+		const tab = createMockAITab({ id: 'tab-1', name: null, hidden: true });
+		const session = createMockSession({ aiTabs: [tab], activeTabId: tab.id });
+		seedStore(session);
+
+		requestTabAutoNameForMessage(session, tab.id, 'what does the schema look like?');
+
+		expect(generateTabName).not.toHaveBeenCalled();
+	});
+	it('never throws into the send path, and does not leave the tab stuck mid-naming', () => {
+		// The queue drain calls this right before spawning; a naming failure must
+		// not cost the user the message.
+		window.maestro = {
+			...window.maestro,
+			tabNaming: undefined,
+		} as unknown as typeof window.maestro;
+		const tab = createMockAITab({ id: 'tab-1', name: null });
+		const session = createMockSession({ aiTabs: [tab], activeTabId: tab.id });
+		seedStore(session);
+
+		expect(() =>
+			requestTabAutoNameForMessage(session, tab.id, 'rewrite the ingest pipeline')
+		).not.toThrow();
+		expect(useSessionStore.getState().sessions[0].aiTabs[0].isGeneratingName).toBe(false);
+	});
 });

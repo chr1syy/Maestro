@@ -13,6 +13,8 @@ import type { ProcessQueuedItemDeps } from '../../../renderer/stores/agentStore'
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import type { Session, AgentConfig, QueuedItem } from '../../../renderer/types';
 import { createMockSession as baseCreateMockSession } from '../../helpers/mockSession';
+import { dispatchCrossAgentMentionsForMessage } from '../../../renderer/services/crossAgentMentions';
+import { resetStores } from '../../helpers';
 import { requestTabAutoNameForMessage } from '../../../renderer/services/tabAutoNaming';
 
 // ============================================================================
@@ -104,12 +106,6 @@ vi.mock('../../../renderer/services/git', () => ({
 	},
 }));
 
-// Tab auto-naming is fire-and-forget and covered in services/tabAutoNaming.test.ts;
-// here we only assert that the queue drain hands the message to it (issue #1531).
-vi.mock('../../../renderer/services/tabAutoNaming', () => ({
-	requestTabAutoNameForMessage: vi.fn(),
-}));
-
 // Prompt content is now loaded via window.maestro.prompts.get() and cached at module level.
 // The window.maestro.prompts mock is set up below in the window.maestro block.
 
@@ -118,24 +114,21 @@ vi.mock('../../../renderer/utils/templateVariables', () => ({
 	substituteTemplateVariables: vi.fn((template: string) => template),
 }));
 
-function resetStores() {
-	useAgentStore.setState({
-		availableAgents: [],
-		agentsDetected: false,
-	});
-	useSessionStore.setState({
-		sessions: [],
-		groups: [],
-		activeSessionId: '',
-		sessionsLoaded: false,
-		initialLoadComplete: false,
-		removedWorktreePaths: new Set(),
-		cyclePosition: -1,
-	});
-}
+// Mock the cross-agent consult so the deferred-mention dispatch is observable
+// without standing up the whole @mention resolution + IPC pipeline.
+vi.mock('../../../renderer/services/crossAgentMentions', () => ({
+	dispatchCrossAgentMentionsForMessage: vi.fn(),
+	withMentionTurnNotes: (prompt: string) => prompt,
+}));
 
-beforeEach(async () => {
-	resetStores();
+// Tab auto-naming is fire-and-forget and covered in services/tabAutoNaming.test.ts;
+// here we only assert which queued items the drain hands to it (issue #1531).
+vi.mock('../../../renderer/services/tabAutoNaming', () => ({
+	requestTabAutoNameForMessage: vi.fn(),
+}));
+
+beforeEach(() => {
+	resetStores(useAgentStore, useSessionStore);
 	vi.clearAllMocks();
 });
 
@@ -196,9 +189,11 @@ describe('agentStore', () => {
 
 			await expect(useAgentStore.getState().refreshAgents()).rejects.toThrow('IPC failed');
 
-			// State unchanged on failure
+			// Agent list unchanged on failure...
 			expect(useAgentStore.getState().availableAgents).toEqual([]);
-			expect(useAgentStore.getState().agentsDetected).toBe(false);
+			// ...but detection is marked done so the pickers fall out of "Loading agents..."
+			// instead of spinning forever.
+			expect(useAgentStore.getState().agentsDetected).toBe(true);
 		});
 
 		it('refreshAgents with empty result sets agentsDetected true', async () => {
@@ -1176,7 +1171,7 @@ describe('agentStore', () => {
 			expect(useAgentStore.getState().agentsDetected).toBe(true);
 
 			// Reset
-			resetStores();
+			resetStores(useAgentStore, useSessionStore);
 
 			expect(useAgentStore.getState().availableAgents).toEqual([]);
 			expect(useAgentStore.getState().agentsDetected).toBe(false);
@@ -1189,7 +1184,7 @@ describe('agentStore', () => {
 			useAgentStore.getState().clearAgentError('session-1');
 
 			// Reset
-			resetStores();
+			resetStores(useAgentStore, useSessionStore);
 
 			// Set up again and use
 			const newSession = createMockSession({ id: 'session-2', state: 'error' });
@@ -1286,52 +1281,112 @@ describe('agentStore', () => {
 			);
 		});
 
-		it('names the target tab from the queued message (dispatch --queue never passes the composer)', async () => {
-			const session = createMockSession({
-				id: 'session-1',
-				toolType: 'claude-code',
-				aiTabs: [
-					{
-						id: 'tab-1',
-						agentSessionId: null,
-						name: null,
-						starred: false,
-						logs: [],
-						inputValue: '',
-						stagedImages: [],
-						createdAt: Date.now(),
-						state: 'idle',
-					},
-				],
-				activeTabId: 'tab-1',
-			});
-			useSessionStore.getState().setSessions([session]);
-			vi.mocked(requestTabAutoNameForMessage).mockClear();
+		describe('tab auto-naming (issue #1531)', () => {
+			const seedUnnamedTab = () => {
+				useSessionStore.getState().setSessions([
+					createMockSession({
+						id: 'session-1',
+						toolType: 'claude-code',
+						aiTabs: [
+							{
+								id: 'tab-1',
+								agentSessionId: null,
+								name: null,
+								starred: false,
+								logs: [],
+								inputValue: '',
+								stagedImages: [],
+								createdAt: Date.now(),
+								state: 'idle',
+							},
+						],
+						activeTabId: 'tab-1',
+					}),
+				]);
+			};
 
-			await useAgentStore
-				.getState()
-				.processQueuedItem(
+			it('names the target tab from a queued message (dispatch --queue never passes the composer)', async () => {
+				seedUnnamedTab();
+				await useAgentStore
+					.getState()
+					.processQueuedItem(
+						'session-1',
+						createQueuedItem({ tabId: 'tab-1', text: 'Build the feature' }),
+						defaultDeps
+					);
+
+				expect(requestTabAutoNameForMessage).toHaveBeenCalledTimes(1);
+				expect(requestTabAutoNameForMessage).toHaveBeenCalledWith(
+					expect.objectContaining({ id: 'session-1' }),
+					'tab-1',
+					'Build the feature',
+					'queue'
+				);
+			});
+
+			it('names the tab of a leading-mention item, which consults without spawning', async () => {
+				seedUnnamedTab();
+				await useAgentStore.getState().processQueuedItem(
 					'session-1',
-					createQueuedItem({ tabId: 'tab-1', text: 'Build the feature' }),
+					createQueuedItem({
+						tabId: 'tab-1',
+						text: '@Backend review the schema',
+						crossAgentMention: true,
+						crossAgentOnly: true,
+					}),
 					defaultDeps
 				);
 
-			expect(requestTabAutoNameForMessage).toHaveBeenCalledWith(
-				expect.objectContaining({ id: 'session-1' }),
-				'tab-1',
-				'Build the feature',
-				'queue'
-			);
+				expect(mockSpawn).not.toHaveBeenCalled();
+				expect(requestTabAutoNameForMessage).toHaveBeenCalledWith(
+					expect.objectContaining({ id: 'session-1' }),
+					'tab-1',
+					'@Backend review the schema',
+					'queue'
+				);
+			});
+
+			it('does not name a tab from a queued slash command', async () => {
+				seedUnnamedTab();
+				await useAgentStore
+					.getState()
+					.processQueuedItem(
+						'session-1',
+						createQueuedItem({ tabId: 'tab-1', type: 'command', text: undefined, command: '/x' }),
+						defaultDeps
+					);
+
+				expect(requestTabAutoNameForMessage).not.toHaveBeenCalled();
+			});
+
+			it("does not name a tab from a released consult hold (Maestro's own note)", async () => {
+				seedUnnamedTab();
+				await useAgentStore.getState().processQueuedItem(
+					'session-1',
+					createQueuedItem({
+						tabId: 'tab-1',
+						text: 'Backend replied. Finish your answer with what came back.',
+						agentContext: 'Backend said: looks good',
+					}),
+					defaultDeps
+				);
+
+				expect(mockSpawn).toHaveBeenCalledTimes(1);
+				expect(requestTabAutoNameForMessage).not.toHaveBeenCalled();
+			});
 		});
 
-		it('does not name a tab from a queued slash command', async () => {
+		// A queued message that @mentions another agent must consult that agent HERE,
+		// as the message becomes this agent's turn - not when the user typed it into
+		// a queue that was several messages deep.
+		it('fires the deferred cross-agent consult when the item carries one', async () => {
 			const session = createMockSession({
 				id: 'session-1',
 				toolType: 'claude-code',
 				aiTabs: [
 					{
 						id: 'tab-1',
-						agentSessionId: null,
+						agentSessionId: 'existing-conv-id',
 						name: null,
 						starred: false,
 						logs: [],
@@ -1344,17 +1399,101 @@ describe('agentStore', () => {
 				activeTabId: 'tab-1',
 			});
 			useSessionStore.getState().setSessions([session]);
-			vi.mocked(requestTabAutoNameForMessage).mockClear();
 
-			await useAgentStore
-				.getState()
-				.processQueuedItem(
-					'session-1',
-					createQueuedItem({ tabId: 'tab-1', type: 'command', text: undefined, command: '/x' }),
-					defaultDeps
-				);
+			const item = createQueuedItem({
+				tabId: 'tab-1',
+				text: 'now ask @Backend to review',
+				crossAgentMention: true,
+			});
 
-			expect(requestTabAutoNameForMessage).not.toHaveBeenCalled();
+			await useAgentStore.getState().processQueuedItem('session-1', item, defaultDeps);
+
+			expect(dispatchCrossAgentMentionsForMessage).toHaveBeenCalledTimes(1);
+			expect(dispatchCrossAgentMentionsForMessage).toHaveBeenCalledWith(
+				'now ask @Backend to review',
+				expect.objectContaining({ id: 'session-1' }),
+				'tab-1',
+				undefined
+			);
+			// The local turn still runs: a trailing mention does not suppress it.
+			expect(mockSpawn).toHaveBeenCalledTimes(1);
+		});
+
+		// A mention-only item (the message was addressed at the other agent) fires
+		// the consult and nothing else - there is no local turn to run.
+		it('consults and stops for a crossAgentOnly item, releasing the agent', async () => {
+			const session = createMockSession({
+				id: 'session-1',
+				toolType: 'claude-code',
+				state: 'busy',
+				busySource: 'ai',
+				thinkingStartTime: 1,
+				aiTabs: [
+					{
+						id: 'tab-1',
+						agentSessionId: 'existing-conv-id',
+						name: null,
+						starred: false,
+						logs: [],
+						inputValue: '',
+						stagedImages: [],
+						createdAt: Date.now(),
+						state: 'busy',
+					},
+				],
+				activeTabId: 'tab-1',
+			});
+			useSessionStore.getState().setSessions([session]);
+
+			const item = createQueuedItem({
+				tabId: 'tab-1',
+				text: '@rc pull in the latest changes',
+				crossAgentMention: true,
+				crossAgentOnly: true,
+			});
+
+			await useAgentStore.getState().processQueuedItem('session-1', item, defaultDeps);
+
+			expect(dispatchCrossAgentMentionsForMessage).toHaveBeenCalledTimes(1);
+			// No local turn: the source agent was never asked to answer this.
+			expect(mockSpawn).not.toHaveBeenCalled();
+
+			// The dequeue marked the tab busy and nothing else will close it out, so
+			// this path has to release it or the agent hangs on a turn that never ran.
+			const updated = useSessionStore.getState().sessions[0];
+			expect(updated.aiTabs[0].state).toBe('idle');
+			expect(updated.state).toBe('idle');
+			expect(updated.busySource).toBeUndefined();
+		});
+
+		it('does not consult anyone for an item without a pending mention', async () => {
+			// Queued items from Auto Run, Cue, and the CLI never planned a consult.
+			// An `@` in their text must not turn into one at dispatch time.
+			const session = createMockSession({
+				id: 'session-1',
+				toolType: 'claude-code',
+				aiTabs: [
+					{
+						id: 'tab-1',
+						agentSessionId: 'existing-conv-id',
+						name: null,
+						starred: false,
+						logs: [],
+						inputValue: '',
+						stagedImages: [],
+						createdAt: Date.now(),
+						state: 'idle',
+					},
+				],
+				activeTabId: 'tab-1',
+			});
+			useSessionStore.getState().setSessions([session]);
+
+			const item = createQueuedItem({ tabId: 'tab-1', text: 'email ops@example.com' });
+
+			await useAgentStore.getState().processQueuedItem('session-1', item, defaultDeps);
+
+			expect(dispatchCrossAgentMentionsForMessage).not.toHaveBeenCalled();
 		});
 
 		it('prepends and clears the tab pendingMergedContext (session recovery sent while queued)', async () => {
@@ -1490,6 +1629,78 @@ describe('agentStore', () => {
 			expect(spawnCall.args).toContain('--other-flag');
 			expect(spawnCall.args).not.toContain('--dangerously-skip-permissions');
 			expect(spawnCall.readOnlyMode).toBe(true);
+		});
+
+		it('sends permissionMode "readonly" when queued item forces read-only despite tab permissionMode "full"', async () => {
+			const session = createMockSession({
+				id: 'session-1',
+				aiTabs: [
+					{
+						id: 'tab-1',
+						agentSessionId: 'conv-1',
+						name: null,
+						starred: false,
+						logs: [],
+						inputValue: '',
+						stagedImages: [],
+						createdAt: Date.now(),
+						state: 'idle',
+						permissionMode: 'full',
+					},
+				],
+				activeTabId: 'tab-1',
+			});
+			useSessionStore.getState().setSessions([session]);
+
+			const item = createQueuedItem({
+				tabId: 'tab-1',
+				text: 'Read only query',
+				readOnlyMode: true,
+			});
+
+			await useAgentStore.getState().processQueuedItem('session-1', item, defaultDeps);
+
+			const spawnCall = mockSpawn.mock.calls[0][0];
+			expect(spawnCall.readOnlyMode).toBe(true);
+			expect(spawnCall.permissionMode).toBe('readonly');
+		});
+
+		it('sends permissionMode "full" for a queued item on a tab with no permissionMode set', async () => {
+			// Regression for the queued-spawn drift (Greptile P1): a fresh tab resolves
+			// to Full Access in the toolbar, so its queued non-interactive spawn must
+			// also pass permissionMode: 'full' - otherwise buildAgentArgs withholds
+			// Claude Code's --dangerously-skip-permissions and the queued work deadlocks
+			// on denied tools.
+			const session = createMockSession({
+				id: 'session-1',
+				aiTabs: [
+					{
+						id: 'tab-1',
+						agentSessionId: 'conv-1',
+						name: null,
+						starred: false,
+						logs: [],
+						inputValue: '',
+						stagedImages: [],
+						createdAt: Date.now(),
+						state: 'idle',
+					},
+				],
+				activeTabId: 'tab-1',
+			});
+			useSessionStore.getState().setSessions([session]);
+
+			const item = createQueuedItem({
+				tabId: 'tab-1',
+				text: 'Do the thing',
+				readOnlyMode: false,
+			});
+
+			await useAgentStore.getState().processQueuedItem('session-1', item, defaultDeps);
+
+			const spawnCall = mockSpawn.mock.calls[0][0];
+			expect(spawnCall.readOnlyMode).toBe(false);
+			expect(spawnCall.permissionMode).toBe('full');
 		});
 
 		it('processes slash command and spawns agent', async () => {
@@ -1872,7 +2083,67 @@ describe('agentStore', () => {
 			const tab2 = updated.aiTabs.find((t) => t.id === 'tab-2')!;
 
 			expect(tab1.logs).toHaveLength(1);
-			expect(tab1.logs[0].text).toContain('Failed to process queued');
+			expect(tab1.logs[0].text).toContain('Failed to send queued');
+			expect(tab1.logs[0].source).toBe('error');
+			expect(tab2.logs).toHaveLength(0);
+
+			consoleSpy.mockRestore();
+		});
+
+		it('logs a diagnostic instead of silently dropping the error when the resolved tab no longer exists in aiTabs', async () => {
+			mockSpawn.mockRejectedValueOnce(new Error('Spawn failed'));
+			const consoleSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+			// tab-1 was closed while it had queued work, so it now lives in
+			// orphanedThinkingTabs (not aiTabs) - it's still a valid spawn target,
+			// but the catch block's error log has nowhere in aiTabs to land.
+			const session = createMockSession({
+				id: 'session-1',
+				state: 'busy',
+				aiTabs: [
+					{
+						id: 'tab-2',
+						agentSessionId: null,
+						name: null,
+						starred: false,
+						logs: [],
+						inputValue: '',
+						stagedImages: [],
+						createdAt: Date.now(),
+						state: 'idle',
+					},
+				],
+				orphanedThinkingTabs: [
+					{
+						id: 'tab-1',
+						agentSessionId: null,
+						name: null,
+						starred: false,
+						logs: [],
+						inputValue: '',
+						stagedImages: [],
+						createdAt: Date.now(),
+						state: 'busy',
+					},
+				],
+				activeTabId: 'tab-2',
+			});
+			useSessionStore.getState().setSessions([session]);
+
+			const item = createQueuedItem({ tabId: 'tab-1', text: 'Will fail' });
+
+			await expect(
+				useAgentStore.getState().processQueuedItem('session-1', item, defaultDeps)
+			).rejects.toThrow('Spawn failed');
+
+			expect(consoleSpy).toHaveBeenCalledWith(
+				'[processQueuedItem error] Target tab not found - error log dropped',
+				undefined,
+				{ sessionId: 'session-1', resolvedTabId: 'tab-1' }
+			);
+
+			const updated = useSessionStore.getState().sessions[0];
+			const tab2 = updated.aiTabs.find((t) => t.id === 'tab-2')!;
 			expect(tab2.logs).toHaveLength(0);
 
 			consoleSpy.mockRestore();

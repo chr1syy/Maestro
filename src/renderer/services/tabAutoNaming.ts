@@ -18,7 +18,8 @@
 import { getClaudeTokenSourceFields } from '../../shared/claudeTokenMode';
 import { useSessionStore, selectSessionById, updateAiTab } from '../stores/sessionStore';
 import { useSettingsStore } from '../stores/settingsStore';
-import { extractQuickTabName } from '../utils/tabHelpers';
+import { extractQuickTabName, isAiTabHidden } from '../utils/tabHelpers';
+import { captureException } from '../utils/sentry';
 import type { AITab, Session } from '../types';
 
 /**
@@ -224,7 +225,7 @@ export function requestTabAutoName(options: RequestTabAutoNameOptions): void {
 /**
  * Name an AI tab from a message that is about to run in it, whatever produced
  * that message: the composer, a queue drain, or a remote dispatch
- * (`maestro-cli dispatch`, `send --live --new-tab`, a web/mobile client).
+ * (`maestro-cli dispatch`, `send --live`, `dispatch --new-tab`, a web client).
  *
  * Naming used to be wired into the composer alone, so a tab whose messages
  * only ever arrived from outside it kept `name === null` forever - there is
@@ -236,6 +237,19 @@ export function requestTabAutoName(options: RequestTabAutoNameOptions): void {
  * dequeue path appends it before spawning), so a trailing copy is dropped
  * rather than fed to the namer twice. Guards are `requestTabAutoName`'s: the
  * setting, a non-empty message, no existing name, no namer already running.
+ *
+ * The tab is read from the LIVE store, not from `session`: callers hold a
+ * snapshot taken before an await (agent config, system prompt), and a namer
+ * started by another send during that gap is invisible to the snapshot - which
+ * would spawn a second, paid naming job for the same tab. `session` is only the
+ * fallback for a caller whose agent is not in the store. A hidden consult tab
+ * is never named: it has no chip to show a name on, and the text it receives
+ * was written by the agent that asked, not by the user.
+ *
+ * Never throws. The send paths call this synchronously right before they
+ * spawn (the queue drain before its own recovery `try`), and a naming bug must
+ * not cost the user the message it was trying to name - so a failure is
+ * reported to Sentry and the send carries on.
  */
 export function requestTabAutoNameForMessage(
 	session: Session,
@@ -243,20 +257,33 @@ export function requestTabAutoNameForMessage(
 	message: string,
 	label = 'auto'
 ): void {
-	const text = message.trim();
-	if (!text) return;
-	const tab = session.aiTabs.find((t) => t.id === tabId);
-	if (!tab) return;
+	// Whether a namer was already running when we got here. If this call throws
+	// after flagging the tab, the flag is ours to clear - left set, it would
+	// block every later attempt and the tab would never be named.
+	let wasGenerating = true;
+	try {
+		const text = message.trim();
+		if (!text) return;
+		const liveSession = selectSessionById(session.id)(useSessionStore.getState()) ?? session;
+		const tab = liveSession.aiTabs.find((t) => t.id === tabId);
+		if (!tab || isAiTabHidden(tab)) return;
+		wasGenerating = !!tab.isGeneratingName;
 
-	const prior = tab.logs.filter((entry) => entry.source === 'user').map((entry) => entry.text);
-	if (prior.length > 0 && prior[prior.length - 1]?.trim() === text) prior.pop();
+		const prior = tab.logs.filter((entry) => entry.source === 'user').map((entry) => entry.text);
+		if (prior.length > 0 && prior[prior.length - 1]?.trim() === text) prior.pop();
 
-	requestTabAutoName({
-		session,
-		tabId,
-		prompt: collectNamingPrompt(prior, message),
-		label,
-	});
+		requestTabAutoName({
+			session: liveSession,
+			tabId,
+			prompt: collectNamingPrompt(prior, message),
+			label,
+		});
+	} catch (error) {
+		if (!wasGenerating && findTab(session.id, tabId)?.isGeneratingName) {
+			setGeneratingName(session.id, tabId, false);
+		}
+		captureException(error, { extra: { operation: 'tab-auto-name', label, tabId } });
+	}
 }
 
 /**
