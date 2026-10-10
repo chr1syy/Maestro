@@ -9,14 +9,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { BrowserWindow } from 'electron';
 import type { CueEvent, CueSubscription } from '../../../main/cue/cue-types';
 import type { SessionInfo } from '../../../shared/types';
 
+// The launcher is injected, so the executor is exercised with no Electron in
+// reach - which is the property the Cue engine's Electron ratchet protects.
 const launchCueAutoRunMock = vi.fn();
-vi.mock('../../../main/cue/cue-autorun-bridge', () => ({
-	launchCueAutoRun: (...args: unknown[]) => launchCueAutoRunMock(...args),
-}));
 
 import { executeCueAutoRun } from '../../../main/cue/cue-autorun-executor';
 
@@ -44,7 +42,6 @@ function createSubscription(overrides: Partial<CueSubscription> = {}): CueSubscr
 }
 
 const event = { type: 'time.once', payload: {} } as unknown as CueEvent;
-const mainWindow = {} as BrowserWindow;
 
 describe('executeCueAutoRun', () => {
 	beforeEach(() => {
@@ -66,12 +63,11 @@ describe('executeCueAutoRun', () => {
 				loop_enabled: true,
 				max_loops: 2,
 			},
-			mainWindow,
+			launch: launchCueAutoRunMock,
 			onLog: vi.fn(),
 		});
 
 		expect(launchCueAutoRunMock).toHaveBeenCalledWith(
-			mainWindow,
 			expect.objectContaining({
 				sessionId: 'session-1',
 				documents: [
@@ -100,11 +96,11 @@ describe('executeCueAutoRun', () => {
 				task_selection_mode: 'document',
 				ignore_model_hints: true,
 			},
-			mainWindow,
+			launch: launchCueAutoRunMock,
 			onLog: vi.fn(),
 		});
 
-		expect(launchCueAutoRunMock.mock.calls[0][1]).toMatchObject({
+		expect(launchCueAutoRunMock.mock.calls[0][0]).toMatchObject({
 			taskSelectionMode: 'document',
 			ignoreModelHints: true,
 		});
@@ -119,11 +115,11 @@ describe('executeCueAutoRun', () => {
 			subscription: createSubscription(),
 			event,
 			autoRun: { documents: ['/proj/a.md'] },
-			mainWindow,
+			launch: launchCueAutoRunMock,
 			onLog: vi.fn(),
 		});
 
-		expect(launchCueAutoRunMock.mock.calls[0][1].documents).toEqual([
+		expect(launchCueAutoRunMock.mock.calls[0][0].documents).toEqual([
 			{ filename: '/proj/a.md', resetOnCompletion: false },
 		]);
 	});
@@ -144,7 +140,7 @@ describe('executeCueAutoRun', () => {
 			subscription: createSubscription(),
 			event,
 			autoRun: { documents: ['/proj/a.md'] },
-			mainWindow,
+			launch: launchCueAutoRunMock,
 			onLog: vi.fn(),
 		});
 
@@ -163,7 +159,7 @@ describe('executeCueAutoRun', () => {
 			subscription: createSubscription(),
 			event,
 			autoRun: { documents: ['/proj/a.md'] },
-			mainWindow,
+			launch: launchCueAutoRunMock,
 			onLog,
 		});
 

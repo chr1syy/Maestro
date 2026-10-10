@@ -6,9 +6,15 @@
  * restarts, the missed-fire grace window, and the activity log, so scheduling
  * an Auto Run needs none of its own.
  *
- * The executor hands the captured document list to the renderer via
- * {@link launchCueAutoRun} and synthesizes a {@link CueRunResult} so the usual
+ * The executor hands the captured document list to an injected
+ * {@link CueAutoRunLauncher} and synthesizes a {@link CueRunResult} so the usual
  * terminal-status pipeline runs (history entry, `time.once` self-destruct).
+ *
+ * The launcher is injected rather than imported because launching an Auto Run
+ * is renderer-owned, and reaching the renderer takes Electron. The Cue engine
+ * has to stay runnable without the desktop app, so the desktop supplies the
+ * launcher (`src/main/cue-autorun-launcher.ts`) and this module names only the
+ * shape it needs.
  *
  * Status semantics matter more here than in the other executors, because a
  * `time.once` subscription is CONSUMED on a terminal status:
@@ -22,10 +28,42 @@
  *     6am run never existed".
  */
 
-import { BrowserWindow } from 'electron';
 import type { CueAutoRunConfig, CueEvent, CueRunResult, CueSubscription } from './cue-types';
-import type { SessionInfo } from '../../shared/types';
-import { launchCueAutoRun } from './cue-autorun-bridge';
+import type { SessionInfo, TaskSelectionMode } from '../../shared/types';
+
+/** One document to run, in the shape `remote:configureAutoRun` expects. */
+export interface CueAutoRunDocument {
+	/** Absolute path, captured when the run was scheduled. */
+	filename: string;
+	resetOnCompletion?: boolean;
+}
+
+export interface CueAutoRunLaunchParams {
+	sessionId: string;
+	documents: CueAutoRunDocument[];
+	prompt?: string;
+	loopEnabled?: boolean;
+	maxLoops?: number;
+	model?: string;
+	effort?: string;
+	taskSelectionMode?: TaskSelectionMode;
+	ignoreModelHints?: boolean;
+}
+
+export interface CueAutoRunLaunchResult {
+	success: boolean;
+	error?: string;
+}
+
+/**
+ * Starts an Auto Run and reports whether it was ACCEPTED. Must never reject: a
+ * launch that could not happen resolves `{ success: false, error }`, because
+ * the executor turns the result into a run status and an exception would
+ * bypass that.
+ */
+export type CueAutoRunLauncher = (
+	params: CueAutoRunLaunchParams
+) => Promise<CueAutoRunLaunchResult>;
 
 export interface CueAutoRunExecutionConfig {
 	runId: string;
@@ -34,7 +72,8 @@ export interface CueAutoRunExecutionConfig {
 	event: CueEvent;
 	/** Captured Auto Run payload - documents, prompt, loop settings. */
 	autoRun: CueAutoRunConfig;
-	mainWindow: BrowserWindow | null;
+	/** How the run is actually started. Supplied by whoever hosts the engine. */
+	launch: CueAutoRunLauncher;
 	onLog: (level: string, message: string) => void;
 }
 
@@ -61,7 +100,7 @@ export async function executeCueAutoRun(config: CueAutoRunExecutionConfig): Prom
 			`(${documents.length} document${documents.length === 1 ? '' : 's'}, ${event.type})`
 	);
 
-	const result = await launchCueAutoRun(config.mainWindow, {
+	const result = await config.launch({
 		sessionId: session.id,
 		documents,
 		prompt: autoRun.prompt,

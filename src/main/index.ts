@@ -102,6 +102,7 @@ import { executeCueShell } from './cue/cue-shell-executor';
 import { executeCueCli } from './cue/cue-cli-executor';
 import { executeCueNotify } from './cue/cue-notify-executor';
 import { executeCueAutoRun } from './cue/cue-autorun-executor';
+import { launchCueAutoRun } from './cue-autorun-launcher';
 import { reportCueAuthFailure } from './cue/cue-auth-detector';
 import { setSusFactorNotifier } from './cue/cue-susfactor';
 import { emitCueNotifyToast } from './cue/cue-notify-bridge';
@@ -1272,9 +1273,9 @@ app
 						else logger.cue(message, 'Cue');
 					};
 					if (!autoRun || autoRun.documents.length === 0) {
-						// Reachable when a queued run is restored from the persisted
-						// queue across a restart: the queue schema has no column for
-						// the payload, so it comes back undefined. Report a failure
+						// Reachable for a queued run restored from a row that was
+						// persisted before the queue table carried the payload
+						// (`auto_run_json`), which comes back undefined. Report a failure
 						// rather than throwing - a `time.once` autorun task is written
 						// with `self_destruct_on_failure: false`, so failing here keeps
 						// the subscription on disk instead of consuming it silently.
@@ -1304,7 +1305,7 @@ app
 						subscription,
 						event,
 						autoRun,
-						mainWindow,
+						launch: (params) => launchCueAutoRun(mainWindow, params),
 						onLog: autoRunLog,
 					});
 					return autoRunResult;

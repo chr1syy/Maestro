@@ -190,7 +190,8 @@ describe('computeSortedSessions - hidden groups', () => {
 			showHiddenGroups: true,
 		});
 
-		expect(visibleSessions.map((s) => s.name)).toEqual(['Parked', 'Parked', 'Working']);
+		// The bookmark row first, then the groups in name order (ACTIVE, PARKED).
+		expect(visibleSessions.map((s) => s.name)).toEqual(['Parked', 'Working', 'Parked']);
 		expect(bookmarkNavSize).toBe(1);
 	});
 
