@@ -378,6 +378,7 @@ export function registerPersistenceHandlers(
 	);
 
 	ipcMain.handle('settings:set', async (event, key: string, value: any) => {
+		if (key.startsWith('mediaModelDirectory.')) return false;
 		if (key === 'mediaModelDirectory') {
 			try {
 				value = await resolveMediaModelDirectory(value);

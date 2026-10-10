@@ -448,6 +448,15 @@ describe('persistence IPC handlers', () => {
 	});
 
 	describe('settings:set', () => {
+		it.each(['mediaModelDirectory.child', 'mediaModelDirectory.child.deep'])(
+			'rejects nested media key %s without overwriting the directory',
+			async (key) => {
+				mockSettingsStore.get.mockReturnValue('/canonical/models');
+				expect(await handlers.get('settings:set')!({}, key, 'replacement')).toBe(false);
+				expect(mockSettingsStore.set).not.toHaveBeenCalled();
+			}
+		);
+
 		it.each(['relative/models', '~/models', 42, null, {}])(
 			'rejects invalid media directory %j without writing',
 			async (value) => {
