@@ -48,6 +48,9 @@ action backpressure so a busy plugin can cancel without creating an unbounded
 release-call channel. A separate 200-call/second close budget bounds unknown or
 already released job IDs; only valid closes for an actually owned retained job
 can bypass that budget, so no-op traffic cannot prevent an active cancellation.
+Concurrent duplicate closes for one job return `MediaBusy` instead of consuming
+the other job's cancellation slot or accumulating cleanup waiters. They do not
+bypass the close-rate budget; a new cancellation for the other owned job still can.
 
 Two jobs per plugin and four globally bound memory, native concurrency and disk
 use. One operation may run per job. Every job has one download, one decode and one

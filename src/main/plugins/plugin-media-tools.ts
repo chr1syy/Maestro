@@ -108,6 +108,7 @@ export async function resolveMediaRuntime(): Promise<Runtime> {
 	return { binaries, models };
 }
 
+/** Owns bounded plugin jobs, private artifacts and cleanup recovery in the host process. */
 export class PluginMediaTools {
 	private readonly jobs = new Map<string, Job>();
 	private readonly pendingCleanups = new Map<string, Job>();
@@ -115,6 +116,7 @@ export class PluginMediaTools {
 	private readonly directories = new Set<string>();
 	constructor(private readonly deps: PluginMediaToolsDeps) {}
 
+	/** Sanitize failures from the live grant/signature check before they cross the RPC boundary. */
 	private authorize(pluginId: string): void {
 		try {
 			this.deps.authorize(pluginId);
@@ -178,6 +180,7 @@ export class PluginMediaTools {
 		}
 	}
 
+	/** Project host runtime discovery to profile/model IDs without exposing installation paths. */
 	private async status(): Promise<MediaToolStatus> {
 		const runtime = await (this.deps.resolveRuntime ?? resolveMediaRuntime)();
 		const models = MEDIA_MODEL_IDS.filter((id) => runtime.models[id]);
@@ -188,6 +191,7 @@ export class PluginMediaTools {
 		return { profiles: missing.length ? [] : ['whisper-cli'], models, missing };
 	}
 
+	/** Reserve active capacity without I/O and arm the fixed deadline and revocation backstop. */
 	private open(pluginId: string): { jobId: string } {
 		if (
 			this.jobs.size >= MEDIA_LIMITS.maxJobs ||
@@ -225,11 +229,13 @@ export class PluginMediaTools {
 		return { jobId: id };
 	}
 
+	/** Reject aborted or newly unauthorized jobs before starting I/O or returning a result. */
 	private check(job: Job): void {
 		if (job.controller.signal.aborted) throw job.controller.signal.reason;
 		this.authorize(job.pluginId);
 	}
 
+	/** Abort synchronously, drain the operation, then delete; failed deletion retains disk capacity. */
 	private close(job: Job, code: MediaErrorCode): Promise<void> {
 		if (job.closing) return job.closing;
 		clearTimeout(job.cleanupRetry);
@@ -310,6 +316,7 @@ export class PluginMediaTools {
 		}
 	}
 
+	/** Allocate bounded private storage and dispatch only the closed native operation profiles. */
 	private async execute(job: Job, method: string, p: Record<string, unknown>): Promise<unknown> {
 		this.check(job);
 		if (!job.dir) {
@@ -436,6 +443,7 @@ export class PluginMediaTools {
 		throw new MediaError('MediaInvalid');
 	}
 
+	/** Stream one exact Discord attachment through the pinned transport into a bounded host file. */
 	private async download(job: Job, rawUrl: unknown): Promise<{ audioId: string; bytes: number }> {
 		if (
 			job.downloaded ||
@@ -504,6 +512,7 @@ export class PluginMediaTools {
 		return { audioId, bytes };
 	}
 
+	/** Require the expected single audio stream and independently verify source/decoded duration. */
 	private async probe(job: Job, audio: Audio, runtime: Runtime): Promise<MediaProbe> {
 		const json = await this.runProcess(job, runtime, 'ffprobe', [
 			'-v',
@@ -551,6 +560,7 @@ export class PluginMediaTools {
 		};
 	}
 
+	/** Execute a host-selected binary with fixed argv and output caps; abort kills before settling. */
 	private runProcess(
 		job: Job,
 		runtime: Runtime,

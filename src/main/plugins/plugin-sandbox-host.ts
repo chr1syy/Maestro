@@ -109,6 +109,8 @@ interface PendingTool {
 interface RunningPlugin {
 	/** Separate bounded release slots so saturated ordinary calls cannot block cancellation. */
 	mediaClosesInFlight: number;
+	/** Do not spend both release slots awaiting duplicate cleanup of one job. */
+	mediaClosingJobs: Set<string>;
 	mediaCloseWindowCount: number;
 	proc: UtilityProcess;
 	shutdownTimer?: NodeJS.Timeout;
@@ -234,6 +236,7 @@ export class PluginSandboxHost {
 			windowStart: Date.now(),
 			windowCount: 0,
 			mediaClosesInFlight: 0,
+			mediaClosingJobs: new Set(),
 			mediaCloseWindowCount: 0,
 			pendingTools: new Map(),
 			nextToolId: 1,
@@ -502,15 +505,34 @@ export class PluginSandboxHost {
 			return;
 		}
 
+		const closeParams = request.params as { jobId?: unknown } | null | undefined;
+		const closeJobId =
+			method === 'media.close' &&
+			closeParams &&
+			typeof closeParams === 'object' &&
+			!Array.isArray(closeParams) &&
+			Object.keys(closeParams).length === 1 &&
+			typeof closeParams.jobId === 'string' &&
+			closeParams.jobId.length <= 64
+				? closeParams.jobId
+				: undefined;
 		if (record && method === 'media.close') {
+			const duplicate = closeJobId !== undefined && record.mediaClosingJobs.has(closeJobId);
 			if (
 				record.mediaCloseWindowCount >= RATE_MAX_PER_WINDOW &&
-				!handler.ownsReleaseResource?.(pluginId, request.params)
+				(duplicate || !handler.ownsReleaseResource?.(pluginId, request.params))
 			) {
 				respond({ ok: false, error: 'MediaBusy' });
 				return;
 			}
 			record.mediaCloseWindowCount += 1;
+			// Reject duplicates instead of accumulating waiters on the same promise.
+			// Their request IDs still get a bounded, code-only backpressure response.
+			if (duplicate) {
+				respond({ ok: false, error: 'MediaBusy' });
+				return;
+			}
+			if (closeJobId !== undefined) record.mediaClosingJobs.add(closeJobId);
 		}
 
 		if (record) {
@@ -532,6 +554,7 @@ export class PluginSandboxHost {
 				record.inFlight = Math.max(0, record.inFlight - 1);
 				if (method === 'media.close')
 					record.mediaClosesInFlight = Math.max(0, record.mediaClosesInFlight - 1);
+				if (closeJobId !== undefined) record.mediaClosingJobs.delete(closeJobId);
 			}
 			act.inFlight = Math.max(0, act.inFlight - 1);
 		}

@@ -194,12 +194,14 @@ Integrity ("files match what was signed") and trust ("key is recognized") are la
 
 `HOST_API_VERSION` is a permanent public contract once plugins ship. PATCH = host bug fix; MINOR = additive (new contribution point / manifest field / capability, older plugins keep working); MAJOR = remove or change the meaning of an existing one. A plugin pins `maestro.minHostApi`; the host loads it only when same-major and `host >= min`.
 
-The current host is `1.16.0`; it added the metadata-only `session.activated`
-event topic, the `sessions.focus` method plus its narrow `sessions:focus`
-capability, and the `ui.openPanel` / `ui.closePanel` / `ui.togglePanel` methods
-plus the optional panel manifest field `size?: 'default' | 'full'`. (`1.15.0` is
-taken by the Board + Profiles work on this fork, so it is skipped here.)
-Earlier: `1.14.0` added the `tool.executed` event topic and the
+The current host is `1.17.0`; it added `media:tools` with the exact
+`discord-voice` scope, opaque media jobs and fixed native profiles. STT remains
+in the plugin; tools and models are not bundled. (`1.15.0` is taken by the
+Board + Profiles work on this fork, so it is skipped here.)
+Earlier: `1.16.0` added the metadata-only `session.activated` event topic, the
+`sessions.focus` method plus its narrow `sessions:focus` capability, and the
+`ui.openPanel` / `ui.closePanel` / `ui.togglePanel` methods plus the optional
+panel manifest field `size?: 'default' | 'full'`. `1.14.0` added the `tool.executed` event topic and the
 `ui.panelPost` host-to-panel push method; `1.13.0` added the
 host-mediated `PluginUiSurface` registry and trusted-chrome guard; `1.12.0`
 added the `net:connect` capability and the `net.connect` / `net.send` /
