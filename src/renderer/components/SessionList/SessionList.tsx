@@ -21,6 +21,8 @@ import {
 	Trash2,
 	Bot,
 	Star,
+	Eye,
+	EyeOff,
 } from 'lucide-react';
 import { GhostIconButton } from '../ui/GhostIconButton';
 import { HamburgerDropdown } from './HamburgerDropdown';
@@ -58,6 +60,7 @@ import { useInlineWizardContext } from '../../contexts/InlineWizardContext';
 import { useWindowContextOptional } from '../../contexts/WindowContext';
 import { rollUpWizardActivityToSessions } from '../../utils/wizardActivity';
 import { buildSessionJumpSlotMap } from '../../utils/sessionJumpSlots';
+import { collectHiddenGroupIds } from '../../utils/sidebarMembership';
 import { getModalActions, useModalStore } from '../../stores/modalStore';
 import { SessionContextMenu } from './SessionContextMenu';
 import { buildWindowMoveTargets, scopeSessionsToOwningWindow } from '../../utils/windowTargets';
@@ -168,6 +171,8 @@ interface SessionListProps {
 	toggleGlobalLive: () => Promise<void>;
 	restartWebServer: () => Promise<string | null>;
 	toggleGroup: (groupId: string) => void;
+	/** Park a group out of this list, or bring it back. */
+	toggleGroupHidden: (groupId: string) => void;
 	handleDragStart: (sessionId: string) => void;
 	handleDragOver: (e: React.DragEvent) => void;
 	handleDropOnGroup: (groupId: string) => void;
@@ -280,6 +285,7 @@ function SessionListInner(props: SessionListProps) {
 	const webInterfaceUseCustomPort = useSettingsStore((s) => s.webInterfaceUseCustomPort);
 	const webInterfaceCustomPort = useSettingsStore((s) => s.webInterfaceCustomPort);
 	const ungroupedCollapsed = useSettingsStore((s) => s.ungroupedCollapsed);
+	const showHiddenGroups = useSettingsStore((s) => s.showHiddenGroups);
 	const starredSectionCollapsed = useSettingsStore((s) => s.starredSessionsCollapsed);
 	const showStarredSessionsSection = useSettingsStore((s) => s.showStarredSessionsSection);
 	const pianolaEnabled = useSettingsStore((s) => s.encoreFeatures?.pianola);
@@ -288,10 +294,17 @@ function SessionListInner(props: SessionListProps) {
 	const showLeftPanelGroupMemberCount = useSettingsStore((s) => s.showLeftPanelGroupMemberCount);
 	const leftPanelCollapsedPillsPerRow = useSettingsStore((s) => s.leftPanelCollapsedPillsPerRow);
 	const autoRunStats = useSettingsStore((s) => s.autoRunStats);
+	// How much wider the header's own labels render in the current interface font
+	// than in the one the thresholds below were measured against. Zero when the
+	// user is on the original monospace face.
+	const headerTextDelta = useHeaderTextDelta();
 	// The badge pill occupies part of the header's left cluster, so both label
-	// thresholds below shift by the same amount when it is showing.
+	// thresholds below shift by the same amount when it is showing. Its box is
+	// rem-built, so it grows with the root size.
 	const headerBadgeWidth =
-		autoRunStats && autoRunStats.currentBadgeLevel > 0 ? HEADER_BADGE_WIDTH : 0;
+		autoRunStats && autoRunStats.currentBadgeLevel > 0
+			? HEADER_BADGE_WIDTH * headerTextDelta.remScale
+			: 0;
 	// Whether the now-playing pill is on screen, and in which form. Read from the
 	// store's own selector rather than re-derived here, so the reserve below
 	// cannot end up describing a header nobody is looking at.
@@ -299,13 +312,8 @@ function SessionListInner(props: SessionListProps) {
 	const nowPlayingCompact = leftSidebarWidthState < NOW_PLAYING_LABEL_MIN_WIDTH + headerBadgeWidth;
 	const nowPlayingReserve = !nowPlayingVisible
 		? 0
-		: nowPlayingCompact
-			? NOW_PLAYING_COMPACT_RESERVE
-			: NOW_PLAYING_LABEL_RESERVE;
-	// How much wider the header's own labels render in the current interface font
-	// than in the one the thresholds below were measured against. Zero when the
-	// user is on the original monospace face.
-	const headerTextDelta = useHeaderTextDelta();
+		: (nowPlayingCompact ? NOW_PLAYING_COMPACT_RESERVE : NOW_PLAYING_LABEL_RESERVE) *
+			headerTextDelta.remScale;
 	// Constant on this build. The indirection is deliberate: a build that hides
 	// the LIVE toggle zeroes this one line instead of re-deriving the threshold.
 	// The label's own delta rides with it, since the reserve exists to hold it.
@@ -564,6 +572,7 @@ function SessionListInner(props: SessionListProps) {
 	const setWebInterfaceUseCustomPort = useSettingsStore.getState().setWebInterfaceUseCustomPort;
 	const setWebInterfaceCustomPort = useSettingsStore.getState().setWebInterfaceCustomPort;
 	const setUngroupedCollapsed = useSettingsStore.getState().setUngroupedCollapsed;
+	const setShowHiddenGroups = useSettingsStore.getState().setShowHiddenGroups;
 	const setLeftSidebarWidthState = useSettingsStore.getState().setLeftSidebarWidth;
 
 	// Modal actions (stable, accessed via store)
@@ -587,6 +596,7 @@ function SessionListInner(props: SessionListProps) {
 		toggleGlobalLive,
 		restartWebServer,
 		toggleGroup,
+		toggleGroupHidden,
 		handleDragStart,
 		handleDragOver,
 		handleDropOnGroup,
@@ -944,6 +954,7 @@ function SessionListInner(props: SessionListProps) {
 		sortedUngroupedParentSessions,
 		sortedFilteredSessions,
 		sortedGroups,
+		hiddenGroupIds,
 	} = useSessionCategories(
 		deferredSessionFilter,
 		sortedSessions,
@@ -984,10 +995,17 @@ function SessionListInner(props: SessionListProps) {
 	}, []);
 
 	const { orderedGroups, groupById, childrenByParentId } = useMemo(() => {
+		// `groupById` stays COMPLETE - it resolves a nested group's parent, and a
+		// child whose parent is suppressed still has to find it to know it is
+		// nested. Only the rendered list is narrowed.
 		const groupById = new Map(sortedGroups.map((group) => [group.id, group]));
+		const visibleGroups =
+			hiddenGroupIds.size > 0
+				? sortedGroups.filter((group) => !hiddenGroupIds.has(group.id))
+				: sortedGroups;
 		if (!groupsPlusEnabled) {
 			return {
-				orderedGroups: sortedGroups,
+				orderedGroups: visibleGroups,
 				groupById,
 				childrenByParentId: new Map<string, Group[]>(),
 			};
@@ -996,7 +1014,7 @@ function SessionListInner(props: SessionListProps) {
 		const childrenByParentId = new Map<string, Group[]>();
 		const rootGroups: Group[] = [];
 
-		for (const group of sortedGroups) {
+		for (const group of visibleGroups) {
 			const parent = group.parentGroupId ? groupById.get(group.parentGroupId) : undefined;
 			if (!parent || parent.parentGroupId) {
 				rootGroups.push(group);
@@ -1019,7 +1037,21 @@ function SessionListInner(props: SessionListProps) {
 			groupById,
 			childrenByParentId,
 		};
-	}, [groupsPlusEnabled, sortedGroups]);
+	}, [groupsPlusEnabled, sortedGroups, hiddenGroupIds]);
+
+	// Counted off the groups themselves, never off `hiddenGroupIds`: that set is
+	// EMPTY while "Show Hidden" is on, so counting it would make the button
+	// announce "0" at exactly the moment it has to offer the way back.
+	const hiddenGroupCount = useMemo(
+		() => sortedGroups.reduce((n, group) => (group.hidden ? n + 1 : n), 0),
+		[sortedGroups]
+	);
+
+	// Every group that is parked, whether by its own flag or by its parent's.
+	// The fade reads this rather than `group.hidden`: a child renders as its own
+	// sibling row, so its parent's opacity never reaches it, and a revealed
+	// child drawn at full strength looks like a group that was never hidden.
+	const parkedGroupIds = useMemo(() => collectHiddenGroupIds(sortedGroups), [sortedGroups]);
 
 	// PERF: Cached callback maps to prevent SessionItem re-renders.
 	// These Maps store stable function references keyed by session id. They only
@@ -1925,15 +1957,20 @@ function SessionListInner(props: SessionListProps) {
 									key={group.id}
 									data-group-depth={isNestedGroup ? 1 : 0}
 									className={`${isNestedGroup ? 'ml-4 ' : ''}mb-1 rounded`}
-									style={
-										dragOverTarget === group.id
+									style={{
+										// A parked group only reaches this list while "Show Hidden" is on
+										// (or while it holds the active agent), so it is drawn faded:
+										// without it a revealed group is indistinguishable from a normal
+										// one and the toggle reads as having done nothing.
+										...(parkedGroupIds.has(group.id) ? { opacity: 0.45 } : undefined),
+										...(dragOverTarget === group.id
 											? {
 													outline: `1px dashed ${theme.colors.accent}`,
 													outlineOffset: '-2px',
 													backgroundColor: `${theme.colors.accent}14`,
 												}
-											: undefined
-									}
+											: undefined),
+									}}
 									onDragEnter={() => handleDropTargetEnter(group.id)}
 									onDragLeave={handleDropTargetLeave}
 								>
@@ -2297,6 +2334,36 @@ function SessionListInner(props: SessionListProps) {
 						</div>
 					) : null}
 
+					{/* SHOW HIDDEN - only exists once something is actually parked, so the
+					    foot of the list stays empty for anyone not using the feature. It is
+					    the ONLY way back to a hidden group: its header is off the list, so
+					    the right-click that hid it is out of reach. */}
+					{!activeVirtualGrouping && !isSecondaryWindow && hiddenGroupCount > 0 && (
+						<div className="mt-2 px-3">
+							<button
+								type="button"
+								onClick={() => setShowHiddenGroups(!showHiddenGroups)}
+								aria-pressed={showHiddenGroups}
+								className="w-full px-2 py-1.5 rounded-full text-2xs font-medium hover:opacity-80 transition-opacity flex items-center justify-center gap-1"
+								style={{
+									backgroundColor: showHiddenGroups ? theme.colors.accent + '20' : 'transparent',
+									color: showHiddenGroups ? theme.colors.accent : theme.colors.textDim,
+									border: `1px solid ${showHiddenGroups ? theme.colors.accent + '40' : theme.colors.border}`,
+								}}
+								title={
+									showHiddenGroups
+										? 'Suppress hidden groups from this list again'
+										: `Reveal ${hiddenGroupCount} hidden group${hiddenGroupCount === 1 ? '' : 's'}`
+								}
+							>
+								{showHiddenGroups ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+								<span>
+									{showHiddenGroups ? 'Hide Hidden' : 'Show Hidden'} ({hiddenGroupCount})
+								</span>
+							</button>
+						</div>
+					)}
+
 					{/* Flexible spacer to push group chats to bottom */}
 					<div className="flex-grow min-h-4" />
 
@@ -2455,6 +2522,7 @@ function SessionListInner(props: SessionListProps) {
 					onMoveInto={(parentGroupId) => setGroupParent(groupContextMenuGroup.id, parentGroupId)}
 					onMoveToTopLevel={() => setGroupParent(groupContextMenuGroup.id, undefined)}
 					onNewGroupInside={() => createNewGroup(groupContextMenuGroup.id)}
+					onToggleHidden={() => toggleGroupHidden(groupContextMenuGroup.id)}
 					onRename={() => {
 						const modalActions = getModalActions();
 						modalActions.setRenameGroupId(groupContextMenuGroup.id);

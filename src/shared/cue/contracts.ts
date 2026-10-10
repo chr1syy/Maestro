@@ -4,6 +4,8 @@
  * Keep these types runtime-agnostic and free of Node/Electron dependencies.
  */
 
+import type { TaskSelectionMode, UsageStats } from '../types';
+
 /** Days of the week for scheduled triggers */
 export type CueScheduleDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
 
@@ -110,7 +112,7 @@ export type CueGitHubLabelTarget = 'pr' | 'issue' | 'both';
 export const CUE_GITHUB_LABEL_TARGETS: CueGitHubLabelTarget[] = ['pr', 'issue', 'both'];
 
 /** What a subscription does when it fires. */
-export type CueAction = 'prompt' | 'command' | 'notify';
+export type CueAction = 'prompt' | 'command' | 'notify' | 'autorun';
 
 /** Sub-mode of a `command` action. */
 export type CueCommandMode = 'shell' | 'cli';
@@ -131,6 +133,47 @@ export interface CueNotifyConfig {
 	/** When true, render the toast as dismissible (no auto-timeout - the
 	 *  user must explicitly close it). Maps to `notifyToast({ dismissible: true })`. */
 	sticky?: boolean;
+}
+
+/**
+ * Auto Run config for `action: 'autorun'` subscriptions.
+ *
+ * An autorun subscription launches an Auto Run in the owning agent instead of
+ * spawning a prompt. Paired with a `time.once` trigger this is what backs
+ * "schedule this Auto Run for 6am" - the Cue engine already owns persistence,
+ * the missed-fire grace window, and the activity log, so scheduling does not
+ * need a second timer of its own.
+ *
+ * `documents` is deliberately a list of ABSOLUTE paths captured at schedule
+ * time rather than a folder resolved when the run fires. An agent's Auto Run
+ * folder is a mutable setting: resolving it late means repointing the folder
+ * between scheduling and firing silently runs the agent against a different
+ * set of documents than the user chose.
+ */
+export interface CueAutoRunConfig {
+	/** Absolute paths to the `.md` documents to run, in order. Non-empty. */
+	documents: string[];
+	/** Per-document "uncheck every task when the run finishes" flags, aligned
+	 *  index-for-index with {@link documents}. Absent means all-false. */
+	reset_on_completion?: boolean[];
+	/** Extra instructions prepended to the run, mirroring the Auto Run panel's
+	 *  prompt box. */
+	prompt?: string;
+	/** Re-run the document set once every task is checked off. */
+	loop_enabled?: boolean;
+	/** Loop ceiling. Only meaningful when `loop_enabled` is true. */
+	max_loops?: number;
+	/** Run-scoped model override. Wins over the agent's configured model for
+	 *  this run only and is never written back to the session. */
+	model?: string;
+	/** Run-scoped reasoning-effort override. Same scope rules as `model`. */
+	effort?: string;
+	/** "Fresh context per" in the Auto Run window: one agent turn per task
+	 *  (`task`, the default when absent) or one per document (`document`). */
+	task_selection_mode?: TaskSelectionMode;
+	/** Ignore the documents' `MAESTRO:MODEL` hints and run every task on the
+	 *  run's own model. Absent means the hints apply. */
+	ignore_model_hints?: boolean;
 }
 
 /**
@@ -199,6 +242,9 @@ export interface CueSubscription {
 	/** Toast notification config for `action: 'notify'` subscriptions.
 	 *  Required when `action === 'notify'`. See {@link CueNotifyConfig}. */
 	notify?: CueNotifyConfig;
+	/** Auto Run payload for `action: 'autorun'` subscriptions.
+	 *  Required when `action === 'autorun'`. See {@link CueAutoRunConfig}. */
+	auto_run?: CueAutoRunConfig;
 	watch?: string;
 	source_session?: string | string[];
 	/** Stable session ID(s) for chain subscriptions (event === 'agent.completed').
@@ -435,6 +481,22 @@ export interface CueRunResult {
 	 * AI session) and for runs whose stdout carried no parseable session id.
 	 */
 	providerSessionId?: string | null;
+	/**
+	 * Token usage delta-normalized from the agent's own stdout stream as it
+	 * ran (maestro-lib's `BufferedLineReader` + `UsageAccumulator`, the same
+	 * primitives desktop chat and the CLI use), NOT read back from the
+	 * provider's on-disk session file. `cue-token-accessor.ts`'s post-hoc
+	 * lookup is the dashboard's primary source and covers more fields
+	 * (cost, precise windows) for local runs, but it cannot resolve token
+	 * totals for an SSH-remote Cue run at all - the session file lives on
+	 * the remote host - and returns `coverage: 'partial'` with zeros for
+	 * every such run. This field is populated from the stream regardless of
+	 * where the process ran, so it is the only usage figure available for a
+	 * remote pipeline. Undefined for shell/CLI command runs (no AI stream to
+	 * parse), for agents with no usage events in-stream, and for runs whose
+	 * output never produced one.
+	 */
+	usage?: UsageStats | null;
 }
 
 /** Status summary for a Cue-enabled session */

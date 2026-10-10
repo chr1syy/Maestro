@@ -345,6 +345,41 @@ describe('normalizer - action: notify passthrough', () => {
 	});
 });
 
+describe('normalizer - github re-trigger field passthrough', () => {
+	function normalizeSub(sub: Record<string, unknown>) {
+		const raw = yaml.dump({ subscriptions: [sub] });
+		const doc = parseCueConfigDocument(raw, projectRoot);
+		return materializeCueConfig(doc!).config.subscriptions[0];
+	}
+
+	const base = {
+		name: 'issue-replies',
+		event: 'github.issue',
+		prompt: 'Someone replied',
+		enabled: true,
+		repo: 'RunMaestro/Maestro',
+		filter: { is_retrigger: true },
+	};
+
+	it('keeps retrigger_on_comments and max_notifications for the poller', () => {
+		const sub = normalizeSub({ ...base, retrigger_on_comments: true, max_notifications: 25 });
+		expect(sub.retrigger_on_comments).toBe(true);
+		expect(sub.max_notifications).toBe(25);
+		expect(sub.filter).toEqual({ is_retrigger: true });
+	});
+
+	it('keeps max_notifications: 0 (the unlimited sentinel)', () => {
+		expect(normalizeSub({ ...base, max_notifications: 0 }).max_notifications).toBe(0);
+	});
+
+	it('drops malformed values rather than passing them to the poller', () => {
+		const sub = normalizeSub({ ...base, retrigger_on_comments: 'yes', max_notifications: 2.5 });
+		expect(sub.retrigger_on_comments).toBeUndefined();
+		expect(sub.max_notifications).toBeUndefined();
+		expect(normalizeSub({ ...base, max_notifications: -1 }).max_notifications).toBeUndefined();
+	});
+});
+
 describe('normalizer - github.label field passthrough', () => {
 	function normalizeSub(sub: Record<string, unknown>) {
 		const raw = yaml.dump({ subscriptions: [sub] });
@@ -389,5 +424,54 @@ describe('normalizer - github.label field passthrough', () => {
 		expect(
 			normalizeSub({ ...base, gh_label_target: 'discussion' }).gh_label_target
 		).toBeUndefined();
+	});
+});
+
+describe('normalizer - action: autorun option passthrough', () => {
+	function normalizeSub(sub: Record<string, unknown>) {
+		const raw = yaml.dump({ subscriptions: [sub] });
+		const doc = parseCueConfigDocument(raw, projectRoot);
+		return materializeCueConfig(doc!).config.subscriptions[0];
+	}
+
+	const base = {
+		name: 'nightly',
+		event: 'time.once',
+		action: 'autorun',
+		agent_id: 'agent-xyz',
+		fire_at: '2030-01-01T10:00:00.000Z',
+		enabled: true,
+	};
+
+	it('carries task_selection_mode and ignore_model_hints to the engine', () => {
+		const sub = normalizeSub({
+			...base,
+			auto_run: {
+				documents: ['/proj/a.md'],
+				task_selection_mode: 'document',
+				ignore_model_hints: true,
+			},
+		});
+
+		expect(sub.auto_run).toMatchObject({
+			task_selection_mode: 'document',
+			ignore_model_hints: true,
+		});
+	});
+
+	it('leaves both absent when the document does not set them', () => {
+		const sub = normalizeSub({ ...base, auto_run: { documents: ['/proj/a.md'] } });
+
+		expect(sub.auto_run).not.toHaveProperty('task_selection_mode');
+		expect(sub.auto_run).not.toHaveProperty('ignore_model_hints');
+	});
+
+	it('drops an unknown task_selection_mode rather than handing it to the launch', () => {
+		const sub = normalizeSub({
+			...base,
+			auto_run: { documents: ['/proj/a.md'], task_selection_mode: 'file' },
+		});
+
+		expect(sub.auto_run).not.toHaveProperty('task_selection_mode');
 	});
 });

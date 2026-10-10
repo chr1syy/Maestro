@@ -10,6 +10,7 @@ import {
 	type IpcMainInvokeEvent,
 } from 'electron';
 import { isMacOS } from '../shared/platformDetection';
+import { DURATION_MS } from '../shared/duration';
 import { installApplicationMenu } from './app-menu';
 import path from 'path';
 import os from 'os';
@@ -97,9 +98,11 @@ import {
 } from './plugins/consent-window';
 import { configureCueTelemetry } from './cue/cue-telemetry';
 import { executeCuePrompt, stopCueRun } from './cue/cue-executor';
-import { executeCueShell, stopCueShellRun } from './cue/cue-shell-executor';
-import { executeCueCli, stopCueCliRun } from './cue/cue-cli-executor';
+import { executeCueShell } from './cue/cue-shell-executor';
+import { executeCueCli } from './cue/cue-cli-executor';
 import { executeCueNotify } from './cue/cue-notify-executor';
+import { executeCueAutoRun } from './cue/cue-autorun-executor';
+import { launchCueAutoRun } from './cue-autorun-launcher';
 import { reportCueAuthFailure } from './cue/cue-auth-detector';
 import { setSusFactorNotifier } from './cue/cue-susfactor';
 import { emitCueNotifyToast } from './cue/cue-notify-bridge';
@@ -130,8 +133,6 @@ import {
 	ensureCliServer,
 	startCliDiscoveryWatchdog,
 	stopCliDiscoveryWatchdog,
-	cleanupAllGroomingSessions,
-	getActiveGroomingSessionCount,
 } from './ipc/handlers';
 import { setupIpcHandlers } from './ipc/bootstrap';
 import { stopCoworkingBridge } from './coworking/coworking-bridge';
@@ -1195,6 +1196,7 @@ app
 		});
 
 		// Initialize Cue Engine for event-driven automation
+		const cueHealthToastAt = new Map<string, number>();
 		cueEngine = new CueEngine({
 			getSessions: () => {
 				const stored = sessionsStore.get('sessions', []);
@@ -1216,6 +1218,7 @@ app
 				action,
 				command,
 				notify,
+				autoRun,
 			}) => {
 				const storedSessions = sessionsStore.get('sessions', []) as Array<Record<string, any>>;
 				const storedSession = storedSessions.find((s) => s.id === sessionId);
@@ -1237,6 +1240,76 @@ app
 					},
 					conductorProfile: (store.get('conductorProfile', '') as string) || undefined,
 				};
+
+				// `action: autorun` launches an Auto Run in the owning agent. Handled
+				// before notify/command/prompt for the same reason they are: it never
+				// spawns an agent process here, so the agent-path resolution, SSH
+				// wrapping, and prompt plumbing below do not apply. The document list
+				// travels on the subscription rather than being re-read from the
+				// agent's Auto Run folder, so repointing that folder between
+				// scheduling and firing cannot swap the run out from under the user.
+				if (action === 'autorun') {
+					const sessionInfo = {
+						id: storedSession.id,
+						name: storedSession.name,
+						toolType: storedSession.toolType,
+						cwd: projectRoot,
+						projectRoot,
+						autoRunFolderPath: storedSession.autoRunFolderPath,
+					};
+					const subscription = {
+						name: subscriptionName,
+						event: event.type,
+						enabled: true,
+						prompt,
+						action,
+						auto_run: autoRun,
+						agent_id: storedSession.id,
+					};
+					const autoRunLog = (level: string, message: string) => {
+						if (level === 'error') logger.error(message, 'Cue');
+						else if (level === 'warn') logger.warn(message, 'Cue');
+						else if (level === 'debug') logger.debug(message, 'Cue');
+						else logger.cue(message, 'Cue');
+					};
+					if (!autoRun || autoRun.documents.length === 0) {
+						// Reachable for a queued run restored from a row that was
+						// persisted before the queue table carried the payload
+						// (`auto_run_json`), which comes back undefined. Report a failure
+						// rather than throwing - a `time.once` autorun task is written
+						// with `self_destruct_on_failure: false`, so failing here keeps
+						// the subscription on disk instead of consuming it silently.
+						const reason =
+							'no documents on the run - the captured Auto Run payload did not survive the queue';
+						autoRunLog('error', `[CUE] Auto Run "${subscriptionName}" did not start: ${reason}`);
+						const startedAt = new Date().toISOString();
+						const failed = {
+							runId,
+							sessionId: storedSession.id,
+							sessionName: storedSession.name,
+							subscriptionName,
+							event,
+							status: 'failed' as const,
+							stdout: '',
+							stderr: `Auto Run launch failed: ${reason}`,
+							exitCode: 1,
+							durationMs: 0,
+							startedAt,
+							endedAt: startedAt,
+						};
+						return failed;
+					}
+					const autoRunResult = await executeCueAutoRun({
+						runId,
+						session: sessionInfo,
+						subscription,
+						event,
+						autoRun,
+						launch: (params) => launchCueAutoRun(mainWindow, params),
+						onLog: autoRunLog,
+					});
+					return autoRunResult;
+				}
 
 				// `action: notify` surfaces a toast through the owning agent instead of
 				// spawning anything - handled before command/prompt so the spawn config,
@@ -1438,9 +1511,28 @@ app
 				// see the note on the notify path above.
 				return result;
 			},
-			onStopCueRun: (runId) => stopCueRun(runId) || stopCueShellRun(runId) || stopCueCliRun(runId),
+			onStopCueRun: (runId) => stopCueRun(runId),
 			onLog: (_level, message, data) => {
 				logger.cue(message, 'Cue', data);
+				const payload = data as import('../shared/cue-log-types').CueLogPayload | undefined;
+				if (payload?.type === 'triggerHealthWarning') {
+					const now = Date.now();
+					for (const [id, at] of cueHealthToastAt) {
+						if (now - at >= 5 * DURATION_MS.minute) cueHealthToastAt.delete(id);
+					}
+					// Reach the always-mounted toast channel, even with Cue closed.
+					// Log every warning, but coalesce sticky notices per agent for 5m.
+					if (!cueHealthToastAt.has(payload.sessionId)) {
+						const delivered = emitCueNotifyToast(mainWindow, {
+							agentId: payload.sessionId,
+							title: 'Cue trigger health',
+							message: payload.message,
+							sticky: true,
+							color: 'orange',
+						});
+						if (delivered) cueHealthToastAt.set(payload.sessionId, now);
+					}
+				}
 				// Push activity updates to renderer (and web-desktop bridge clients)
 				if (data) {
 					safeSend('cue:activityUpdate', data);
@@ -2851,6 +2943,9 @@ app
 		setupIpcHandlers({
 			debugPackageDeps,
 			getMainWindow: () => mainWindow,
+			ensureMainWindow: () => {
+				if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+			},
 			getProcessManager: () => processManager,
 			getWebServer: () => webServer,
 			setWebServer: (server) => {
@@ -3139,8 +3234,6 @@ quitHandler = createQuitHandler({
 	getWebServer: () => webServer,
 	getHistoryManager,
 	tunnelManager,
-	getActiveGroomingSessionCount,
-	cleanupAllGroomingSessions,
 	closeStatsDB,
 	stopCliWatcher: () => {
 		cliWatcher.stop();

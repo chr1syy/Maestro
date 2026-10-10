@@ -110,6 +110,7 @@ The response is always JSON:
 	"sessionId": "abc123def456",
 	"response": "The authentication flow works by...",
 	"success": true,
+	"outcome": "completed",
 	"usage": {
 		"inputTokens": 1000,
 		"outputTokens": 500,
@@ -121,6 +122,19 @@ The response is always JSON:
 	}
 }
 ```
+
+`outcome` says how the turn ended:
+
+| `outcome`                | `success` | Meaning                                                                                                 |
+| ------------------------ | --------- | ------------------------------------------------------------------------------------------------------- |
+| `completed`              | `true`    | Clean exit with the provider's explicit done signal.                                                    |
+| `completed-with-warning` | `true`    | An answer was captured, but the process exited non-zero or never sent a done signal.                    |
+| `interrupted`            | `false`   | The send was stopped (Ctrl+C or SIGTERM). Never reported as a crash, even if the agent wrote to stderr. |
+| `crashed`                | `false`   | No usable answer, a classified provider error (auth, rate limit, ...), or the process failed to start.  |
+
+For providers that stream JSON lines (everything except Claude Code), a captured answer outranks a bare non-zero exit, but not a specific provider error: a turn whose stderr says the login expired fails even if some text was produced. Claude Code keeps requiring a clean exit. A process killed by a signal nobody requested is always `crashed`.
+
+The first Ctrl+C stops the agent gracefully (SIGTERM, then SIGKILL after 5 seconds if it ignores it) and exits with code `130`; a second Ctrl+C exits immediately. Other failures exit with `1`. Over an SSH remote this stops the local `ssh` client, and the remote process is not guaranteed to receive the hangup.
 
 On failure, `success` is `false` and an `error` field is included:
 
@@ -1190,14 +1204,15 @@ maestro-cli settings agent reset codex model
 
 **Common agent config keys:**
 
-| Key               | Type   | Description                                      |
-| ----------------- | ------ | ------------------------------------------------ |
-| `customPath`      | string | Custom path to the agent CLI binary              |
-| `customArgs`      | string | Additional CLI arguments                         |
-| `customEnvVars`   | object | Extra environment variables                      |
-| `model`           | string | Model override (e.g., `gpt-5.3-codex`, `o3`)     |
-| `contextWindow`   | number | Context window size in tokens                    |
-| `reasoningEffort` | string | Reasoning effort level (`low`, `medium`, `high`) |
+| Key                | Type   | Description                                                                     |
+| ------------------ | ------ | ------------------------------------------------------------------------------- |
+| `customPath`       | string | Custom path to the agent CLI binary                                             |
+| `customArgs`       | string | Additional CLI arguments                                                        |
+| `customEnvVars`    | object | Extra environment variables                                                     |
+| `model`            | string | Model override (e.g., `gpt-5.3-codex`, `o3`)                                    |
+| `contextWindow`    | number | Context window size in tokens                                                   |
+| `reasoningEffort`  | string | Reasoning effort level (`low`, `medium`, `high`)                                |
+| `reasoningSummary` | string | Codex only: reasoning shown in Thinking (`auto`, `concise`, `detailed`, `none`) |
 
 <Info>
 Settings and agent config changes made via the CLI are automatically detected by the running Maestro desktop app. The app watches for file changes and reloads immediately - it's as if you toggled the setting in the Settings modal yourself.
@@ -1274,7 +1289,7 @@ replace the set outright. Passing an empty string to `-u` or `-k` clears it.
 
 A command-line `-o` outranks `~/.ssh/config`, so `--ssh-option` is the only way
 to change one of Maestro's connection defaults (`ConnectTimeout`, `BatchMode`,
-and friends). `list-ssh-remotes --json` and `update-ssh-remote --json` both
+and friends). `list ssh-remotes --json` and `update-ssh-remote --json` both
 report `resolvedSshOptions`, the full merged set `ssh` actually receives, which
 is what answers "did my `ConnectTimeout` take effect?". See
 [SSH Remote Execution](/ssh-remote-execution) for the reserved keys and the
@@ -1328,6 +1343,12 @@ maestro-cli playbook <playbook-id> --json
 {"type":"document_complete","timestamp":...,"document":"tasks.md","tasksCompleted":5}
 {"type":"loop_complete","timestamp":...,"iteration":1,"tasksCompleted":5,"elapsedMs":60000}
 {"type":"complete","timestamp":...,"success":true,"totalTasksCompleted":5,"totalElapsedMs":60000,"totalCost":0.05}
+```
+
+If the run is interrupted (Ctrl+C or SIGTERM), the agent turn in flight is stopped gracefully and the stream ends with a `complete` event carrying `"stopped":true`. The interrupted task is recorded as "interrupted" rather than failed, and the process exits with code `130`. A second Ctrl+C exits immediately. `maestro-cli playbook`, `maestro-cli run-doc` and `maestro-cli goal-run` all behave this way; a goal run ends with `exitReason: "stopped-by-user"`.
+
+```json
+{"type":"complete","timestamp":...,"success":false,"totalTasksCompleted":2,"totalElapsedMs":31000,"stopped":true}
 ```
 
 The `send` command always outputs JSON (no `--json` flag needed).

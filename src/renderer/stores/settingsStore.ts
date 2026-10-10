@@ -412,6 +412,7 @@ export interface SettingsStoreState
 	autoRunStats: AutoRunStats;
 	usageStats: MaestroUsageStats;
 	ungroupedCollapsed: boolean;
+	showHiddenGroups: boolean;
 	groupChatsExpanded: boolean;
 	groupChatSortAlphabetical: boolean;
 	starredSessionsCollapsed: boolean;
@@ -456,6 +457,10 @@ export interface SettingsStoreState
 	groupCueEntries: boolean;
 	useNativeTitleBar: boolean;
 	autoHideMenuBar: boolean;
+	/** Show the agent's current checklist docked above the composer. */
+	showAgentTaskListBar: boolean;
+	/** Open that docked checklist in full whenever the agent writes a new one. */
+	autoExpandAgentTaskListBar: boolean;
 	// File Edit & Preview
 	fileEditWordWrap: boolean;
 	fileEditShowLineNumbers: boolean;
@@ -530,6 +535,7 @@ export interface SettingsStoreActions
 	setLogViewerSelectedLevels: (value: string[]) => void;
 	setCustomAICommands: (value: CustomAICommand[]) => void;
 	setUngroupedCollapsed: (value: boolean) => void;
+	setShowHiddenGroups: (value: boolean) => void;
 	setGroupChatsExpanded: (value: boolean) => void;
 	setGroupChatSortAlphabetical: (value: boolean) => void;
 	setStarredSessionsCollapsed: (value: boolean) => void;
@@ -569,6 +575,8 @@ export interface SettingsStoreActions
 	setGroupCueEntries: (value: boolean) => void;
 	setUseNativeTitleBar: (value: boolean) => void;
 	setAutoHideMenuBar: (value: boolean) => void;
+	setShowAgentTaskListBar: (value: boolean) => void;
+	setAutoExpandAgentTaskListBar: (value: boolean) => void;
 	setFileEditWordWrap: (value: boolean) => void;
 	setFileEditShowLineNumbers: (value: boolean) => void;
 	setFilePreviewToolbarButtonVisibility: (button: FilePreviewToolbarButton, value: boolean) => void;
@@ -772,6 +780,7 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 		autoRunStats: DEFAULT_AUTO_RUN_STATS,
 		usageStats: DEFAULT_USAGE_STATS,
 		ungroupedCollapsed: false,
+		showHiddenGroups: false,
 		groupChatsExpanded: true,
 		groupChatSortAlphabetical: false,
 		starredSessionsCollapsed: false,
@@ -816,6 +825,8 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 		groupCueEntries: true,
 		useNativeTitleBar: isWindowsPlatform(),
 		autoHideMenuBar: false,
+		showAgentTaskListBar: false,
+		autoExpandAgentTaskListBar: false,
 		fileEditWordWrap: true,
 		fileEditShowLineNumbers: true,
 		filePreviewToolbarVisibility: { ...DEFAULT_FILE_PREVIEW_TOOLBAR_VISIBILITY },
@@ -1099,6 +1110,11 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 			window.maestro.settings.set('ungroupedCollapsed', value);
 		},
 
+		setShowHiddenGroups: (value) => {
+			set({ showHiddenGroups: value });
+			window.maestro.settings.set('showHiddenGroups', value);
+		},
+
 		setGroupChatsExpanded: (value) => {
 			set({ groupChatsExpanded: value });
 			window.maestro.settings.set('groupChatsExpanded', value);
@@ -1367,6 +1383,16 @@ export const useSettingsStore = create<SettingsStore>()((set, get, api) => {
 		setAutoHideMenuBar: (value) => {
 			set({ autoHideMenuBar: value });
 			window.maestro.settings.set('autoHideMenuBar', value);
+		},
+
+		setShowAgentTaskListBar: (value) => {
+			set({ showAgentTaskListBar: value });
+			window.maestro.settings.set('showAgentTaskListBar', value);
+		},
+
+		setAutoExpandAgentTaskListBar: (value) => {
+			set({ autoExpandAgentTaskListBar: value });
+			window.maestro.settings.set('autoExpandAgentTaskListBar', value);
 		},
 
 		setFileEditWordWrap: (value) => {
@@ -2246,6 +2272,9 @@ export async function loadAllSettings(): Promise<void> {
 		if (allSettings['ungroupedCollapsed'] !== undefined)
 			patch.ungroupedCollapsed = allSettings['ungroupedCollapsed'] as boolean;
 
+		if (allSettings['showHiddenGroups'] !== undefined)
+			patch.showHiddenGroups = allSettings['showHiddenGroups'] as boolean;
+
 		if (allSettings['groupChatsExpanded'] !== undefined)
 			patch.groupChatsExpanded = allSettings['groupChatsExpanded'] as boolean;
 
@@ -2558,6 +2587,12 @@ export async function loadAllSettings(): Promise<void> {
 
 		hydrateLeftPanelDisplaySettings(allSettings, patch);
 
+		if (allSettings['showAgentTaskListBar'] !== undefined)
+			patch.showAgentTaskListBar = allSettings['showAgentTaskListBar'] as boolean;
+
+		if (allSettings['autoExpandAgentTaskListBar'] !== undefined)
+			patch.autoExpandAgentTaskListBar = allSettings['autoExpandAgentTaskListBar'] as boolean;
+
 		if (allSettings['fileEditWordWrap'] !== undefined)
 			patch.fileEditWordWrap = allSettings['fileEditWordWrap'] as boolean;
 
@@ -2761,7 +2796,9 @@ export function getSettingsActions() {
 		setBionifyAlgorithm: state.setBionifyAlgorithm,
 		setShowHiddenFiles: state.setShowHiddenFiles,
 		setFileExplorerIconTheme: state.setFileExplorerIconTheme,
+		setFileTreeBranchConnectors: state.setFileTreeBranchConnectors,
 		setToastWidth: state.setToastWidth,
+		setToastPosition: state.setToastPosition,
 		setTerminalWidth: state.setTerminalWidth,
 		setLogLevel: state.setLogLevel,
 		setMaxLogBuffer: state.setMaxLogBuffer,
@@ -2791,6 +2828,7 @@ export function getSettingsActions() {
 		setUsageStats: state.setUsageStats,
 		updateUsageStats: state.updateUsageStats,
 		setUngroupedCollapsed: state.setUngroupedCollapsed,
+		setShowHiddenGroups: state.setShowHiddenGroups,
 		setGroupChatsExpanded: state.setGroupChatsExpanded,
 		setGroupChatSortAlphabetical: state.setGroupChatSortAlphabetical,
 		setStarredSessionsCollapsed: state.setStarredSessionsCollapsed,
@@ -2863,6 +2901,8 @@ export function getSettingsActions() {
 		setShowLeftPanelGitIndicator: state.setShowLeftPanelGitIndicator,
 		setShowLeftPanelCueIndicator: state.setShowLeftPanelCueIndicator,
 		setShowLeftPanelStartupCommandIndicator: state.setShowLeftPanelStartupCommandIndicator,
+		setShowAgentTaskListBar: state.setShowAgentTaskListBar,
+		setAutoExpandAgentTaskListBar: state.setAutoExpandAgentTaskListBar,
 		setFileEditWordWrap: state.setFileEditWordWrap,
 		setFileEditShowLineNumbers: state.setFileEditShowLineNumbers,
 		setFilePreviewToolbarButtonVisibility: state.setFilePreviewToolbarButtonVisibility,
