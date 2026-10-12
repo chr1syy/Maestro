@@ -18,12 +18,18 @@ import {
 } from './mail-account-config';
 import {
 	parseMailAgentRights,
+	parseMailRights,
 	parseMailAuthIdentity,
 	type MailAgentRights,
 } from './mail-account-ledger';
 import { MailCredentialSlot, type MailCredentialAuthority } from './mail-credentials';
 import { assertImapQuotedString, IMAP_COMMAND_LIMITS } from './mail-imap-commands';
-import { ImapConnectionError } from './mail-imap-connection';
+import {
+	ImapConnectionError,
+	openConfiguredImapConnection,
+	type ImapConnection,
+	type ImapConnectionDeps,
+} from './mail-imap-connection';
 
 /** Trusted setup must bind membership to live host agents, never plugin-supplied identity. */
 export interface MailGrantAuthority extends MailCredentialAuthority {
@@ -45,7 +51,8 @@ export class MailAccountCredentials {
 		private readonly store: AuthorizationStore,
 		private readonly pluginId: string,
 		identity: AuthIdentity,
-		private readonly entryFactory?: (service: string, account: string) => KeyringEntry | null
+		private readonly entryFactory?: (service: string, account: string) => KeyringEntry | null,
+		private readonly transport?: Pick<ImapConnectionDeps, 'resolve' | 'blockedPorts' | 'connect'>
 	) {
 		this.identity = parseMailAuthIdentity(identity);
 	}
@@ -119,6 +126,102 @@ export class MailAccountCredentials {
 		const configuration = this.store.readMailConfiguration(this.pluginId, this.identity);
 		if (!configuration) throw new ImapConnectionError('MAIL_DENIED');
 		return configuration;
+	}
+
+	/** Explicit trusted-frame action only. Does not persist readiness, rights or enabled intent. */
+	async testAccount(
+		accountId: string,
+		revision: number,
+		setup: MailCredentialAuthority
+	): Promise<MailAccountConfiguration> {
+		const authority = this.setupAuthority(setup);
+		const configuration = this.configuration();
+		const account = requireMailAccountRevision(configuration, accountId, revision);
+		const lease = this.store.acquireMailSetupActivity(
+			this.pluginId,
+			this.identity,
+			accountId,
+			revision,
+			authority.assertActive
+		);
+		const signal = AbortSignal.any([authority.signal, lease.signal]);
+		let session: ImapConnection | undefined;
+		const check = () => {
+			if (signal.aborted) throw new ImapConnectionError('MAIL_CANCELED');
+			lease.assertActive();
+			authority.assertActive();
+			requireMailAccountRevision(this.configuration(), accountId, revision);
+		};
+		try {
+			check();
+			session = await openConfiguredImapConnection(
+				accountId,
+				{
+					...this.transport,
+					pluginId: this.pluginId,
+					assertActive: check,
+					getEndpoint: () => account.endpoint,
+				},
+				{ signal }
+			);
+			await this.slot(configuration, accountId).authenticate(session, account.username, {
+				signal,
+				assertActive: check,
+			});
+			check();
+			session.close();
+			session = undefined;
+			check();
+			return this.configuration();
+		} catch (error) {
+			throw new ImapConnectionError(
+				error instanceof ImapConnectionError ? error.code : 'MAIL_UNAVAILABLE'
+			);
+		} finally {
+			session?.close();
+			lease.release();
+		}
+	}
+
+	async replacePluginRights(
+		accountId: string,
+		revision: number,
+		value: unknown,
+		setup: MailCredentialAuthority
+	): Promise<MailAccountConfiguration> {
+		const rights = parseMailRights(value, true);
+		const authority = this.setupAuthority(setup);
+		let committed: MailAccountConfiguration | undefined;
+		await this.store.enqueueMailAccountMutation(
+			this.pluginId,
+			this.identity,
+			accountId,
+			revision,
+			authority.assertActive,
+			authority.signal,
+			async (lease) => {
+				lease.assertActive();
+				committed = this.store.replaceMailPluginRights(
+					this.pluginId,
+					this.identity,
+					accountId,
+					revision,
+					rights,
+					lease.assertActive
+				);
+				lease.assertActive();
+			}
+		);
+		if (!committed) throw new ImapConnectionError('MAIL_UNAVAILABLE');
+		this.store.assertMailMutationCompletion(
+			this.pluginId,
+			this.identity,
+			committed,
+			accountId,
+			authority.assertActive,
+			authority.signal
+		);
+		return committed;
 	}
 
 	private slot(configuration: MailAccountConfiguration, accountId: string): MailCredentialSlot {

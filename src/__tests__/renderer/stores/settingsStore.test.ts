@@ -31,6 +31,7 @@ import {
 	KEYBOARD_MASTERY_LEVELS,
 	collectBoundShortcuts,
 } from '../../../renderer/constants/keyboardMastery';
+import { availableShortcuts } from '../../../renderer/utils/encoreShortcuts';
 import { DEFAULT_CUSTOM_THEME_COLORS } from '../../../renderer/constants/themes';
 import { TYPOGRAPHY_PRESETS } from '../../../shared/typographyPresets';
 
@@ -92,6 +93,7 @@ function resetStore() {
 		globalShowHotkey: [],
 		defaultShell: 'zsh',
 		customShellPath: '',
+		mediaModelDirectory: '',
 		shellArgs: '',
 		shellEnvVars: {},
 		ghPath: '',
@@ -113,9 +115,10 @@ function resetStore() {
 		groupChatAutoScroll: true,
 		showHiddenFiles: true,
 		fileExplorerIconTheme: 'rich',
+		toastPosition: 'bottom-right',
 		terminalWidth: 100,
 		logLevel: 'info',
-		maxLogBuffer: 5000,
+		maxLogBuffer: 10000,
 		maxOutputLines: Infinity,
 		osNotificationsEnabled: true,
 		audioFeedbackEnabled: false,
@@ -243,9 +246,10 @@ describe('settingsStore', () => {
 			expect(state.fileExplorerMaxEntries).toBe(100_000);
 			expect(state.sshReduceEntryCapEnabled).toBe(false);
 			expect(state.sshReduceEntryCapFraction).toBe(0.1);
+			expect(state.toastPosition).toBe('bottom-right');
 			expect(state.terminalWidth).toBe(100);
 			expect(state.logLevel).toBe('info');
-			expect(state.maxLogBuffer).toBe(5000);
+			expect(state.maxLogBuffer).toBe(10000);
 			expect(state.maxOutputLines).toBe(Infinity);
 			expect(state.osNotificationsEnabled).toBe(true);
 			expect(state.audioFeedbackEnabled).toBe(false);
@@ -566,7 +570,7 @@ describe('settingsStore', () => {
 				});
 
 				it('quotes the live Right Bar width for the dynamic preset', () => {
-					useSettingsStore.setState({ rightPanelWidth: 500 });
+					useSettingsStore.setState({ rightPanelWidth: 500, toastPosition: 'bottom-right' });
 					useSettingsStore.getState().setToastWidth('dynamic');
 					const [toast] = useNotificationStore.getState().toasts;
 					expect(toast.title).toBe('Toast Width: Dynamic');
@@ -588,6 +592,43 @@ describe('settingsStore', () => {
 					const [toast] = useNotificationStore.getState().toasts;
 					expect(toast.skipCustomNotification).toBe(true);
 					expect(toast.skipOsNotification).toBe(true);
+				});
+			});
+
+			describe('setToastPosition', () => {
+				beforeEach(() => {
+					useNotificationStore.setState({ toasts: [] });
+					useSettingsStore.setState({ toastPosition: 'bottom-right' });
+				});
+
+				it('updates state and persists', () => {
+					useSettingsStore.getState().setToastPosition('top-left');
+					expect(useSettingsStore.getState().toastPosition).toBe('top-left');
+					expect(window.maestro.settings.set).toHaveBeenCalledWith('toastPosition', 'top-left');
+				});
+
+				it('fires a preview toast naming the corner and stack direction', () => {
+					useSettingsStore.getState().setToastPosition('top-right');
+					const toasts = useNotificationStore.getState().toasts;
+					expect(toasts).toHaveLength(1);
+					expect(toasts[0].title).toBe('Toast Position: Top Right');
+					expect(toasts[0].message).toContain('downward');
+				});
+
+				it('shares one preview with the width setting instead of stacking', () => {
+					useSettingsStore.getState().setToastWidth('large');
+					useSettingsStore.getState().setToastPosition('bottom-left');
+					const toasts = useNotificationStore.getState().toasts;
+					expect(toasts).toHaveLength(1);
+					expect(toasts[0].title).toBe('Toast Position: Bottom Left');
+				});
+
+				it('makes a dynamic-width preview quote the Left Bar in a left corner', () => {
+					useSettingsStore.setState({ leftSidebarWidth: 300, toastPosition: 'top-left' });
+					useSettingsStore.getState().setToastWidth('dynamic');
+					const [toast] = useNotificationStore.getState().toasts;
+					// 300 less the 16px gutter on each side.
+					expect(toast.message).toContain('Left Bar width (268px)');
 				});
 			});
 		});
@@ -1123,9 +1164,9 @@ describe('settingsStore', () => {
 		});
 
 		it('setMaxLogBuffer updates state and calls logger.setMaxLogBuffer', async () => {
-			await useSettingsStore.getState().setMaxLogBuffer(10000);
-			expect(useSettingsStore.getState().maxLogBuffer).toBe(10000);
-			expect(window.maestro.logger.setMaxLogBuffer).toHaveBeenCalledWith(10000);
+			await useSettingsStore.getState().setMaxLogBuffer(25000);
+			expect(useSettingsStore.getState().maxLogBuffer).toBe(25000);
+			expect(window.maestro.logger.setMaxLogBuffer).toHaveBeenCalledWith(25000);
 		});
 
 		it('setPreventSleepEnabled updates state, persists, and calls power.setEnabled', async () => {
@@ -1723,8 +1764,16 @@ describe('settingsStore', () => {
 
 		// The denominator is the shortcuts that actually have a chord bound, so the
 		// ids used here have to be real ones - made-up ids count for nothing.
-		const boundShortcutIds = () =>
-			collectBoundShortcuts(DEFAULT_SHORTCUTS, TAB_SHORTCUTS, FIXED_SHORTCUTS).map((s) => s.id);
+		// It also leaves out the chord of an Encore Feature that is switched off:
+		// the keyboard handler refuses it, so it can never be fired either.
+		const boundShortcutIds = () => {
+			const encoreFeatures = useSettingsStore.getState().encoreFeatures;
+			return collectBoundShortcuts(
+				availableShortcuts(DEFAULT_SHORTCUTS, encoreFeatures),
+				TAB_SHORTCUTS,
+				availableShortcuts(FIXED_SHORTCUTS, encoreFeatures)
+			).map((s) => s.id);
+		};
 
 		it('recordShortcutUsage detects level-up', () => {
 			const bound = boundShortcutIds();
@@ -1859,6 +1908,43 @@ describe('settingsStore', () => {
 	// ========================================================================
 	// 11. loadAllSettings
 	// ========================================================================
+
+	describe('host media directory', () => {
+		it.each([undefined, null, 42])(
+			'keeps a controlled empty value for a malformed persisted directory: %s',
+			async (persisted) => {
+				vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(true);
+				vi.mocked(window.maestro.settings.get).mockResolvedValueOnce(persisted);
+				expect(await useSettingsStore.getState().setMediaModelDirectory('/models')).toBe(true);
+				expect(useSettingsStore.getState().mediaModelDirectory).toBe('');
+			}
+		);
+
+		it('updates state only after successful persistence and reads the canonical path', async () => {
+			vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(false);
+			expect(await useSettingsStore.getState().setMediaModelDirectory('/bad')).toBe(false);
+			expect(useSettingsStore.getState().mediaModelDirectory).toBe('');
+			vi.mocked(window.maestro.settings.set).mockResolvedValueOnce(true);
+			vi.mocked(window.maestro.settings.get).mockResolvedValueOnce('/canonical/models');
+			expect(await useSettingsStore.getState().setMediaModelDirectory('/alias/models')).toBe(true);
+			expect(useSettingsStore.getState().mediaModelDirectory).toBe('/canonical/models');
+			expect(window.maestro.settings.set).toHaveBeenLastCalledWith(
+				'mediaModelDirectory',
+				'/alias/models'
+			);
+		});
+
+		it('hydrates the host directory and clears stale values if removed externally', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValueOnce({
+				mediaModelDirectory: '/models',
+			});
+			await loadAllSettings();
+			expect(useSettingsStore.getState().mediaModelDirectory).toBe('/models');
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValueOnce({});
+			await loadAllSettings();
+			expect(useSettingsStore.getState().mediaModelDirectory).toBe('');
+		});
+	});
 
 	describe('loadAllSettings', () => {
 		it('loads all settings from getAll() on success', async () => {
@@ -2064,6 +2150,23 @@ describe('settingsStore', () => {
 			await loadAllSettings();
 
 			expect(useSettingsStore.getState().fileExplorerIconTheme).toBe('rich');
+		});
+
+		it('loads a valid persisted toastPosition', async () => {
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({ toastPosition: 'top-left' });
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().toastPosition).toBe('top-left');
+		});
+
+		it('falls back to bottom-right for an invalid toastPosition', async () => {
+			useSettingsStore.setState({ toastPosition: 'top-left' });
+			vi.mocked(window.maestro.settings.getAll).mockResolvedValue({ toastPosition: 'middle' });
+
+			await loadAllSettings();
+
+			expect(useSettingsStore.getState().toastPosition).toBe('bottom-right');
 		});
 
 		it('keeps edits made while a reload is in flight', async () => {

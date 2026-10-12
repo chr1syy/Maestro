@@ -5,7 +5,8 @@
 
 import { randomUUID } from 'crypto';
 import { BrowserWindow } from 'electron';
-import { WebServer } from './WebServer';
+import { WebServer, type WebServerOptions } from './WebServer';
+import { tunnelManager } from '../tunnel-manager';
 import { logger } from '../utils/logger';
 import { isWebContentsAvailable } from '../utils/safe-send';
 import type { ProcessManager } from '../process-manager';
@@ -27,6 +28,7 @@ import { registerUsageAchievementsCallbacks } from './callbacks/usageAchievement
 import { registerAutoRunConfigCallbacks } from './callbacks/autoRunConfigCallbacks';
 import { registerSessionCrudCallbacks } from './callbacks/sessionCrudCallbacks';
 import { registerGroupCrudCallbacks } from './callbacks/groupCrudCallbacks';
+import { registerWindowCommandCallbacks } from './callbacks/windowCommandCallbacks';
 import { registerGitCallbacks } from './callbacks/gitCallbacks';
 import { registerGroupChatCallbacks } from './callbacks/groupChatCallbacks';
 import { registerDirectorNotesCallbacks } from './callbacks/directorNotesCallbacks';
@@ -112,9 +114,10 @@ export function createWebServerFactory(deps: WebServerFactoryDependencies) {
 
 	/**
 	 * Create and configure the web server with all necessary callbacks.
-	 * Called when user enables the web interface.
+	 * Pass `lanAccess` only for Live Mode; the default is the loopback-only
+	 * server that backs maestro-cli.
 	 */
-	return function createWebServer(): WebServer {
+	return function createWebServer(options: WebServerOptions = {}): WebServer {
 		// Use custom port if enabled, otherwise 0 for random port assignment
 		const useCustomPort = settingsStore.get('webInterfaceUseCustomPort', false);
 		const customPort = settingsStore.get('webInterfaceCustomPort', 8080);
@@ -148,10 +151,17 @@ export function createWebServerFactory(deps: WebServerFactoryDependencies) {
 			}
 		}
 
-		const server = new WebServer(port, securityToken);
+		const server = new WebServer(port, securityToken, options);
+
+		// The Remote Control tunnel serves the web interface from a public
+		// trycloudflare.com origin; accept it alongside the request's own host.
+		server.setTrustedOriginsProvider(() => {
+			const { url } = tunnelManager.getStatus();
+			return url ? [url] : [];
+		});
 
 		// Roaming to a different network changes the LAN IP the URL and QR code
-		// are built from. The server keeps serving (it binds 0.0.0.0), so all
+		// are built from. A LAN server keeps serving (it binds 0.0.0.0), so all
 		// that is needed is telling every window to redraw the new address -
 		// no restart, no token rotation, and any phone already connected over
 		// the old address just reconnects. Broadcast rather than main-window
@@ -185,6 +195,7 @@ export function createWebServerFactory(deps: WebServerFactoryDependencies) {
 
 		registerSessionCrudCallbacks(server, deps);
 		registerGroupCrudCallbacks(server, deps);
+		registerWindowCommandCallbacks(server, deps);
 
 		registerGitCallbacks(server, deps);
 

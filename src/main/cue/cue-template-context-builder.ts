@@ -78,6 +78,16 @@ enricherRegistry.set('*', (event, subscription, runId) => {
 	return base;
 });
 
+enricherRegistry.set('relay.mail.received', (event) => ({
+	mailReference: String(event.payload.reference ?? ''),
+	mailAccountId: String(event.payload.accountId ?? ''),
+	mailFolder: String(event.payload.folder ?? ''),
+	mailUidValidity: String(event.payload.uidValidity ?? ''),
+	mailUid: String(event.payload.uid ?? ''),
+	mailReceivedAt: String(event.payload.receivedAt ?? ''),
+	mailSizeBytes: String(event.payload.sizeBytes ?? ''),
+}));
+
 /** task.pending enricher - adds task-specific fields. */
 enricherRegistry.set('task.pending', (event) => ({
 	taskFile: String(event.payload.path ?? ''),

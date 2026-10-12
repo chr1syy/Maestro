@@ -1,5 +1,5 @@
 /**
- * Host-private confirmation and fixed facade dispatch only; no production issuer or surface.
+ * Host-private confirmation and fixed facade dispatch for the dedicated setup frame.
  * Main must register the dedicated frame and provide real policy/gesture/lifecycle adapters.
  */
 import { DURATION_MS } from '../../shared/duration';
@@ -263,6 +263,15 @@ export class MailSetupConfirmation {
 			}
 		}
 		switch (intent.kind) {
+			case 'replacePluginRights':
+				return this.accounts.replacePluginRights(
+					intent.accountId,
+					intent.expectedRevision,
+					intent.rights,
+					authority
+				);
+			case 'test':
+				return this.accounts.testAccount(intent.accountId, intent.expectedRevision, authority);
 			case 'addDisabled':
 				return this.accounts.addDisabledAccount(intent.settings, authority);
 			case 'enable':

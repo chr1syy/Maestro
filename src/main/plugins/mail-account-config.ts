@@ -76,10 +76,10 @@ export function mailRecord(
 	for (const key of Reflect.ownKeys(fields)) {
 		if (typeof key !== 'string' || (!required.includes(key) && !optional.includes(key))) invalid();
 		const field = fields[key];
-		if (!field.enumerable || !Object.hasOwn(field, 'value')) invalid();
+		if (!field.enumerable || !Object.prototype.hasOwnProperty.call(field, 'value')) invalid();
 		result[key] = field.value;
 	}
-	if (required.some((key) => !Object.hasOwn(result, key))) invalid();
+	if (required.some((key) => !Object.prototype.hasOwnProperty.call(result, key))) invalid();
 	return result;
 }
 
@@ -93,7 +93,8 @@ export function mailList(value: unknown, max: number): unknown[] {
 	const result: unknown[] = [];
 	for (let index = 0; index < length; index++) {
 		const field = fields[String(index)];
-		if (!field || !field.enumerable || !Object.hasOwn(field, 'value')) invalid();
+		if (!field || !field.enumerable || !Object.prototype.hasOwnProperty.call(field, 'value'))
+			invalid();
 		result.push(field.value);
 	}
 	return result;
@@ -122,7 +123,7 @@ export function parseMailSetupNavigation(value: unknown): MailSetupNavigationInt
 	try {
 		const raw = mailRecord(value, ['action'], ['accountId']);
 		if (raw.action === 'add') {
-			if (Object.hasOwn(raw, 'accountId')) invalid();
+			if (Object.prototype.hasOwnProperty.call(raw, 'accountId')) invalid();
 			return Object.freeze({ action: 'add' });
 		}
 		if (
@@ -184,23 +185,26 @@ export function parseMailSearchCriteria(value: unknown): Readonly<{
 	assertImapQuotedString(raw.mailbox, IMAP_COMMAND_LIMITS.mailbox);
 	assertImapUid(raw.fromUid);
 	assertImapUid(raw.toUid);
-	if (Object.hasOwn(raw, 'uidValidity')) assertImapUid(raw.uidValidity);
-	if (Object.hasOwn(raw, 'text')) assertImapQuotedString(raw.text, IMAP_COMMAND_LIMITS.searchText);
+	if (Object.prototype.hasOwnProperty.call(raw, 'uidValidity')) assertImapUid(raw.uidValidity);
+	if (Object.prototype.hasOwnProperty.call(raw, 'text'))
+		assertImapQuotedString(raw.text, IMAP_COMMAND_LIMITS.searchText);
 	const criteria = Object.freeze({
 		accountId,
 		accountRevision,
 		mailbox: raw.mailbox,
 		fromUid: raw.fromUid,
 		toUid: raw.toUid,
-		...(Object.hasOwn(raw, 'uidValidity') ? { uidValidity: raw.uidValidity as string } : {}),
-		...(Object.hasOwn(raw, 'text') ? { text: raw.text as string } : {}),
+		...(Object.prototype.hasOwnProperty.call(raw, 'uidValidity')
+			? { uidValidity: raw.uidValidity as string }
+			: {}),
+		...(Object.prototype.hasOwnProperty.call(raw, 'text') ? { text: raw.text as string } : {}),
 	});
 	// Validate ordered range/fixed grammar before I/O; never write or retain this buffer.
 	prepareImapCommand('A1', {
 		kind: 'search',
 		fromUid: criteria.fromUid,
 		toUid: criteria.toUid,
-		...(Object.hasOwn(criteria, 'text') ? { text: criteria.text } : {}),
+		...(Object.prototype.hasOwnProperty.call(criteria, 'text') ? { text: criteria.text } : {}),
 	}).bytes.fill(0);
 	return criteria;
 }
@@ -241,7 +245,7 @@ export function parseMailAccountSettings(value: unknown): MailAccountSettings {
 		typeof endpoint.host !== 'string' ||
 		typeof endpoint.port !== 'number' ||
 		endpoint.tls !== true ||
-		(Object.hasOwn(endpoint, 'allowNonstandardPort') &&
+		(Object.prototype.hasOwnProperty.call(endpoint, 'allowNonstandardPort') &&
 			typeof endpoint.allowNonstandardPort !== 'boolean')
 	)
 		invalid();
@@ -249,7 +253,7 @@ export function parseMailAccountSettings(value: unknown): MailAccountSettings {
 		host: endpoint.host,
 		port: endpoint.port,
 		tls: true,
-		...(Object.hasOwn(endpoint, 'allowNonstandardPort')
+		...(Object.prototype.hasOwnProperty.call(endpoint, 'allowNonstandardPort')
 			? { allowNonstandardPort: endpoint.allowNonstandardPort as boolean }
 			: {}),
 	});
@@ -327,7 +331,7 @@ export function parseMailAccountMutation(value: unknown): MailAccountMutation {
 		const raw = mailRecord(value, ['kind', 'accountId', 'expectedRevision'], ['settings']);
 		if (
 			(raw.kind !== 'disable' && raw.kind !== 'replaceSettings' && raw.kind !== 'remove') ||
-			Object.hasOwn(raw, 'settings') !== (raw.kind === 'replaceSettings')
+			Object.prototype.hasOwnProperty.call(raw, 'settings') !== (raw.kind === 'replaceSettings')
 		)
 			invalid();
 		const accountId = opaqueId(raw.accountId);
@@ -446,7 +450,10 @@ export function parseMailAccountConfiguration(serialized: unknown): MailAccountC
 			(value) => {
 				const tombstone = mailRecord(value, ['accountId', 'revision'], ['credentialCleanup']);
 				// Legacy history has no native outcome proof. Explicit invalid values fail closed.
-				const credentialCleanup = Object.hasOwn(tombstone, 'credentialCleanup')
+				const credentialCleanup = Object.prototype.hasOwnProperty.call(
+					tombstone,
+					'credentialCleanup'
+				)
 					? tombstone.credentialCleanup
 					: 'pending';
 				if (credentialCleanup !== 'pending' && credentialCleanup !== 'confirmedAbsent') invalid();

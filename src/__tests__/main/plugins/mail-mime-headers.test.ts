@@ -292,7 +292,7 @@ describe('complete bounded header framing and ownership', () => {
 	it.each([
 		'',
 		'\r\n',
-		'Content-Type: text/plain',
+		'X-Unrequested: text/plain',
 		'Content-Type: text/plain\r\n',
 		'Content-Type: text/plain\n\n',
 		'Content-Type: text/plain\r\r\n',
@@ -427,7 +427,7 @@ describe('actual display projection regressions through the canonical scanner', 
 		expect(input.every((byte) => byte === 0)).toBe(true);
 	});
 
-	it.each(['Content-Type: text/plain', 'X-Unknown: x', 'Subject: two', ' orphan'])(
+	it.each(['X-Unrequested: text/plain', 'X-Unknown: x', 'Subject: two', ' orphan'])(
 		'retains the closed display allowlist/duplicate/framing refusal: %s',
 		(field) => {
 			const wire = field === ' orphan' ? field + '\r\nSubject: one' : 'Subject: one\r\n' + field;

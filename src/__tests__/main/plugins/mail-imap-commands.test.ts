@@ -224,6 +224,7 @@ describe('real framed IMAP command response semantics', () => {
 		expect(validateImapCommandResult(command, decode(data + namespace + extras + end))).toEqual({
 			kind: 'examine',
 			uidValidity: '4294967295',
+			uidNext: '1',
 		});
 		for (const wire of [
 			data + end,
@@ -414,11 +415,12 @@ describe('real framed IMAP command response semantics', () => {
 				f.kind === 'data' ? f.parts.filter(Buffer.isBuffer) : []
 			)[0];
 			if (size === cap) {
-				expect(validateImapCommandResult(command, frames)).toEqual({
-					kind: 'fetch',
-					uid: '9',
-					bytes: literal,
-				});
+				const result = validateImapCommandResult(command, frames);
+				expect(result.kind).toBe('fetch');
+				if (result.kind === 'fetch') {
+					expect(result.uid).toBe('9');
+					expect(result.bytes).toBe(literal);
+				}
 				expect(literal[0]).toBe(88);
 				eraseImapFrameLiterals(frames);
 			} else rejected(() => validateImapCommandResult(command, frames), 'MAIL_LIMIT');

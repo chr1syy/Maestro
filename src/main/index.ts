@@ -1,3 +1,8 @@
+import { getPluginRunProofProtectedPaths } from './plugins/plugin-tool-run-identity';
+import { configureMailCueHost } from './cue/triggers/cue-mail-trigger-source';
+import { createMailCueHost } from './plugins/mail-cue-host';
+import { MailHostService } from './plugins/mail-host-service';
+import { MailSetupWindows } from './plugins/mail-setup-window';
 import {
 	app,
 	BrowserWindow,
@@ -10,7 +15,8 @@ import {
 	type IpcMainInvokeEvent,
 } from 'electron';
 import { isMacOS } from '../shared/platformDetection';
-import { installApplicationMenu } from './app-menu';
+import { DURATION_MS } from '../shared/duration';
+import { installApplicationMenu, setMenuEncoreFeatures } from './app-menu';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
@@ -34,9 +40,16 @@ import {
 } from './global-hotkey-manager';
 import { CueEngine } from './cue/cue-engine';
 import { createCueSupervisorHooks } from './cue/cue-first-party';
-import { PianolaSupervisor } from './pianola/pianola-supervisor';
+import { PianolaSupervisor, type AutoWatchSession } from './pianola/pianola-supervisor';
 import { PianolaRelearnScheduler } from './pianola/pianola-relearn-scheduler';
 import { createPianolaLifecycle } from './pianola/pianola-lifecycle';
+import {
+	getComputerHistoryService,
+	createComputerHistorySupervisorHooks,
+} from './computer-history';
+import { createComputerHistoryForApp } from './computer-history/bootstrap';
+import { getMaestroRunService } from './maestro-run';
+import { createMaestroRunForApp } from './maestro-run/bootstrap';
 import { execFile } from 'child_process';
 import { PluginManager } from './plugins/plugin-manager';
 import { PluginToolRunIdentity } from './plugins/plugin-tool-run-identity';
@@ -44,6 +57,7 @@ import { PluginToolRunProofFiles } from './plugins/plugin-tool-run-proof-file';
 import { ImapConnectionError } from './plugins/mail-imap-connection';
 import { getRecord, type PluginRecord } from '../shared/plugins/plugin-registry';
 import { isValidAgentId } from '../shared/agentIds';
+import { RELAY_PLUGIN_ID } from '../shared/plugins/relay-identity';
 import { resolveTrustedKeys } from '../shared/plugins/publisher-keys';
 import { seedBundledPlugins } from './plugins/bundled-plugins';
 import { SpawnBinaryRegistry } from './plugins/spawn-binary-registry';
@@ -57,6 +71,8 @@ import {
 	getActivePluginManager,
 	setActivePluginManager,
 	stopActivePluginManager,
+	setHeadlessAgentRunner,
+	type HeadlessAgentRunner,
 } from './plugins/plugin-manager-singleton';
 import { PluginSchedulerHost } from './plugins/plugin-scheduler-host';
 import {
@@ -69,6 +85,10 @@ import { createCadenzaDelivery, registerCadenzaIpcHandlers } from './cadenza-bri
 import { createPluginHostViewBridge } from './plugin-host-view-bridge';
 import { ActionGuard } from './plugins/action-guard';
 import { PluginKvStore } from './plugins/plugin-kv-store';
+import { PluginAgentSessionBindings } from './plugins/plugin-agent-session-bindings';
+import { setClaudeSessionOrigin } from './storage/claude-session-origins';
+import { getProviderProfileConfig } from '../shared/providerProfiles';
+import { getSessionStorage } from './agents';
 import { PluginEventBusImpl } from './plugins/plugin-event-bus';
 import { createEgressGuard } from './plugins/net-egress-guard';
 // [UiCommandeer] WS-ui-command host bridge (see runUiCommand wiring below).
@@ -107,9 +127,18 @@ import {
 } from './plugins/consent-window';
 import { configureCueTelemetry } from './cue/cue-telemetry';
 import { executeCuePrompt, stopCueRun } from './cue/cue-executor';
-import { executeCueShell, stopCueShellRun } from './cue/cue-shell-executor';
-import { executeCueCli, stopCueCliRun } from './cue/cue-cli-executor';
+import { beginCueRunCapture, recordCommandLineRuns } from './cot-export/runtime';
+import { executeCueShell } from './cue/cue-shell-executor';
+import { executeCueCli, resolveMaestroCliScriptPath } from './cue/cue-cli-executor';
+import { spawnAgent } from '../cli/services/agent-spawner';
+import { prepareMaestroSystemPromptCli } from '../cli/services/system-prompt';
+import { pluginToolRunIdentity } from './plugins/plugin-tool-run-identity';
+import { createPluginHeadlessAgentRunner } from './plugins/plugin-headless-agent-runner';
+import { generateTabName } from './ipc/handlers/tabNaming';
+import type { SessionInfo } from '../shared/types';
 import { executeCueNotify } from './cue/cue-notify-executor';
+import { executeCueAutoRun } from './cue/cue-autorun-executor';
+import { launchCueAutoRun } from './cue-autorun-launcher';
 import { reportCueAuthFailure } from './cue/cue-auth-detector';
 import { setSusFactorNotifier } from './cue/cue-susfactor';
 import { emitCueNotifyToast } from './cue/cue-notify-bridge';
@@ -121,6 +150,8 @@ import { getHistoryManager } from './history-manager';
 import { initDispatchCallbacks } from './dispatch-callbacks';
 import { MAX_ENTRIES_PER_SESSION } from '../shared/history';
 import { DEFAULT_CUE_HISTORY_RETENTION_DAYS } from '../shared/cue/retention';
+import { resolveCueTurnSettings } from '../shared/cue/turn-settings';
+import { describeTurnSettings } from '../shared/autorunTurnSettings';
 import { resolveEncoreFeatures } from '../shared/encoreFeatureDefaults';
 import {
 	initializeStores,
@@ -133,6 +164,7 @@ import {
 	getWindowStateStore,
 	getClaudeSessionOriginsStore,
 	getAgentSessionOriginsStore,
+	getSshRemoteById,
 } from './stores';
 import { runSettingsMigrations } from './stores/migrations';
 import { migrateClaudeSessionNamesFromHistory } from './stores/migrations/claude-session-names-backfill';
@@ -140,8 +172,6 @@ import {
 	ensureCliServer,
 	startCliDiscoveryWatchdog,
 	stopCliDiscoveryWatchdog,
-	cleanupAllGroomingSessions,
-	getActiveGroomingSessionCount,
 } from './ipc/handlers';
 import { setupIpcHandlers } from './ipc/bootstrap';
 import { stopCoworkingBridge } from './coworking/coworking-bridge';
@@ -161,7 +191,7 @@ import { createConcertoHtmlResponse } from './concerto-html';
 import { MEDIA_SCHEME } from '../shared/mediaTypes';
 import { handleMediaStreamRequest } from './media/media-stream';
 import { closeAllParquetFiles } from './parquet/parquet-file';
-import { DEMO_MODE, DEMO_DATA_PATH } from './constants';
+import { DEMO_MODE, DEMO_DATA_PATH, resolveSharedDataPath } from './constants';
 // initAutoUpdater is now used by window-manager.ts (Phase 4 refactoring)
 import { checkWslEnvironment } from './utils/wslDetector';
 import { setupDeepLinkHandling, flushPendingDeepLink } from './deep-links';
@@ -184,6 +214,7 @@ import {
 } from './app-lifecycle';
 // Multi-window registry (single source of truth for window<->session ownership)
 import { WindowRegistry } from './window-registry';
+import { createQuickChatController, closeQuickChatWindow } from './quick-chat';
 // Multi-window startup restore: turn the persisted MultiWindowState back into
 // window-creation specs (pruning agents that no longer exist).
 import { planWindowRestore, pickFocusWindowSpec } from './window-state-persistence';
@@ -269,8 +300,9 @@ const IMAGE_SCHEME = 'maestro-image';
 }
 
 // Capture the production data path before any modification
-// Used for stores that should be shared between dev and prod (e.g., agent configs)
-const productionDataPath = app.getPath('userData');
+// Used for stores that should be shared between dev and prod (e.g., agent configs).
+// A demo profile shares nothing: see resolveSharedDataPath.
+const productionDataPath = resolveSharedDataPath(app.getPath('userData'));
 
 // Demo mode: use a separate data directory for fresh demos
 if (DEMO_MODE) {
@@ -626,11 +658,37 @@ store.onDidChange('encoreFeatures', (encoreFeatures) => {
 			pluginGroupingRegistry?.clearAll();
 		}
 	}
+	// Feature changes also invalidate cached settings guests, including changes
+	// made outside this renderer. Reads remain pure; do not refresh discovery.
+	try {
+		mainWindow?.webContents.send(
+			'plugins:changed',
+			undefined,
+			pluginManager?.getContributions().panels.map((panel) => panel.id) ?? []
+		);
+	} catch {
+		// Renderer may be gone during shutdown.
+	}
 	if (!arePluginHostViewsEnabled()) {
 		pluginHostViews.purgeAll();
 		return;
 	}
 	pluginHostViews.sync();
+});
+
+// Computer History follows its Encore flag live. `maestro-cli encore enable`
+// writes through set_setting rather than the first-party bridge, so this store
+// change is the one signal every enable/disable path produces. reconcile() is
+// idempotent and a no-op before the service exists.
+store.onDidChange('encoreFeatures', () => {
+	void getComputerHistoryService()
+		?.reconcile()
+		.catch((err) => void captureException(err, { operation: 'computerHistory:flagChange' }));
+	// MaestroRun follows the same signal: inspect the launcher when its flag
+	// turns on, stop polling for the grant when it turns off.
+	void getMaestroRunService()
+		?.reconcile()
+		.catch((err) => void captureException(err, { operation: 'maestroRun:flagChange' }));
 });
 
 // Collectors for a support (debug) package. One object shared by the debug and
@@ -646,6 +704,33 @@ const debugPackageDeps: DebugPackageDependencies = {
 	bootstrapStore,
 };
 
+// The app window that owns an agent, falling back to the primary window.
+function resolveWindowForSession(sessionId: string): BrowserWindow | null {
+	const ownerId = windowRegistry.getWindowForSession(sessionId);
+	const owner = ownerId ? windowRegistry.get(ownerId) : windowRegistry.getPrimary();
+	return owner?.browserWindow ?? mainWindow;
+}
+
+// Quick Chat: the hotkey-summoned floating chat window. Its IPC handlers and
+// hotkey register at app-ready (see quickChatController.init below).
+const quickChatController = createQuickChatController({
+	settingsStore: store,
+	windowDeps: {
+		isDevelopment,
+		preloadPath,
+		rendererProductionUrl,
+		devServerUrl,
+		windowRegistry,
+		// Per-device, like every other window's bounds.
+		boundsStore: {
+			get: () => windowStateStore.get('quickChat'),
+			set: (bounds) => windowStateStore.set('quickChat', bounds),
+		},
+	},
+	getMainWindow: () => mainWindow,
+	getWindowForSession: resolveWindowForSession,
+});
+
 // Create web server factory with dependency injection (Phase 2 refactoring)
 const createWebServer = createWebServerFactory({
 	settingsStore: store,
@@ -653,11 +738,7 @@ const createWebServer = createWebServerFactory({
 	groupsStore,
 	getDebugPackageDeps: () => debugPackageDeps,
 	getMainWindow: () => mainWindow,
-	getWindowForSession: (sessionId: string) => {
-		const ownerId = windowRegistry.getWindowForSession(sessionId);
-		const owner = ownerId ? windowRegistry.get(ownerId) : windowRegistry.getPrimary();
-		return owner?.browserWindow ?? mainWindow;
-	},
+	getWindowForSession: resolveWindowForSession,
 	deliverCadenza,
 	getProcessManager: () => processManager,
 	triggerCueSubscription: (subscriptionName, prompt, sourceAgentId) => {
@@ -696,6 +777,8 @@ function createWindow(options?: { sessionIds?: string[]; bounds?: Partial<Shared
 		// It deliberately stays visible while Maestro is merely minimized - the
 		// whole point of a HUD is to watch things while working in other apps.
 		closeCadenzaHudWindow();
+		// Same for Quick Chat: it is a feature window, not a reason to keep running.
+		closeQuickChatWindow();
 
 		// The primary window is the app's anchor: it owns the auto-updater, the
 		// global hotkey, the deep-link target, and the quit-confirmation surface.
@@ -917,7 +1000,11 @@ app
 		// Load logger settings first
 		const logLevel = store.get('logLevel', 'info');
 		logger.setLogLevel(logLevel);
-		const maxLogBuffer = store.get('maxLogBuffer', 1000);
+		// Same fallback as the history cap. The renderer reads this value back
+		// through `logger:getMaxLogBuffer` and shows it as the setting, so a
+		// different fallback here made a fresh install display one limit
+		// (1,000) while history was actually trimmed at another.
+		const maxLogBuffer = store.get('maxLogBuffer', MAX_ENTRIES_PER_SESSION);
 		logger.setMaxLogBuffer(maxLogBuffer);
 
 		logger.info('Maestro application starting', 'Startup', {
@@ -935,7 +1022,8 @@ app
 		// `encoreFeatures.opencodeServer` plugin. Read live on every spawn so the
 		// Extensions toggle takes effect without an app restart.
 		processManager = new ProcessManager(
-			() => (store.get('encoreFeatures', {}) as Record<string, boolean>).opencodeServer === true
+			() => (store.get('encoreFeatures', {}) as Record<string, boolean>).opencodeServer === true,
+			{ appVersion: app.getVersion() }
 		);
 		// Note: webServer is created on-demand when user enables web interface (see setupWebServerCallbacks)
 		agentDetector = new AgentDetector();
@@ -1212,6 +1300,7 @@ app
 		});
 
 		// Initialize Cue Engine for event-driven automation
+		const cueHealthToastAt = new Map<string, number>();
 		cueEngine = new CueEngine({
 			getSessions: () => {
 				const stored = sessionsStore.get('sessions', []);
@@ -1233,6 +1322,8 @@ app
 				action,
 				command,
 				notify,
+				autoRun,
+				turnSettings,
 			}) => {
 				const storedSessions = sessionsStore.get('sessions', []) as Array<Record<string, any>>;
 				const storedSession = storedSessions.find((s) => s.id === sessionId);
@@ -1255,14 +1346,85 @@ app
 					conductorProfile: (store.get('conductorProfile', '') as string) || undefined,
 				};
 
+				// `action: autorun` launches an Auto Run in the owning agent. Handled
+				// before notify/command/prompt for the same reason they are: it never
+				// spawns an agent process here, so the agent-path resolution, SSH
+				// wrapping, and prompt plumbing below do not apply. The document list
+				// travels on the subscription rather than being re-read from the
+				// agent's Auto Run folder, so repointing that folder between
+				// scheduling and firing cannot swap the run out from under the user.
+				if (action === 'autorun') {
+					const sessionInfo = {
+						id: storedSession.id,
+						name: storedSession.name,
+						toolType: storedSession.toolType,
+						cwd: projectRoot,
+						projectRoot,
+						autoRunFolderPath: storedSession.autoRunFolderPath,
+					};
+					const subscription = {
+						name: subscriptionName,
+						event: event.type,
+						enabled: true,
+						prompt,
+						action,
+						auto_run: autoRun,
+						agent_id: storedSession.id,
+					};
+					const autoRunLog = (level: string, message: string) => {
+						if (level === 'error') logger.error(message, 'Cue');
+						else if (level === 'warn') logger.warn(message, 'Cue');
+						else if (level === 'debug') logger.debug(message, 'Cue');
+						else logger.cue(message, 'Cue');
+					};
+					if (!autoRun || autoRun.documents.length === 0) {
+						// Reachable for a queued run restored from a row that was
+						// persisted before the queue table carried the payload
+						// (`auto_run_json`), which comes back undefined. Report a failure
+						// rather than throwing - a `time.once` autorun task is written
+						// with `self_destruct_on_failure: false`, so failing here keeps
+						// the subscription on disk instead of consuming it silently.
+						const reason =
+							'no documents on the run - the captured Auto Run payload did not survive the queue';
+						autoRunLog('error', `[CUE] Auto Run "${subscriptionName}" did not start: ${reason}`);
+						const startedAt = new Date().toISOString();
+						const failed = {
+							runId,
+							sessionId: storedSession.id,
+							sessionName: storedSession.name,
+							subscriptionName,
+							event,
+							status: 'failed' as const,
+							stdout: '',
+							stderr: `Auto Run launch failed: ${reason}`,
+							exitCode: 1,
+							durationMs: 0,
+							startedAt,
+							endedAt: startedAt,
+						};
+						return failed;
+					}
+					const autoRunResult = await executeCueAutoRun({
+						runId,
+						session: sessionInfo,
+						subscription,
+						event,
+						autoRun,
+						launch: (params) => launchCueAutoRun(mainWindow, params),
+						onLog: autoRunLog,
+					});
+					return autoRunResult;
+				}
+
 				// `action: notify` surfaces a toast through the owning agent instead of
 				// spawning anything - handled before command/prompt so the spawn config,
 				// SSH wrap, and history-recording paths below stay agent-only. The
 				// notify message is pre-resolved by the dispatch service via the
 				// fallback chain (notify.message → label → prompt → name); falling
 				// back here to `prompt` (which the dispatcher uses as the carrier)
-				// covers the queue-restored corner where the in-memory `notify` was
-				// lost but the message survived in the persisted `prompt` slot.
+				// covers a queue row restored from before the queue table carried
+				// the notify config (`notify_json`), where only the message survived,
+				// in the persisted `prompt` slot.
 				if (action === 'notify') {
 					const sessionInfo = {
 						id: storedSession.id,
@@ -1379,15 +1541,43 @@ app
 
 				const agentConfigValues = getAgentConfigForAgent(storedSession.toolType);
 
-				// Resolve the agent's binary path using the agent detector.
-				// Without this, Cue falls back to the bare command name (e.g., 'claude')
-				// which fails with ENOENT when spawn() can't find it on PATH.
-				let resolvedAgentPath = agentConfigValues.customPath as string | undefined;
-				if (!resolvedAgentPath && agentDetector) {
-					const detectedAgent = await agentDetector.getAgent(storedSession.toolType);
-					if (detectedAgent?.available && detectedAgent.path) {
-						resolvedAgentPath = detectedAgent.path;
-					}
+				// Resolve the agent's binary the way a tab spawn does: the agent's
+				// own custom path, then the provider's, then the detector's. Without
+				// the last rung Cue falls back to the bare command name (e.g.
+				// 'claude'), which fails with ENOENT when spawn() can't find it on PATH.
+				const { resolveCueAgentBinary } = await import('./cue/cue-agent-binary');
+				const resolvedAgentPath = await resolveCueAgentBinary({
+					sessionCustomPath: storedSession.customPath,
+					providerCustomPath: agentConfigValues.customPath as string | undefined,
+					sshEnabled: !!storedSession.sessionSshRemoteConfig?.enabled,
+					getDetectedPath: async () => {
+						const detectedAgent = await agentDetector?.getAgent(storedSession.toolType);
+						return detectedAgent?.available ? detectedAgent.path : undefined;
+					},
+					onWarn: (message) => logger.warn(message, 'Cue', { sessionId: storedSession.id }),
+				});
+
+				// The same Maestro system prompt a tab spawn gets, built from the
+				// stored agent (an SSH agent gets it without localOnly sections).
+				const { buildMaestroSystemPromptForSession } =
+					await import('./utils/maestro-system-prompt');
+				const appendSystemPrompt = await buildMaestroSystemPromptForSession(storedSession.id);
+
+				// The subscription's tier / model / effort outranks the agent's own
+				// config for this run only. A tier or effort the provider cannot
+				// honor falls back to the agent's value and is logged as a warning,
+				// so a run never silently lands on a different model than asked.
+				const turn = resolveCueTurnSettings(
+					storedSession.toolType,
+					turnSettings,
+					storedSession.customModel,
+					storedSession.customEffort
+				);
+				const turnNote = describeTurnSettings(turn);
+				if (turnNote) {
+					const line = `[CUE] "${subscriptionName}" model: ${turnNote}`;
+					if (turn.warnings.length > 0) logger.warn(line, 'Cue');
+					else logger.cue(line, 'Cue');
 				}
 
 				const result = await executeCuePrompt({
@@ -1416,11 +1606,11 @@ app
 					customPath: resolvedAgentPath,
 					customArgs: storedSession.customArgs,
 					customEnvVars: storedSession.customEnvVars,
-					customModel: storedSession.customModel,
-					customEffort: storedSession.customEffort,
+					customModel: turn.model,
+					customEffort: turn.effort,
 					// Claude token-source selection (TUI / API / dynamic), read from
-					// the same persisted session record that supplies customModel
-					// above, so Cue runs honor the triggering agent's choice.
+					// the same persisted session record the model fallback above
+					// reads, so Cue runs honor the triggering agent's choice.
 					enableMaestroP: storedSession.enableMaestroP,
 					maestroPMode: storedSession.maestroPMode,
 					maestroPPath: storedSession.maestroPPath,
@@ -1437,6 +1627,10 @@ app
 					},
 					sshStore: createSshRemoteStoreAdapter(store),
 					agentConfigValues,
+					// Decided here, at dispatch, and never throws: a run is not affected
+					// by what happens to its record.
+					onRunTranscript: beginCueRunCapture(storedSession.id),
+					appendSystemPrompt,
 				});
 
 				// Cue spawns agents outside the ProcessManager, so a failed run is the
@@ -1455,9 +1649,28 @@ app
 				// see the note on the notify path above.
 				return result;
 			},
-			onStopCueRun: (runId) => stopCueRun(runId) || stopCueShellRun(runId) || stopCueCliRun(runId),
+			onStopCueRun: (runId) => stopCueRun(runId),
 			onLog: (_level, message, data) => {
 				logger.cue(message, 'Cue', data);
+				const payload = data as import('../shared/cue-log-types').CueLogPayload | undefined;
+				if (payload?.type === 'triggerHealthWarning') {
+					const now = Date.now();
+					for (const [id, at] of cueHealthToastAt) {
+						if (now - at >= 5 * DURATION_MS.minute) cueHealthToastAt.delete(id);
+					}
+					// Reach the always-mounted toast channel, even with Cue closed.
+					// Log every warning, but coalesce sticky notices per agent for 5m.
+					if (!cueHealthToastAt.has(payload.sessionId)) {
+						const delivered = emitCueNotifyToast(mainWindow, {
+							agentId: payload.sessionId,
+							title: 'Cue trigger health',
+							message: payload.message,
+							sticky: true,
+							color: 'orange',
+						});
+						if (delivered) cueHealthToastAt.set(payload.sessionId, now);
+					}
+				}
 				// Push activity updates to renderer (and web-desktop bridge clients)
 				if (data) {
 					safeSend('cue:activityUpdate', data);
@@ -1510,6 +1723,26 @@ app
 		});
 		pianolaSupervisor = pianolaLifecycle.supervisor;
 		pianolaRelearnScheduler = pianolaLifecycle.relearnScheduler;
+
+		// Computer History: construct the one service (IPC, the CLI's WS writes,
+		// and the first-party hooks all reach it). Started below at boot when its
+		// Encore flag is on; see src/main/computer-history/.
+		createComputerHistoryForApp({
+			settingsStore: store as unknown as { get: (key: string) => unknown },
+			safeSend,
+			getWindowForSession: (sessionId: string) => {
+				const ownerId = windowRegistry.getWindowForSession(sessionId);
+				const owner = ownerId ? windowRegistry.get(ownerId) : windowRegistry.getPrimary();
+				return owner?.browserWindow ?? mainWindow;
+			},
+		});
+
+		// MaestroRun: construct the one service (IPC, the CLI's WS verbs, and the
+		// system-prompt builder all reach it). macOS only; inert elsewhere.
+		createMaestroRunForApp({
+			settingsStore: store as unknown as { get: (key: string) => unknown },
+			safeSend,
+		});
 
 		// Plugin manager: discovers installed community plugins, tracks their
 		// enable state, verifies signatures, and (tier 1) runs their sandboxed
@@ -1599,7 +1832,8 @@ app
 		};
 		try {
 			assertToolProofLocation();
-			toolIdentity = new PluginToolRunIdentity((agentId) => {
+			toolIdentity = pluginToolRunIdentity;
+			toolIdentity.setAgentActiveAssertion((agentId) => {
 				assertToolOwnerActive();
 				assertToolProofLocation();
 				const sessions = sessionsStore.get('sessions', []);
@@ -1697,6 +1931,19 @@ app
 					reconcile: () => usageRefreshScheduler?.start(),
 					stopAll: () => usageRefreshScheduler?.stop(),
 				},
+				// Computer History: `computerHistory.observer` - the accessibility
+				// helper plus the segment writer. Disable/revoke stops both.
+				computerHistory: createComputerHistorySupervisorHooks(() => getComputerHistoryService()),
+				// MaestroRun: no long-running service, only the bounded poll that
+				// watches for the Full Disk Access grant. Disable/revoke stops it.
+				maestroRun: {
+					reconcile: () => {
+						void getMaestroRunService()
+							?.reconcile()
+							.catch((err) => void captureException(err, { operation: 'maestroRun:reconcile' }));
+					},
+					stopAll: () => getMaestroRunService()?.stopWatching(),
+				},
 			};
 		const firstPartyBridges: Partial<Record<FirstPartyEncoreFlag, FirstPartyPluginBridge>> = {};
 		for (const flag of Object.keys(FIRST_PARTY_PLUGINS) as FirstPartyEncoreFlag[]) {
@@ -1726,7 +1973,7 @@ app
 			// cli-server.json token, the plugins dir, plugin KV, supervisor targets,
 			// transcripts) from fs:read AND fs:write, enforced on the symlink-resolved
 			// real path so no plugin fs scope can ever reach it.
-			protectedPaths: () => [app.getPath('userData')],
+			protectedPaths: () => [app.getPath('userData'), ...getPluginRunProofProtectedPaths()],
 			onDecision: (pluginId, method, decision) => {
 				if (decision.allowed) return;
 				logger.warn(
@@ -1771,6 +2018,40 @@ app
 		const pluginKvStore = new PluginKvStore({
 			baseDir: path.join(app.getPath('userData'), 'plugin-data'),
 		});
+		const pluginProviderSessions = new PluginAgentSessionBindings(
+			path.join(app.getPath('userData'), 'plugin-agent-sessions')
+		);
+		const relayProjectPath = (agent: SessionInfo): string =>
+			agent.sessionSshRemoteConfig?.enabled
+				? agent.sessionSshRemoteConfig.workingDirOverride || agent.projectRoot || agent.cwd
+				: agent.projectRoot || agent.cwd;
+		const markRelaySession = (agent: SessionInfo, providerSessionId: string, backfill = false) => {
+			const projectPath = relayProjectPath(agent);
+			if (agent.toolType === 'claude-code' || agent.toolType === 'codex') {
+				const existing = claudeSessionOriginsStore.get('origins', {})[projectPath]?.[
+					providerSessionId
+				];
+				if (backfill && (typeof existing === 'string' ? existing : existing?.origin) === 'relay') {
+					return;
+				}
+				setClaudeSessionOrigin(claudeSessionOriginsStore, projectPath, providerSessionId, {
+					origin: 'relay',
+				});
+				return;
+			}
+			const origins = agentSessionOriginsStore.get('origins', {});
+			const project = origins[agent.toolType]?.[projectPath] ?? {};
+			const existing = project[providerSessionId];
+			if (backfill && existing?.origin === 'relay') return;
+			origins[agent.toolType] = {
+				...origins[agent.toolType],
+				[projectPath]: {
+					...project,
+					[providerSessionId]: { ...existing, origin: 'relay' },
+				},
+			};
+			agentSessionOriginsStore.set('origins', origins);
+		};
 		const pluginEgressGuard = createEgressGuard({
 			// The app's own web/CLI server. Loopback + RFC1918 are already blocked by
 			// IP classification; this is belt-and-suspenders for a public-bind setup.
@@ -2247,7 +2528,20 @@ app
 				unifiedTabOrder: [{ type: 'ai', id: tabId }],
 				unifiedClosedTabHistory: [],
 			};
-			setPluginSessionsRaw([...pluginSessionsRaw(), session]);
+			const previousSessions = pluginSessionsRaw();
+			setPluginSessionsRaw([...previousSessions, session]);
+			if (!previousSessions.some((existing) => existing.id === sessionId)) {
+				try {
+					pianolaSupervisor?.autoWatchNewSessions(
+						[session],
+						[...previousSessions, session] as AutoWatchSession[],
+						store.get('pianolaAutoWatchNewAgents', false) === true
+					);
+				} catch (error) {
+					logger.error('Could not register new Pianola watch', '[Pianola]', error);
+					void captureException(error, { operation: 'pianola:autoWatchPluginSession' });
+				}
+			}
 			sessionsStore.set('activeSessionId', sessionId);
 			return {
 				id: sessionId,
@@ -2282,7 +2576,19 @@ app
 		const pluginSessionsDelete = async (sessionId: string): Promise<boolean> => {
 			const sessions = pluginSessionsRaw();
 			if (!sessions.some((s) => s.id === sessionId)) return false;
-			setPluginSessionsRaw(sessions.filter((s) => s.id !== sessionId));
+			const remaining = sessions.filter((s) => s.id !== sessionId);
+			setPluginSessionsRaw(remaining);
+			try {
+				pianolaSupervisor?.autoWatchNewSessions(
+					[],
+					remaining as unknown as AutoWatchSession[],
+					store.get('pianolaAutoWatchNewAgents', false) === true,
+					[sessionId]
+				);
+			} catch (error) {
+				logger.error('Could not retire Pianola watch', '[Pianola]', error);
+				void captureException(error, { operation: 'pianola:retireAutoWatch' });
+			}
 			if (sessionsStore.get('activeSessionId', '') === sessionId) {
 				const nextActive = pluginSessionsRaw()[0]?.id;
 				sessionsStore.set('activeSessionId', typeof nextActive === 'string' ? nextActive : '');
@@ -2389,7 +2695,10 @@ app
 			}
 		}
 
-		let pluginResourceCleanup: ((pluginId: string) => void) | undefined;
+		let serviceAvailable: ((pluginId: string, requirementId: string) => boolean) | undefined;
+		let serviceReconcileQueued = false;
+		let serviceReconcile: (() => void) | undefined;
+		let pluginResourceCleanup: ((pluginId: string) => Promise<void>) | undefined;
 		const groupingRegistry = new PluginGroupingRegistry(() => {
 			try {
 				mainWindow?.webContents.send('plugins:groupings-changed');
@@ -2398,6 +2707,134 @@ app
 			}
 		});
 		pluginGroupingRegistry = groupingRegistry;
+		const runHeadlessAgent: HeadlessAgentRunner = createPluginHeadlessAgentRunner({
+			getAgent: (agentId) =>
+				(sessionsStore.get('sessions', []) as SessionInfo[]).find(
+					(session) => session.id === agentId
+				),
+			detectAgent: async (type) => {
+				const detected = await agentDetector?.getAgent(type);
+				return { available: detected?.available === true, path: detected?.path };
+			},
+			getAgentConfig: getAgentConfigForAgent,
+			getGlobalEnvVars: () => store.get('shellEnvVars', {}),
+			hasPluginTools: () => (pluginManager?.getContributions().tools.length ?? 0) > 0,
+			spawn: spawnAgent,
+			prepareSystemPrompt: prepareMaestroSystemPromptCli,
+			issueRunToken: (agentId, ttlMs, receiptToolId) =>
+				pluginToolRunIdentity.issue(agentId, ttlMs, receiptToolId),
+			getRunReceipts: (token) => pluginToolRunIdentity.getReceipts(token),
+			hasRunReceiptOverflow: (token) => pluginToolRunIdentity.hasReceiptOverflowed(token),
+			revokeRunToken: (token) => pluginToolRunIdentity.revoke(token),
+			cliScriptPath: resolveMaestroCliScriptPath,
+			audit: (agentId, resumed) =>
+				logger.info(
+					`agents.send -> agent ${agentId} providerSession=${resumed ? 'resume' : 'fresh'}`,
+					'[PluginAudit]'
+				),
+		});
+		setHeadlessAgentRunner(runHeadlessAgent);
+		const mailIdentityFor = (id: string) => {
+			if (!resolveEncoreFeatures(store.get('encoreFeatures')).plugins)
+				throw new ImapConnectionError('MAIL_DENIED');
+			if (pluginSandboxHost?.isAcceptingServiceCalls(id) !== true)
+				throw new ImapConnectionError('MAIL_DENIED');
+			const record = pluginManager
+				?.getActiveRecords()
+				.find((r) => r.id === id && r.signature?.status === 'trusted');
+			if (!record) throw new ImapConnectionError('MAIL_DENIED');
+			const identity = pluginIdentity(record.source, trustedKeysFor());
+			if (
+				!identity ||
+				!authStore.verify(
+					id,
+					identity,
+					(record.manifest?.permissions ?? []).map((p) => p.capability)
+				).authorized
+			)
+				throw new ImapConnectionError('MAIL_DENIED');
+			authStore.readMailConfiguration(id, identity);
+			return identity;
+		};
+		const mailSetup = new MailSetupWindows({
+			store: authStore,
+			dir: __dirname,
+			identityFor: mailIdentityFor,
+			agents: () =>
+				sessionsStore
+					.get('sessions', [])
+					.filter((s) => s.toolType !== 'terminal')
+					.map((s) => ({ id: s.id, name: s.name })),
+			onChanged: (id) =>
+				pluginSandboxHost?.pushEvent(id, {
+					topic: 'mail.accountsChanged',
+					at: new Date().toISOString(),
+					payload: {},
+				}),
+		});
+		const pluginMail = new MailHostService({
+			store: authStore,
+			toolIdentity: pluginToolRunIdentity,
+			identityFor: mailIdentityFor,
+			assertPolicyActive: (id, identity, agentId, right, accountId) => {
+				const current = mailIdentityFor(id);
+				if (
+					current.contentHash !== identity.contentHash ||
+					current.signerKey !== identity.signerKey ||
+					current.signatureStatus !== identity.signatureStatus
+				)
+					throw new ImapConnectionError('MAIL_DENIED');
+				const capability =
+					right === 'detail'
+						? 'mail:body'
+						: right === 'attachments'
+							? 'mail:attachments'
+							: 'mail:read';
+				if (
+					!isPermitted(grantsOf(id), capability, accountId) ||
+					sessionsStore
+						.get('sessions', [])
+						.filter((s) => s.id === agentId && s.toolType !== 'terminal').length !== 1
+				)
+					throw new ImapConnectionError('MAIL_DENIED');
+			},
+			requestSetup: (id, intent) => mailSetup.request(id, intent),
+		});
+
+		configureMailCueHost(
+			createMailCueHost({
+				store: authStore,
+				toolIdentity: pluginToolRunIdentity,
+				identityFor: mailIdentityFor,
+				checkpointPath: path.join(app.getPath('userData'), 'mail-cue-checkpoints.json'),
+				enabled: () => cueEngine?.isEnabled() === true,
+				capturePluginLifetime: (id) => pluginSandboxHost!.captureToolLifetime(id),
+				getPluginGeneration: (id) => pluginSandboxHost!.getToolGeneration(id),
+				isSubscriptionActive: (id, name, source) =>
+					cueEngine?.isMailSubscriptionActive(id, name, source) === true,
+				assertPolicyActive: (id, identity, agent, right, account) => {
+					mailIdentityFor(id);
+					if (
+						sessionsStore
+							.get('sessions', [])
+							.filter((s) => s.id === agent && s.toolType !== 'terminal').length !== 1 ||
+						!isPermitted(grantsOf(id), 'mail:read', account)
+					)
+						throw new ImapConnectionError('MAIL_DENIED');
+					authStore.assertStoredMailAgentRight(
+						id,
+						identity,
+						account,
+						authStore
+							.readMailConfiguration(id, identity)!
+							.accounts.find((a) => a.accountId === account)!.revision,
+						agent,
+						right
+					);
+				},
+			})
+		);
+
 		const sandboxHost = new PluginSandboxHost({
 			toolIdentity,
 			assertToolPluginActive: (pluginId) => {
@@ -2408,6 +2845,42 @@ app
 			},
 			broker: pluginBroker,
 			handlers: buildHostCallHandlers({
+				mail: pluginMail,
+				serviceManifest: (id) =>
+					pluginManager
+						?.getActiveRecords()
+						.find((r) => r.id === id && r.signature?.status === 'trusted')?.manifest ?? undefined,
+				serviceCancelProvider: (id, callId) => {
+					pluginSandboxHost?.pushEvent(id, {
+						topic: 'services.cancel',
+						at: new Date().toISOString(),
+						payload: { callId },
+					});
+				},
+				serviceRunning: (id) => pluginSandboxHost?.isAcceptingServiceCalls(id) === true,
+				serviceAllowed: (id, capability, target) => isPermitted(grantsOf(id), capability, target),
+				serviceInvoke: (id, command, request, signal, timeoutMs) =>
+					pluginSandboxHost
+						? pluginSandboxHost.invokeTool(id, command, request, {
+								signal,
+								timeoutMs,
+								service: true,
+							})
+						: Promise.reject(new Error('ServiceUnavailable')),
+				registerServiceReconcile: (reconcile) => {
+					serviceReconcile = reconcile;
+				},
+				registerServiceAvailability: (available) => {
+					serviceAvailable = available;
+				},
+				serviceChanged: () => {
+					if (serviceReconcileQueued) return;
+					serviceReconcileQueued = true;
+					queueMicrotask(() => {
+						serviceReconcileQueued = false;
+						pluginManager?.reconcileServiceDependencies();
+					});
+				},
 				broker: pluginBroker,
 				actionGuard: pluginActionGuard,
 				kvStore: pluginKvStore,
@@ -2473,7 +2946,11 @@ app
 				powerPreventSleep: (reason) => powerManager.addBlockReason(reason),
 				powerReleaseSleep: (reason) => powerManager.removeBlockReason(reason),
 				registerResourceCleanup: (cleanup) => {
-					pluginResourceCleanup = cleanup;
+					pluginResourceCleanup = (id) => {
+						mailSetup.closePlugin(id);
+						pluginMail.stopPlugin(id);
+						return cleanup(id);
+					};
 				},
 				backgroundRegister: async (pluginId, service) =>
 					backgroundSupervisor.register(pluginId, service),
@@ -2542,7 +3019,56 @@ app
 				isPluginTrusted: (pluginId) =>
 					pluginManager?.getRegistry().records.find((r) => r.id === pluginId)?.signature?.status ===
 					'trusted',
+				getPluginSignature: (pluginId) =>
+					pluginManager?.getRegistry().records.find((record) => record.id === pluginId)?.signature,
 				dispatch: async (agentId, prompt) => dispatchPromptToSession(agentId, prompt),
+				sendAgent: runHeadlessAgent,
+				generateTitle: async (agentId, firstMessage, signal) => {
+					const session = (sessionsStore.get('sessions', []) as SessionInfo[]).find(
+						(candidate) => candidate.id === agentId
+					);
+					if (!session) throw new Error(`agents.generateTitle: no agent "${agentId}"`);
+					return generateTabName(
+						{
+							getProcessManager: () => processManager,
+							getAgentDetector: () => agentDetector,
+							agentConfigsStore,
+							settingsStore: store,
+						},
+						{
+							userMessage: firstMessage,
+							agentType: session.toolType,
+							cwd: session.cwd,
+							sessionSshRemoteConfig: session.sessionSshRemoteConfig,
+							sessionCustomEnvVars: session.customEnvVars,
+							enableMaestroP: session.enableMaestroP,
+							maestroPMode: session.maestroPMode,
+							maestroPPath: session.maestroPPath,
+							useUtilityAgent: false,
+						},
+						signal
+					);
+				},
+				providerSessions: pluginProviderSessions,
+				recordRelayTurn: async (agentId, prompt, result) => {
+					const agent = (sessionsStore.get('sessions', []) as SessionInfo[]).find(
+						(session) => session.id === agentId
+					);
+					if (!agent) return;
+					if (result.sessionId) markRelaySession(agent, result.sessionId);
+					const projectPath = relayProjectPath(agent);
+					await getHistoryManager().addEntry(agent.id, projectPath, {
+						id: crypto.randomUUID(),
+						type: 'RELAY',
+						timestamp: Date.now(),
+						summary: (result.response || result.error || prompt).slice(0, 500),
+						fullResponse: result.response || undefined,
+						projectPath,
+						sessionId: agent.id,
+						agentSessionId: result.sessionId || undefined,
+						success: result.success,
+					});
+				},
 				// Direct plugin dispatch is never user-present, so it requires the
 				// separate unattended consent on TOP of the interactive allowlist grant
 				// - the same grant source and check the time-based scheduler uses.
@@ -2599,17 +3125,23 @@ app
 				logger.info(`[Plugin:${pluginId}] ${level}: ${message}`, '[Plugins]');
 			},
 			onCrash: (pluginId, code) => {
-				pluginResourceCleanup?.(pluginId);
+				const drain = pluginResourceCleanup?.(pluginId);
 				pluginHostViews.purge(pluginId);
 				groupingRegistry.removePlugin(pluginId);
 				logger.warn(`[Plugins] plugin "${pluginId}" crashed (code ${code})`, '[Plugins]');
-				backgroundSupervisor.onPluginCrash(pluginId, code);
+				backgroundSupervisor.onPluginCrash(
+					pluginId,
+					code,
+					drain ? Promise.resolve(drain) : undefined
+				);
+				return drain;
 			},
 			onStop: (pluginId) => {
-				pluginResourceCleanup?.(pluginId);
+				const drain = pluginResourceCleanup?.(pluginId);
 				pluginHostViews.purge(pluginId);
 				groupingRegistry.removePlugin(pluginId);
 				backgroundSupervisor.onPluginStopped(pluginId);
+				return drain;
 			},
 		});
 		pluginSandboxHost = sandboxHost;
@@ -2617,6 +3149,7 @@ app
 			toolIdentity,
 			toolProofFiles,
 			assertToolRecordActive,
+			serviceAvailable: (id, requirement) => serviceAvailable?.(id, requirement) === true,
 			isEnabled: () => {
 				const ef = store.get('encoreFeatures', {}) as Record<string, boolean>;
 				return ef.plugins === true;
@@ -2641,6 +3174,7 @@ app
 			// Complete uninstall (invariant #8): purge the plugin's KV store, its
 			// plugins.<id>.* settings, and its event subscriptions.
 			purgePluginData: (id) => {
+				pluginProviderSessions.purge(id);
 				purgePluginData(id, {
 					kvStore: pluginKvStore,
 					settingsDeleteNamespace: pluginSettingsDeleteNamespace,
@@ -2651,9 +3185,15 @@ app
 				backgroundSupervisor.teardown(id);
 			},
 			onChange: (registry) => {
+				serviceReconcile?.();
+				pluginManager?.reconcileServiceDependencies();
 				pluginHostViews.sync();
 				try {
-					mainWindow?.webContents.send('plugins:changed', registry);
+					mainWindow?.webContents.send(
+						'plugins:changed',
+						registry,
+						pluginManager?.getContributions().panels.map((panel) => panel.id) ?? []
+					);
 				} catch {
 					// Renderer may be gone during shutdown; ignore.
 				}
@@ -2681,9 +3221,8 @@ app
 				const record = pluginManager?.getRegistry().records.find((r) => r.id === pluginId);
 				return record ? pluginIdentity(record.source, trustedKeysFor()) : null;
 			},
-			openPrompt: async ({ pluginId, offered, nonce }) => {
+			openPrompt: async ({ pluginId, offered, requested, nonce }) => {
 				const record = pluginManager?.getRegistry().records.find((r) => r.id === pluginId);
-				const requested = pluginManager?.getRequestedPermissions(pluginId) ?? [];
 				// [FC1Finish] Full-trust banner for a CODE plugin (tier >= 1 with an
 				// entry file): under Option-B trusted-to-run there is no OS sandbox,
 				// so consent must say what enabling actually does.
@@ -2977,6 +3516,9 @@ app
 		setupIpcHandlers({
 			debugPackageDeps,
 			getMainWindow: () => mainWindow,
+			ensureMainWindow: () => {
+				if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+			},
 			getProcessManager: () => processManager,
 			getWebServer: () => webServer,
 			setWebServer: (server) => {
@@ -3013,6 +3555,42 @@ app
 			getCustomEnvVarsForAgent,
 		});
 
+		// Older Relay turns predate origin recording. The private host binding is
+		// the proof: only a session owned by this exact plugin and agent qualifies.
+		// A real CLI session has no such binding, so it is never relabeled.
+		if (pluginProviderSessions.hasBindings(RELAY_PLUGIN_ID)) {
+			void (async () => {
+				for (const agent of sessionsStore.get('sessions', []) as SessionInfo[]) {
+					const storage = getSessionStorage(agent.toolType);
+					if (!storage) continue;
+					try {
+						const remoteId = agent.sessionSshRemoteConfig?.enabled
+							? agent.sessionSshRemoteConfig.remoteId
+							: null;
+						const ssh = remoteId ? getSshRemoteById(remoteId) : undefined;
+						if (agent.sessionSshRemoteConfig?.enabled && (!ssh || !ssh.enabled)) continue;
+						const projectPath = relayProjectPath(agent);
+						const profileEnvVar = getProviderProfileConfig(agent.toolType)?.envVar;
+						const sessions = await storage.listSessions(
+							projectPath,
+							ssh,
+							profileEnvVar ? agent.customEnvVars?.[profileEnvVar] : undefined
+						);
+						for (const session of sessions) {
+							if (!pluginProviderSessions.isOwned(RELAY_PLUGIN_ID, agent.id, session.sessionId)) {
+								continue;
+							}
+							markRelaySession(agent, session.sessionId, true);
+						}
+					} catch (error) {
+						logger.warn(`Relay origin backfill skipped ${agent.id}: ${String(error)}`, 'Migration');
+					}
+				}
+			})().catch((error) =>
+				logger.warn(`Relay origin backfill failed: ${String(error)}`, 'Migration')
+			);
+		}
+
 		// Set up process event listeners
 		logger.debug('Setting up process event listeners', 'Startup');
 		wireProcessListeners({
@@ -3048,7 +3626,10 @@ app
 				});
 				// F3: also watch the store files so CLI-origin writes (pianola/send/batch)
 				// reach the renderer when the app is running (ISC-3.1).
-				startAgentRunStoreWatcher();
+				// The same change also tells the per-agent turn log which runs the
+				// command line finished, including those that ended while the app
+				// was closed (the watcher reports once when it starts).
+				startAgentRunStoreWatcher({ onRunsChanged: recordCommandLineRuns });
 				// F1/ISC-1.10 crash recovery: settle runs left non-terminal by a previous
 				// crash. Runs once, before any new agent spawns; error-tolerant inside.
 				setupAgentRunRecovery(processManager);
@@ -3071,6 +3652,24 @@ app
 				);
 			}
 		}
+
+		// Start Computer History when its Encore flag is on. start() re-checks the
+		// flag itself; a missing helper binary is reported in status, not thrown.
+		void getComputerHistoryService()
+			?.start()
+			.catch((err) => {
+				void captureException(err, { operation: 'computerHistory:boot' });
+				logger.error(`Computer History failed to start at boot: ${err}`, 'Startup');
+			});
+
+		// Inspect MaestroRun when its Encore flag is on, so the first agent
+		// spawned after launch already knows whether the launcher is ready.
+		void getMaestroRunService()
+			?.reconcile()
+			.catch((err) => {
+				void captureException(err, { operation: 'maestroRun:boot' });
+				logger.error(`MaestroRun check failed at boot: ${err}`, 'Startup');
+			});
 
 		// Start the Pianola supervisor unconditionally: it self-gates on the
 		// pianola Encore flag (reconcile kills everything and spawns nothing when
@@ -3119,7 +3718,11 @@ app
 		// Install the application menu (File / Edit / View / Window on macOS,
 		// removed entirely on Windows/Linux). See src/main/app-menu.ts for why the
 		// menu is display-only and how clicks are routed back to the renderer.
+		// The Encore flags go in first: an item for a switched-off feature is
+		// left out, and the menu follows the flags live from then on.
+		setMenuEncoreFeatures(store.get('encoreFeatures'));
 		installApplicationMenu();
+		store.onDidChange('encoreFeatures', (value) => setMenuEncoreFeatures(value));
 
 		// Restore the saved multi-window layout (or a single primary window when
 		// there is nothing saved - backward compatible).
@@ -3146,6 +3749,8 @@ app
 				mainWindow.webContents.send('globalHotkey:registrationFailed', keys);
 			}
 		});
+		// Quick Chat registers its own hotkey through the same manager.
+		quickChatController.init();
 		// Electron auto-unregisters globalShortcuts on quit, but be explicit so the
 		// behavior survives any future change to that policy.
 		app.on('will-quit', disposeGlobalHotkey);
@@ -3265,8 +3870,6 @@ quitHandler = createQuitHandler({
 	getWebServer: () => webServer,
 	getHistoryManager,
 	tunnelManager,
-	getActiveGroomingSessionCount,
-	cleanupAllGroomingSessions,
 	closeStatsDB,
 	stopPluginToolAuthority: () => {
 		const manager = pluginManager;
@@ -3293,6 +3896,15 @@ quitHandler = createQuitHandler({
 		pianolaSupervisor?.stopAll();
 		// Stop the Pianola re-learn cadence.
 		pianolaRelearnScheduler?.stop();
+		// Stop the Computer History helper (it also exits on stdin EOF) and close
+		// the open segment. If quit outruns the close, the next start indexes it.
+		void getComputerHistoryService()
+			?.stop()
+			.catch((error) => {
+				void captureException(error, { operation: 'shutdown:computerHistory' });
+			});
+		// Stop polling for the MaestroRun grant.
+		getMaestroRunService()?.dispose();
 		// Tear down plugin hot-reload watching and running sandboxes.
 		pluginManager?.stopWatching();
 		pluginManager?.stopAllSandboxes();

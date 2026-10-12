@@ -22,6 +22,7 @@ import { useSettingsStore } from '../../../renderer/stores/settingsStore';
 import { useUIStore } from '../../../renderer/stores/uiStore';
 import type { Session, Theme, LogEntry } from '../../../renderer/types';
 import { TRANSCRIPT_SCROLL_TO_BOTTOM_EVENT } from '../../../renderer/services/transcriptScroll';
+import { useComposerInputStore } from '../../../renderer/stores/composerInputStore';
 
 // Mock dependencies
 vi.mock('react-syntax-highlighter', () => ({
@@ -302,6 +303,50 @@ describe('TerminalOutput', () => {
 			render(<TerminalOutput {...props} />);
 
 			expect(screen.queryByTitle('Sent in read-only mode')).not.toBeInTheDocument();
+		});
+
+		it('shows the steer indicator for a message steered into a running turn', () => {
+			const logs: LogEntry[] = [
+				createLogEntry({ text: 'go left instead', source: 'user', steered: true }),
+			];
+
+			const session = createDefaultSession({
+				tabs: [
+					{ id: 'tab-1', agentSessionId: 'claude-123', logs, isUnread: false, showThinking: 'on' },
+				],
+				activeTabId: 'tab-1',
+			});
+
+			const props = createDefaultProps({ session });
+			render(<TerminalOutput {...props} />);
+
+			expect(
+				screen.getByTitle('Sent as a steer into the turn that was already running')
+			).toBeInTheDocument();
+		});
+
+		it('does not show the steer indicator for a message that started its own turn', () => {
+			const logs: LogEntry[] = [
+				createLogEntry({ text: 'Regular message', source: 'user', forceParallel: true }),
+			];
+
+			const session = createDefaultSession({
+				tabs: [
+					{ id: 'tab-1', agentSessionId: 'claude-123', logs, isUnread: false, showThinking: 'on' },
+				],
+				activeTabId: 'tab-1',
+			});
+
+			const props = createDefaultProps({ session });
+			render(<TerminalOutput {...props} />);
+
+			expect(
+				screen.queryByTitle('Sent as a steer into the turn that was already running')
+			).not.toBeInTheDocument();
+			// The two marks are separate: a force-sent message keeps its hammer.
+			expect(
+				screen.getByTitle('Sent via forced parallel execution (bypassed queue)')
+			).toBeInTheDocument();
 		});
 
 		it('renders error log entries through the markdown renderer to preserve line breaks', () => {
@@ -1140,6 +1185,65 @@ describe('TerminalOutput', () => {
 				expect(active?.detail).toBe('Copy this text');
 				expect(active?.color).toBe('theme');
 			});
+		});
+	});
+
+	describe('quote selection into the composer (#1663)', () => {
+		const renderWithReply = (text: string) => {
+			const logs: LogEntry[] = [createLogEntry({ text, source: 'stdout' })];
+			const session = createDefaultSession({
+				tabs: [{ id: 'tab-1', agentSessionId: 'claude-123', logs, isUnread: false }],
+				activeTabId: 'tab-1',
+			});
+			return render(<TerminalOutput {...createDefaultProps({ session })} />);
+		};
+
+		const selectContents = (el: Element) => {
+			const range = document.createRange();
+			range.selectNodeContents(el);
+			const selection = window.getSelection()!;
+			selection.removeAllRanges();
+			selection.addRange(range);
+		};
+
+		beforeEach(() => {
+			useComposerInputStore.getState().loadAiDraft('tab-1', '', 'off');
+		});
+
+		afterEach(() => {
+			window.getSelection()?.removeAllRanges();
+		});
+
+		it('offers Quote in Message on a right-click over selected reply text and appends a quote', () => {
+			renderWithReply('Passage to quote');
+			const passage = screen.getByText('Passage to quote');
+			selectContents(passage);
+
+			fireEvent.contextMenu(passage, { clientX: 10, clientY: 10 });
+			fireEvent.click(screen.getByText('Quote in Message'));
+
+			expect(useComposerInputStore.getState().aiValue).toBe('> Passage to quote\n\n');
+			expect(screen.queryByText('Quote in Message')).not.toBeInTheDocument();
+		});
+
+		it('keeps text already in the composer and leaves command mode', () => {
+			useComposerInputStore.getState().loadAiDraft('tab-1', 'first comment', 'shell');
+			renderWithReply('Second passage');
+			const passage = screen.getByText('Second passage');
+			selectContents(passage);
+
+			fireEvent.contextMenu(passage);
+			fireEvent.click(screen.getByText('Quote in Message'));
+
+			const state = useComposerInputStore.getState();
+			expect(state.aiValue).toBe('first comment\n\n> Second passage\n\n');
+			expect(state.aiCommandMode).toBe('off');
+		});
+
+		it('shows no menu when nothing is selected', () => {
+			renderWithReply('Unselected passage');
+			fireEvent.contextMenu(screen.getByText('Unselected passage'));
+			expect(screen.queryByText('Quote in Message')).not.toBeInTheDocument();
 		});
 	});
 
@@ -3158,9 +3262,15 @@ describe('TerminalOutput', () => {
 			const props = createDefaultProps({ session });
 			render(<TerminalOutput {...props} />);
 
-			// Header pill still renders, body goes through the markdown stack
-			// (react-markdown is mocked to a div with this testid).
+			// Collapsed by default: only the first line shows, as plain text.
 			expect(screen.getByText('/archive-playbooks:')).toBeInTheDocument();
+			expect(screen.queryByTestId('react-markdown')).not.toBeInTheDocument();
+			expect(screen.getByText(/## Step 1/)).toBeInTheDocument();
+			expect(screen.queryByText(/what moved/)).not.toBeInTheDocument();
+
+			// Clicking the header expands the body through the markdown stack
+			// (react-markdown is mocked to a div with this testid).
+			fireEvent.click(screen.getByText('/archive-playbooks:'));
 			expect(screen.getByTestId('react-markdown')).toHaveTextContent('Step 1');
 		});
 
@@ -3186,6 +3296,7 @@ describe('TerminalOutput', () => {
 
 			const props = createDefaultProps({ session, markdownEditMode: true });
 			render(<TerminalOutput {...props} />);
+			fireEvent.click(screen.getByText('/pr-review:'));
 
 			expect(screen.queryByTestId('react-markdown')).not.toBeInTheDocument();
 

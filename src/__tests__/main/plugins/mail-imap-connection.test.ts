@@ -106,9 +106,9 @@ describe('configured endpoint validation', () => {
 	it('copies frozen trusted fields and strips TLS overrides without mutating configuration', () => {
 		const config = { ...endpoint, rejectUnauthorized: false, password: 'synthetic' };
 		const result = validateConfiguredImapEndpoint(config);
-		expect(result).toStrictEqual({ ...endpoint, allowNonstandardPort: undefined });
+		expect(result).toStrictEqual(endpoint);
 		expect(Object.isFrozen(result)).toBe(true);
-		expect(result).not.toBe(config);
+		expect(result === config).toBe(false);
 		expect(config.rejectUnauthorized).toBe(false);
 	});
 	it.each([
@@ -320,7 +320,7 @@ describe('admission and pinned synthetic TLS', () => {
 		safeError((await lookup(f, 'foreign.test')).error, 'MAIL_DENIED');
 		expect(f.deps.resolve).toHaveBeenCalledTimes(1);
 		f.controller.abort();
-		safeError((await lookup(f)).error, 'MAIL_CANCELED');
+		safeError((await lookup(f)).error, 'MAIL_DENIED');
 		expect(f.deps.resolve).toHaveBeenCalledTimes(1);
 	});
 });

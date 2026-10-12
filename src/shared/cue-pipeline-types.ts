@@ -14,6 +14,7 @@ import type {
 	CueGraphSession as SharedCueGraphSession,
 } from './cue';
 export type { CueCommand, CueCommandMode, CueEventType, CueNotifyConfig } from './cue';
+import type { EffortLevel, ModelTier } from './modelTiers';
 
 /** Cue brand color - single source of truth for all Cue UI */
 export const CUE_COLOR = '#06b6d4';
@@ -59,6 +60,7 @@ export interface TriggerNodeData {
 	/** User-defined label overriding the default event-type label (e.g. "Morning Check") */
 	customLabel?: string;
 	config: {
+		mail?: import('./cue/contracts').CueMailSource;
 		interval_minutes?: number;
 		schedule_times?: string[];
 		schedule_days?: string[];
@@ -125,6 +127,13 @@ export interface AgentNodeData {
 	fanInTimeoutMinutes?: number;
 	/** Per-node fan-in timeout-on-fail override. 'break' waits for all, 'continue' fires with partial data. */
 	fanInTimeoutOnFail?: 'break' | 'continue';
+	/** Model tier this node runs at (`low | medium | high`). Serialized onto
+	 *  the subscription that runs the node as `tier`. Exclusive with `model`. */
+	tier?: ModelTier;
+	/** Exact model id this node runs on. Serialized as `model`. */
+	model?: string;
+	/** Effort level this node runs at. Serialized as `effort`. */
+	effort?: EffortLevel;
 	/** Stable per-instance identifier (UUID), generated when the node is
 	 *  created in the editor. Persisted in YAML via `target_node_key` /
 	 *  `fan_out_node_keys` on the owning subscription so two visual nodes

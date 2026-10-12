@@ -90,7 +90,7 @@ describe('host-private incremental IMAP framing', () => {
 		if (frames[0].kind !== 'data') throw new Error('Expected FETCH');
 		const literals = frames[0].parts.filter(Buffer.isBuffer);
 		expect(literals).toHaveLength(3);
-		expect(literals[1]).not.toBe(literals[2]);
+		expect(literals[1] === literals[2]).toBe(false);
 		wire.fill(0);
 		expect(literals.map((part) => part.toString())).toEqual(['', 'ZZ', 'YY']);
 		literals[1].fill(65);
@@ -230,7 +230,7 @@ describe('host-private incremental IMAP framing', () => {
 		decoder.finish();
 		if (frames[0].kind !== 'data') throw new Error('Expected FETCH');
 		const output = frames[0].parts[2] as Buffer;
-		expect(output).not.toBe(input);
+		expect(output === input).toBe(false);
 		expect(output.length).toBe(size);
 		expect(output.equals(input)).toBe(true);
 		output.fill(0);
@@ -445,7 +445,7 @@ describe('host-private incremental IMAP framing', () => {
 				caught = error;
 			}
 			expect(caught).toEqual(new ImapFramingError('MAIL_PROTOCOL'));
-			expect(caught).not.toBe(native);
+			expect(caught === native).toBe(false);
 			expect(caught).not.toHaveProperty('cause');
 			expect(String(caught)).not.toContain('synthetic-private');
 			for (const result of alloc.mock.results)

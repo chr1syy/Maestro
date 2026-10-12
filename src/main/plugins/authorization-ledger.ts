@@ -32,9 +32,16 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import type { CueMailEnvelope } from '../../shared/cue/contracts';
+import type { RelayMailMetadata } from '../../shared/plugins/mail';
+import { mailRecord, parseMailMessageReference } from './mail-account-config';
 import { assertSerializedJsonIsSafe } from '../../shared/jsonUtils';
-import { isAllowlistScoped, isValidAllowlistMember } from '../../shared/plugins/permissions';
+import {
+	isAllowlistScoped,
+	isValidAllowlistMember,
+	parseAllowlistScope,
+} from '../../shared/plugins/permissions';
 import type { PermissionGrant, PluginCapability } from '../../shared/plugins/permissions';
 import type { SignatureStatus } from '../../shared/plugins/signing';
 import { PLUGIN_ID_PATTERN } from '../../shared/plugins/plugin-manifest';
@@ -57,6 +64,7 @@ import {
 	MAIL_LEDGER_LIMITS,
 	MAIL_AGENT_RIGHTS,
 	parseMailAgentRights,
+	parseMailRights,
 	type MailAccountAgentGrant,
 	type MailAgentRight,
 	type MailLedgerState,
@@ -67,6 +75,15 @@ import {
 	assertMailActivityAuthority,
 	type MailActivityLease,
 } from './mail-account-activity';
+import {
+	createKeyringAnchor,
+	keyringAnchor,
+	noAnchor,
+	createKeyringEntry,
+} from '../utils/keyring-anchor';
+import type { Anchor, AnchorStore, KeyringEntry, KeyringModule } from '../utils/keyring-anchor';
+import { safeStorageSeal } from '../utils/safe-storage-seal';
+import type { SafeStorageLike, SealProvider } from '../utils/safe-storage-seal';
 
 /** Schema version of the sealed ledger payload. */
 export const LEDGER_VERSION = 2 as const;
@@ -114,32 +131,15 @@ export interface AuthorizationLedger {
 	mail: MailLedgerState;
 }
 
-/** The freshness anchor stored in the OS credential vault. */
-export interface Anchor {
-	installSecret: string;
-	epoch: number;
-}
+// The seal primitive lives in `utils/safe-storage-seal.ts` so every sealed
+// store shares one copy. Re-exported so this module's importers are unchanged.
+export { safeStorageSeal };
+export type { SafeStorageLike, SealProvider };
 
-/** Seals/unseals bytes via an OS-key-backed primitive (safeStorage). */
-export interface SealProvider {
-	available(): boolean;
-	seal(plaintext: string): Buffer;
-	unseal(blob: Buffer): string;
-}
-
-export interface SafeStorageLike {
-	isEncryptionAvailable(): boolean;
-	encryptString(s: string): Buffer;
-	decryptString(b: Buffer): string;
-}
-
-/** Named credential-store slot for the anchor, OUTSIDE the data-dir file tree. */
-export interface AnchorStore {
-	available(): boolean;
-	read(): Anchor | null;
-	write(anchor: Anchor): void;
-	clear(): void;
-}
+// The freshness anchor and its keyring binding live in `utils/keyring-anchor.ts`
+// for the same reason. Re-exported so this module's importers are unchanged.
+export { createKeyringAnchor, keyringAnchor, noAnchor, createKeyringEntry };
+export type { Anchor, AnchorStore, KeyringEntry, KeyringModule };
 
 export interface AuthorizationStoreDeps {
 	seal: SealProvider;
@@ -408,6 +408,175 @@ export class AuthorizationStore {
 		if (!Number.isSafeInteger(this.ledger.epoch) || this.ledger.epoch >= Number.MAX_SAFE_INTEGER)
 			throw new ImapConnectionError('MAIL_UNAVAILABLE');
 		this.ledger.epoch += 1;
+	}
+
+	/** Host-only attestation for metadata already obtained through a verified read. */
+	mailEventProof(
+		pluginId: string,
+		identity: AuthIdentity,
+		source: Omit<CueMailEnvelope, 'proof'>,
+		payload: RelayMailMetadata
+	): string {
+		const raw = mailRecord(payload, [
+			'reference',
+			'accountId',
+			'folder',
+			'uidValidity',
+			'uid',
+			'receivedAt',
+			'sizeBytes',
+		]);
+		const ref = parseMailMessageReference({
+			accountId: raw.accountId,
+			accountRevision: source.accountRevision,
+			mailbox: raw.folder,
+			uidValidity: raw.uidValidity,
+			uid: raw.uid,
+		});
+		if (
+			typeof source.sourceGeneration !== 'string' ||
+			!/^[0-9a-f]{32}$/.test(source.sourceGeneration) ||
+			source.pluginId !== pluginId ||
+			source.accountId !== ref.accountId ||
+			source.mailbox !== ref.mailbox ||
+			raw.reference !==
+				`relay-mail:1:${ref.accountId}:${encodeURIComponent(ref.mailbox)}:${ref.uidValidity}:${ref.uid}` ||
+			!Number.isSafeInteger(raw.receivedAt) ||
+			(raw.receivedAt as number) < 0 ||
+			(raw.receivedAt as number) > 253402300799999 ||
+			!Number.isSafeInteger(raw.sizeBytes) ||
+			(raw.sizeBytes as number) < 0
+		)
+			throw new ImapConnectionError('MAIL_INVALID');
+		if (Buffer.byteLength(JSON.stringify(raw)) > 4096) throw new ImapConnectionError('MAIL_LIMIT');
+		this.assertStoredMailAgentRight(
+			pluginId,
+			identity,
+			ref.accountId,
+			ref.accountRevision,
+			source.producerAgentId,
+			'read'
+		);
+		return createHmac('sha256', this.ledger.installSecret)
+			.update(JSON.stringify(['maestro.mail.event.v1', identity, source, raw]))
+			.digest('hex');
+	}
+	verifyMailEvent(
+		identity: AuthIdentity,
+		envelope: CueMailEnvelope,
+		payload: RelayMailMetadata,
+		targetAgentId: string
+	): boolean {
+		try {
+			const raw = mailRecord(envelope, [
+				'pluginId',
+				'accountId',
+				'accountRevision',
+				'mailbox',
+				'producerAgentId',
+				'sourceGeneration',
+				'proof',
+			]);
+			if (typeof raw.proof !== 'string' || !/^[0-9a-f]{64}$/.test(raw.proof)) return false;
+			const source = {
+				pluginId: envelope.pluginId,
+				accountId: envelope.accountId,
+				accountRevision: envelope.accountRevision,
+				mailbox: envelope.mailbox,
+				producerAgentId: envelope.producerAgentId,
+				sourceGeneration: envelope.sourceGeneration,
+			};
+			const expected = this.mailEventProof(envelope.pluginId, identity, source, payload);
+			this.assertStoredMailAgentRight(
+				envelope.pluginId,
+				identity,
+				envelope.accountId,
+				envelope.accountRevision,
+				targetAgentId,
+				'read'
+			);
+			return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(raw.proof, 'hex'));
+		} catch {
+			return false;
+		}
+	}
+
+	/** Lifecycle cancellation; a restart does not revive old leases. */
+	stopMailPluginActivity(pluginId: string): void {
+		this.mailActivity.invalidatePlugin(pluginId);
+	}
+
+	/** Dedicated setup's read-only login test, under the same bounded account activity. */
+	acquireMailSetupActivity(
+		pluginId: string,
+		identity: AuthIdentity,
+		accountId: string,
+		revision: number,
+		assertSetup: () => void
+	): MailActivityLease {
+		const check = () => {
+			assertMailActivityAuthority(assertSetup);
+			requireMailAccountRevision(
+				this.readMailConfiguration(pluginId, identity),
+				accountId,
+				revision
+			);
+			assertMailActivityAuthority(assertSetup);
+		};
+		check();
+		return this.mailActivity.acquire(pluginId, accountId, check);
+	}
+
+	/** Dedicated frame only: changes an already-consented capability's exact account scope. */
+	replaceMailPluginRights(
+		pluginId: string,
+		identity: AuthIdentity,
+		accountId: string,
+		revision: number,
+		value: unknown,
+		assertSetup: () => void
+	): MailAccountConfiguration {
+		const rights = parseMailRights(value, true);
+		const configuration = this.readMailConfiguration(pluginId, identity);
+		const account = requireMailAccountRevision(configuration, accountId, revision);
+		const changed = parseMailAccountConfiguration(
+			JSON.stringify({
+				...configuration,
+				accounts: configuration!.accounts.map((item) =>
+					item.accountId === accountId ? { ...item, revision: item.revision + 1 } : item
+				),
+			})
+		);
+		const entry = this.ledger.entries[pluginId];
+		const capabilityFor = (right: MailAgentRight): PluginCapability =>
+			right === 'detail' ? 'mail:body' : right === 'attachments' ? 'mail:attachments' : 'mail:read';
+		if (rights.some((right) => !entry.caps.some((cap) => cap.capability === capabilityFor(right))))
+			throw new ImapConnectionError('MAIL_DENIED');
+		const updatedCaps = entry.caps.map((cap) => {
+			const right =
+				cap.capability === 'mail:body'
+					? 'detail'
+					: cap.capability === 'mail:attachments'
+						? 'attachments'
+						: cap.capability === 'mail:read'
+							? 'read'
+							: undefined;
+			if (!right) return cap;
+			const members = [...(parseAllowlistScope(cap.scope) ?? [])].filter((id) => id !== accountId);
+			if (rights.includes(right)) members.push(accountId);
+			return { ...cap, scope: members.length ? members.join(',') : undefined };
+		});
+		assertMailActivityAuthority(assertSetup);
+		if (
+			this.readMailConfiguration(pluginId, identity) !== configuration ||
+			account.revision !== revision
+		)
+			throw new ImapConnectionError('MAIL_STALE');
+		entry.caps = updatedCaps;
+		const agents = this.ledger.mail.configurations
+			.find((item) => item.configuration.pluginId === pluginId)!
+			.agentGrants.filter((grant) => grant.accountId !== accountId);
+		return this.saveMailConfiguration(pluginId, identity, changed, agents, assertSetup);
 	}
 
 	/** Trusted-host only. Configuration is private and confers no mail authority. */
@@ -1150,6 +1319,7 @@ export class AuthorizationStore {
 	): boolean {
 		this.ensureLoaded();
 		if (!isAllowlistScoped(capability)) return false;
+		if (capability.startsWith('mail:')) return false;
 		const entry = this.ledger.entries[pluginId];
 		if (!entry || !entry.enabled) return false;
 		const idx = entry.caps.findIndex((c) => c.capability === capability);
@@ -1243,129 +1413,6 @@ export class AuthorizationStore {
 	}
 }
 
-/** Production `SealProvider` over Electron `safeStorage`. */
-export function safeStorageSeal(safeStorage: SafeStorageLike): SealProvider {
-	return {
-		available: () => {
-			try {
-				return safeStorage.isEncryptionAvailable();
-			} catch {
-				return false;
-			}
-		},
-		seal: (plaintext) => safeStorage.encryptString(plaintext),
-		unseal: (blob) => safeStorage.decryptString(blob),
-	};
-}
-
-/**
- * Production `AnchorStore` over a named OS credential entry. `entryFactory`
- * lazily constructs the keyring entry so a missing/unavailable native module
- * degrades to `available() === false` (→ session-only) instead of throwing.
- */
-export interface KeyringEntry {
-	getPassword(): string | null;
-	setPassword(password: string): void;
-	deletePassword(): boolean;
-}
-
-export function keyringAnchor(entryFactory: () => KeyringEntry | null): AnchorStore {
-	let entry: KeyringEntry | null | undefined;
-	const get = (): KeyringEntry | null => {
-		if (entry === undefined) {
-			try {
-				entry = entryFactory();
-			} catch {
-				entry = null;
-			}
-		}
-		return entry;
-	};
-	return {
-		available: () => get() !== null,
-		read: () => {
-			const e = get();
-			if (!e) return null;
-			try {
-				const raw = e.getPassword();
-				if (!raw) return null;
-				const parsed: unknown = JSON.parse(raw);
-				if (
-					typeof parsed !== 'object' ||
-					parsed === null ||
-					!('installSecret' in parsed) ||
-					!('epoch' in parsed) ||
-					typeof parsed.installSecret !== 'string' ||
-					typeof parsed.epoch !== 'number'
-				) {
-					return null;
-				}
-				return { installSecret: parsed.installSecret, epoch: parsed.epoch };
-			} catch {
-				return null;
-			}
-		},
-		write: (anchor) => {
-			const e = get();
-			if (!e) return;
-			e.setPassword(JSON.stringify(anchor));
-		},
-		clear: () => {
-			const e = get();
-			if (!e) return;
-			try {
-				e.deletePassword();
-			} catch {
-				/* best-effort */
-			}
-		},
-	};
-}
-
-/** A no-op anchor - `available() === false`, so the store runs session-only. */
-export function noAnchor(): AnchorStore {
-	return {
-		available: () => false,
-		read: () => null,
-		write: () => {},
-		clear: () => {},
-	};
-}
-
-export interface KeyringModule {
-	Entry: new (service: string, account: string) => KeyringEntry;
-}
-
-/** Canonical lazy native-entry factory. Construction is not a backend health check. */
-export function createKeyringEntry(
-	service: string,
-	account: string,
-	loadModule: () => KeyringModule | null = () => {
-		try {
-			const mod = require('@napi-rs/keyring') as Partial<KeyringModule>;
-			return typeof mod.Entry === 'function' ? (mod as KeyringModule) : null;
-		} catch {
-			return null;
-		}
-	}
-): KeyringEntry | null {
-	try {
-		const mod = loadModule();
-		if (!mod) return null;
-		return new mod.Entry(service, account);
-	} catch {
-		return null;
-	}
-}
-
-/** Lazily adapt the canonical entry factory for authorization freshness only. */
-export function createKeyringAnchor(
-	service: string,
-	account: string,
-	loadModule?: () => KeyringModule | null
-): AnchorStore {
-	return keyringAnchor(() => createKeyringEntry(service, account, loadModule));
-}
 export function createAuthorizationStore(opts: {
 	safeStorage: SafeStorageLike;
 	ledgerPath: string;

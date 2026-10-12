@@ -38,6 +38,12 @@ export interface MailInvocationReaderDeps extends MailInvocationReadAuthorityDep
 
 /** Actual resolver/reader only; no supplied caller, projection or read callback. */
 export class MailInvocationReader {
+	inspectMailbox(invocationId: unknown, criteria: unknown) {
+		return this.read('inspect', invocationId, criteria);
+	}
+	readMetadata(invocationId: unknown, reference: unknown) {
+		return this.read('metadata', invocationId, reference);
+	}
 	private readonly store: AuthorizationStore;
 	private readonly pluginId: string;
 	private readonly identity: AuthIdentity;
@@ -136,13 +142,25 @@ export class MailInvocationReader {
 		invocationId: unknown,
 		criteria: unknown
 	): ReturnType<MailAccountHeaderReader['searchReferences']>;
+	private read(
+		mode: 'metadata',
+		invocationId: unknown,
+		reference: unknown
+	): ReturnType<MailAccountHeaderReader['readMetadata']>;
+	private read(
+		mode: 'inspect',
+		invocationId: unknown,
+		reference: unknown
+	): ReturnType<MailAccountHeaderReader['inspectMailbox']>;
 	private async read(
-		mode: MailAgentRight | 'attachment' | 'search' | 'snapshot',
+		mode: MailAgentRight | 'inspect' | 'metadata' | 'attachment' | 'search' | 'snapshot',
 		invocationId: unknown,
 		reference: unknown
 	): Promise<
 		| MailAttachmentSnapshot
 		| MailHeaderDisplay
+		| Awaited<ReturnType<MailAccountHeaderReader['inspectMailbox']>>
+		| Awaited<ReturnType<MailAccountHeaderReader['readMetadata']>>
 		| MailHeaderSearchResult
 		| MailMimeAttachmentContent
 		| Readonly<Pick<MailMimeContent, 'body'>>
@@ -152,7 +170,7 @@ export class MailInvocationReader {
 		const right: MailAgentRight =
 			mode === 'attachment' || mode === 'snapshot'
 				? 'attachments'
-				: mode === 'search'
+				: mode === 'search' || mode === 'metadata' || mode === 'inspect'
 					? 'read'
 					: mode;
 		let lease: MailActivityLease | undefined;
@@ -167,7 +185,7 @@ export class MailInvocationReader {
 			const request =
 				mode === 'attachment' || mode === 'snapshot'
 					? parseMailAttachmentReference(reference)
-					: mode === 'search'
+					: mode === 'search' || mode === 'inspect'
 						? parseMailSearchCriteria(reference)
 						: parseMailMessageReference(reference);
 			const caller = this.authority.resolve(invocationId);
@@ -231,15 +249,19 @@ export class MailInvocationReader {
 			// Include facade provenance/policy/account work in the inner pre-LOGIN/total budgets.
 			// Both leases count against canonical caps. No raw header/source surface.
 			const result =
-				mode === 'search'
-					? await this.reader.searchReferences(request, caller, admittedAt)
-					: mode === 'attachment' || mode === 'snapshot'
-						? await this.reader.readAttachmentContent(request, caller, admittedAt)
-						: mode === 'read'
-							? await this.reader.readHeaderDisplay(request, caller, admittedAt)
-							: mode === 'detail'
-								? await this.reader.readMessageBody(request, caller, admittedAt)
-								: await this.reader.readAttachmentManifest(request, caller, admittedAt);
+				mode === 'inspect'
+					? await this.reader.inspectMailbox(request, caller, admittedAt)
+					: mode === 'metadata'
+						? await this.reader.readMetadata(request, caller, admittedAt)
+						: mode === 'search'
+							? await this.reader.searchReferences(request, caller, admittedAt)
+							: mode === 'attachment' || mode === 'snapshot'
+								? await this.reader.readAttachmentContent(request, caller, admittedAt)
+								: mode === 'read'
+									? await this.reader.readHeaderDisplay(request, caller, admittedAt)
+									: mode === 'detail'
+										? await this.reader.readMessageBody(request, caller, admittedAt)
+										: await this.reader.readAttachmentManifest(request, caller, admittedAt);
 			// Own bytes before any callback, even if cancellation preceded this continuation.
 			if (mode === 'attachment' || mode === 'snapshot')
 				attachmentBytes = (result as MailMimeAttachmentContent).bytes;

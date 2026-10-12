@@ -1,5 +1,8 @@
 /** Unwired main-process run proofs. A resolved proof confers no plugin/mail policy. */
 import { randomBytes } from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { performance } from 'perf_hooks';
 import { PLUGIN_ID_PATTERN } from '../../shared/plugins/plugin-manifest';
 import { assertMailActivityAuthority } from './mail-account-activity';
@@ -13,7 +16,7 @@ export const PLUGIN_TOOL_RUN_LIMITS = Object.freeze({
 	invocationsPerPlugin: 32,
 	invocationTtlMs: 30_000,
 	defaultTtlMs: 60 * 60 * 1000,
-	maxTtlMs: 4 * 60 * 60 * 1000,
+	maxTtlMs: 24 * 60 * 60 * 1000 + 60_000,
 });
 
 /** Supplied exclusively by the host's run lifecycle, never by tool arguments. */
@@ -68,20 +71,29 @@ export class PluginToolRunIdentity {
 	private readonly invocations = new Map<string, Invocation>();
 	private readonly pluginLifetimes = new Map<AbortSignal, PluginLifetime>();
 	private readonly revokingAgents = new Set<string>();
-	private readonly assertAgentActive: (agentId: string) => void;
+	private assertAgentActive: (agentId: string) => void;
 	private issuing?: { readonly controller: AbortController; agentId?: string };
 	private issuingInvocation?: AbortController;
 	private stopped = false;
 
-	constructor(assertAgentActive: (agentId: string) => void) {
+	constructor(
+		assertAgentActive: (agentId: string) => void = (agentId) => {
+			requireMailAgentId(agentId);
+		}
+	) {
 		if (typeof assertAgentActive !== 'function') throw new ImapConnectionError('MAIL_DENIED');
 		this.assertAgentActive = assertAgentActive;
+	}
+
+	setAgentActiveAssertion(assertion: (agentId: string) => void): void {
+		this.assertAgentActive = assertion;
 	}
 
 	/** Delete first: synchronous abort listeners must never resolve the revoked proof. */
 	private remove(token: string, run: RunProof): void {
 		if (this.runs.get(token) !== run) return;
 		this.runs.delete(token);
+		this.receiptRuns.delete(token);
 		for (const handle of [...run.invocations]) this.releaseInvocation(handle);
 		if (run.timer) clearTimeout(run.timer);
 		run.source.removeEventListener('abort', run.onAbort);
@@ -117,7 +129,7 @@ export class PluginToolRunIdentity {
 	}
 
 	/** Mint only after host membership/run admission; the token is a private bearer secret. */
-	issue(
+	private issueAuthorized(
 		agentId: unknown,
 		authority: PluginToolRunAuthority,
 		ttlMs = PLUGIN_TOOL_RUN_LIMITS.defaultTtlMs
@@ -197,8 +209,96 @@ export class PluginToolRunIdentity {
 		}
 	}
 
+	/** Canonical MCP callers supply the verified agent and revoke on exact-run teardown. */
+	issue(
+		agentId: unknown,
+		authority?: PluginToolRunAuthority | number,
+		ttlOrReceipt?: number | string
+	): string {
+		if (authority && typeof authority === 'object')
+			return this.issueAuthorized(
+				agentId,
+				authority,
+				typeof ttlOrReceipt === 'number' ? ttlOrReceipt : undefined
+			);
+		const controller = new AbortController();
+		const token = this.issueAuthorized(
+			agentId,
+			{ signal: controller.signal, assertActive: () => {} },
+			authority ?? PLUGIN_TOOL_RUN_LIMITS.defaultTtlMs
+		);
+		if (
+			ttlOrReceipt !== undefined &&
+			(typeof ttlOrReceipt !== 'string' || !ttlOrReceipt || ttlOrReceipt.length > 200)
+		) {
+			this.revoke(token);
+			throw new Error('InvalidPluginReceiptTool');
+		}
+		this.receiptRuns.set(token, {
+			runId: randomBytes(16).toString('hex'),
+			toolId: ttlOrReceipt,
+			receipts: [],
+			overflow: false,
+		});
+		return token;
+	}
+
+	private readonly receiptRuns = new Map<
+		string,
+		{ runId: string; toolId?: string; receipts: PluginToolReceipt[]; overflow: boolean }
+	>();
+	resolve(token: unknown): { readonly callerAgentId: string | null } {
+		try {
+			return Object.freeze({ callerAgentId: this.resolveVerified(token).callerAgentId });
+		} catch {
+			return Object.freeze({ callerAgentId: null });
+		}
+	}
+	recordReceipt(token: unknown, toolId: string, result: unknown): void {
+		const agentId = this.resolve(token).callerAgentId;
+		const run = typeof token === 'string' ? this.receiptRuns.get(token) : undefined;
+		if (
+			!agentId ||
+			!run ||
+			run.toolId !== toolId ||
+			run.overflow ||
+			!result ||
+			typeof result !== 'object'
+		)
+			return;
+		const record = result as Record<string, unknown>;
+		if (record.success === false || record.ok === false || record.error != null) return;
+		const ids = record.messageIds;
+		if (
+			!Array.isArray(ids) ||
+			!ids.length ||
+			ids.length > 20 ||
+			!ids.every((id) => typeof id === 'string' && /^[1-9][0-9]{0,19}$/.test(id))
+		)
+			return;
+		if (run.receipts.length >= 16) {
+			run.overflow = true;
+			return;
+		}
+		run.receipts.push({ runId: run.runId, agentId, toolId, messageIds: [...ids] });
+	}
+	getReceipts(token: unknown): PluginToolReceipt[] {
+		if (!this.resolve(token).callerAgentId || typeof token !== 'string') return [];
+		return (
+			this.receiptRuns.get(token)?.receipts.map((r) => ({ ...r, messageIds: [...r.messageIds] })) ??
+			[]
+		);
+	}
+	hasReceiptOverflowed(token: unknown): boolean {
+		return (
+			!!this.resolve(token).callerAgentId &&
+			typeof token === 'string' &&
+			this.receiptRuns.get(token)?.overflow === true
+		);
+	}
+
 	/** Resolve exact proofs only. No anonymous fallback can be mistaken for verified authority. */
-	resolve(token: unknown): PluginToolCallerContext {
+	resolveVerified(token: unknown): PluginToolCallerContext {
 		if (typeof token !== 'string' || token.length !== 64 || !/^[0-9a-f]{64}$/.test(token))
 			throw new ImapConnectionError('MAIL_DENIED');
 		const run = this.runs.get(token);
@@ -432,4 +532,60 @@ export class PluginToolRunIdentity {
 		this.stopped = true;
 		for (const [token, run] of this.runs) this.remove(token, run);
 	}
+}
+
+export interface PluginToolReceipt {
+	runId: string;
+	agentId: string;
+	toolId: string;
+	messageIds: string[];
+}
+export const pluginToolRunIdentity = new PluginToolRunIdentity();
+
+const proofDirectories = new Set<string>();
+/** Main-only broker exclusion, including proofs outside the user-data directory. */
+export function getPluginRunProofProtectedPaths(): readonly string[] {
+	return [...proofDirectories];
+}
+
+export function createPluginRunProofFile(
+	token: string,
+	ttlMs = PLUGIN_TOOL_RUN_LIMITS.defaultTtlMs
+): string {
+	if (proofDirectories.size >= PLUGIN_TOOL_RUN_LIMITS.runs)
+		throw new ImapConnectionError('MAIL_LIMIT');
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-plugin-run-'));
+	proofDirectories.add(dir);
+	if (process.platform !== 'win32') fs.chmodSync(dir, 0o700);
+	const file = path.join(dir, 'proof');
+	try {
+		fs.writeFileSync(file, token, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+	} catch {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+			proofDirectories.delete(dir);
+		} catch {
+			/* retain protection after failed deletion */
+		}
+		throw new ImapConnectionError('MAIL_UNAVAILABLE');
+	}
+	const timer = setTimeout(
+		() => {
+			try {
+				removePluginRunProofFile(file);
+			} catch {
+				/* no native diagnostics */
+			}
+		},
+		Math.min(ttlMs, PLUGIN_TOOL_RUN_LIMITS.maxTtlMs)
+	);
+	timer.unref();
+	return file;
+}
+export function removePluginRunProofFile(file: string): void {
+	const dir = path.dirname(file);
+	if (path.basename(file) !== 'proof' || !path.basename(dir).startsWith('maestro-plugin-run-'))
+		return;
+	fs.rmSync(dir, { recursive: true, force: true });
+	proofDirectories.delete(dir);
 }

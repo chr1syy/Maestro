@@ -18,6 +18,8 @@ export interface MailAttachmentChunk {
 
 /** Main-only object bound to its original exact reference and nested invocation. */
 export interface MailAttachmentSnapshot {
+	/** Main-only closure notification; never serialized to the plugin. */
+	readonly signal: AbortSignal;
 	readonly partId: string;
 	readonly filename: string;
 	readonly mimeType: MailMimeAttachmentContent['mimeType'];
@@ -124,6 +126,7 @@ export function reserveMailAttachmentSnapshot(pluginId: string) {
 				lease.signal.addEventListener('abort', close, { once: true });
 				assertActive();
 				const snapshot: MailAttachmentSnapshot = Object.freeze({
+					signal: lease.signal,
 					partId: content.partId,
 					filename: content.filename,
 					mimeType: content.mimeType,

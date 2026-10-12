@@ -56,7 +56,7 @@ export class ImapResponseDecoder {
 		for (const key of Object.keys(limits) as (keyof FramingLimits)[]) {
 			const value = limits[key];
 			if (
-				!Object.hasOwn(IMAP_FRAMING_LIMITS, key) ||
+				!Object.prototype.hasOwnProperty.call(IMAP_FRAMING_LIMITS, key) ||
 				!Number.isSafeInteger(value) ||
 				value === undefined ||
 				value < 1 ||

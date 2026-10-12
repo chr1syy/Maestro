@@ -7,6 +7,8 @@ tags: [relay, imap, host, security, cue]
 related: ['[[CLAUDE-PLUGINS]]', '[[CLAUDE-CUE]]', '[[relay-imap-host-evidence-20261006]]']
 ---
 
+> Historical foundation record. The implemented public signatures and production gate are defined in [the 2026-10-12 contract](relay-imap-host-contract-20261012.md); retain the notes below as history.
+
 # Relay IMAP host early contract
 
 This is a reviewable proposal, not an available SDK. The IMAP response framing,

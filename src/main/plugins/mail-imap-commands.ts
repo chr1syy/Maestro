@@ -39,6 +39,7 @@ export type FixedImapCommand =
 	| { kind: 'search'; fromUid: string; toUid: string; text?: string }
 	| { kind: 'fetch'; uid: string; content: 'headers' | 'source' }
 	| { kind: 'fetch'; uid: string; content: 'part'; part: string }
+	| { kind: 'metadata'; uid: string }
 	| { kind: 'noop' | 'logout' };
 
 /** LOGIN bytes contain secrets. No credential fields; erase bytes after write. */
@@ -56,9 +57,10 @@ export interface PreparedImapCommand {
 /** Internal results only. MIME/header projection and live grants are separate. */
 export type ImapCommandResult =
 	| { kind: 'status' }
-	| { kind: 'examine'; uidValidity: string }
+	| { kind: 'examine'; uidValidity: string; uidNext?: string }
 	| { kind: 'search'; uids: string[] }
-	| { kind: 'fetch'; uid: string; bytes: Buffer };
+	| { kind: 'fetch'; uid: string; bytes: Buffer }
+	| { kind: 'metadata'; uid: string; receivedAt: number; sizeBytes: number };
 
 function fail(code: ConstructorParameters<typeof ImapConnectionError>[0] = 'MAIL_PROTOCOL'): never {
 	throw new ImapConnectionError(code);
@@ -133,6 +135,12 @@ export function prepareImapCommand(tag: string, command: FixedImapCommand): Prep
 				body += ` OR HEADER SUBJECT ${text} HEADER FROM ${text}`;
 			}
 			details = { fromUid: command.fromUid, toUid: command.toUid };
+			break;
+		case 'metadata':
+			assertFields(command, ['kind', 'uid']);
+			assertImapUid(command.uid);
+			body = `UID FETCH ${command.uid} (UID INTERNALDATE RFC822.SIZE)`;
+			details = { uid: command.uid, literalLimit: 0 };
 			break;
 		case 'fetch': {
 			assertFields(
@@ -224,6 +232,7 @@ export function validateImapCommandResult(
 		validateStatusCode(command.kind, completion.text);
 		const data: Extract<ImapResponseFrame, { kind: 'data' }>[] = [];
 		let uidValidity: string | undefined;
+		let uidNext: string | undefined;
 		let bye = false;
 		for (const frame of frames.slice(0, -1)) {
 			if (frame.kind === 'data') {
@@ -237,6 +246,12 @@ export function validateImapCommandResult(
 				continue;
 			}
 			if (frame.status !== 'OK' || bye) fail();
+			if (/^\[UIDNEXT(?:\s|\])/i.test(frame.text)) {
+				const match = /^\[UIDNEXT ([1-9][0-9]{0,9})\](?: |$)/i.exec(frame.text);
+				if (command.kind !== 'examine' || uidNext || !match) fail();
+				assertImapUid(match[1], 'MAIL_PROTOCOL');
+				uidNext = match[1];
+			}
 			if (/^\[UIDVALIDITY(?:\s|\])/i.test(frame.text)) {
 				const match = /^\[UIDVALIDITY ([1-9][0-9]{0,9})\](?: |$)/i.exec(frame.text);
 				if (command.kind !== 'examine' || uidValidity || !match) fail();
@@ -253,7 +268,7 @@ export function validateImapCommandResult(
 					!['FLAGS', 'EXISTS', 'RECENT'].every((name) => names.includes(name))
 				)
 					fail();
-				return { kind: 'examine', uidValidity };
+				return { kind: 'examine', uidValidity, ...(uidNext ? { uidNext } : {}) };
 			}
 			case 'search': {
 				if (data.length !== 1 || data[0].name !== 'SEARCH' || data[0].parts.length !== 1) fail();
@@ -273,6 +288,30 @@ export function validateImapCommandResult(
 					seen.add(uid);
 				}
 				return { kind: 'search', uids: uids.sort((a, b) => Number(a) - Number(b)) };
+			}
+			case 'metadata': {
+				if (!data.length) fail('MAIL_STALE');
+				if (
+					data.length !== 1 ||
+					data[0].name !== 'FETCH' ||
+					data[0].parts.length !== 2 ||
+					data[0].parts.some((part) => typeof part !== 'string')
+				)
+					fail();
+				const line = data[0].parts.join('');
+				const match =
+					/^\* [1-9][0-9]{0,9} FETCH \(UID ([1-9][0-9]{0,9}) INTERNALDATE "([^"]{26})" RFC822.SIZE (0|[1-9][0-9]{0,15})\)$/i.exec(
+						line
+					);
+				if (!match || match[1] !== command.uid) fail();
+				const sizeBytes = Number(match[3]);
+				if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) fail();
+				return {
+					kind: 'metadata',
+					uid: match[1],
+					receivedAt: parseMailInternalDate(match[2]),
+					sizeBytes,
+				};
 			}
 			case 'fetch':
 				if (data.length === 0) fail('MAIL_STALE');
@@ -330,4 +369,51 @@ function validateFetch(
 	const match = expression.exec(prefix + before.slice(0, marker.index) + '\x00' + after);
 	if (!match || (match[1] ?? match[2]) !== command.uid) fail();
 	return { kind: 'fetch', uid: command.uid, bytes };
+}
+
+/** Restricted INTERNALDATE grammar, validated without locale-dependent Date.parse. */
+export function parseMailInternalDate(value: string): number {
+	const match =
+		/^( [1-9]|[12][0-9]|3[01]|0[1-9])-([A-Za-z]{3})-([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) ([+-])([0-9]{2})([0-9]{2})$/.exec(
+			value
+		);
+	if (!match) fail();
+	const day = Number(match[1]),
+		month = [
+			'jan',
+			'feb',
+			'mar',
+			'apr',
+			'may',
+			'jun',
+			'jul',
+			'aug',
+			'sep',
+			'oct',
+			'nov',
+			'dec',
+		].indexOf(match[2].toLowerCase()),
+		year = Number(match[3]);
+	const hour = Number(match[4]),
+		minute = Number(match[5]),
+		second = Number(match[6]),
+		zoneHour = Number(match[8]),
+		zoneMinute = Number(match[9]);
+	if (
+		year < 1601 ||
+		month < 0 ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 ||
+		zoneHour > 23 ||
+		zoneMinute > 59
+	)
+		fail();
+	const date = new Date(Date.UTC(year, month, day, hour, minute, second));
+	if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day)
+		fail();
+	const timestamp =
+		date.getTime() - (match[7] === '+' ? 1 : -1) * (zoneHour * 60 + zoneMinute) * 60_000;
+	if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp > 253402300799999) fail();
+	return timestamp;
 }

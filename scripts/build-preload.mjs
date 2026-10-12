@@ -63,7 +63,7 @@ async function build() {
 		logBuilt(consentPreloadOutfile);
 
 		// Broker-only plugin-panel preload for panel <webview> guests: the one-way
-		// postMessage -> sendToHost bridge. Forced by the main process in
+		// postMessage -> sendToHost bridge plus host theme application. Forced in
 		// will-attach-webview; never referenced by the renderer.
 		await esbuild.build({
 			entryPoints: [path.join(rootDir, 'src/main/preload/plugin-panel.ts')],
@@ -71,6 +71,16 @@ async function build() {
 			...sharedOptions,
 		});
 		logBuilt(pluginPanelPreloadOutfile);
+
+		await esbuild.build({
+			entryPoints: [path.join(rootDir, 'src/main/preload/mail-setup.ts')],
+			outfile: path.join(distMainDir, 'mail-setup-preload.js'),
+			...sharedOptions,
+		});
+		fs.copyFileSync(
+			path.join(rootDir, 'src/main/consent/mail-setup.html'),
+			path.join(distMainDir, 'mail-setup.html')
+		);
 
 		// Copy the static consent page next to its preload.
 		fs.mkdirSync(distMainDir, { recursive: true });

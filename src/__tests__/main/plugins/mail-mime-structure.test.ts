@@ -66,7 +66,7 @@ describe('complete owned MIME trees', () => {
 				});
 				expect(leaves).toHaveLength(1);
 				expect(leaves[0].toString()).toBe(body);
-				expect(leaves[0]).not.toBe(input);
+				expect(leaves[0] === input).toBe(false);
 				expect(alias.every((byte) => byte === 0)).toBe(true);
 				alias.fill(88);
 				expect(leaves[0].toString()).toBe(body);
@@ -421,7 +421,7 @@ describe('owned failure cleanup and fixed errors', () => {
 				code: 'MAIL_PROTOCOL',
 				message: 'Unsupported or invalid mail response.',
 			});
-			expect(failure).not.toBe(nativeError);
+			expect(failure === nativeError).toBe(false);
 			expect(failure).not.toHaveProperty('cause');
 			expect(String(failure)).not.toContain('synthetic-private');
 			expect(allocations[0].every((byte) => byte === 0)).toBe(true);

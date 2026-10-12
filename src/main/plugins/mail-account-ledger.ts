@@ -53,16 +53,20 @@ export function parseMailAgentRights(value: unknown): readonly MailAgentRights[]
 			const agentId = requireMailAgentId(raw.agentId);
 			if (ids.has(agentId)) throw new ImapConnectionError('MAIL_INVALID');
 			ids.add(agentId);
-			const rights = mailList(raw.rights, MAIL_AGENT_RIGHTS.length).map((right) => {
-				if (!MAIL_AGENT_RIGHTS.includes(right as MailAgentRight))
-					throw new ImapConnectionError('MAIL_INVALID');
-				return right as MailAgentRight;
-			});
-			if (!rights.length || new Set(rights).size !== rights.length)
-				throw new ImapConnectionError('MAIL_INVALID');
-			return Object.freeze({ agentId, rights: Object.freeze(rights) });
+			return Object.freeze({ agentId, rights: parseMailRights(raw.rights) });
 		})
 	);
+}
+
+export function parseMailRights(value: unknown, allowEmpty = false): readonly MailAgentRight[] {
+	const rights = mailList(value, MAIL_AGENT_RIGHTS.length).map((right) => {
+		if (!MAIL_AGENT_RIGHTS.includes(right as MailAgentRight))
+			throw new ImapConnectionError('MAIL_INVALID');
+		return right as MailAgentRight;
+	});
+	if ((!allowEmpty && !rights.length) || new Set(rights).size !== rights.length)
+		throw new ImapConnectionError('MAIL_INVALID');
+	return Object.freeze(rights);
 }
 
 function parseAccountAgentGrants(
@@ -140,7 +144,7 @@ export function parseMailLedgerState(value: unknown): MailLedgerState {
 			// Pre-grant v2 state conveys no rights. Explicit null/malformed fields fail closed.
 			agentGrants: parseAccountAgentGrants(
 				configuration,
-				Object.hasOwn(entry, 'agentGrants') ? entry.agentGrants : []
+				Object.prototype.hasOwnProperty.call(entry, 'agentGrants') ? entry.agentGrants : []
 			),
 		});
 	});

@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-src 'none'; connect-src 'none'"
+		/>
+		<title>Mail account setup</title>
+		<style>
+			body {
+				font: 16px system-ui;
+				background: #101114;
+				color: #eee;
+				padding: 24px;
+			}
+			label {
+				display: block;
+				margin: 14px 0;
+			}
+			input,
+			select,
+			button {
+				font: inherit;
+				padding: 8px;
+				background: #252630;
+				color: #eee;
+				border: 1px solid #626575;
+				border-radius: 5px;
+			}
+			input {
+				width: 95%;
+			}
+			button {
+				cursor: pointer;
+				margin: 8px 8px 8px 0;
+			}
+			pre {
+				white-space: pre-wrap;
+				overflow-wrap: anywhere;
+			}
+			#notice {
+				min-height: 24px;
+			}
+			small {
+				color: #bbb;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Mail account setup</h1>
+		<p id="plugin"></p>
+		<p>
+			Credentials remain in the operating system keyring. Accounts are added disabled. Enabling
+			requires a saved password; it does not test authentication.
+		</p>
+		<label>Account<select id="account"></select></label>
+		<label
+			>Action<select id="action">
+				<option value="addDisabled">Add disabled account</option>
+				<option value="replace">Replace endpoint and username</option>
+				<option value="cleanupRemoved">Retry removed credential cleanup</option>
+				<option value="savePassword">Save password</option>
+				<option value="enable">Enable</option>
+				<option value="test">Test login</option>
+				<option value="replacePluginRights">Replace plugin account permissions</option>
+				<option value="replaceRights">Replace agent rights</option>
+				<option value="disable">Disable</option>
+				<option value="remove">Remove</option>
+			</select></label
+		>
+		<div id="settings">
+			<label>IMAPS hostname<input id="host" autocomplete="off" /></label
+			><label>Username<input id="username" autocomplete="off" /></label
+			><label>Mailbox<input id="mailbox" value="INBOX" autocomplete="off" /></label>
+		</div>
+		<div id="grants" hidden>
+			<label>Agent<select id="agent"></select></label
+			><label><input type="checkbox" id="read" style="width: auto" />Read headers</label
+			><label><input type="checkbox" id="detail" style="width: auto" />Read plain text</label
+			><label><input type="checkbox" id="attachments" style="width: auto" />Read attachments</label
+			><small
+				>Submitting no selected rights revokes the selected permission set. Changing plugin account
+				permissions clears prior agent rights; grant agent rights afterwards. Replacing rights
+				advances the account revision.</small
+			>
+		</div>
+		<label id="passwordLabel" hidden
+			>Password<input id="password" type="password" autocomplete="new-password"
+		/></label>
+		<button id="review">Review action</button>
+		<div id="confirmation" hidden>
+			<h2>Confirm this action</h2>
+			<pre id="intent"></pre>
+			<button id="confirm">Confirm</button><button id="cancel">Cancel</button>
+		</div>
+		<p id="notice" role="status"></p>
+		<script>
+			'use strict';
+			const element = (id) => document.getElementById(id);
+			let accounts = [],
+				nonce = null,
+				pendingKind = null,
+				initialized = false;
+			async function refresh() {
+				const result = await window.mailSetup.list();
+				if (!result.ok) {
+					element('notice').textContent = result.error;
+					return;
+				}
+				accounts = [
+					...result.accounts,
+					...result.removedAccounts.map((a) => ({ ...a, removed: true })),
+				];
+				element('plugin').textContent = 'Plugin: ' + result.pluginId;
+				element('account').replaceChildren(
+					...accounts.map((a) => {
+						const option = document.createElement('option');
+						option.value = a.accountId;
+						option.textContent =
+							a.accountId +
+							' · revision ' +
+							a.revision +
+							' · ' +
+							(a.removed
+								? 'removed · cleanup ' + a.credentialCleanup
+								: a.enabled
+									? 'enabled intent'
+									: 'disabled');
+						return option;
+					})
+				);
+				const target = new URLSearchParams(location.search);
+				if (!initialized) {
+					initialized = true;
+					if (accounts.some((a) => a.accountId === target.get('accountId')))
+						element('account').value = target.get('accountId');
+					element('action').value =
+						{ test: 'test', rights: 'replaceRights', disable: 'disable', remove: 'remove' }[
+							target.get('action')
+						] || 'addDisabled';
+					changed();
+				}
+				element('agent').replaceChildren(
+					...result.agents.map((a) => {
+						const option = document.createElement('option');
+						option.value = a.id;
+						option.textContent = a.name;
+						return option;
+					})
+				);
+			}
+			function changed() {
+				nonce = null;
+				['read', 'detail', 'attachments'].forEach((id) => (element(id).checked = false));
+				element('confirmation').hidden = true;
+				const kind = element('action').value;
+				element('settings').hidden = !['addDisabled', 'replace'].includes(kind);
+				element('grants').hidden = kind !== 'replaceRights' && kind !== 'replacePluginRights';
+				element('agent').parentElement.hidden = kind === 'replacePluginRights';
+				element('passwordLabel').hidden = kind !== 'savePassword';
+				element('password').value = '';
+			}
+			element('action').onchange = changed;
+			element('account').onchange = changed;
+			element('review').onclick = async () => {
+				element('notice').textContent = '';
+				const kind = element('action').value;
+				const account = accounts.find((a) => a.accountId === element('account').value);
+				let intent =
+					kind === 'addDisabled'
+						? {
+								kind,
+								settings: {
+									endpoint: { host: element('host').value, port: 993, tls: true },
+									username: element('username').value,
+									mailboxes: [element('mailbox').value],
+								},
+							}
+						: {
+								kind,
+								accountId: account && account.accountId,
+								expectedRevision: account && account.revision,
+							};
+				if (kind === 'replaceRights' || kind === 'replacePluginRights') {
+					const rights = ['read', 'detail', 'attachments'].filter((id) => element(id).checked);
+					if (kind === 'replaceRights')
+						intent.agents = rights.length ? [{ agentId: element('agent').value, rights }] : [];
+					else intent.rights = rights;
+				}
+				if (kind === 'replace')
+					intent.settings = {
+						endpoint: { host: element('host').value, port: 993, tls: true },
+						username: element('username').value,
+						mailboxes: [element('mailbox').value],
+					};
+				const result = await window.mailSetup.prepare(intent);
+				if (!result.ok) {
+					element('notice').textContent = result.error;
+					return;
+				}
+				nonce = result.nonce;
+				pendingKind = kind;
+				element('intent').textContent = JSON.stringify(intent, null, 2);
+				element('confirmation').hidden = false;
+			};
+			element('confirm').onclick = async () => {
+				if (!nonce) return;
+				const ticket = nonce;
+				nonce = null;
+				const password = pendingKind === 'savePassword' ? element('password').value : undefined;
+				element('password').value = '';
+				element('confirm').disabled = true;
+				try {
+					const result = await window.mailSetup.confirm(ticket, password);
+					element('notice').textContent = result.ok ? 'Account updated.' : result.error;
+					element('confirmation').hidden = true;
+					await refresh();
+				} finally {
+					element('confirm').disabled = false;
+				}
+			};
+			element('cancel').onclick = async () => {
+				await window.mailSetup.cancel();
+				changed();
+			};
+			refresh();
+		</script>
+	</body>
+</html>

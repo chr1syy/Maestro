@@ -13,11 +13,19 @@
 
 import type { MainLogLevel } from '../../shared/logger-types';
 import type { CueLogPayload } from '../../shared/cue-log-types';
-import type { CueCommand, CueEvent, CueSubscription } from './cue-types';
+import type {
+	CueAutoRunConfig,
+	CueCommand,
+	CueEvent,
+	CueNotifyConfig,
+	CueSubscription,
+} from './cue-types';
+import type { CueTurnSettings } from '../../shared/cue/turn-settings';
 import {
 	getQueuedEvents,
 	clearPersistedQueue,
 	safePersistQueuedEvent,
+	persistQueuedEvent,
 	safeRemoveQueuedEvent,
 	safeRecordCueEvent,
 	type CueQueuedEventRecord,
@@ -40,6 +48,15 @@ export interface PersistableQueueEntry {
 	 *  for root events (and for any entry queued while usageStats is off). */
 	chainRootId?: string;
 	parentEventId?: string;
+	/** Captured Auto Run payload for `action: autorun`. The run launches from
+	 *  THIS, not from the subscription, so it has to survive a restart with the
+	 *  row or the restored run has no documents. */
+	autoRun?: CueAutoRunConfig;
+	/** Resolved notify config for `action: notify`. The message also rides the
+	 *  `prompt` slot, but `sticky` lives nowhere else. */
+	notify?: CueNotifyConfig;
+	/** The subscription's model choice, so a restored run keeps it. */
+	turnSettings?: CueTurnSettings;
 }
 
 export interface RestoredQueueEntry extends PersistableQueueEntry {
@@ -47,11 +64,19 @@ export interface RestoredQueueEntry extends PersistableQueueEntry {
 }
 
 export interface CueQueuePersistence {
-	persist(sessionId: string, persistId: string, entry: PersistableQueueEntry): void;
+	persist(sessionId: string, persistId: string, entry: PersistableQueueEntry): void | boolean;
 	remove(persistId: string): void;
 	clearSession(sessionId: string): void;
 	clearAll(): void;
-	restoreAll(): Map<string, RestoredQueueEntry[]>;
+	/**
+	 * Ids of every row currently persisted. The engine snapshots this BEFORE
+	 * it initializes sessions, because initializing one can enqueue (and so
+	 * persist) an `app.startup` or initial `time.heartbeat` event behind a busy
+	 * slot - and restoring that row would run the same event a second time.
+	 */
+	persistedIds(): Set<string>;
+	/** Restore persisted rows, limited to `onlyIds` when given (see `persistedIds`). */
+	restoreAll(onlyIds?: ReadonlySet<string>): Map<string, RestoredQueueEntry[]>;
 }
 
 export interface CueQueuePersistenceDeps {
@@ -67,7 +92,11 @@ export interface CueQueuePersistenceDeps {
 export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQueuePersistence {
 	const now = deps.now ?? (() => Date.now());
 
-	function persist(sessionId: string, persistId: string, entry: PersistableQueueEntry): void {
+	function persist(
+		sessionId: string,
+		persistId: string,
+		entry: PersistableQueueEntry
+	): void | boolean {
 		const record: CueQueuedEventRecord = {
 			id: persistId,
 			sessionId,
@@ -82,7 +111,20 @@ export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQue
 			queuedAt: entry.queuedAt,
 			chainRootId: entry.chainRootId ?? null,
 			parentEventId: entry.parentEventId ?? null,
+			autoRunJson: entry.autoRun ? JSON.stringify(entry.autoRun) : null,
+			notifyJson: entry.notify ? JSON.stringify(entry.notify) : null,
+			turnSettingsJson: entry.turnSettings ? JSON.stringify(entry.turnSettings) : null,
 		};
+		if (entry.event.type === 'relay.mail.received') {
+			try {
+				persistQueuedEvent(record);
+				return getQueuedEvents().some(
+					(row) => row.id === record.id && row.eventJson === record.eventJson
+				);
+			} catch {
+				return false;
+			}
+		}
 		safePersistQueuedEvent(record);
 	}
 
@@ -117,10 +159,21 @@ export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQue
 		}
 	}
 
-	function restoreAll(): Map<string, RestoredQueueEntry[]> {
+	function persistedIds(): Set<string> {
+		try {
+			return new Set(getQueuedEvents().map((row) => row.id));
+		} catch {
+			// restoreAll() reports the same read failure; an empty snapshot just
+			// defers any prior rows to the next start rather than running twice.
+			return new Set();
+		}
+	}
+
+	function restoreAll(onlyIds?: ReadonlySet<string>): Map<string, RestoredQueueEntry[]> {
 		let rows: CueQueuedEventRecord[];
 		try {
 			rows = getQueuedEvents();
+			if (onlyIds) rows = rows.filter((row) => onlyIds.has(row.id));
 		} catch (err) {
 			void captureException(err, { operation: 'cueQueuePersistence.restoreAll' });
 			deps.onLog(
@@ -195,10 +248,16 @@ export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQue
 			let event: CueEvent;
 			let cliOutput: { target: string } | undefined;
 			let command: CueCommand | undefined;
+			let autoRun: CueAutoRunConfig | undefined;
+			let notify: CueNotifyConfig | undefined;
+			let turnSettings: CueTurnSettings | undefined;
 			try {
 				event = JSON.parse(row.eventJson);
 				cliOutput = row.cliOutputJson ? JSON.parse(row.cliOutputJson) : undefined;
 				command = row.commandJson ? JSON.parse(row.commandJson) : undefined;
+				autoRun = row.autoRunJson ? JSON.parse(row.autoRunJson) : undefined;
+				notify = row.notifyJson ? JSON.parse(row.notifyJson) : undefined;
+				turnSettings = row.turnSettingsJson ? JSON.parse(row.turnSettingsJson) : undefined;
 			} catch (err) {
 				const errorMessage = err instanceof Error ? err.message : String(err);
 				deps.onLog(
@@ -226,6 +285,9 @@ export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQue
 				queuedAt: row.queuedAt,
 				chainRootId: row.chainRootId ?? undefined,
 				parentEventId: row.parentEventId ?? undefined,
+				autoRun,
+				notify,
+				turnSettings,
 			};
 			if (!restored.has(row.sessionId)) restored.set(row.sessionId, []);
 			restored.get(row.sessionId)!.push(entry);
@@ -277,5 +339,5 @@ export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQue
 		return restored;
 	}
 
-	return { persist, remove, clearSession, clearAll, restoreAll };
+	return { persist, remove, clearSession, clearAll, persistedIds, restoreAll };
 }

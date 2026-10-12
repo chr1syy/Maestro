@@ -14,6 +14,22 @@
 
 import { expectTypeOf } from 'vitest';
 import type {
+	MaestroServicesApi,
+	TranscriptionInvocation,
+	TranscriptionResult,
+	PluginServiceStatus,
+} from '../index';
+import type {
+	MaestroServicesApi as SrcServicesApi,
+	TranscriptionInvocation as SrcInvocation,
+	TranscriptionResult as SrcResult,
+	PluginServiceStatus as SrcStatus,
+} from '../../../../src/shared/plugins/services';
+expectTypeOf<MaestroServicesApi>().toEqualTypeOf<SrcServicesApi>();
+expectTypeOf<TranscriptionInvocation>().toEqualTypeOf<SrcInvocation>();
+expectTypeOf<TranscriptionResult>().toEqualTypeOf<SrcResult>();
+expectTypeOf<PluginServiceStatus>().toEqualTypeOf<SrcStatus>();
+import type {
 	UiItemContribution,
 	HostViewContribution,
 	HostViewBlocks,
@@ -61,3 +77,46 @@ expectTypeOf<PluginEventPayloads>().toEqualTypeOf<SrcPluginEventPayloads>();
 expectTypeOf<PluginCategory>().toEqualTypeOf<SrcPluginCategory>();
 expectTypeOf<PluginManifest>().toEqualTypeOf<SrcPluginManifest>();
 expectTypeOf<ManifestValidationResult>().toEqualTypeOf<SrcManifestValidationResult>();
+
+import type {
+	MaestroMediaApi,
+	MediaProbe,
+	MediaRunOptions,
+	MediaToolStatus,
+	MediaFailure,
+} from '../index';
+import type {
+	MaestroMediaApi as SrcMediaApi,
+	MediaProbe as SrcMediaProbe,
+	MediaRunOptions as SrcMediaOptions,
+	MediaToolStatus as SrcMediaStatus,
+	MediaFailure as SrcMediaFailure,
+} from '../../../../src/shared/plugins/media-tools';
+expectTypeOf<MaestroMediaApi>().toEqualTypeOf<SrcMediaApi>();
+expectTypeOf<MediaProbe>().toEqualTypeOf<SrcMediaProbe>();
+expectTypeOf<MediaRunOptions>().toEqualTypeOf<SrcMediaOptions>();
+expectTypeOf<MediaToolStatus>().toEqualTypeOf<SrcMediaStatus>();
+expectTypeOf<MediaFailure>().toEqualTypeOf<SrcMediaFailure>();
+
+import type {
+	MaestroMailApi,
+	MailReference,
+	MailResult,
+	MailErrorCode,
+	MailAccountView,
+	RelayMailMetadata,
+} from '../index';
+import type {
+	MaestroMailApi as HostMailApi,
+	MailReference as HostMailReference,
+	MailResult as HostMailResult,
+	MailErrorCode as HostMailErrorCode,
+	MailAccountView as HostMailAccountView,
+	RelayMailMetadata as HostRelayMailMetadata,
+} from '../../../../src/shared/plugins/mail';
+expectTypeOf<MaestroMailApi>().toEqualTypeOf<HostMailApi>();
+expectTypeOf<MailReference>().toEqualTypeOf<HostMailReference>();
+expectTypeOf<MailResult<string>>().toEqualTypeOf<HostMailResult<string>>();
+expectTypeOf<MailErrorCode>().toEqualTypeOf<HostMailErrorCode>();
+expectTypeOf<MailAccountView>().toEqualTypeOf<HostMailAccountView>();
+expectTypeOf<RelayMailMetadata>().toEqualTypeOf<HostRelayMailMetadata>();

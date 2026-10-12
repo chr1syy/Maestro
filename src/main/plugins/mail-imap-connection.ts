@@ -1,3 +1,4 @@
+import { MAIL_ERROR_MESSAGES } from '../../shared/plugins/mail';
 /**
  * Host-only bounded IMAPS session. Not wired to production, RPC or SDK.
  * The account service must supply live authorization; no grants or secret store here.
@@ -62,17 +63,7 @@ type ConnectionErrorCode =
 /** Fixed content-free errors. Never carry a peer error, cause or account config. */
 export class ImapConnectionError extends Error {
 	constructor(readonly code: ConnectionErrorCode) {
-		const messages: Record<ConnectionErrorCode, string> = {
-			MAIL_DENIED: 'Mail access denied.',
-			MAIL_INVALID: 'Invalid mail request.',
-			MAIL_STALE: 'Mail reference is no longer valid.',
-			MAIL_UNAVAILABLE: 'Mail service unavailable.',
-			MAIL_TIMEOUT: 'Mail request timed out.',
-			MAIL_CANCELED: 'Mail request canceled.',
-			MAIL_PROTOCOL: 'Unsupported or invalid mail response.',
-			MAIL_LIMIT: 'Mail request exceeds a limit.',
-		};
-		super(messages[code]);
+		super(MAIL_ERROR_MESSAGES[code]);
 		this.name = 'ImapConnectionError';
 	}
 }
@@ -172,7 +163,9 @@ export function validateConfiguredImapEndpoint(
 			host: configured.host,
 			port: configured.port,
 			tls: configured.tls,
-			allowNonstandardPort: configured.allowNonstandardPort,
+			...(configured.allowNonstandardPort === undefined
+				? {}
+				: { allowNonstandardPort: configured.allowNonstandardPort }),
 		};
 		const { host, port } = endpoint;
 		if (
@@ -445,7 +438,11 @@ async function openCapturedImapConnection(
 				wireBytes = prepared.bytes;
 				if ((prepared.kind === 'login') === authenticated)
 					throw new ImapConnectionError('MAIL_INVALID');
-				if (prepared.kind === 'search' || prepared.kind === 'fetch') {
+				if (
+					prepared.kind === 'search' ||
+					prepared.kind === 'fetch' ||
+					prepared.kind === 'metadata'
+				) {
 					if (!uidValidity || expectedUidValidity !== uidValidity)
 						throw new ImapConnectionError('MAIL_STALE');
 				}

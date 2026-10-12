@@ -1,5 +1,5 @@
 /**
- * Host-private secret-free intent schema only. No confirmation or production caller.
+ * Host-private secret-free intent schema for the dedicated setup frame.
  * Stored target validation is not authority; use the existing guarded facades later.
  */
 import {
@@ -16,7 +16,12 @@ import {
 	type MailAccountMutation,
 	type MailAccountSettings,
 } from './mail-account-config';
-import { parseMailAgentRights, type MailAgentRights } from './mail-account-ledger';
+import {
+	parseMailAgentRights,
+	parseMailRights,
+	type MailAgentRight,
+	type MailAgentRights,
+} from './mail-account-ledger';
 import { ImapConnectionError } from './mail-imap-connection';
 
 /** Operation names differ from navigation labels; none carries credentials or permits login. */
@@ -24,7 +29,13 @@ export type MailSetupOperationIntent =
 	| Readonly<{ kind: 'addDisabled'; settings: MailAccountSettings }>
 	| MailAccountMutation
 	| Readonly<{
-			kind: 'enable' | 'cleanupRemoved' | 'savePassword';
+			kind: 'replacePluginRights';
+			accountId: string;
+			expectedRevision: number;
+			rights: readonly MailAgentRight[];
+	  }>
+	| Readonly<{
+			kind: 'enable' | 'cleanupRemoved' | 'savePassword' | 'test';
 			accountId: string;
 			expectedRevision: number;
 	  }>
@@ -41,7 +52,7 @@ export function parseMailSetupOperationIntent(value: unknown): MailSetupOperatio
 		const raw = mailRecord(
 			value,
 			['kind'],
-			['accountId', 'expectedRevision', 'settings', 'agents']
+			['accountId', 'expectedRevision', 'settings', 'agents', 'rights']
 		);
 		switch (raw.kind) {
 			case 'addDisabled': {
@@ -56,6 +67,7 @@ export function parseMailSetupOperationIntent(value: unknown): MailSetupOperatio
 			case 'remove':
 				return parseMailAccountMutation(raw);
 			case 'enable':
+			case 'test':
 			case 'cleanupRemoved':
 			case 'savePassword':
 			case 'replaceRights': {
@@ -75,6 +87,15 @@ export function parseMailSetupOperationIntent(value: unknown): MailSetupOperatio
 							agents: parseMailAgentRights(fields.agents),
 						})
 					: Object.freeze({ kind: raw.kind, accountId, expectedRevision });
+			}
+			case 'replacePluginRights': {
+				const fields = mailRecord(raw, ['kind', 'accountId', 'expectedRevision', 'rights']);
+				return Object.freeze({
+					kind: raw.kind,
+					accountId: parseMailAccountId(fields.accountId),
+					expectedRevision: parseMailAccountRevision(fields.expectedRevision),
+					rights: parseMailRights(fields.rights, true),
+				});
 			}
 			default:
 				throw new ImapConnectionError('MAIL_INVALID');

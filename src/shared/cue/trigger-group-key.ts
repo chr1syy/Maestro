@@ -54,6 +54,7 @@ export function triggerGroupKey(sub: CueSubscription): string {
 		// paths (or different secrets) collapse into one visual trigger, and the
 		// next save rewrites both to whichever config won - silently breaking a
 		// working endpoint.
+		mail: sub.mail ?? null,
 		webhook_path: sub.webhook?.path ?? null,
 		webhook_secret: sub.webhook?.secret ?? null,
 		webhook_secret_env: sub.webhook?.secret_env ?? null,

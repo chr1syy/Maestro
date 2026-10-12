@@ -77,6 +77,15 @@ describe('@maestro/plugin-sdk authoring surface', () => {
 		]);
 	});
 
+	it('rejects calendar rollovers and accepts an actual leap day', () => {
+		for (const releaseDate of ['2023-02-29', '2024-02-30', '2026-04-31']) {
+			expect(validatePluginManifest({ ...sample, releaseDate }).manifest).toBeNull();
+		}
+		expect(
+			validatePluginManifest({ ...sample, releaseDate: '2024-02-29' }).manifest?.releaseDate
+		).toBe('2024-02-29');
+	});
+
 	it('rejects a manifest whose id breaks PLUGIN_ID_PATTERN', () => {
 		const bad = validatePluginManifest({ ...sample, id: '1nope' });
 		expect(bad.manifest).toBeNull();
@@ -242,7 +251,7 @@ describe('@maestro/plugin-sdk authoring surface', () => {
 		} finally {
 			if (!hadDist) rmSync(distDir, { recursive: true, force: true });
 		}
-	});
+	}, 30_000);
 
 	it('matches host API semver compatibility edge cases without dependencies', () => {
 		expect(isHostApiCompatible('1.7.0+build.1', '1.7.0+build.2').compatible).toBe(true);

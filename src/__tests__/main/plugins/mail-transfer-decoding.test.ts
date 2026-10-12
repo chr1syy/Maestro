@@ -25,7 +25,7 @@ describe('complete owned MIME transfer bytes', () => {
 		try {
 			expect(output.toString()).toBe(expected);
 			expect(output.length).toBe(Buffer.byteLength(expected));
-			expect(output).not.toBe(input);
+			expect(output === input).toBe(false);
 			expect(alias.equals(Buffer.alloc(alias.length))).toBe(true);
 			alias.fill(88);
 			expect(output.toString()).toBe(expected);
@@ -38,7 +38,7 @@ describe('complete owned MIME transfer bytes', () => {
 	it.each(['7bit', '8bit', 'base64', 'quoted-printable'])('accepts empty %s parts', (encoding) => {
 		const input = Buffer.alloc(0);
 		const output = consumeMailTransferBytes(input, encoding, 1);
-		expect(output).not.toBe(input);
+		expect(output === input).toBe(false);
 		expect(output).toHaveLength(0);
 	});
 
@@ -397,7 +397,7 @@ describe('failed allocation ownership and content-free errors', () => {
 				code: 'MAIL_PROTOCOL',
 				message: 'Unsupported or invalid mail response.',
 			});
-			expect(caught).not.toBe(nativeError);
+			expect(caught === nativeError).toBe(false);
 			expect(caught).not.toHaveProperty('cause');
 			expect(String(caught)).not.toContain('synthetic-private-content');
 			expect(input.every((byte) => byte === 0)).toBe(true);

@@ -286,7 +286,7 @@ export class PluginToolRunProofFiles {
 		try {
 			const token = this.identities.issue(agentId, authority, ttlMs);
 			resource.token = token;
-			resource.context = this.identities.resolve(resource.token);
+			resource.context = this.identities.resolveVerified(resource.token);
 			resource.onAbort = () => {
 				try {
 					this.dispose(resource);

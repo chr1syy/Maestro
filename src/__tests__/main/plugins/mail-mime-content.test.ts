@@ -47,7 +47,7 @@ describe('complete MIME body and attachment composition', () => {
 			'é 🦊',
 			'é 🦊',
 		],
-		[encodedText, 'w6kg8J+miA==', 'é 🦊'],
+		[encodedText, 'w6kg8J+mig==', 'é 🦊'],
 		[
 			'Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n',
 			'=C3=A9=20=F0=9F=A6=8A',

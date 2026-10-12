@@ -1,7 +1,15 @@
+import { authorizeMailCueEvent } from './triggers/cue-mail-trigger-source';
 import * as crypto from 'crypto';
 import type { MainLogLevel } from '../../shared/logger-types';
-import type { CueCommand, CueEvent, CueNotifyConfig, CueSubscription } from './cue-types';
+import type {
+	CueAutoRunConfig,
+	CueCommand,
+	CueEvent,
+	CueNotifyConfig,
+	CueSubscription,
+} from './cue-types';
 import { recordTriggerFired } from './cue-telemetry';
+import { cueTurnSettingsOf, type CueTurnSettings } from '../../shared/cue/turn-settings';
 
 export interface CueDispatchServiceDeps {
 	getSessions: () => Array<{ id: string; name: string }>;
@@ -18,8 +26,10 @@ export interface CueDispatchServiceDeps {
 		command?: CueCommand,
 		chainRootId?: string,
 		parentEventId?: string,
-		notify?: CueNotifyConfig
-	) => void;
+		notify?: CueNotifyConfig,
+		autoRun?: CueAutoRunConfig,
+		turnSettings?: CueTurnSettings
+	) => void | boolean;
 	onLog: (level: MainLogLevel, message: string, data?: unknown) => void;
 	/**
 	 * Optional metadata-only hook fired once per subscription dispatch, carrying
@@ -78,6 +88,7 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 			chainRootId?: string,
 			parentEventId?: string
 		): number {
+			if (!authorizeMailCueEvent(event, ownerSessionId, sub.name, false)) return 0;
 			// Telemetry: one `trigger_fired` per subscription dispatch (not per
 			// fan-out target). Best-effort and gated on Encore flags inside the
 			// telemetry module - never throws into the dispatch path.
@@ -90,6 +101,9 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 
 			// Surface `cue.fired` to subscribed plugins (type only, no prompt text).
 			deps.onTriggerFired?.(event.type);
+
+			// One model choice per subscription: every fan-out target shares it.
+			const turnSettings = cueTurnSettingsOf(sub);
 
 			if (sub.fan_out && sub.fan_out.length > 0) {
 				const targetNames = sub.fan_out.join(', ');
@@ -114,15 +128,18 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						continue;
 					}
 
-					const fanOutEvent: CueEvent = {
-						...event,
-						id: crypto.randomUUID(),
-						payload: {
-							...event.payload,
-							fanOutSource: sourceSessionName,
-							fanOutIndex: i,
-						},
-					};
+					const fanOutEvent: CueEvent =
+						event.type === 'relay.mail.received'
+							? event
+							: {
+									...event,
+									id: crypto.randomUUID(),
+									payload: {
+										...event.payload,
+										fanOutSource: sourceSessionName,
+										fanOutIndex: i,
+									},
+								};
 					// The normalizer (cue-config-normalizer.ts) resolves prompt_file → prompt
 					// content at config load time. sub.prompt is always a string post-normalization.
 					const perTargetPrompt = sub.fan_out_prompts?.[i];
@@ -135,7 +152,7 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						skippedTargets.push(`${targetName} (empty prompt)`);
 						continue;
 					}
-					deps.executeRun(
+					const accepted = deps.executeRun(
 						targetSession.id,
 						prompt,
 						fanOutEvent,
@@ -147,9 +164,12 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						sub.action,
 						sub.command,
 						chainRootId,
-						parentEventId
+						parentEventId,
+						undefined, // notify: a fan-out branch is always a prompt run
+						undefined, // autoRun: same
+						turnSettings
 					);
-					dispatched++;
+					if (accepted !== false) dispatched++;
 				}
 				// If every fan-out target was skipped the user sees nothing happen -
 				// surface a loud error so they can fix the broken prompts. This was
@@ -169,10 +189,26 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 			// from the notify config + fallback chain.
 			let prompt: string;
 			let resolvedNotify: CueNotifyConfig | undefined;
+			let resolvedAutoRun: CueAutoRunConfig | undefined;
 			if (sub.action === 'notify') {
 				const message = resolveNotifyMessage(sub);
 				prompt = message;
 				resolvedNotify = { ...(sub.notify ?? {}), message };
+			} else if (sub.action === 'autorun') {
+				// An autorun subscription's work is its document list, not a
+				// prompt. Bail loudly rather than dispatching a run that would
+				// reach the executor with nothing to launch - a scheduled run
+				// fires when nobody is watching, so a silent no-op looks
+				// exactly like a run that never fired at all.
+				if (!sub.auto_run || sub.auto_run.documents.length === 0) {
+					deps.onLog(
+						'error',
+						`[CUE] "${sub.name}" has action='autorun' but no documents - skipping dispatch`
+					);
+					return 0;
+				}
+				resolvedAutoRun = sub.auto_run;
+				prompt = sub.prompt?.trim() || sub.auto_run.documents.join(', ');
 			} else {
 				prompt = promptOverride ?? sub.prompt;
 				if (!prompt) {
@@ -180,7 +216,7 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 					return 0;
 				}
 			}
-			deps.executeRun(
+			const accepted = deps.executeRun(
 				ownerSessionId,
 				prompt,
 				event,
@@ -193,9 +229,11 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 				sub.command,
 				chainRootId,
 				parentEventId,
-				resolvedNotify
+				resolvedNotify,
+				resolvedAutoRun,
+				turnSettings
 			);
-			return 1;
+			return accepted === false ? 0 : 1;
 		},
 	};
 }

@@ -5,6 +5,7 @@ import * as os from 'os';
 import { logger } from '../../utils/logger';
 import { captureException } from '../../utils/sentry';
 import { resolveToBytesSync } from '../../storage/session-image-store';
+export { buildImagePromptPrefix } from '../../../shared/maestro-lib/launch/image-refs';
 
 /**
  * Resolve an image value to base64 + media type.
@@ -81,16 +82,6 @@ export function saveImageToTempFile(
 		});
 		return null;
 	}
-}
-
-/**
- * Build a text prefix for embedding image file paths in the prompt.
- * Used when an agent's resume mode doesn't support -i flag (e.g., codex exec resume).
- * The prefix is prepended to the user's prompt so the agent knows where to find images on disk.
- */
-export function buildImagePromptPrefix(tempPaths: string[]): string {
-	if (tempPaths.length === 0) return '';
-	return `[Attached images: ${tempPaths.join(', ')}]\n\n`;
 }
 
 /**

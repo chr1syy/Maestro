@@ -10,6 +10,7 @@
 
 /** The fixed catalog of topics a plugin may subscribe to. */
 export const PLUGIN_EVENT_TOPICS = [
+	'mail.accountsChanged',
 	'session.created',
 	'session.updated',
 	'session.removed',
@@ -40,6 +41,7 @@ export function isPluginEventTopic(value: unknown): value is PluginEventTopic {
  * doc. Adding a field is a host-API MINOR; adding sensitive data is forbidden.
  */
 export interface PluginEventPayloads {
+	'mail.accountsChanged': Record<string, never>;
 	'session.created': { sessionId: string; title?: string; agentId?: string; projectPath?: string };
 	'session.updated': { sessionId: string; title?: string; status?: string };
 	'session.removed': { sessionId: string };

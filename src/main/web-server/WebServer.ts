@@ -18,10 +18,14 @@
  * - Token regenerated on each app restart (unless Persistent Web Link is enabled)
  * - Invalid/missing token redirects to website
  * - No access without knowing the token
+ * - Bound to 127.0.0.1 unless created with `lanAccess` (Live Mode), so the
+ *   always-on CLI channel is never reachable from the network
+ * - Requests carrying a foreign `Origin` are refused (see originPolicy.ts), and
+ *   no CORS headers are sent, so a web page cannot drive the server even when
+ *   it knows the URL
  */
 
 import Fastify from 'fastify';
-import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
@@ -49,10 +53,12 @@ import {
 	WsRoute,
 } from './routes';
 import { MEDIA_PATH_PARAM_MAX_LENGTH } from './routes/mediaRoutes';
+import { IMMUTABLE_ASSET_CACHE_CONTROL, isContentHashedAsset } from './asset-cache-policy';
 import { webLoginPreHandler } from './auth/web-login-hook';
 import { getWebUserStore } from './auth/web-user-store';
 import { WEB_LOGIN_WS_CLOSE_CODE } from '../../shared/webLogin';
 import { LiveSessionManager, CallbackRegistry } from './managers';
+import { isAllowedRequestOrigin } from './originPolicy';
 
 // Import shared types from canonical location
 import type {
@@ -79,9 +85,11 @@ import type {
 	SelectTabCallback,
 	NewTabCallback,
 	CloseTabCallback,
+	ReopenTabCallback,
 	RenameTabCallback,
 	StarTabCallback,
 	SnoozeCommandCallback,
+	WindowCommandCallback,
 	ReorderTabCallback,
 	ToggleBookmarkCallback,
 	OpenFileTabCallback,
@@ -105,6 +113,7 @@ import type {
 	EnqueueCommandCallback,
 	ListQueueCallback,
 	RemoveQueueItemCallback,
+	SteerQueueItemCallback,
 	RefreshAutoRunDocsCallback,
 	ConfigureAutoRunCallback,
 	LaunchGoalRunCallback,
@@ -183,6 +192,7 @@ import type {
 	GetSessionHistoryCallback,
 } from './types';
 import type { SnoozeCommandRequest } from '../../shared/snoozeCommands';
+import type { WindowCommandRequest } from '../../shared/windowCommands';
 
 // Logger context for all web server logs
 const LOG_CONTEXT = 'WebServer';
@@ -194,6 +204,20 @@ const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	maxPost: 30, // 30 requests per minute for POST endpoints (more restrictive)
 	enabled: true,
 };
+
+/** Interface the server listens on when it is reachable from the LAN (Live Mode). */
+const LAN_BIND_HOST = '0.0.0.0';
+/** Interface the server listens on otherwise: the CLI channel only. */
+const LOOPBACK_BIND_HOST = '127.0.0.1';
+
+export interface WebServerOptions {
+	/**
+	 * Listen on every interface so phones and other machines on the LAN can
+	 * connect. Only Live Mode asks for this; the always-on CLI server stays on
+	 * loopback, where only processes on this machine can reach it.
+	 */
+	lanAccess?: boolean;
+}
 
 export class WebServer {
 	private server: FastifyInstance;
@@ -224,11 +248,19 @@ export class WebServer {
 	// Regenerated every startup - documents are in-memory and never outlive it.
 	private concertoToken: string = randomUUID().replace(/-/g, '');
 
-	// Local IP address for generating URLs (detected at startup, then kept
-	// current by the address watcher below - see onLocalAddressChanged)
-	private localIpAddress: string = 'localhost';
+	// Whether the server listens on the LAN (Live Mode) or loopback only.
+	private readonly lanAccess: boolean;
 
-	// Watches for the machine moving between networks. The server itself binds
+	// Origins allowed besides the request's own host (the active tunnel URL).
+	// Read on every request so a tunnel started after the server is honored.
+	private getTrustedOrigins: () => readonly string[] = () => [];
+
+	// Local IP address for generating URLs (detected at startup, then kept
+	// current by the address watcher below - see onLocalAddressChanged).
+	// Loopback servers advertise 127.0.0.1 and never watch the network.
+	private localIpAddress: string = LOOPBACK_BIND_HOST;
+
+	// Watches for the machine moving between networks. A LAN server binds
 	// 0.0.0.0 and keeps serving, but every displayed URL and QR code is built
 	// from localIpAddress, so a roam would otherwise advertise a dead address.
 	private addressWatcher: NetworkAddressWatcher | null = null;
@@ -256,9 +288,10 @@ export class WebServer {
 	private staticRoutes: StaticRoutes;
 	private wsRoute: WsRoute;
 
-	constructor(port: number = 0, securityToken?: string) {
+	constructor(port: number = 0, securityToken?: string, options: WebServerOptions = {}) {
 		// Use port 0 to let OS assign a random available port
 		this.port = port;
+		this.lanAccess = options.lanAccess === true;
 		this.server = Fastify({
 			logger: {
 				level: 'info',
@@ -393,6 +426,21 @@ export class WebServer {
 	}
 
 	/**
+	 * Whether this server listens on the LAN (Live Mode) rather than loopback only.
+	 */
+	isLanAccessible(): boolean {
+		return this.lanAccess;
+	}
+
+	/**
+	 * Supply origins to accept besides the request's own host, read on every
+	 * request. The factory points this at the Cloudflare tunnel's public URL.
+	 */
+	setTrustedOriginsProvider(provider: () => readonly string[]): void {
+		this.getTrustedOrigins = provider;
+	}
+
+	/**
 	 * Get the full secure URL (with token)
 	 */
 	getSecureUrl(): string {
@@ -495,6 +543,11 @@ export class WebServer {
 		this.callbackRegistry.setCloseTabCallback(callback);
 	}
 
+	/** Register the owner-side conversation restore callback. */
+	setReopenTabCallback(callback: ReopenTabCallback): void {
+		this.callbackRegistry.setReopenTabCallback(callback);
+	}
+
 	setRenameTabCallback(callback: RenameTabCallback): void {
 		this.callbackRegistry.setRenameTabCallback(callback);
 	}
@@ -505,6 +558,10 @@ export class WebServer {
 
 	setSnoozeCommandCallback(callback: SnoozeCommandCallback): void {
 		this.callbackRegistry.setSnoozeCommandCallback(callback);
+	}
+
+	setWindowCommandCallback(callback: WindowCommandCallback): void {
+		this.callbackRegistry.setWindowCommandCallback(callback);
 	}
 
 	setReorderTabCallback(callback: ReorderTabCallback): void {
@@ -600,6 +657,10 @@ export class WebServer {
 
 	setRemoveQueueItemCallback(callback: RemoveQueueItemCallback): void {
 		this.callbackRegistry.setRemoveQueueItemCallback(callback);
+	}
+
+	setSteerQueueItemCallback(callback: SteerQueueItemCallback): void {
+		this.callbackRegistry.setSteerQueueItemCallback(callback);
 	}
 
 	setRefreshAutoRunDocsCallback(callback: RefreshAutoRunDocsCallback): void {
@@ -886,10 +947,28 @@ export class WebServer {
 
 	// ============ Server Setup ============
 
+	/** Whether a request with these headers may reach a route (see originPolicy.ts). */
+	private isRequestOriginAllowed(origin: string | string[] | undefined, host: string | undefined) {
+		return isAllowedRequestOrigin({ origin, host, trustedOrigins: this.getTrustedOrigins() });
+	}
+
 	private async setupMiddleware(): Promise<void> {
-		// Enable CORS for web access
-		await this.server.register(cors, {
-			origin: true,
+		// No CORS plugin on purpose: every legitimate client is same-origin (the
+		// web interface this server serves) or not a browser (maestro-cli), so a
+		// cross-origin page gets no Access-Control-Allow-Origin and cannot read
+		// a response. Refusing the request outright also stops "simple" requests
+		// (a form POST) that a browser sends without a preflight.
+		//
+		// WebSocket upgrades are left to wsRoute, which closes the socket itself:
+		// a reply sent from a hook does not reliably reach an upgrading socket.
+		this.server.addHook('onRequest', async (request, reply) => {
+			if (request.headers.upgrade?.toLowerCase() === 'websocket') return;
+			if (this.isRequestOriginAllowed(request.headers.origin, request.headers.host)) return;
+			logger.warn(
+				`Refused cross-origin request from ${String(request.headers.origin)}`,
+				LOG_CONTEXT
+			);
+			await reply.code(403).send({ error: 'Forbidden', message: 'Cross-origin request refused' });
 		});
 
 		// The Web Login gate, registered ONCE and globally so a route added later
@@ -951,6 +1030,15 @@ export class WebServer {
 					root: wdAssets,
 					prefix: `/${this.securityToken}/desktop/assets/`,
 					decorateReply: false,
+					// Runs after the plugin's own headers (200, 206 and 304 alike), so
+					// this replaces its default `max-age=0` for hashed files only.
+					// See asset-cache-policy.ts for why revalidating them broke boot
+					// over a Cloudflare quick tunnel.
+					setHeaders: (reply, filePath) => {
+						if (isContentHashedAsset(wdAssets, filePath)) {
+							reply.header('Cache-Control', IMMUTABLE_ASSET_CACHE_CONTROL);
+						}
+					},
 				});
 			}
 		}
@@ -1010,6 +1098,7 @@ export class WebServer {
 
 		// Setup WebSocket route callbacks and register route
 		this.wsRoute.setCallbacks({
+			isOriginAllowed: (origin, host) => this.isRequestOriginAllowed(origin, host),
 			getSessions: () => this.callbackRegistry.getSessions(),
 			getTheme: () => this.callbackRegistry.getTheme(),
 			getBionifyReadingMode: () => this.callbackRegistry.getBionifyReadingMode(),
@@ -1062,6 +1151,7 @@ export class WebServer {
 	private setupMessageHandlerCallbacks(): void {
 		this.messageHandler.setCallbacks({
 			getSessionDetail: (sessionId: string) => this.callbackRegistry.getSessionDetail(sessionId),
+			getAutoRunState: (sessionId: string) => this.liveSessionManager.getAutoRunState(sessionId),
 			executeCommand: async (
 				sessionId: string,
 				command: string,
@@ -1096,6 +1186,8 @@ export class WebServer {
 				this.callbackRegistry.starTab(sessionId, tabId, starred),
 			snoozeCommand: async (request: SnoozeCommandRequest) =>
 				this.callbackRegistry.snoozeCommand(request),
+			windowCommand: async (request: WindowCommandRequest) =>
+				this.callbackRegistry.windowCommand(request),
 			reorderTab: async (sessionId: string, fromIndex: number, toIndex: number) =>
 				this.callbackRegistry.reorderTab(sessionId, fromIndex, toIndex),
 			toggleBookmark: async (sessionId: string) => this.callbackRegistry.toggleBookmark(sessionId),
@@ -1144,6 +1236,8 @@ export class WebServer {
 			listQueue: async (sessionId?: string) => this.callbackRegistry.listQueue(sessionId),
 			removeQueueItem: async (sessionId: string, itemId: string) =>
 				this.callbackRegistry.removeQueueItem(sessionId, itemId),
+			steerQueueItem: async (sessionId: string, itemId: string) =>
+				this.callbackRegistry.steerQueueItem(sessionId, itemId),
 			refreshAutoRunDocs: async (sessionId: string, background?: boolean) =>
 				this.callbackRegistry.refreshAutoRunDocs(sessionId, background),
 			configureAutoRun: async (
@@ -1396,6 +1490,16 @@ export class WebServer {
 		return this.callbackRegistry.newTab(sessionId, background);
 	}
 
+	/** Resolve true only after the owning renderer confirms closure. */
+	requestCloseTab(sessionId: string, tabId: string): Promise<boolean> {
+		return this.callbackRegistry.closeTab(sessionId, tabId);
+	}
+
+	/** Reopen a browser-selected history entry using the desktop's tab identity. */
+	requestReopenTab(sessionId: string, tabId: string): Promise<{ tabId: string } | null> {
+		return this.callbackRegistry.reopenTab(sessionId, tabId);
+	}
+
 	broadcastThemeChange(theme: Theme): void {
 		this.broadcastService.broadcastThemeChange(theme);
 	}
@@ -1532,10 +1636,13 @@ export class WebServer {
 		}
 
 		try {
-			// Detect LAN IP for display URLs, bind to 0.0.0.0 for LAN accessibility
-			// Security token (UUID) prevents unauthorized access
-			this.localIpAddress = await getLocalIpAddress();
-			logger.info(`Using IP address: ${this.localIpAddress}`, LOG_CONTEXT);
+			// LAN servers (Live Mode) bind every interface and advertise the LAN
+			// address; everything else binds loopback and advertises 127.0.0.1.
+			// The URL token is a capability, not an authentication scheme, so it
+			// is never put on the network unless the user asked for that.
+			const bindHost = this.lanAccess ? LAN_BIND_HOST : LOOPBACK_BIND_HOST;
+			this.localIpAddress = this.lanAccess ? await getLocalIpAddress() : LOOPBACK_BIND_HOST;
+			logger.info(`Listening on ${bindHost}, advertising ${this.localIpAddress}`, LOG_CONTEXT);
 
 			// Setup middleware and routes (must be done before listen)
 			await this.setupMiddleware();
@@ -1553,7 +1660,7 @@ export class WebServer {
 
 			this.watchWebUserStore();
 
-			await this.server.listen({ port: this.port, host: '0.0.0.0' });
+			await this.server.listen({ port: this.port, host: bindHost });
 
 			// Get the actual port (important when using port 0 for random assignment)
 			const address = this.server.server.address();
@@ -1562,7 +1669,7 @@ export class WebServer {
 			}
 
 			this.isRunning = true;
-			this.startAddressWatcher();
+			if (this.lanAccess) this.startAddressWatcher();
 
 			return {
 				port: this.port,

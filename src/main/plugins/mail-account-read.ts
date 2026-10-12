@@ -59,7 +59,30 @@ export interface MailHeaderSearchResult {
 }
 
 /** Host-only admission timestamps may tighten, never restart, the existing read budgets. */
+export interface MailNamespace {
+	readonly uidValidity: string;
+	readonly uidNext: string;
+}
+export interface MailMessageMetadata {
+	readonly receivedAt: number;
+	readonly sizeBytes: number;
+}
+
 export class MailAccountHeaderReader {
+	inspectMailbox(
+		criteria: unknown,
+		caller: MailHeaderReadAuthority,
+		admittedAt?: number
+	): Promise<MailNamespace> {
+		return this.read('inspect', criteria, caller, admittedAt);
+	}
+	readMetadata(
+		reference: unknown,
+		caller: MailHeaderReadAuthority,
+		admittedAt?: number
+	): Promise<MailMessageMetadata> {
+		return this.read('metadata', reference, caller, admittedAt);
+	}
 	private readonly identity: AuthIdentity;
 	private readonly transport: Pick<ImapConnectionDeps, 'resolve' | 'blockedPorts' | 'connect'>;
 
@@ -199,14 +222,37 @@ export class MailAccountHeaderReader {
 		caller: MailHeaderReadAuthority,
 		admissionStart?: number
 	): Promise<MailMimeAttachmentContent>;
+	private read(
+		mode: 'metadata',
+		reference: unknown,
+		caller: MailHeaderReadAuthority,
+		admissionStart?: number
+	): Promise<MailMessageMetadata>;
+	private read(
+		mode: 'inspect',
+		reference: unknown,
+		caller: MailHeaderReadAuthority,
+		admissionStart?: number
+	): Promise<MailNamespace>;
 	private async read(
-		mode: 'bytes' | 'display' | 'search' | 'source' | 'body' | 'manifest' | 'attachment',
+		mode:
+			| 'inspect'
+			| 'metadata'
+			| 'bytes'
+			| 'display'
+			| 'search'
+			| 'source'
+			| 'body'
+			| 'manifest'
+			| 'attachment',
 		reference: unknown,
 		caller: MailHeaderReadAuthority,
 		admissionStart?: number
 	): Promise<
 		| Buffer
 		| MailHeaderDisplay
+		| MailNamespace
+		| MailMessageMetadata
 		| MailHeaderSearchResult
 		| MailMimeAttachmentContent
 		| Readonly<Pick<MailMimeContent, 'body'>>
@@ -251,7 +297,7 @@ export class MailAccountHeaderReader {
 				throw new ImapConnectionError('MAIL_INVALID');
 			// Own closed intent before caller accessors or host callbacks can retarget it.
 			const raw: Record<string, unknown> =
-				mode === 'search'
+				mode === 'search' || mode === 'inspect'
 					? parseMailSearchCriteria(reference)
 					: mode === 'attachment'
 						? parseMailAttachmentReference(reference)
@@ -286,25 +332,30 @@ export class MailAccountHeaderReader {
 			assertCaller();
 			const partId = mode === 'attachment' ? (raw.partId as string) : undefined;
 			let expectedUidValidity: string | undefined;
-			if (Object.hasOwn(raw, 'uidValidity')) {
+			if (Object.prototype.hasOwnProperty.call(raw, 'uidValidity')) {
 				assertImapUid(raw.uidValidity);
 				expectedUidValidity = raw.uidValidity;
 			}
 			let command: FixedImapCommand;
-			if (mode === 'search') {
+			if (mode === 'search' || mode === 'inspect') {
 				command = Object.freeze({
 					kind: 'search',
 					fromUid: raw.fromUid as string,
 					toUid: raw.toUid as string,
-					...(Object.hasOwn(raw, 'text') ? { text: raw.text as string } : {}),
+					...(Object.prototype.hasOwnProperty.call(raw, 'text')
+						? { text: raw.text as string }
+						: {}),
 				});
 			} else {
 				assertImapUid(raw.uid);
-				command = Object.freeze({
-					kind: 'fetch',
-					uid: raw.uid,
-					content: needsSource ? 'source' : 'headers',
-				});
+				command =
+					mode === 'metadata'
+						? Object.freeze({ kind: 'metadata', uid: raw.uid })
+						: Object.freeze({
+								kind: 'fetch',
+								uid: raw.uid,
+								content: needsSource ? 'source' : 'headers',
+							});
 			}
 			assertImapQuotedString(raw.mailbox, IMAP_COMMAND_LIMITS.mailbox);
 			const configuration = this.store.readMailConfiguration(this.pluginId, this.identity);
@@ -391,26 +442,42 @@ export class MailAccountHeaderReader {
 			assertActive();
 			session.assertActive();
 			if (selected.kind !== 'examine') throw new ImapConnectionError('MAIL_PROTOCOL');
-			const result = await session.execute(command, selected.uidValidity);
+			const result =
+				mode === 'inspect' ? selected : await session.execute(command, selected.uidValidity);
 			// Take ownership before any callback can revoke and discard the result.
 			if (result.kind === 'fetch') bytes = result.bytes;
 			assertActive();
 			session.assertActive();
 			let projection:
 				| MailHeaderDisplay
+				| MailNamespace
+				| MailMessageMetadata
 				| MailHeaderSearchResult
 				| MailMimeAttachmentContent
 				| Readonly<Pick<MailMimeContent, 'body'>>
 				| readonly Readonly<Omit<MailMimeAttachmentContent, 'bytes'>>[]
 				| undefined;
-			if (mode === 'search') {
+			if (mode === 'inspect') {
+				if (result.kind !== 'examine' || !result.uidNext)
+					throw new ImapConnectionError('MAIL_PROTOCOL');
+				projection = Object.freeze({ uidValidity: result.uidValidity, uidNext: result.uidNext });
+			} else if (mode === 'metadata') {
+				if (result.kind !== 'metadata') throw new ImapConnectionError('MAIL_PROTOCOL');
+				projection = Object.freeze({ receivedAt: result.receivedAt, sizeBytes: result.sizeBytes });
+			} else if (mode === 'search') {
 				if (result.kind !== 'search') throw new ImapConnectionError('MAIL_PROTOCOL');
 				// The canonical session validates count, uniqueness, range and UID ordering.
 				projection = Object.freeze({
 					uidValidity: selected.uidValidity,
 					references: Object.freeze(
 						result.uids.map((uid) =>
-							Object.freeze({ ...request, uidValidity: selected.uidValidity, uid })
+							Object.freeze({
+								accountId: request.accountId,
+								accountRevision: request.accountRevision,
+								mailbox: request.mailbox,
+								uidValidity: selected.uidValidity,
+								uid,
+							})
 						)
 					),
 				});

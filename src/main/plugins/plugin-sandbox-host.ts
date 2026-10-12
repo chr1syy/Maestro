@@ -1,3 +1,4 @@
+import { MAIL_ERROR_MESSAGES, type MailErrorCode } from '../../shared/plugins/mail';
 /**
  * Plugin sandbox host (main process).
  *
@@ -12,17 +13,22 @@
  * children down (graceful shutdown message, then hard kill after a grace).
  */
 
+import { SERVICE_ERROR_CODES, SERVICE_LIMITS } from '../../shared/plugins/services';
+import { MEDIA_ERROR_CODES, MEDIA_LIMITS } from '../../shared/plugins/media-tools';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomBytes } from 'crypto';
 import { logger } from '../utils/logger';
 import { PermissionBroker } from './permission-broker';
 import {
 	isHostMethod,
+	MAX_AGENT_SEND_TOOL_SUMMARY_CHARS,
 	type HostMethod,
 	type HostRequest,
 	type HostResponse,
 	type ToolResult,
+	type AgentSendProgressEvent,
 } from '../../shared/plugins/rpc-protocol';
 import type { PluginEvent } from '../../shared/plugins/events';
 import {
@@ -40,7 +46,17 @@ export interface SandboxControlEvent {
 
 /** An injected implementation of one host method. Receives the calling plugin
  * id (for per-plugin scoping) and the validated params. */
-export type HostCallHandler = (pluginId: string, params: unknown) => Promise<unknown>;
+export type HostCallHandler = ((
+	pluginId: string,
+	params: unknown,
+	context?: {
+		onProgress: (event: AgentSendProgressEvent) => void;
+		setResponseGuard?: (guard: () => void) => void;
+	}
+) => Promise<unknown>) & {
+	/** Host-only ownership query for active release requests. */
+	ownsReleaseResource?: (pluginId: string, params: unknown) => boolean;
+};
 export type HostCallHandlers = Partial<Record<HostMethod, HostCallHandler>>;
 
 export interface PluginSandboxHostDeps {
@@ -52,13 +68,13 @@ export interface PluginSandboxHostDeps {
 	assertToolPluginActive?: (pluginId: string) => void;
 	/** Forward plugin console/log lines somewhere visible. */
 	onLog?: (pluginId: string, level: string, message: string) => void;
-	/** Notified when a child exits unexpectedly (non-zero / crash). */
-	onCrash?: (pluginId: string, code: number) => void;
+	/** Notified on an unexpected exit (including code zero), or a non-zero crash. */
+	onCrash?: (pluginId: string, code: number) => void | Promise<void>;
 	/** Notified when a plugin is stopped ON PURPOSE (disable/uninstall/reload/
 	 * quit), BEFORE the shutdown message is posted - so intentional stops can
 	 * be distinguished from crashes by exit-time observers (e.g. the background
 	 * supervisor clears registrations here and never restarts on the exit). */
-	onStop?: (pluginId: string) => void;
+	onStop?: (pluginId: string) => void | Promise<void>;
 }
 
 /** One bounded recent-log entry observed for a running plugin. */
@@ -107,12 +123,23 @@ const MAX_PENDING_TOOLS = 64;
 
 /** One outstanding `invokeTool` round-trip awaiting the child's `toolResult`. */
 interface PendingTool {
+	service?: boolean;
 	resolve: (value: unknown) => void;
 	reject: (err: Error) => void;
 	timer: NodeJS.Timeout;
 }
 
 interface RunningPlugin {
+	readonly generation: string;
+	exited: Promise<void>;
+	markExited: () => void;
+	stopping?: boolean;
+	/** Separate bounded release slots so saturated ordinary calls cannot block cancellation. */
+	mediaClosesInFlight: number;
+	serviceCancelsInFlight: number;
+	/** Do not spend both release slots awaiting duplicate cleanup of one job. */
+	mediaClosingJobs: Set<string>;
+	mediaCloseWindowCount: number;
 	proc: UtilityProcess;
 	/** Stops invocation authority synchronously, before shutdown/exit callbacks. */
 	lifetime: AbortController;
@@ -124,6 +151,7 @@ interface RunningPlugin {
 	pendingTools: Map<number, PendingTool>;
 	/** Monotonic correlation id for the next tool invocation. */
 	nextToolId: number;
+	inFlightIds: Set<number>;
 }
 
 /** Mutable per-plugin observability accumulator. Kept separate from `running`
@@ -152,6 +180,9 @@ function toActivitySnapshot(a: Activity): ActivitySnapshot {
 export class PluginSandboxHost {
 	private readonly toolIdentity?: PluginToolRunIdentity;
 	private readonly assertToolPluginActive?: (pluginId: string) => void;
+	/** Retain failed drains: a cleanup failure must never authorize a fresh process. */
+	private readonly drains = new Map<string, Promise<void>>();
+	private readonly failedDrains = new Map<string, () => void | Promise<void>>();
 	private running = new Map<string, RunningPlugin>();
 	/** Per-plugin observability, keyed by plugin id. Separate from `running` so
 	 *  it survives a crashed child (crash counts must persist). */
@@ -176,6 +207,18 @@ export class PluginSandboxHost {
 			if (!record || this.running.get(pluginId) !== record || record.lifetime.signal.aborted)
 				throw new ImapConnectionError('MAIL_DENIED');
 		};
+	}
+
+	/** False as soon as shutdown starts, before child exit, so stopping plugins cannot acquire new service work. */
+	isAcceptingServiceCalls(pluginId: string): boolean {
+		const record = this.running.get(pluginId);
+		return !!record && !record.stopping;
+	}
+	getToolGeneration(pluginId: string): string {
+		const record = this.running.get(pluginId);
+		if (!record || record.stopping || record.lifetime.signal.aborted)
+			throw new ImapConnectionError('MAIL_DENIED');
+		return record.generation;
 	}
 
 	runningIds(): string[] {
@@ -233,6 +276,7 @@ export class PluginSandboxHost {
 	 */
 	start(pluginId: string, pluginDir: string, entryRelPath: string): void {
 		if (this.running.has(pluginId)) return;
+		if (this.drains.has(pluginId)) throw new Error('PluginDrainPending');
 
 		// Resolve and confine the entry path inside the plugin dir (defense in
 		// depth; the manifest validator already rejects traversal).
@@ -250,14 +294,26 @@ export class PluginSandboxHost {
 			env: {},
 		});
 
+		let markExited!: () => void;
+		const exited = new Promise<void>((resolve) => {
+			markExited = resolve;
+		});
 		const record: RunningPlugin = {
+			generation: randomBytes(16).toString('hex'),
+			exited,
+			markExited,
 			proc,
 			lifetime: new AbortController(),
 			inFlight: 0,
 			windowStart: Date.now(),
 			windowCount: 0,
+			mediaClosesInFlight: 0,
+			serviceCancelsInFlight: 0,
+			mediaClosingJobs: new Set(),
+			mediaCloseWindowCount: 0,
 			pendingTools: new Map(),
 			nextToolId: 1,
+			inFlightIds: new Set(),
 		};
 		this.running.set(pluginId, record);
 		// Ensure an observability record exists so a freshly started plugin shows
@@ -274,12 +330,33 @@ export class PluginSandboxHost {
 			// An old child's delayed exit must never remove a replacement sandbox.
 			if (this.running.get(pluginId) !== record) return;
 			this.running.delete(pluginId);
+			record.markExited();
 			const act = this.activity.get(pluginId);
 			if (act) act.inFlight = 0;
-			if (code !== 0) {
-				if (act) act.crashCount += 1;
+			if (code !== 0 || !record.stopping) {
+				if (act && code !== 0) act.crashCount += 1;
 				logger.warn(`[Plugins] sandbox "${pluginId}" exited with code ${code}`, '[Plugins]');
-				this.deps.onCrash?.(pluginId, code);
+				let cleanup: void | Promise<void>;
+				try {
+					cleanup = this.deps.onCrash?.(pluginId, code);
+				} catch {
+					cleanup = Promise.reject(new Error('ServiceFailed'));
+				}
+				if (record.stopping) {
+					void Promise.resolve(cleanup).catch(() => {});
+				} else if (cleanup) {
+					const drain = Promise.resolve(cleanup).then(() => {
+						this.drains.delete(pluginId);
+					});
+					this.drains.set(pluginId, drain);
+					void drain.catch(() => {
+						if (this.drains.get(pluginId) === drain) {
+							this.failedDrains.set(pluginId, () =>
+								this.deps.onStop ? this.deps.onStop(pluginId) : this.deps.onCrash?.(pluginId, code)
+							);
+						}
+					});
+				}
 			}
 		});
 
@@ -293,7 +370,7 @@ export class PluginSandboxHost {
 	 */
 	invokeCommand(pluginId: string, commandId: string, args?: unknown): boolean {
 		const record = this.running.get(pluginId);
-		if (!record) return false;
+		if (!record || record.stopping) return false;
 		// Cap the host->child payload the same way HostRequest params are bounded:
 		// a non-serializable or oversized args object is dropped, never posted.
 		let serialized: string;
@@ -328,139 +405,123 @@ export class PluginSandboxHost {
 		pluginId: string,
 		commandId: string,
 		args?: unknown,
-		runContext?: unknown
+		options?: {
+			callerAgentId?: string | null;
+			runContext?: PluginToolCallerContext;
+			signal?: AbortSignal;
+			timeoutMs?: number;
+			service?: true;
+		}
 	): Promise<unknown> {
 		const record = this.running.get(pluginId);
-		const verified = arguments.length >= 4;
-		if (!record && !verified)
-			return Promise.reject(new Error(`plugin "${pluginId}" is not running`));
-		const identity = this.toolIdentity;
-		const assertPlugin = this.assertToolPluginActive;
+		if (!record) return Promise.reject(new Error(`plugin "${pluginId}" is not running`));
+		if (commandId.startsWith('service:')) {
+			if (options?.service !== true || !options.signal)
+				return Promise.reject(new Error('ServiceDenied'));
+			if (record.stopping) return Promise.reject(new Error('ServiceUnavailable'));
+		}
+		if (record.stopping) return Promise.reject(new Error(`plugin "${pluginId}" is not running`));
+		// Bound the host->child payload exactly like invokeCommand / HostRequest.
+		let serialized: string;
+		try {
+			serialized = JSON.stringify(args ?? null);
+		} catch {
+			return Promise.reject(new Error('tool args are not serializable'));
+		}
+		if (serialized.length > MAX_MESSAGE_BYTES) {
+			return Promise.reject(new Error('tool args exceed size limit'));
+		}
+		if (record.pendingTools.size >= MAX_PENDING_TOOLS) {
+			return Promise.reject(new Error('too many concurrent tool invocations'));
+		}
+		if (options?.signal?.aborted) return Promise.reject(new Error('ServiceCancelled'));
 		let handle: string | undefined;
 		let invocation: PluginToolInvocationContext | undefined;
-		let checkRun: (() => void) | undefined;
-		let capturedArgs: unknown;
-		const assertSandbox = this.captureToolLifetime(pluginId);
-		const safeError = (error: unknown): Error =>
-			verified
-				? new ImapConnectionError(error instanceof ImapConnectionError ? error.code : 'MAIL_DENIED')
-				: error instanceof Error
-					? error
-					: new Error('tool invocation failed');
-		try {
-			assertSandbox();
-			// Serialize once: getters/toJSON cannot change the posted args after admission.
-			let serialized: string | undefined;
+		if (options?.runContext) {
 			try {
-				serialized = JSON.stringify(args ?? null);
-			} catch {
-				throw new Error('tool args are not serializable');
-			}
-			if (typeof serialized !== 'string') throw new Error('tool args are not serializable');
-			if (serialized.length > MAX_MESSAGE_BYTES) throw new Error('tool args exceed size limit');
-			capturedArgs = JSON.parse(serialized);
-			assertSandbox();
-			if (verified) {
-				if (!(identity instanceof PluginToolRunIdentity) || typeof assertPlugin !== 'function')
+				if (!this.toolIdentity || !this.assertToolPluginActive)
 					throw new ImapConnectionError('MAIL_DENIED');
-				handle = identity.issueInvocation(runContext, pluginId, {
-					signal: record!.lifetime.signal,
+				handle = this.toolIdentity.issueInvocation(options.runContext, pluginId, {
+					signal: record.lifetime.signal,
 					assertActive: () => {
-						assertSandbox();
-						assertPlugin(pluginId);
-						assertSandbox();
+						this.captureToolLifetime(pluginId)();
+						this.assertToolPluginActive!(pluginId);
 					},
 				});
-				invocation = identity.resolveInvocation(pluginId, handle);
-				// issueInvocation proved exact frozen context membership, not structural shape.
-				checkRun = (runContext as PluginToolCallerContext).assertActive;
+				invocation = this.toolIdentity.resolveInvocation(pluginId, handle);
+			} catch {
+				return Promise.reject(new ImapConnectionError('MAIL_DENIED'));
 			}
-			assertSandbox();
-			if (record!.pendingTools.size >= MAX_PENDING_TOOLS)
-				throw new Error('too many concurrent tool invocations');
-			if (!Number.isSafeInteger(record!.nextToolId) || record!.nextToolId < 1)
-				throw new Error('tool correlation limit exceeded');
-		} catch (error) {
-			if (handle) identity?.releaseInvocation(handle);
-			return Promise.reject(safeError(error));
 		}
-		// Admission proved this exact record, rechecked after all host callbacks.
-		const running = record!;
-		const id = running.nextToolId++;
+		const context = {
+			callerAgentId: invocation?.callerAgentId ?? options?.callerAgentId ?? null,
+			...(handle ? { mailInvocationId: handle } : {}),
+		};
+		const timeoutMs = Math.min(
+			options?.timeoutMs ?? TOOL_INVOKE_TIMEOUT_MS,
+			MEDIA_LIMITS.jobTimeoutMs
+		);
+		const id = record.nextToolId++;
 		return new Promise<unknown>((resolve, reject) => {
-			let settled = false;
-			const cleanup = () => {
-				settled = true;
-				running.pendingTools.delete(id);
-				clearTimeout(timer);
-				invocation?.signal.removeEventListener('abort', onAbort);
-				if (handle) identity?.releaseInvocation(handle);
-			};
-			const fail = (error: unknown) => {
-				if (settled) return;
-				cleanup();
-				reject(safeError(error));
-			};
-			const onAbort = () => fail(new ImapConnectionError('MAIL_CANCELED'));
 			const timer = setTimeout(() => {
-				fail(
-					verified
-						? new ImapConnectionError('MAIL_TIMEOUT')
-						: new Error(`tool "${commandId}" timed out after ${TOOL_INVOKE_TIMEOUT_MS}ms`)
+				const error = new Error(
+					options?.signal ? 'ServiceTimeout' : `tool "${commandId}" timed out after ${timeoutMs}ms`
 				);
-			}, TOOL_INVOKE_TIMEOUT_MS);
+				record.pendingTools.get(id)?.reject(error);
+				record.pendingTools.delete(id);
+			}, timeoutMs);
+			// Never let a pending tool timer keep the process alive on shutdown.
 			if (typeof timer.unref === 'function') timer.unref();
-			running.pendingTools.set(id, {
-				timer,
-				reject: fail,
+			const signal = invocation?.signal ?? options?.signal;
+			const detach = () => {
+				signal?.removeEventListener('abort', abort);
+				if (handle) this.toolIdentity?.releaseInvocation(handle);
+			};
+			/** Reject and detach the pending provider RPC on abort; native/media draining remains host-owned. */
+			const abort = () => {
+				record.pendingTools.delete(id);
+				clearTimeout(timer);
+				detach();
+				reject(signal?.reason instanceof Error ? signal.reason : new Error('ServiceCancelled'));
+			};
+			signal?.addEventListener('abort', abort, { once: true });
+			record.pendingTools.set(id, {
+				service: commandId.startsWith('service:'),
 				resolve: (value) => {
-					if (settled) return;
 					try {
-						assertSandbox();
 						invocation?.assertActive();
-						assertSandbox();
-						// Verified completion is bounded before releasing the nested lifetime.
-						// Snapshot once; any serialization callbacks are followed by live checks.
-						if (verified) {
-							const serialized = JSON.stringify(value === undefined ? null : value);
-							if (typeof serialized !== 'string') throw new ImapConnectionError('MAIL_INVALID');
-							if (serialized.length > MAX_MESSAGE_BYTES)
-								throw new ImapConnectionError('MAIL_LIMIT');
-							value = JSON.parse(serialized);
-							invocation!.assertActive();
-							assertSandbox();
-						}
-						if (settled) return; // Reentrant authority callback canceled this call.
-						cleanup();
-						// Releasing a handle aborts retained nested contexts and may reenter host code.
-						checkRun?.();
-						if (verified) assertPlugin!(pluginId);
-						assertSandbox();
-						checkRun?.();
-						assertSandbox();
-						resolve(value);
-					} catch (error) {
-						if (settled) reject(safeError(error));
-						else fail(error);
+					} catch {
+						detach();
+						reject(new ImapConnectionError('MAIL_DENIED'));
+						return;
 					}
+					detach();
+					resolve(value);
 				},
+				reject: (error) => {
+					detach();
+					reject(error);
+				},
+				timer,
 			});
-			invocation?.signal.addEventListener('abort', onAbort, { once: true });
 			try {
-				assertSandbox();
-				invocation?.assertActive();
-				assertSandbox();
-				if (invocation?.signal.aborted) onAbort();
-				if (settled) return;
-				running.proc.postMessage({
+				record.proc.postMessage({
 					kind: 'invokeTool',
 					id,
 					commandId,
-					args: capturedArgs,
+					args: JSON.parse(serialized),
+					context,
 					...(handle ? { invocationId: handle } : {}),
 				});
-			} catch (error) {
-				fail(error);
+			} catch (err) {
+				record.pendingTools.delete(id);
+				clearTimeout(timer);
+				detach();
+				reject(
+					new Error(
+						`failed to post tool invocation: ${err instanceof Error ? err.message : String(err)}`
+					)
+				);
 			}
 		});
 	}
@@ -486,7 +547,7 @@ export class PluginSandboxHost {
 	 */
 	pushEvent(pluginId: string, event: PluginEvent | SandboxControlEvent): boolean {
 		const record = this.running.get(pluginId);
-		if (!record) return false;
+		if (!record || record.stopping) return false;
 		try {
 			record.proc.postMessage({
 				kind: 'event',
@@ -500,13 +561,46 @@ export class PluginSandboxHost {
 		}
 	}
 
-	/** Stop a plugin: ask it to shut down, then hard-kill after a grace period. */
-	stop(pluginId: string): void {
+	/**
+	 * Bar new media/service work, request shutdown and hard-kill after the grace period.
+	 * Resolve only after child exit and host cleanup; a failed drain blocks restart until an explicit stop retry succeeds.
+	 */
+	stop(pluginId: string): Promise<void> {
+		const existingDrain = this.drains.get(pluginId);
+		if (existingDrain) {
+			const retryCleanup = this.failedDrains.get(pluginId);
+			if (this.running.has(pluginId) || !retryCleanup) return existingDrain;
+			this.failedDrains.delete(pluginId);
+			const retry = Promise.resolve()
+				.then(retryCleanup)
+				.then(() => {
+					if (this.drains.get(pluginId) === retry) this.drains.delete(pluginId);
+				});
+			this.drains.set(pluginId, retry);
+			void retry.catch(() => {
+				if (this.drains.get(pluginId) === retry) this.failedDrains.set(pluginId, retryCleanup);
+			});
+			return retry;
+		}
 		const record = this.running.get(pluginId);
-		if (!record || record.lifetime.signal.aborted) return;
+		if (!record) return Promise.resolve();
+		record.stopping = true;
 		record.lifetime.abort();
 		this.rejectPendingTools(record, 'plugin stopped before returning a tool result');
-		this.deps.onStop?.(pluginId);
+		let cleanup: void | Promise<void>;
+		try {
+			cleanup = this.deps.onStop?.(pluginId);
+		} catch {
+			cleanup = Promise.reject(new Error('ServiceFailed'));
+		}
+		const drain = Promise.all([record.exited, cleanup]).then(() => {
+			this.drains.delete(pluginId);
+		});
+		this.drains.set(pluginId, drain);
+		void drain.catch(() => {
+			if (this.drains.get(pluginId) === drain)
+				this.failedDrains.set(pluginId, () => this.deps.onStop?.(pluginId));
+		});
 		try {
 			record.proc.postMessage({ kind: 'shutdown' });
 		} catch {
@@ -519,11 +613,16 @@ export class PluginSandboxHost {
 				// Already dead.
 			}
 		}, SHUTDOWN_GRACE_MS);
+		return drain;
 	}
 
 	/** Stop every running plugin (app shutdown / feature disable). */
-	stopAll(): void {
-		for (const id of this.runningIds()) this.stop(id);
+	stopAll(): Promise<void> {
+		const drain = Promise.all(
+			[...new Set([...this.runningIds(), ...this.drains.keys()])].map((id) => this.stop(id))
+		).then(() => {});
+		void drain.catch(() => {});
+		return drain;
 	}
 
 	/** Authorize and execute one host request from a child. */
@@ -533,7 +632,7 @@ export class PluginSandboxHost {
 		data: unknown
 	): Promise<void> {
 		const current = this.running.get(pluginId);
-		if (!current || current.proc !== proc || current.lifetime.signal.aborted) return;
+		if (!current || current.proc !== proc) return;
 		if (typeof data !== 'object' || data === null) return;
 		const msg = data as Record<string, unknown>;
 
@@ -556,7 +655,44 @@ export class PluginSandboxHost {
 		if (typeof msg.id !== 'number' || !isHostMethod(msg.method)) return;
 		const request = msg as unknown as HostRequest;
 
+		/** Sanitize media/service failures to public codes and send the matching request id; tolerate child exit. */
 		const respond = (res: Omit<HostResponse, 'id'>): void => {
+			if (request.method.startsWith('mail.') && !res.ok) {
+				const code: MailErrorCode =
+					res.error && Object.prototype.hasOwnProperty.call(MAIL_ERROR_MESSAGES, res.error)
+						? (res.error as MailErrorCode)
+						: 'MAIL_DENIED';
+				res = {
+					ok: true,
+					result: { ok: false, error: { code, message: MAIL_ERROR_MESSAGES[code] } },
+				};
+			}
+			if (request.method.startsWith('media.') && !res.ok) {
+				const code = (MEDIA_ERROR_CODES as readonly string[]).includes(res.error ?? '')
+					? res.error!
+					: /permission denied/.test(res.error ?? '')
+						? 'MediaDenied'
+						: /rate limit|concurrent|concurrency limit/.test(res.error ?? '')
+							? 'MediaBusy'
+							: /not implemented/.test(res.error ?? '')
+								? 'MediaUnavailable'
+								: /serializable|size limit/.test(res.error ?? '')
+									? 'MediaInvalid'
+									: 'MediaProcessFailed';
+				res = { ok: false, error: code, errorCode: code };
+			}
+			if (request.method.startsWith('services.') && !res.ok) {
+				const code = (SERVICE_ERROR_CODES as readonly string[]).includes(res.error ?? '')
+					? res.error!
+					: /permission denied/.test(res.error ?? '')
+						? 'ServiceDenied'
+						: /rate limit|concurrent|concurrency limit/.test(res.error ?? '')
+							? 'ServiceBusy'
+							: /not implemented/.test(res.error ?? '')
+								? 'ServiceUnavailable'
+								: 'ServiceFailed';
+				res = { ok: false, error: code, errorCode: code };
+			}
 			try {
 				proc.postMessage({ id: request.id, ...res });
 			} catch {
@@ -566,18 +702,67 @@ export class PluginSandboxHost {
 
 		// Backpressure + rate limiting against a flooding child.
 		const record = this.running.get(pluginId);
+		if (
+			record?.stopping &&
+			!request.method.startsWith('media.') &&
+			!request.method.startsWith('services.') &&
+			request.method !== 'fs.write' &&
+			request.method !== 'settings.set' &&
+			request.method !== 'storage.set' &&
+			request.method !== 'storage.delete'
+		) {
+			respond({ ok: false, error: 'plugin is stopping' });
+			return;
+		}
+		if (!record || record.proc !== proc || record.inFlightIds.has(request.id)) {
+			respond({ ok: false, error: 'duplicate or stale host request' });
+			return;
+		}
 		if (record) {
+			// Closing snapshots cannot admit new media resources during shutdown.
+			if (
+				record.stopping &&
+				((request.method.startsWith('media.') && request.method !== 'media.close') ||
+					(request.method.startsWith('services.') &&
+						!['services.cancel', 'services.result', 'services.unregister'].includes(
+							request.method
+						)))
+			) {
+				respond({
+					ok: false,
+					error: request.method.startsWith('services.') ? 'ServiceUnavailable' : 'MediaCancelled',
+				});
+				return;
+			}
+			if (
+				(request.method === 'media.close' &&
+					record.mediaClosesInFlight >= MEDIA_LIMITS.maxJobsPerPlugin) ||
+				(request.method === 'services.cancel' &&
+					record.serviceCancelsInFlight >= SERVICE_LIMITS.callsPerPlugin)
+			) {
+				respond({ ok: false, error: 'release concurrency limit exceeded' });
+				return;
+			}
 			const now = Date.now();
 			if (now - record.windowStart > RATE_WINDOW_MS) {
 				record.windowStart = now;
 				record.windowCount = 0;
+				record.mediaCloseWindowCount = 0;
 			}
 			record.windowCount += 1;
-			if (record.inFlight >= MAX_IN_FLIGHT) {
+			if (
+				record.inFlight >= MAX_IN_FLIGHT &&
+				request.method !== 'media.close' &&
+				request.method !== 'services.cancel'
+			) {
 				respond({ ok: false, error: 'too many concurrent host calls' });
 				return;
 			}
-			if (record.windowCount > RATE_MAX_PER_WINDOW) {
+			if (
+				record.windowCount > RATE_MAX_PER_WINDOW &&
+				request.method !== 'media.close' &&
+				request.method !== 'services.cancel'
+			) {
 				respond({ ok: false, error: 'host call rate limit exceeded' });
 				return;
 			}
@@ -609,19 +794,110 @@ export class PluginSandboxHost {
 			return;
 		}
 
-		if (record) record.inFlight += 1;
+		const closeParams = request.params as { jobId?: unknown; callId?: unknown } | null | undefined;
+		const releaseId = method === 'media.close' ? closeParams?.jobId : closeParams?.callId;
+		const closeJobId =
+			(method === 'media.close' || method === 'services.cancel') &&
+			closeParams &&
+			typeof closeParams === 'object' &&
+			!Array.isArray(closeParams) &&
+			Object.keys(closeParams).length === 1 &&
+			typeof releaseId === 'string' &&
+			releaseId.length <= 64
+				? `${method}:${releaseId}`
+				: undefined;
+		if (record && (method === 'media.close' || method === 'services.cancel')) {
+			const duplicate = closeJobId !== undefined && record.mediaClosingJobs.has(closeJobId);
+			if (
+				record.mediaCloseWindowCount >= RATE_MAX_PER_WINDOW &&
+				(duplicate || !handler.ownsReleaseResource?.(pluginId, request.params))
+			) {
+				respond({ ok: false, error: 'release concurrency limit exceeded' });
+				return;
+			}
+			record.mediaCloseWindowCount += 1;
+			// Reject duplicates instead of accumulating waiters on the same promise.
+			// Their request IDs still get a bounded, code-only backpressure response.
+			if (duplicate) {
+				respond({ ok: false, error: method === 'services.cancel' ? 'ServiceBusy' : 'MediaBusy' });
+				return;
+			}
+			if (closeJobId !== undefined) record.mediaClosingJobs.add(closeJobId);
+		}
+
+		if (record) {
+			record.inFlight += 1;
+			if (method === 'media.close') record.mediaClosesInFlight += 1;
+			if (method === 'services.cancel') record.serviceCancelsInFlight += 1;
+		}
+		record.inFlightIds.add(request.id);
+		let active = true;
+		const onProgress = (event: AgentSendProgressEvent): void => {
+			if (!active || record.stopping || this.running.get(pluginId) !== record) return;
+			if (!this.deps.broker.authorize(pluginId, method, request.params, { audit: false }).allowed)
+				return;
+			// Keep the optional public action bounded at the final host -> sandbox
+			// boundary as well. Older callers and events without a summary pass through.
+			const publicEvent =
+				event.type === 'tool' && event.summary !== undefined
+					? {
+							...event,
+							...(typeof event.summary === 'string' &&
+							event.summary.length <= MAX_AGENT_SEND_TOOL_SUMMARY_CHARS &&
+							!/[\x00-\x1f\x7f]/.test(event.summary)
+								? { summary: event.summary }
+								: { summary: undefined }),
+						}
+					: event;
+			try {
+				proc.postMessage({ kind: 'progress', id: request.id, event: publicEvent });
+			} catch {
+				// The owning sandbox exited; the provider run is aborted by onCrash.
+			}
+		};
 		const act = this.activityFor(pluginId);
 		act.totalCalls += 1;
 		act.inFlight += 1;
 		act.lastActivity = Date.now();
 		if (act.inFlight > act.peakInFlight) act.peakInFlight = act.inFlight;
 		try {
-			const result = await handler(pluginId, request.params);
+			let responseGuard: (() => void) | undefined;
+			const result = await handler(pluginId, request.params, {
+				onProgress,
+				setResponseGuard: (guard) => {
+					responseGuard = guard;
+				},
+			});
+			if (method.startsWith('mail.')) {
+				if (
+					record.stopping ||
+					this.running.get(pluginId) !== record ||
+					!this.deps.broker.authorize(pluginId, method, request.params, { audit: false }).allowed
+				)
+					throw new ImapConnectionError('MAIL_DENIED');
+				responseGuard?.();
+			}
 			respond({ ok: true, result });
 		} catch (err) {
-			respond({ ok: false, error: err instanceof Error ? err.message : String(err) });
+			respond({
+				ok: false,
+				error: method.startsWith('mail.')
+					? 'MAIL_DENIED'
+					: err instanceof Error
+						? err.message
+						: String(err),
+			});
 		} finally {
-			if (record) record.inFlight = Math.max(0, record.inFlight - 1);
+			active = false;
+			record.inFlightIds.delete(request.id);
+			if (record) {
+				record.inFlight = Math.max(0, record.inFlight - 1);
+				if (method === 'media.close')
+					record.mediaClosesInFlight = Math.max(0, record.mediaClosesInFlight - 1);
+				if (method === 'services.cancel')
+					record.serviceCancelsInFlight = Math.max(0, record.serviceCancelsInFlight - 1);
+				if (closeJobId !== undefined) record.mediaClosingJobs.delete(closeJobId);
+			}
 			act.inFlight = Math.max(0, act.inFlight - 1);
 		}
 	}
@@ -639,6 +915,14 @@ export class PluginSandboxHost {
 		if (res.ok === true) {
 			pending.resolve(res.result);
 		} else {
+			if (pending.service) {
+				const candidate = res.errorCode ?? res.error;
+				const code = (SERVICE_ERROR_CODES as readonly unknown[]).includes(candidate)
+					? (candidate as string)
+					: 'ServiceFailed';
+				pending.reject(Object.assign(new Error(code), { code }));
+				return;
+			}
 			pending.reject(
 				new Error(typeof res.error === 'string' ? res.error : 'tool invocation failed')
 			);

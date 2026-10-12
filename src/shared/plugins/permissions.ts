@@ -22,14 +22,23 @@
  *   silently become an allow-all.
  */
 
+import { isValidServiceCallTarget } from './services';
+
 /**
  * The fixed vocabulary of things a sandboxed plugin can ask to do. Adding a
  * capability is a host-API change (it expands the contract). Each maps to a
  * brokered host call; there is no generic "eval"/"exec arbitrary" capability.
  */
 export type PluginCapability =
+	| 'mail:accounts'
+	| 'mail:read'
+	| 'mail:body'
+	| 'mail:attachments'
 	| 'fs:read' // read files under a path scope
 	| 'fs:write' // write files under a path scope
+	| 'services:call'
+	| 'services:provide'
+	| 'media:tools' // fixed Discord voice media profiles, opaque jobs only
 	| 'net:fetch' // HTTP(S) fetch to a host scope
 	| 'net:connect' // hold an outbound persistent websocket to a host scope (Discord/Slack gateway)
 	| 'agents:read' // list/read agents and their state
@@ -63,8 +72,15 @@ export type PluginCapability =
 	| 'ui:render-unsafe'; // high-trust custom UI in host-approved, non-protected regions
 
 export const PLUGIN_CAPABILITIES: readonly PluginCapability[] = [
+	'mail:accounts',
+	'mail:read',
+	'mail:body',
+	'mail:attachments',
 	'fs:read',
 	'fs:write',
+	'services:call',
+	'services:provide',
+	'media:tools',
 	'net:fetch',
 	'net:connect',
 	'agents:read',
@@ -102,6 +118,11 @@ export const PLUGIN_CAPABILITIES: readonly PluginCapability[] = [
 export type CapabilityRisk = 'low' | 'medium' | 'high';
 
 const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
+	'mail:accounts': 'medium',
+	'mail:read': 'high',
+	'mail:body': 'high',
+	'mail:attachments': 'high',
+
 	'notifications:toast': 'low',
 	'settings:read': 'low',
 	'agents:read': 'low',
@@ -115,6 +136,9 @@ const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
 	'sessions:focus': 'low',
 	'fs:read': 'medium',
 	'fs:watch': 'medium',
+	'services:call': 'high',
+	'services:provide': 'high',
+	'media:tools': 'high',
 	'net:fetch': 'medium',
 	'net:connect': 'high',
 	'sessions:read': 'medium',
@@ -151,9 +175,17 @@ const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
 type ScopeKind = 'path' | 'host' | 'allowlist' | 'none';
 
 const CAPABILITY_SCOPE_KIND: Record<PluginCapability, ScopeKind> = {
+	'mail:accounts': 'none',
+	'mail:read': 'allowlist',
+	'mail:body': 'allowlist',
+	'mail:attachments': 'allowlist',
+
 	'fs:read': 'path',
 	'fs:write': 'path',
 	'fs:watch': 'path',
+	'services:call': 'allowlist',
+	'services:provide': 'allowlist',
+	'media:tools': 'allowlist',
 	'net:fetch': 'host',
 	'net:connect': 'host',
 	'agents:read': 'none',
@@ -422,7 +454,8 @@ export function parseAllowlistScope(scope: string | undefined): readonly string[
 }
 
 /** Validate an allowlist request scope at parse time: required, non-empty, and
- * every member a plain exact token (no wildcards/paths/whitespace/quotes). */
+ * every member a plain exact token (no wildcards/paths/whitespace/quotes).
+ * services:call alone uses exact provider/service pairs instead of bare tokens. */
 function validateAllowlistScope(capability: PluginCapability, scope: unknown): string | null {
 	if (typeof scope !== 'string' || scope.trim() === '') {
 		return `capability "${capability}" requires an allowlist scope naming exact targets (never wildcard)`;
@@ -432,7 +465,11 @@ function validateAllowlistScope(capability: PluginCapability, scope: unknown): s
 		return `capability "${capability}" allowlist scope has no valid members`;
 	}
 	for (const member of members) {
-		if (!isValidAllowlistMember(member)) {
+		const valid =
+			capability === 'services:call'
+				? isValidServiceCallTarget(member)
+				: isValidAllowlistMember(member);
+		if (!valid) {
 			return `capability "${capability}" allowlist member "${member}" contains forbidden characters (exact names only)`;
 		}
 	}
@@ -474,6 +511,10 @@ export function isPermitted(
 		if (grant.capability !== capability) continue;
 		if (scopeKind === 'none') return true;
 		if (scopeKind === 'allowlist') {
+			// Service pairs must also be valid when read from persisted grants;
+			// malformed/wildcard members never authorize even an exact target.
+			if (capability === 'services:call' && validateAllowlistScope(capability, grant.scope))
+				continue;
 			// Never wildcard: an unscoped act-verb grant and a target-less call
 			// are both denied; only an exact named member matches.
 			if (target !== undefined && allowlistScopeCovers(grant.scope, target)) return true;
@@ -513,6 +554,20 @@ export function describeCapability(capability: PluginCapability): string {
 			return 'Read files';
 		case 'fs:write':
 			return 'Create and modify files';
+		case 'services:call':
+			return 'Call an explicitly bound plugin service (exact provider/service; bounded requests and results)';
+		case 'services:provide':
+			return 'Provide an own declared host-mediated service (exact service ID; no direct plugin IPC)';
+		case 'mail:accounts':
+			return 'Request host-owned mail setup and view own account intent (no credentials or agent identities)';
+		case 'mail:read':
+			return 'Read headers of exact mail accounts for independently authorized agents';
+		case 'mail:body':
+			return 'Read complete plain text from exact mail accounts for independently authorized agents';
+		case 'mail:attachments':
+			return 'Read bounded attachments from exact mail accounts for independently authorized agents';
+		case 'media:tools':
+			return 'Download Discord voice attachments and run fixed local media tools (8 MiB, 120 seconds; no general file or process access)';
 		case 'net:fetch':
 			return 'Make network requests (unscoped includes localhost and your internal network)';
 		case 'net:connect':
