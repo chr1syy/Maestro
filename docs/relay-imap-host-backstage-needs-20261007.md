@@ -10,6 +10,8 @@ related:
 
 # Backstage requirements for this existing host package
 
+The reconciliation below is historical. [The implemented 2026-10-12 contract](relay-imap-host-contract-20261012.md) defines the callable interface, exact seven-field event and host-owned checkpoint policy. [The continuation validation record](relay-imap-host-validation-20261012.md) records synthetic evidence and rollout limits.
+
 Read in full:
 `/home/chris/code/Maestro-Backstage/.maestro/playbooks/2026-10-06-Relay-Mail/HOST-HANDOFF-20261006.md`.
 Also read the implementation plan, host gate, independent event-state semantics,

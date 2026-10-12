@@ -75,4 +75,6 @@ Synthetic tests use injected TLS, keyring and storage only. They cover actual re
 
 Observed focused results: mail security/readers **860 passing tests**, full Cue/shared-Cue **2,100 passing tests, 2 skipped**, SDK runtime/drift/type parity **36 passing tests and zero type errors**, VM/RPC/durable admission **137 passing tests**. The dedicated frame/editor additions and repository gates are recorded in the continuation evidence after their runs settle. Main/preload and CLI builds passed. These counts overlap and must not be added into a unique-test total.
 
+The [continuation validation record](relay-imap-host-validation-20261012.md) identifies implementation commits, fresh test results, repository gate commands and the review boundary.
+
 Production integration remains gated on the final committed contract, successful repository gates and review. This continuation has not installed the plugin, launched a provider, sent live mail traffic, used real mail credentials, restarted Maestro, changed consent/settings or reported to Discord. No live mailbox compatibility or packaged desktop UX is claimed by synthetic tests.

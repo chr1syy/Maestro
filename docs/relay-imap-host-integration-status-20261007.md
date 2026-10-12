@@ -9,6 +9,8 @@ related: ['[[relay-imap-host-contract-20261006]]', '[[relay-imap-host-evidence-2
 
 # Relay IMAP host integration status
 
+This historical snapshot is superseded by [the implemented 2026-10-12 contract](relay-imap-host-contract-20261012.md) and [the continuation validation record](relay-imap-host-validation-20261012.md). The snapshot below is preserved as history.
+
 **No callable mail SDK/RPC contract is implemented yet.** Backstage must keep
 production integration gated. This is a snapshot of the existing authorized host
 package, not a second implementation or a feature-completion report.
