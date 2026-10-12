@@ -65,7 +65,7 @@ export interface McpBridge {
 
 export function createMcpBridge(deps: McpBridgeDeps): McpBridge {
 	// Capture once: subsequent dependency mutations cannot change this run.
-	const proofConfigured = Object.hasOwn(deps, 'runToken');
+	const proofConfigured = Object.prototype.hasOwnProperty.call(deps, 'runToken');
 	const runToken = deps.runToken;
 	const proofValid =
 		typeof runToken === 'string' && runToken.length === 64 && /^[0-9a-f]{64}$/.test(runToken);

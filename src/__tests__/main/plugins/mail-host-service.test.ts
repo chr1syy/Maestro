@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMailHostFixture } from '../../helpers/mailHostFixture';
 import { PermissionBroker } from '../../../main/plugins/permission-broker';
@@ -291,5 +292,50 @@ describe('actual callable mail boundary with synthetic TLS and keyring', () => {
 			await f.service.call(f.pluginId, 'mail.readAttachment', request, () => {})
 		).toMatchObject({ ok: false });
 		expect(f.connect).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('anchored ledger migration and fail-closed restores', () => {
+	it('migrates a fresh v1 anchor with empty mail configuration and independent rights', async () => {
+		const f = await fixture();
+		const ledger = JSON.parse(f.deps.seal.unseal(fs.readFileSync(f.deps.ledgerPath)));
+		ledger.version = 1;
+		delete ledger.mail;
+		fs.writeFileSync(f.deps.ledgerPath, f.deps.seal.seal(JSON.stringify(ledger)));
+		const before = f.entryFactory.mock.calls.length;
+		const restored = new AuthorizationStore(f.deps);
+		expect(restored.readMailConfiguration(f.pluginId, f.identity)).toBeNull();
+		expect(JSON.parse(f.deps.seal.unseal(fs.readFileSync(f.deps.ledgerPath))).version).toBe(2);
+		expect(() =>
+			restored.assertStoredMailAgentRight(
+				f.pluginId,
+				f.identity,
+				f.accountId,
+				f.reference.accountRevision,
+				f.agentId,
+				'read'
+			)
+		).toThrow();
+		expect(f.entryFactory.mock.calls.length).toBe(before);
+	});
+	it('refuses a malformed sealed v2 mail object before native access', async () => {
+		const f = await fixture();
+		const ledger = JSON.parse(f.deps.seal.unseal(fs.readFileSync(f.deps.ledgerPath)));
+		ledger.mail = { unexpected: 'synthetic malformed mail state' };
+		fs.writeFileSync(f.deps.ledgerPath, f.deps.seal.seal(JSON.stringify(ledger)));
+		const restored = new AuthorizationStore(f.deps);
+		const before = f.entryFactory.mock.calls.length;
+		expect(() => restored.readMailConfiguration(f.pluginId, f.identity)).toThrow();
+		expect(() =>
+			restored.assertStoredMailAgentRight(
+				f.pluginId,
+				f.identity,
+				f.accountId,
+				f.reference.accountRevision,
+				f.agentId,
+				'read'
+			)
+		).toThrow();
+		expect(f.entryFactory.mock.calls.length).toBe(before);
 	});
 });
