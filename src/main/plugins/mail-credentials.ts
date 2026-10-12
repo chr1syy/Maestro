@@ -4,6 +4,7 @@
  * This module creates no authority and never exports a password getter.
  */
 import { createHash } from 'crypto';
+import { canonicalJson } from '../../shared/canonicalJson';
 import { PLUGIN_ID_PATTERN } from '../../shared/plugins/plugin-manifest';
 import { isValidAllowlistMember } from '../../shared/plugins/permissions';
 import { createKeyringEntry, type KeyringEntry } from './authorization-ledger';
@@ -53,7 +54,7 @@ export class MailCredentialSlot {
 			throw new ImapConnectionError('MAIL_INVALID');
 		// JSON tuple preserves boundaries; digest keeps native slot names bounded.
 		this.slot = createHash('sha256')
-			.update(JSON.stringify([installationId, pluginId, accountId]))
+			.update(canonicalJson([installationId, pluginId, accountId]))
 			.digest('hex');
 	}
 

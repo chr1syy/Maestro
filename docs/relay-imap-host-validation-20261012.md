@@ -21,8 +21,11 @@ Existing dependencies are reused through a worktree-local `node_modules` symlink
 | Transport, framing, fixed commands, MIME/charset/encoding and mail authority      | 10 files, 860 passed               | `.maestro/imap-continuation/mail-verified-tests.log`      |
 | Actual VM/RPC bridge and durable Cue admission                                    | 4 files, 137 passed                | `.maestro/imap-continuation/rpc-durable-tests.log`        |
 | Canonical Relay MCP and short Unix-socket regressions                             | 3 files, 339 passed                | `.maestro/imap-continuation/relay-socket-gates-tests.log` |
+| Canonical mail proof regression, authorization ledger and complete Cue/shared-Cue | 102 files, 2,151 passed, 2 skipped | `.maestro/imap-continuation/canonical-proof-green.log`    |
 
 Counts overlap and are not a unique-test total. All listed runs settled successfully. Earlier failed or interrupted logs remain intact; they are not used as passing receipts.
+
+Review reproduced a mail proof failure when unchanged seven-field metadata was reordered during serialization: the actual sealed-store verification rejected it. The one-test red run exited 1 (`canonical-proof-red.log`). Mail proofs, event IDs and configuration equality now reuse `canonicalJson`; the same regression and the complete authorization/Cue run above exit 0. The credential namespace's primitive-array serialization remains byte-identical. The obsolete broad gate was stopped before editing; it is not counted as a passing run. Normalization is part of this unshipped contract; production integration remains gated.
 
 Fresh command lines, executed from the worktree (SDK command from `packages/plugin-sdk`):
 

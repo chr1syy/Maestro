@@ -235,6 +235,21 @@ describe('actual callable mail boundary with synthetic TLS and keyring', () => {
 		expect(f.store.verifyMailEvent(f.identity, { ...source, proof }, payload, f.agentId)).toBe(
 			true
 		);
+		const reorderedPayload = Object.fromEntries(
+			Object.entries(payload).reverse()
+		) as typeof payload;
+		const reorderedSource = Object.fromEntries(Object.entries(source).reverse()) as typeof source;
+		expect(
+			f.store.verifyMailEvent(
+				f.identity,
+				{ ...reorderedSource, proof },
+				reorderedPayload,
+				f.agentId
+			)
+		).toBe(true);
+		expect(f.store.mailEventProof(f.pluginId, f.identity, reorderedSource, reorderedPayload)).toBe(
+			proof
+		);
 		expect(
 			f.store.verifyMailEvent(
 				f.identity,

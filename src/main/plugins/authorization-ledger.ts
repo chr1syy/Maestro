@@ -33,6 +33,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import { canonicalJson } from '../../shared/canonicalJson';
 import type { CueMailEnvelope } from '../../shared/cue/contracts';
 import type { RelayMailMetadata } from '../../shared/plugins/mail';
 import { mailRecord, parseMailMessageReference } from './mail-account-config';
@@ -458,7 +459,7 @@ export class AuthorizationStore {
 			'read'
 		);
 		return createHmac('sha256', this.ledger.installSecret)
-			.update(JSON.stringify(['maestro.mail.event.v1', identity, source, raw]))
+			.update(canonicalJson(['maestro.mail.event.v1', identity, source, raw]))
 			.digest('hex');
 	}
 	verifyMailEvent(
@@ -664,7 +665,7 @@ export class AuthorizationStore {
 			assertMailActivityAuthority(assertSetupActive);
 			if (
 				this.readMailConfiguration(pluginId, current) !== saved ||
-				JSON.stringify(saved) !== JSON.stringify(configuration)
+				canonicalJson(saved) !== canonicalJson(configuration)
 			)
 				throw new ImapConnectionError('MAIL_STALE');
 			return saved;

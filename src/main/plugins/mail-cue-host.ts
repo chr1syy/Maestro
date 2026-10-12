@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { canonicalJson } from '../../shared/canonicalJson';
 import type { CueEvent, CueMailSource } from '../../shared/cue/contracts';
 import type { RelayMailMetadata } from '../../shared/plugins/mail';
 import type { MailCueHost } from '../cue/triggers/cue-mail-trigger-source';
@@ -23,7 +24,7 @@ export function createMailCueHost(deps: MailCueHostDeps): MailCueHost {
 		revision: number,
 		mailbox: string,
 		agent: string
-	) => JSON.stringify([plugin, account, revision, mailbox, agent]);
+	) => canonicalJson([plugin, account, revision, mailbox, agent]);
 	return {
 		checkpointPath: deps.checkpointPath,
 		authorize(event, agentId, name, queued = false) {
@@ -52,7 +53,7 @@ export function createMailCueHost(deps: MailCueHostDeps): MailCueHost {
 					return false;
 				const expectedId = createHash('sha256')
 					.update(
-						JSON.stringify([
+						canonicalJson([
 							source.pluginId,
 							{
 								accountId: source.accountId,
@@ -173,7 +174,7 @@ export function createMailCueHost(deps: MailCueHostDeps): MailCueHost {
 					};
 					const proof = deps.store.mailEventProof(source.plugin_id, identity, envelope, payload);
 					const id = createHash('sha256')
-						.update(JSON.stringify([source.plugin_id, reference]))
+						.update(canonicalJson([source.plugin_id, reference]))
 						.digest('hex');
 					events.push({
 						id,
