@@ -254,15 +254,22 @@ export async function handlePluginsCallTool(
 			toolId === RELAY_REPLY_TOOL_ID &&
 			declaredTool.pluginId === RELAY_PLUGIN_ID &&
 			declaredTool.localId === 'send';
-		if (
-			relayReply &&
-			(!context.callerAgentId ||
+		if (relayReply) {
+			if (!context.callerAgentId) {
+				respond({ ok: false, error: 'Verified caller required' });
+				return;
+			}
+			if (
 				!manager
 					.getActiveRecords()
-					.some((record) => isRelayConversationIdentity(record.id, record.signature)))
-		) {
-			respond({ ok: false, error: 'Verified trusted Relay caller required' });
-			return;
+					.some((record) => isRelayConversationIdentity(record.id, record.signature))
+			) {
+				respond({
+					ok: false,
+					error: 'Relay reply requires a trusted signed plugin from the pinned Relay publisher',
+				});
+				return;
+			}
 		}
 		const verdict = evaluatePluginDispatch(riskText);
 		if (!relayReply && !verdict.eligible) {
@@ -295,7 +302,7 @@ export async function handlePluginsCallTool(
 			});
 			return;
 		}
-		const result = await manager.invokeTool(toolId, args);
+		const result = await manager.invokeTool(toolId, args, context);
 		respond({ ok: true, result });
 	} catch (error) {
 		respond({
@@ -303,7 +310,11 @@ export async function handlePluginsCallTool(
 			error: verified
 				? error instanceof ImapConnectionError
 					? error.code
-					: 'MAIL_DENIED'
+					: message.toolId === RELAY_REPLY_TOOL_ID &&
+						  error instanceof Error &&
+						  error.message === 'Thread is not bound to caller'
+						? 'Thread is not bound to caller'
+						: 'MAIL_DENIED'
 				: error instanceof Error
 					? error.message
 					: String(error),

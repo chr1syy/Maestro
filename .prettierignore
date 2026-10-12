@@ -21,3 +21,6 @@ src/renderer/generated-fonts.css
 .maestro/
 .cache/
 .build/
+
+# Short worktree-local temporary directory for bounded Unix socket paths.
+.t/

@@ -39,6 +39,7 @@ import {
 	getHeadlessAgentRunner,
 } from '../../../../main/plugins/plugin-manager-singleton';
 import type { PluginManager } from '../../../../main/plugins/plugin-manager';
+import { performance } from 'node:perf_hooks';
 import { pluginToolRunIdentity } from '../../../../main/plugins/plugin-tool-run-identity';
 import {
 	initDispatchCallbacks,
@@ -4872,6 +4873,19 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 	let handler: WebSocketMessageHandler;
 	let client: WebClient;
 	const invokeTool = vi.fn();
+	// Updated manager seam: proof remains outside model args; final publication
+	// occurs inside the verified invocation after the real registry's live check.
+	const invokeVerifiedTool: PluginManager['invokeVerifiedTool'] = async (
+		toolId,
+		args,
+		proof,
+		publish
+	) => {
+		const caller = pluginToolRunIdentity.resolveVerified(proof);
+		const result = await invokeTool(toolId, args, { callerAgentId: caller.callerAgentId });
+		publish(result, () => caller.assertActive());
+		return result;
+	};
 	const tool = {
 		id: 'acme/dostuff',
 		localId: 'dostuff',
@@ -4883,6 +4897,7 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 	const fakeManager = {
 		getContributions: () => ({ tools: [tool] }),
 		invokeTool,
+		invokeVerifiedTool,
 	} as unknown as PluginManager;
 
 	function lastResult(): Record<string, unknown> {
@@ -5070,6 +5085,7 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 				},
 			],
 			invokeTool,
+			invokeVerifiedTool,
 		} as unknown as PluginManager);
 		const runToken = pluginToolRunIdentity.issue('agent-a');
 		const args = {
@@ -5110,11 +5126,12 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 					},
 				],
 				invokeTool,
+				invokeVerifiedTool,
 			} as unknown as PluginManager);
 			let runToken: string | undefined;
 			if (proof === 'forged') runToken = 'f'.repeat(64);
 			if (proof === 'expired') {
-				const now = vi.spyOn(Date, 'now').mockReturnValue(1);
+				const now = vi.spyOn(performance, 'now').mockReturnValue(1);
 				runToken = pluginToolRunIdentity.issue('agent-a', 1);
 				now.mockReturnValue(3);
 			} else if (proof === 'revoked') {
@@ -5153,6 +5170,7 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 					{ id: 'sh.maestro.relay', signature: { status: 'trusted', signerKey } },
 				],
 				invokeTool,
+				invokeVerifiedTool,
 			} as unknown as PluginManager);
 			const runToken = pluginToolRunIdentity.issue('agent-a');
 			try {
@@ -5187,6 +5205,7 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 					{ id: 'sh.maestro.relay', signature: status ? { status } : undefined },
 				],
 				invokeTool,
+				invokeVerifiedTool,
 			} as unknown as PluginManager);
 			const runToken = pluginToolRunIdentity.issue('agent-a');
 			try {
@@ -5224,6 +5243,7 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 					},
 				],
 				invokeTool,
+				invokeVerifiedTool,
 			} as unknown as PluginManager);
 			const runToken = pluginToolRunIdentity.issue('agent-a');
 			try {
@@ -5257,6 +5277,7 @@ describe('WebSocketMessageHandler - plugin MCP tool bridge', () => {
 				},
 			],
 			invokeTool,
+			invokeVerifiedTool,
 		} as unknown as PluginManager);
 		invokeTool.mockRejectedValue(new Error('Thread is not bound to caller'));
 		const runToken = pluginToolRunIdentity.issue('agent-a');

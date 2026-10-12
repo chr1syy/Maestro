@@ -73,3 +73,6 @@ examples/plugins/*/signature.json
 
 # Worktree-local test caches (shared node_modules may be read-only).
 .cache/
+
+# Short worktree-local temporary directory for bounded Unix socket paths.
+.t/
