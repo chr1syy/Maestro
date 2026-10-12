@@ -169,7 +169,8 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						undefined, // autoRun: same
 						turnSettings
 					);
-					if (accepted !== false) dispatched++;
+					if (event.type === 'relay.mail.received' ? accepted === true : accepted !== false)
+						dispatched++;
 				}
 				// If every fan-out target was skipped the user sees nothing happen -
 				// surface a loud error so they can fix the broken prompts. This was
@@ -181,7 +182,10 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						`[CUE] "${sub.name}": no fan-out targets ran (${skippedTargets.join('; ')}). Check that each agent has a prompt configured.`
 					);
 				}
-				return dispatched;
+				// One consumer checkpoint cannot acknowledge a partial fan-out. A retry may duplicate admitted targets.
+				return event.type === 'relay.mail.received' && dispatched !== sub.fan_out.length
+					? 0
+					: dispatched;
 			}
 
 			// For `action: notify` the prompt slot carries the resolved toast
@@ -233,7 +237,13 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 				resolvedAutoRun,
 				turnSettings
 			);
-			return accepted === false ? 0 : 1;
+			return event.type === 'relay.mail.received'
+				? accepted === true
+					? 1
+					: 0
+				: accepted === false
+					? 0
+					: 1;
 		},
 	};
 }

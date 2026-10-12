@@ -4,7 +4,7 @@ import {
 	type CueDispatchServiceDeps,
 } from '../../../main/cue/cue-dispatch-service';
 import { createCueEvent } from '../../../main/cue/cue-types';
-import type { CueSubscription } from '../../../shared/cue';
+import type { CueSubscription, CueEvent } from '../../../shared/cue';
 
 function makeDeps(
 	sessionsByName: Array<{ id: string; name: string }> = [
@@ -430,4 +430,73 @@ describe('createCueDispatchService', () => {
 			expect(onTriggerFired).toHaveBeenCalledWith('time.heartbeat');
 		});
 	});
+});
+
+import { configureMailCueHost } from '../../../main/cue/triggers/cue-mail-trigger-source';
+it('refuses a partial mail fan-out receipt while preserving the exact signed payload', () => {
+	configureMailCueHost({
+		checkpointPath: 'unused',
+		poll: async () => ({ events: [] }),
+		authorize: () => true,
+	});
+	try {
+		const executeRun = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false);
+		const service = createCueDispatchService({
+			getSessions: () => [
+				{ id: 'a', name: 'A' },
+				{ id: 'b', name: 'B' },
+			],
+			executeRun,
+			onLog: vi.fn(),
+		});
+		const event: CueEvent = {
+			id: 'signed-id',
+			type: 'relay.mail.received',
+			timestamp: new Date().toISOString(),
+			triggerName: 'mail',
+			payload: {
+				reference: 'r',
+				accountId: 'account',
+				folder: 'INBOX',
+				uidValidity: '7',
+				uid: '2',
+				receivedAt: 1,
+				sizeBytes: 42,
+			},
+		};
+		expect(
+			service.dispatchSubscription(
+				'owner',
+				{
+					name: 'mail-sub',
+					event: 'relay.mail.received',
+					enabled: true,
+					prompt: 'metadata',
+					fan_out: ['A', 'B'],
+				},
+				event,
+				'Owner'
+			)
+		).toBe(0);
+		expect(executeRun).toHaveBeenCalledTimes(2);
+		expect(executeRun.mock.calls[0][2]).toBe(event);
+		expect(executeRun.mock.calls[1][2]).toBe(event);
+		executeRun.mockReturnValue(true);
+		expect(
+			service.dispatchSubscription(
+				'owner',
+				{
+					name: 'mail-sub',
+					event: 'relay.mail.received',
+					enabled: true,
+					prompt: 'metadata',
+					fan_out: ['A', 'B'],
+				},
+				event,
+				'Owner'
+			)
+		).toBe(2);
+	} finally {
+		configureMailCueHost(undefined);
+	}
 });
