@@ -99,6 +99,8 @@ export interface QuitHandlerDependencies {
 	tunnelManager: typeof tunnelManagerInstance;
 	/** Function to close the stats database */
 	closeStatsDB: () => void;
+	/** Synchronous permanent authority fence, only after quit is confirmed. */
+	stopPluginToolAuthority?: () => void;
 	/** Function to stop CLI watcher (optional, may not be started yet) */
 	stopCliWatcher?: () => void;
 	/** Function to stop settings file watcher (optional, may not be started yet) */
@@ -174,6 +176,7 @@ export function createQuitHandler(deps: QuitHandlerDependencies): QuitHandler {
 		getHistoryManager,
 		tunnelManager,
 		closeStatsDB,
+		stopPluginToolAuthority,
 		stopCliWatcher,
 		stopSettingsWatcher,
 		powerManager,
@@ -339,12 +342,19 @@ export function createQuitHandler(deps: QuitHandlerDependencies): QuitHandler {
 	 * Called synchronously from before-quit, so async operations are fire-and-forget.
 	 */
 	function performCleanup(): void {
+		// Retire before persistence/watch/process callbacks can reenter tool ingress.
+		// A failed private-file cleanup must not prevent the rest of shutdown.
+		try {
+			stopPluginToolAuthority?.();
+		} catch {
+			logger.warn('Plugin tool authority retirement failed', 'Shutdown');
+		}
 		logger.info('Application shutting down', 'Shutdown');
 
-		// Land the last sessions write before anything else. Session persistence is
+		// Land the last sessions write immediately after the authority fence. Persistence is
 		// normally deferred behind a short coalescing timer so it can't block the
 		// UI thread (see stores/deferred-writes.ts), but this path force-exits the
-		// process a moment from now, so that timer will never fire. Runs first so a
+		// process a moment from now, so that timer will never fire. Runs before other cleanup so a
 		// throw further down cleanup can't cost the user their agent list.
 		try {
 			flushPendingSessionWritesSync();

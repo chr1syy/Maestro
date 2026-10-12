@@ -1,3 +1,4 @@
+import { parseCueMailSource } from '../../../shared/plugins/mail';
 import picomatch from 'picomatch';
 import {
 	CUE_EVENT_TYPES,
@@ -432,7 +433,13 @@ function validateEventSpecificFields(
 	errors: string[]
 ): void {
 	const event = sub.event as string;
-	if (event === 'time.heartbeat') {
+	if (event === 'relay.mail.received') {
+		try {
+			parseCueMailSource(sub.mail);
+		} catch {
+			errors.push(`${prefix}: valid exact mail source is required`);
+		}
+	} else if (event === 'time.heartbeat') {
 		if (
 			typeof sub.interval_minutes !== 'number' ||
 			!Number.isFinite(sub.interval_minutes) ||

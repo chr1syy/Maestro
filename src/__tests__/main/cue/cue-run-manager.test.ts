@@ -58,6 +58,8 @@ vi.mock('crypto', () => ({
 	randomUUID: vi.fn(() => `run-${++uuidCounter}`),
 }));
 
+import { configureMailCueHost } from '../../../main/cue/triggers/cue-mail-trigger-source';
+import type { CueQueuePersistence } from '../../../main/cue/cue-queue-persistence';
 import { updateCueEventStatus, safeUpdateCueEventStatus } from '../../../main/cue/cue-db';
 import {
 	createCueRunManager,
@@ -1843,4 +1845,122 @@ describe('createCueRunManager', () => {
 			expect(manager.getQueueStatus().size).toBe(0);
 		});
 	});
+});
+
+describe('durable mail admission and revocation', () => {
+	afterEach(() => configureMailCueHost(undefined));
+	function harness(persisted = true) {
+		let allowed = true;
+		configureMailCueHost({
+			checkpointPath: 'synthetic-unused',
+			poll: async () => ({ events: [] }),
+			authorize: () => allowed,
+		});
+		const queue = {
+			persist: vi.fn(() => persisted),
+			remove: vi.fn(),
+			clearSession: vi.fn(),
+			clearAll: vi.fn(),
+			persistedIds: () => new Set<string>(),
+			restoreAll: () => new Map(),
+		} satisfies CueQueuePersistence;
+		const completion = Promise.withResolvers<CueRunResult>();
+		const deps = createDeps({ queuePersistence: queue, onCueRun: vi.fn(() => completion.promise) });
+		const manager = createCueRunManager(deps);
+		const mail = createEvent({ type: 'relay.mail.received' });
+		return {
+			queue,
+			completion,
+			deps,
+			manager,
+			mail,
+			revoke: () => {
+				allowed = false;
+			},
+		};
+	}
+	it('persists an immediately admitted event until its terminal result', async () => {
+		const h = harness();
+		expect(h.manager.execute('session-1', 'mail', h.mail, 'mail-sub')).toBe(true);
+		expect(h.queue.persist).toHaveBeenCalledTimes(1);
+		expect(h.deps.onCueRun).toHaveBeenCalledTimes(1);
+		expect(h.queue.remove).not.toHaveBeenCalled();
+		h.completion.resolve(makeResult());
+		await vi.waitFor(() => expect(h.queue.remove).toHaveBeenCalledTimes(1));
+	});
+	it('rejects a failed durable write before starting work', () => {
+		const h = harness(false);
+		expect(h.manager.execute('session-1', 'mail', h.mail, 'mail-sub')).toBe(false);
+		expect(h.deps.onCueRun).not.toHaveBeenCalled();
+		expect(h.manager.getActiveRunMap().size).toBe(0);
+	});
+	it('does not consume a queued revoked event or wedge the concurrency slot', async () => {
+		const h = harness();
+		h.manager.execute('session-1', 'ordinary', createEvent(), 'ordinary-sub');
+		expect(h.manager.execute('session-1', 'mail', h.mail, 'mail-sub')).toBe(true);
+		h.revoke();
+		h.completion.resolve(makeResult());
+		await vi.waitFor(() => expect(h.queue.remove).toHaveBeenCalledTimes(1));
+		expect(h.deps.onCueRun).toHaveBeenCalledTimes(1);
+		expect(h.manager.getQueueStatus().get('session-1') ?? 0).toBe(0);
+	});
+	it('refuses a mail event when durable persistence is absent', () => {
+		const h = harness();
+		const manager = createCueRunManager(createDeps());
+		expect(manager.execute('session-1', 'mail', h.mail, 'mail-sub')).toBe(false);
+	});
+});
+
+describe('mail output-prompt boundary', () => {
+	afterEach(() => configureMailCueHost(undefined));
+	it.each([false, true])(
+		'preserves metadata and rechecks output delivery after revoke=%s',
+		async (revoke) => {
+			let allowed = true;
+			configureMailCueHost({
+				checkpointPath: 'unused',
+				poll: async () => ({ events: [] }),
+				authorize: () => allowed,
+			});
+			const event = createEvent({
+				type: 'relay.mail.received',
+				payload: {
+					reference: 'r',
+					accountId: 'a',
+					folder: 'INBOX',
+					uidValidity: '7',
+					uid: '2',
+					receivedAt: 1,
+					sizeBytes: 42,
+				},
+			});
+			const done = Promise.withResolvers<CueRunResult>();
+			const queue = {
+				persist: vi.fn(() => true),
+				remove: vi.fn(),
+				clearSession: vi.fn(),
+				clearAll: vi.fn(),
+				persistedIds: () => new Set<string>(),
+				restoreAll: () => new Map(),
+			} satisfies CueQueuePersistence;
+			const onCueRun = vi
+				.fn()
+				.mockImplementationOnce(() => done.promise)
+				.mockResolvedValue(makeResult());
+			const manager = createCueRunManager(createDeps({ queuePersistence: queue, onCueRun }));
+			expect(manager.execute('session-1', 'metadata', event, 'mail-sub', 'Summarize output')).toBe(
+				true
+			);
+			allowed = !revoke;
+			done.resolve(makeResult({ stdout: 'synthetic private agent output' }));
+			await vi.waitFor(() => expect(queue.remove).toHaveBeenCalledTimes(1));
+			expect(onCueRun).toHaveBeenCalledTimes(revoke ? 1 : 2);
+			if (!revoke) {
+				const outputEvent = onCueRun.mock.calls[1][0].event;
+				expect(outputEvent).toBe(event);
+				expect(Object.keys(outputEvent.payload)).toHaveLength(7);
+				expect(JSON.stringify(outputEvent)).not.toContain('synthetic private agent output');
+			}
+		}
+	);
 });

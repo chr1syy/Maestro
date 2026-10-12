@@ -6,9 +6,16 @@ import {
 	PluginToolRunIdentity,
 	createPluginRunProofFile,
 	removePluginRunProofFile,
+	getPluginRunProofProtectedPaths,
 } from '../../../main/plugins/plugin-tool-run-identity';
 
 describe('PluginToolRunIdentity', () => {
+	it('protects the canonical run proof directory until successful cleanup', () => {
+		const file = createPluginRunProofFile('synthetic-token');
+		expect(getPluginRunProofProtectedPaths()).toContain(path.dirname(file));
+		removePluginRunProofFile(file);
+		expect(getPluginRunProofProtectedPaths()).not.toContain(path.dirname(file));
+	});
 	it('binds distinct local runs to exact agents and revokes a completed run', () => {
 		const runs = new PluginToolRunIdentity();
 		const a = runs.issue('agent-a');

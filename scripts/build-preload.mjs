@@ -72,6 +72,16 @@ async function build() {
 		});
 		logBuilt(pluginPanelPreloadOutfile);
 
+		await esbuild.build({
+			entryPoints: [path.join(rootDir, 'src/main/preload/mail-setup.ts')],
+			outfile: path.join(distMainDir, 'mail-setup-preload.js'),
+			...sharedOptions,
+		});
+		fs.copyFileSync(
+			path.join(rootDir, 'src/main/consent/mail-setup.html'),
+			path.join(distMainDir, 'mail-setup.html')
+		);
+
 		// Copy the static consent page next to its preload.
 		fs.mkdirSync(distMainDir, { recursive: true });
 		fs.copyFileSync(consentHtmlSrc, consentHtmlDest);

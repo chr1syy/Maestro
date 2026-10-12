@@ -118,8 +118,8 @@ export interface KeyringModule {
 	Entry: new (service: string, account: string) => KeyringEntry;
 }
 
-/** Lazily adapt `@napi-rs/keyring` without making app startup depend on it. */
-export function createKeyringAnchor(
+/** Canonical lazy factory shared by freshness anchors and host-owned credential slots. */
+export function createKeyringEntry(
 	service: string,
 	account: string,
 	loadModule: () => KeyringModule | null = () => {
@@ -130,10 +130,18 @@ export function createKeyringAnchor(
 			return null;
 		}
 	}
-): AnchorStore {
-	return keyringAnchor(() => {
+): KeyringEntry | null {
+	try {
 		const mod = loadModule();
-		if (!mod) return null;
-		return new mod.Entry(service, account);
-	});
+		return mod ? new mod.Entry(service, account) : null;
+	} catch {
+		return null;
+	}
+}
+export function createKeyringAnchor(
+	service: string,
+	account: string,
+	loadModule?: () => KeyringModule | null
+): AnchorStore {
+	return keyringAnchor(() => createKeyringEntry(service, account, loadModule));
 }

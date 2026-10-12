@@ -311,3 +311,48 @@ describe('cue-template-context-builder', () => {
 		});
 	});
 });
+
+import { substituteTemplateVariables } from '../../../shared/templateVariables';
+it('substitutes the seven mail metadata variables without producer proof or content', () => {
+	const payload = {
+		reference: 'relay-mail:1:account:INBOX:7:2',
+		accountId: 'account',
+		folder: 'INBOX',
+		uidValidity: '7',
+		uid: '2',
+		receivedAt: 1,
+		sizeBytes: 42,
+	};
+	const event = createEvent({
+		type: 'relay.mail.received',
+		payload,
+		mailSource: {
+			pluginId: 'plugin',
+			accountId: 'account',
+			accountRevision: 4,
+			mailbox: 'INBOX',
+			producerAgentId: 'agent',
+			sourceGeneration: 'c'.repeat(32),
+			proof: 'PRIVATE_PROOF',
+		},
+	});
+	const cue = buildCueTemplateContext(
+		event,
+		createSubscription({ event: 'relay.mail.received' }),
+		'run'
+	);
+	const text = substituteTemplateVariables(
+		'{{CUE_MAIL_REFERENCE}}|{{CUE_MAIL_ACCOUNT_ID}}|{{CUE_MAIL_FOLDER}}|{{CUE_MAIL_UIDVALIDITY}}|{{CUE_MAIL_UID}}|{{CUE_MAIL_RECEIVED_AT}}|{{CUE_MAIL_SIZE_BYTES}}',
+		{
+			cue,
+			session: {
+				id: 'synthetic-agent',
+				name: 'Synthetic',
+				toolType: 'claude-code',
+				cwd: '/synthetic',
+			},
+		}
+	);
+	expect(text).toBe('relay-mail:1:account:INBOX:7:2|account|INBOX|7|2|1|42');
+	expect(JSON.stringify(cue)).not.toContain('PRIVATE_PROOF');
+});

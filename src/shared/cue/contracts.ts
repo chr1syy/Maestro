@@ -34,7 +34,8 @@ export type CueEventType =
 	| 'github.label'
 	| 'task.pending'
 	| 'cli.trigger'
-	| 'webhook.received';
+	| 'webhook.received'
+	| 'relay.mail.received';
 
 /** All valid event type values */
 export const CUE_EVENT_TYPES: CueEventType[] = [
@@ -50,6 +51,7 @@ export const CUE_EVENT_TYPES: CueEventType[] = [
 	'task.pending',
 	'cli.trigger',
 	'webhook.received',
+	'relay.mail.received',
 ];
 
 /**
@@ -249,7 +251,16 @@ export type CueCommand = { mode: 'shell'; shell: string } | { mode: 'cli'; cli: 
  * are NOT part of the runtime contract. See `CueSubscriptionDocument` in the
  * config normalizer if you need to know whether the prompt came from a file.
  */
+export interface CueMailSource {
+	plugin_id: string;
+	account_id: string;
+	account_revision: number;
+	mailbox: string;
+	interval_minutes: number;
+}
+
 export interface CueSubscription {
+	mail?: CueMailSource;
 	name: string;
 	event: CueEventType;
 	enabled: boolean;
@@ -496,7 +507,18 @@ export interface CueConfig {
 }
 
 /** An event instance produced by a trigger */
+export interface CueMailEnvelope {
+	pluginId: string;
+	accountId: string;
+	accountRevision: number;
+	mailbox: string;
+	producerAgentId: string;
+	sourceGeneration: string;
+	proof: string;
+}
+
 export interface CueEvent {
+	mailSource?: CueMailEnvelope;
 	id: string;
 	type: CueEventType;
 	timestamp: string;

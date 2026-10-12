@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+const configDirectory = import.meta.dirname;
 
 // Directories excluded from the default unit-test run (have their own configs).
 const sharedExclude = [
@@ -61,6 +62,7 @@ for (const name of GIT_REPOSITORY_ENV_VARS) {
 }
 
 export default defineConfig({
+	cacheDir: path.resolve(configDirectory, '.cache/vitest'),
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	plugins: [react() as any],
 	test: {
@@ -117,7 +119,7 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
-			'@': path.resolve(__dirname, './src'),
+			'@': path.resolve(configDirectory, './src'),
 		},
 	},
 });

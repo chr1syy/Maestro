@@ -60,6 +60,7 @@ export interface TriggerNodeData {
 	/** User-defined label overriding the default event-type label (e.g. "Morning Check") */
 	customLabel?: string;
 	config: {
+		mail?: import('./cue/contracts').CueMailSource;
 		interval_minutes?: number;
 		schedule_times?: string[];
 		schedule_days?: string[];

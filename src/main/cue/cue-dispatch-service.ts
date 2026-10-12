@@ -1,3 +1,4 @@
+import { authorizeMailCueEvent } from './triggers/cue-mail-trigger-source';
 import * as crypto from 'crypto';
 import type { MainLogLevel } from '../../shared/logger-types';
 import type {
@@ -28,7 +29,7 @@ export interface CueDispatchServiceDeps {
 		notify?: CueNotifyConfig,
 		autoRun?: CueAutoRunConfig,
 		turnSettings?: CueTurnSettings
-	) => void;
+	) => void | boolean;
 	onLog: (level: MainLogLevel, message: string, data?: unknown) => void;
 	/**
 	 * Optional metadata-only hook fired once per subscription dispatch, carrying
@@ -87,6 +88,7 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 			chainRootId?: string,
 			parentEventId?: string
 		): number {
+			if (!authorizeMailCueEvent(event, ownerSessionId, sub.name, false)) return 0;
 			// Telemetry: one `trigger_fired` per subscription dispatch (not per
 			// fan-out target). Best-effort and gated on Encore flags inside the
 			// telemetry module - never throws into the dispatch path.
@@ -126,15 +128,18 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						continue;
 					}
 
-					const fanOutEvent: CueEvent = {
-						...event,
-						id: crypto.randomUUID(),
-						payload: {
-							...event.payload,
-							fanOutSource: sourceSessionName,
-							fanOutIndex: i,
-						},
-					};
+					const fanOutEvent: CueEvent =
+						event.type === 'relay.mail.received'
+							? event
+							: {
+									...event,
+									id: crypto.randomUUID(),
+									payload: {
+										...event.payload,
+										fanOutSource: sourceSessionName,
+										fanOutIndex: i,
+									},
+								};
 					// The normalizer (cue-config-normalizer.ts) resolves prompt_file → prompt
 					// content at config load time. sub.prompt is always a string post-normalization.
 					const perTargetPrompt = sub.fan_out_prompts?.[i];
@@ -147,7 +152,7 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						skippedTargets.push(`${targetName} (empty prompt)`);
 						continue;
 					}
-					deps.executeRun(
+					const accepted = deps.executeRun(
 						targetSession.id,
 						prompt,
 						fanOutEvent,
@@ -164,7 +169,8 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						undefined, // autoRun: same
 						turnSettings
 					);
-					dispatched++;
+					if (event.type === 'relay.mail.received' ? accepted === true : accepted !== false)
+						dispatched++;
 				}
 				// If every fan-out target was skipped the user sees nothing happen -
 				// surface a loud error so they can fix the broken prompts. This was
@@ -176,7 +182,10 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 						`[CUE] "${sub.name}": no fan-out targets ran (${skippedTargets.join('; ')}). Check that each agent has a prompt configured.`
 					);
 				}
-				return dispatched;
+				// One consumer checkpoint cannot acknowledge a partial fan-out. A retry may duplicate admitted targets.
+				return event.type === 'relay.mail.received' && dispatched !== sub.fan_out.length
+					? 0
+					: dispatched;
 			}
 
 			// For `action: notify` the prompt slot carries the resolved toast
@@ -211,7 +220,7 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 					return 0;
 				}
 			}
-			deps.executeRun(
+			const accepted = deps.executeRun(
 				ownerSessionId,
 				prompt,
 				event,
@@ -228,7 +237,13 @@ export function createCueDispatchService(deps: CueDispatchServiceDeps): CueDispa
 				resolvedAutoRun,
 				turnSettings
 			);
-			return 1;
+			return event.type === 'relay.mail.received'
+				? accepted === true
+					? 1
+					: 0
+				: accepted === false
+					? 0
+					: 1;
 		},
 	};
 }

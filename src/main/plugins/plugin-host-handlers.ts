@@ -1,3 +1,4 @@
+import type { MailHostService } from './mail-host-service';
 /**
  * Host-call handlers: the actual implementations behind each brokered RPC.
  *
@@ -130,6 +131,7 @@ export interface PluginSessionMetadata {
 }
 
 export interface HostHandlerDeps {
+	mail?: MailHostService;
 	serviceManifest?: (pluginId: string) => PluginManifest | undefined;
 	serviceRunning?: (pluginId: string) => boolean;
 	serviceAllowed?: (
@@ -2094,6 +2096,26 @@ export function buildHostCallHandlers(deps: HostHandlerDeps): HostCallHandlers {
 	};
 	deps.registerResourceCleanup?.(cleanupPluginResources);
 
+	for (const method of [
+		'mail.listAccounts',
+		'mail.requestSetup',
+		'mail.readHeaders',
+		'mail.searchHeaders',
+		'mail.readBody',
+		'mail.listAttachments',
+		'mail.openAttachment',
+		'mail.readAttachment',
+		'mail.closeAttachment',
+	] as const) {
+		handlers[method] = async (pluginId, params, context) => {
+			if (!deps.mail || !context?.setResponseGuard)
+				return {
+					ok: false,
+					error: { code: 'MAIL_UNAVAILABLE', message: 'Mail service unavailable.' },
+				};
+			return deps.mail.call(pluginId, method, params, context.setResponseGuard);
+		};
+	}
 	return handlers;
 }
 

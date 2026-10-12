@@ -70,6 +70,19 @@ describe('cue-queue-persistence', () => {
 		});
 	}
 
+	it('acknowledges mail only after a matching durable row can be read back', () => {
+		const p = makePersistence();
+		const event = makeEvent('relay.mail.received');
+		expect(p.persist('s-1', 'mail-row', makeEntry({ event }))).toBe(true);
+		expect(p.restoreAll().get('s-1')![0].event).toEqual(event);
+		const write = vi.spyOn(getSharedDb(), 'persistQueuedEvent').mockImplementation(() => {});
+		expect(p.persist('s-1', 'no-op-row', makeEntry({ event }))).toBe(false);
+		write.mockImplementation(() => {
+			throw new Error('Synthetic disk failure');
+		});
+		expect(p.persist('s-1', 'failed-row', makeEntry({ event }))).toBe(false);
+		write.mockRestore();
+	});
 	describe('restoring only what a previous run left behind', () => {
 		// The engine snapshots persistedIds() before sessions initialize. A row
 		// persisted after that (this boot's own app.startup queued behind a

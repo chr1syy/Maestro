@@ -68,6 +68,10 @@ export function serializedJsonByteLength(value: unknown): number | null {
 /** The fixed vocabulary of things a sandboxed plugin can ask to do. Adding a
  * capability is a host-API change. Each maps to a brokered host call. */
 export type PluginCapability =
+	| 'mail:accounts'
+	| 'mail:read'
+	| 'mail:body'
+	| 'mail:attachments'
 	| 'fs:read' // read files under a path scope
 	| 'fs:write' // write files under a path scope
 	| 'services:call'
@@ -106,6 +110,10 @@ export type PluginCapability =
 	| 'ui:render-unsafe'; // high-trust custom UI in host-approved, non-protected regions
 
 export const PLUGIN_CAPABILITIES: readonly PluginCapability[] = [
+	'mail:accounts',
+	'mail:read',
+	'mail:body',
+	'mail:attachments',
 	'fs:read',
 	'fs:write',
 	'services:call',
@@ -148,6 +156,11 @@ export const PLUGIN_CAPABILITIES: readonly PluginCapability[] = [
 export type CapabilityRisk = 'low' | 'medium' | 'high';
 
 const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
+	'mail:accounts': 'medium',
+	'mail:read': 'high',
+	'mail:body': 'high',
+	'mail:attachments': 'high',
+
 	'notifications:toast': 'low',
 	'settings:read': 'low',
 	'agents:read': 'low',
@@ -200,6 +213,11 @@ const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
 type ScopeKind = 'path' | 'host' | 'allowlist' | 'none';
 
 const CAPABILITY_SCOPE_KIND: Record<PluginCapability, ScopeKind> = {
+	'mail:accounts': 'none',
+	'mail:read': 'allowlist',
+	'mail:body': 'allowlist',
+	'mail:attachments': 'allowlist',
+
 	'fs:read': 'path',
 	'fs:write': 'path',
 	'fs:watch': 'path',
@@ -371,6 +389,14 @@ export function describeCapability(capability: PluginCapability): string {
 			return 'Call an explicitly bound plugin service (exact provider/service; bounded requests and results)';
 		case 'services:provide':
 			return 'Provide an own declared host-mediated service (exact service ID; no direct plugin IPC)';
+		case 'mail:accounts':
+			return 'Request host-owned mail setup and view own account intent (no credentials or agent identities)';
+		case 'mail:read':
+			return 'Read headers of exact mail accounts for independently authorized agents';
+		case 'mail:body':
+			return 'Read complete plain text from exact mail accounts for independently authorized agents';
+		case 'mail:attachments':
+			return 'Read bounded attachments from exact mail accounts for independently authorized agents';
 		case 'media:tools':
 			return 'Download Discord voice attachments and run fixed local media tools (8 MiB, 120 seconds; no general file or process access)';
 		case 'net:fetch':
@@ -441,7 +467,9 @@ export function describeCapability(capability: PluginCapability): string {
 // --- Host API version (from shared/plugins/host-api.ts) ---------------------
 
 /**
- * The host API version this Maestro build implements. 1.25.0 adds resumable
+ * The host API version this Maestro build implements. 1.26.0 adds host-owned mail accounts, verified invocation-bound
+ * IMAP reads and attachment snapshots, trusted setup, and metadata-only Cue sources.
+ * 1.25.0 adds resumable
  * agents.send with public progress, verified plugin-tool caller identity, and
  * isolated agents.generateTitle. 1.24.0 added host-mediated services.
  * 1.23.0 adds independent
@@ -477,7 +505,7 @@ export function describeCapability(capability: PluginCapability): string {
  * `ui:contribute` / `ui:panel` / `ui:render-unsafe`; 1.3.0 added `tools` +
  * `keybindings`; 1.2.0 added `transcripts:read`.
  */
-export const HOST_API_VERSION = '1.25.0';
+export const HOST_API_VERSION = '1.26.0';
 
 /** Result of checking a plugin's declared host-API requirement. */
 export interface HostApiCompatibility {
@@ -1226,6 +1254,7 @@ export interface AggregatedContributions {
 
 /** The fixed catalog of topics a plugin may subscribe to. */
 export const PLUGIN_EVENT_TOPICS = [
+	'mail.accountsChanged',
 	'session.created',
 	'session.updated',
 	'session.removed',
@@ -1253,6 +1282,7 @@ export function isPluginEventTopic(value: unknown): value is PluginEventTopic {
 /** Metadata-only payload per topic. Never message bodies, prompt text, agent
  * output, file contents, or secret-bearing fields. */
 export interface PluginEventPayloads {
+	'mail.accountsChanged': Record<string, never>;
 	'session.created': { sessionId: string; title?: string; agentId?: string; projectPath?: string };
 	'session.updated': { sessionId: string; title?: string; status?: string };
 	'session.removed': { sessionId: string };
@@ -1358,6 +1388,16 @@ export interface PluginEvent<T extends PluginEventTopic = PluginEventTopic> {
  * method union, the runtime list, and the method->capability map all DERIVE from
  * this. `satisfies` makes a typo'd capability a compile error. */
 export const HOST_API = {
+	'mail.listAccounts': { capability: 'mail:accounts' },
+	'mail.requestSetup': { capability: 'mail:accounts' },
+	'mail.readHeaders': { capability: 'mail:read' },
+	'mail.searchHeaders': { capability: 'mail:read' },
+	'mail.readBody': { capability: 'mail:body' },
+	'mail.listAttachments': { capability: 'mail:attachments' },
+	'mail.openAttachment': { capability: 'mail:attachments' },
+	'mail.readAttachment': { capability: 'mail:attachments' },
+	'mail.closeAttachment': { capability: 'mail:attachments' },
+
 	'fs.read': { capability: 'fs:read' },
 	'fs.write': { capability: 'fs:write' },
 	'services.register': { capability: 'services:provide' },
@@ -1725,7 +1765,10 @@ export interface MaestroCommandsApi {
 export interface MaestroToolsApi {
 	register(
 		localId: string,
-		handler: (args: unknown, context: { readonly callerAgentId: string | null }) => unknown
+		handler: (
+			args: unknown,
+			context: { readonly callerAgentId: string | null; readonly mailInvocationId?: string }
+		) => unknown
 	): void;
 }
 
@@ -1845,6 +1888,7 @@ export interface MaestroMediaApi {
 /** The full `maestro` runtime surface handed to `activate(maestro)`. Frozen and
  * namespaced exactly as the host injects it. */
 export interface MaestroSdk {
+	readonly mail: MaestroMailApi;
 	readonly services: MaestroServicesApi;
 	readonly media: MaestroMediaApi;
 	readonly pluginId: string;
@@ -2117,4 +2161,133 @@ export function isTranscriptionResult(
 		value.durationSeconds > 0 &&
 		value.durationSeconds <= MEDIA_LIMITS.maxDurationSeconds
 	);
+}
+
+/** Host-owned, read-only mail boundary. References are coordinates, never authority. */
+export interface MailReference {
+	readonly accountId: string;
+	readonly accountRevision: number;
+	readonly mailbox: string;
+	readonly uidValidity: string;
+	readonly uid: string;
+}
+
+export const MAIL_ERROR_MESSAGES = {
+	MAIL_DENIED: 'Mail access denied.',
+	MAIL_INVALID: 'Invalid mail request.',
+	MAIL_STALE: 'Mail reference is no longer valid.',
+	MAIL_UNAVAILABLE: 'Mail service unavailable.',
+	MAIL_TIMEOUT: 'Mail request timed out.',
+	MAIL_CANCELED: 'Mail request canceled.',
+	MAIL_PROTOCOL: 'Unsupported or invalid mail response.',
+	MAIL_LIMIT: 'Mail request exceeds a limit.',
+} as const;
+export type MailErrorCode = keyof typeof MAIL_ERROR_MESSAGES;
+export type MailResult<T> =
+	| { readonly ok: true; readonly value: T }
+	| {
+			readonly ok: false;
+			readonly error: { readonly code: MailErrorCode; readonly message: string };
+	  };
+export interface MailAccountView {
+	readonly accountId: string;
+	readonly revision: number;
+	readonly enabled: boolean;
+	readonly mailboxes: readonly string[];
+	/** No credential lookup or login is performed by listAccounts. */
+	readonly status: 'disabled' | 'unknown' | 'stopped';
+	readonly credentialStatus: 'unknown';
+	/** Stored counts only, without agent identities or effective-right claims. */
+	readonly agentGrantCounts: Readonly<{ read: number; detail: number; attachments: number }>;
+}
+export interface MailHeaders {
+	readonly reference: MailReference;
+	readonly subject?: string;
+	readonly sender?: string;
+}
+export interface MailBody {
+	readonly reference: MailReference;
+	readonly mimeType: 'text/plain';
+	readonly text: string;
+	readonly sizeBytes: number;
+}
+export interface MailAttachment {
+	readonly partId: string;
+	readonly filename: string;
+	readonly mimeType:
+		| 'text/plain'
+		| 'application/pdf'
+		| 'image/png'
+		| 'image/jpeg'
+		| 'image/gif'
+		| 'image/webp';
+	readonly sizeBytes: number;
+}
+export interface MailSearchRequest {
+	readonly invocationId: string;
+	readonly accountId: string;
+	readonly accountRevision: number;
+	readonly mailbox: string;
+	readonly fromUid: string;
+	readonly toUid: string;
+	readonly uidValidity?: string;
+	readonly text?: string;
+	readonly limit?: number;
+}
+export interface MailPage {
+	readonly uidValidity: string;
+	readonly references: readonly MailReference[];
+	readonly truncated: boolean;
+	readonly nextAfterUid?: string;
+}
+export interface MailChunk {
+	readonly dataBase64: string;
+	readonly nextOffset: number;
+	readonly complete: boolean;
+}
+export interface MaestroMailApi {
+	requestSetup(
+		intent?:
+			| { action: 'add' }
+			| { action: 'test' | 'rights' | 'disable' | 'remove'; accountId: string }
+	): Promise<MailResult<{ requested: true }>>;
+	listAccounts(): Promise<MailResult<readonly MailAccountView[]>>;
+	readHeaders(p: {
+		invocationId: string;
+		reference: MailReference;
+	}): Promise<MailResult<MailHeaders>>;
+	searchHeaders(p: MailSearchRequest): Promise<MailResult<MailPage>>;
+	readBody(p: { invocationId: string; reference: MailReference }): Promise<MailResult<MailBody>>;
+	listAttachments(p: {
+		invocationId: string;
+		reference: MailReference;
+	}): Promise<MailResult<readonly MailAttachment[]>>;
+	openAttachment(p: {
+		invocationId: string;
+		reference: MailReference;
+		partId: string;
+	}): Promise<MailResult<MailAttachment & { snapshotId: string }>>;
+	readAttachment(p: {
+		invocationId: string;
+		accountId: string;
+		snapshotId: string;
+		offset: number;
+		limit?: number;
+	}): Promise<MailResult<MailChunk>>;
+	closeAttachment(p: {
+		invocationId: string;
+		accountId: string;
+		snapshotId: string;
+	}): Promise<MailResult<{ closed: true }>>;
+}
+
+/** Exact seven-field Relay adapter projection. Producer provenance lives in Cue's envelope. */
+export interface RelayMailMetadata {
+	readonly reference: string;
+	readonly accountId: string;
+	readonly folder: string;
+	readonly uidValidity: string;
+	readonly uid: string;
+	readonly receivedAt: number;
+	readonly sizeBytes: number;
 }

@@ -1,3 +1,4 @@
+import { parseCueMailSource } from '../../../shared/plugins/mail';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
@@ -420,6 +421,7 @@ function normalizeSubscription(
 				? (sub.gh_state as CueGitHubState)
 				: undefined,
 		webhook: normalizeWebhook(sub.webhook),
+		...(sub.event === 'relay.mail.received' ? { mail: parseCueMailSource(sub.mail) } : {}),
 		gh_label_target:
 			typeof sub.gh_label_target === 'string' &&
 			CUE_GITHUB_LABEL_TARGETS.includes(sub.gh_label_target as CueGitHubLabelTarget)

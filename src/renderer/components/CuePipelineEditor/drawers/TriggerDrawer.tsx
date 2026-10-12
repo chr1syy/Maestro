@@ -83,6 +83,14 @@ const TRIGGER_ITEMS: TriggerItem[] = [
 		color: EVENT_COLORS['cli.trigger'],
 	},
 	{
+		eventType: 'relay.mail.received',
+		label: 'Mail Received',
+		description: 'Read-only metadata from an explicitly authorized mail account',
+		icon: EVENT_ICONS['relay.mail.received'],
+		color: EVENT_COLORS['relay.mail.received'],
+	},
+
+	{
 		eventType: 'webhook.received',
 		label: 'Webhook',
 		description: 'HTTP POST from any external service',

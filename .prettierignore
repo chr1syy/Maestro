@@ -16,3 +16,11 @@ docs/releases.md
 # undone by the next `npm run fonts:fetch`, breaking the format gate on a
 # routine font refresh.
 src/renderer/generated-fonts.css
+
+# Local task artifacts and test caches are not source.
+.maestro/
+.cache/
+.build/
+
+# Short worktree-local temporary directory for bounded Unix socket paths.
+.t/

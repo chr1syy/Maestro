@@ -21,6 +21,8 @@ import { shellEscape, shellEscapeRemotePath } from '../../utils/shell-escape';
 import { resolveSshPath } from '../../utils/cliDetection';
 import type { SshRemoteConfig } from '../../../shared/types';
 import { buildSshOptionArgs } from '../../../shared/sshOptions';
+import { isWindows } from '../../../shared/platformDetection';
+import { projectMcpProcessPublication } from '../../../shared/plugins/mcp-agent-config';
 import { MaestroSettings } from './persistence';
 import { getDefaultShell, resolveConfiguredShell } from '../../stores/defaults';
 import { handleProcessSpawn } from './process/handle-spawn';
@@ -279,6 +281,16 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 			// For terminal processes, also fetch child processes to show what's running inside the shell
 			const result: Array<Record<string, unknown>> = await Promise.all(
 				processes.map(async (p) => {
+					// Publish copied diagnostics, never the executable configuration.
+					const publication = projectMcpProcessPublication(
+						p.args === undefined ? [] : p.args,
+						p.maestroEnvVars
+					);
+					const command = projectMcpProcessPublication(p.command === undefined ? [] : [p.command]);
+					const remote = projectMcpProcessPublication(
+						p.sshRemoteCommand === undefined ? [] : [p.sshRemoteCommand]
+					);
+					const withheld = publication.withheld || command.withheld || remote.withheld;
 					const entry: Record<string, unknown> = {
 						sessionId: p.sessionId,
 						toolType: p.toolType,
@@ -287,15 +299,25 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 						isTerminal: p.isTerminal,
 						isBatchMode: p.isBatchMode || false,
 						startTime: p.startTime,
-						command: p.command,
-						args: p.args,
-						maestroEnvVars: p.maestroEnvVars,
-						sshRemoteCommand: p.sshRemoteCommand,
+						command: command.args[0],
+						args: p.args === undefined ? undefined : [...publication.args],
+						maestroEnvVars: p.maestroEnvVars === undefined ? undefined : publication.env,
+						// A prejoined shell command cannot be reconstructed safely from
+						// projected argv. Withhold it when any configuration was withheld.
+						sshRemoteCommand: withheld ? undefined : remote.args[0],
 					};
 					if (options?.includeChildProcesses !== false && p.isTerminal && p.pid) {
 						const children = await getChildProcesses(p.pid);
 						if (children.length > 0) {
-							entry.childProcesses = children;
+							entry.childProcesses = children.map((child) => ({
+								pid: child.pid,
+								// Windows returns an opaque CommandLine, POSIX a command
+								// name. Never try to tokenize the former as executable argv.
+								command:
+									withheld || isWindows()
+										? '<child command unavailable>'
+										: projectMcpProcessPublication([child.command]).args[0],
+							}));
 						}
 					}
 					return entry;
@@ -305,6 +327,12 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 			// Append active Cue run processes if available
 			const cueProcesses = deps.getCueProcesses?.() ?? [];
 			for (const cue of cueProcesses) {
+				// Project again at IPC even when the canonical Cue list is already safe.
+				const publication = projectMcpProcessPublication(cue.args);
+				const command = projectMcpProcessPublication([cue.command]);
+				const remote = projectMcpProcessPublication(
+					cue.sshRemoteCommand === undefined ? [] : [cue.sshRemoteCommand]
+				);
 				result.push({
 					sessionId: `cue-run-${cue.runId}`,
 					toolType: cue.toolType,
@@ -313,9 +341,12 @@ export function registerProcessHandlers(deps: ProcessHandlerDependencies): void 
 					isTerminal: false,
 					isBatchMode: false,
 					startTime: cue.startTime,
-					command: cue.command,
-					args: cue.args,
-					sshRemoteCommand: cue.sshRemoteCommand,
+					command: command.args[0],
+					args: [...publication.args],
+					sshRemoteCommand:
+						publication.withheld || command.withheld || remote.withheld
+							? undefined
+							: remote.args[0],
 					isCueRun: true,
 					cueRunId: cue.runId,
 					cueSessionName: cue.sessionName,

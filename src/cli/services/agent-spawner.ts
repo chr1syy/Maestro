@@ -270,6 +270,7 @@ function localPluginMcp(
 		{
 			command: process.execPath,
 			args: [overrides.mcpCliScriptPath, 'mcp', 'serve'],
+			runTokenFile: overrides.pluginRunProofFile,
 			env: {
 				ELECTRON_RUN_AS_NODE: '1',
 				MAESTRO_PLUGIN_RUN_TOKEN_FILE: overrides.pluginRunProofFile,

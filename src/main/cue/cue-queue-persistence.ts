@@ -25,6 +25,7 @@ import {
 	getQueuedEvents,
 	clearPersistedQueue,
 	safePersistQueuedEvent,
+	persistQueuedEvent,
 	safeRemoveQueuedEvent,
 	safeRecordCueEvent,
 	type CueQueuedEventRecord,
@@ -63,7 +64,7 @@ export interface RestoredQueueEntry extends PersistableQueueEntry {
 }
 
 export interface CueQueuePersistence {
-	persist(sessionId: string, persistId: string, entry: PersistableQueueEntry): void;
+	persist(sessionId: string, persistId: string, entry: PersistableQueueEntry): void | boolean;
 	remove(persistId: string): void;
 	clearSession(sessionId: string): void;
 	clearAll(): void;
@@ -91,7 +92,11 @@ export interface CueQueuePersistenceDeps {
 export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQueuePersistence {
 	const now = deps.now ?? (() => Date.now());
 
-	function persist(sessionId: string, persistId: string, entry: PersistableQueueEntry): void {
+	function persist(
+		sessionId: string,
+		persistId: string,
+		entry: PersistableQueueEntry
+	): void | boolean {
 		const record: CueQueuedEventRecord = {
 			id: persistId,
 			sessionId,
@@ -110,6 +115,16 @@ export function createCueQueuePersistence(deps: CueQueuePersistenceDeps): CueQue
 			notifyJson: entry.notify ? JSON.stringify(entry.notify) : null,
 			turnSettingsJson: entry.turnSettings ? JSON.stringify(entry.turnSettings) : null,
 		};
+		if (entry.event.type === 'relay.mail.received') {
+			try {
+				persistQueuedEvent(record);
+				return getQueuedEvents().some(
+					(row) => row.id === record.id && row.eventJson === record.eventJson
+				);
+			} catch {
+				return false;
+			}
+		}
 		safePersistQueuedEvent(record);
 	}
 

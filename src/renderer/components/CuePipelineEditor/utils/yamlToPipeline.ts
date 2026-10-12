@@ -288,6 +288,9 @@ function extractTriggerConfig(sub: CueSubscription): TriggerNodeData['config'] {
 	const config: TriggerNodeData['config'] = {};
 
 	switch (sub.event as CueEventType) {
+		case 'relay.mail.received':
+			config.mail = sub.mail;
+			break;
 		case 'time.heartbeat':
 			if (sub.interval_minutes != null) config.interval_minutes = sub.interval_minutes;
 			break;

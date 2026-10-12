@@ -97,3 +97,26 @@ expectTypeOf<MediaProbe>().toEqualTypeOf<SrcMediaProbe>();
 expectTypeOf<MediaRunOptions>().toEqualTypeOf<SrcMediaOptions>();
 expectTypeOf<MediaToolStatus>().toEqualTypeOf<SrcMediaStatus>();
 expectTypeOf<MediaFailure>().toEqualTypeOf<SrcMediaFailure>();
+
+import type {
+	MaestroMailApi,
+	MailReference,
+	MailResult,
+	MailErrorCode,
+	MailAccountView,
+	RelayMailMetadata,
+} from '../index';
+import type {
+	MaestroMailApi as HostMailApi,
+	MailReference as HostMailReference,
+	MailResult as HostMailResult,
+	MailErrorCode as HostMailErrorCode,
+	MailAccountView as HostMailAccountView,
+	RelayMailMetadata as HostRelayMailMetadata,
+} from '../../../../src/shared/plugins/mail';
+expectTypeOf<MaestroMailApi>().toEqualTypeOf<HostMailApi>();
+expectTypeOf<MailReference>().toEqualTypeOf<HostMailReference>();
+expectTypeOf<MailResult<string>>().toEqualTypeOf<HostMailResult<string>>();
+expectTypeOf<MailErrorCode>().toEqualTypeOf<HostMailErrorCode>();
+expectTypeOf<MailAccountView>().toEqualTypeOf<HostMailAccountView>();
+expectTypeOf<RelayMailMetadata>().toEqualTypeOf<HostRelayMailMetadata>();

@@ -96,9 +96,9 @@ describe('@maestro/plugin-sdk vendored-contract drift guard', () => {
 		expect(HOST_METHOD_CAPABILITY).toEqual(SRC_HOST_METHOD_CAPABILITY);
 	});
 
-	it('HOST_API_VERSION matches the source and is pinned to 1.25.0', () => {
+	it('HOST_API_VERSION matches the source and is pinned to 1.26.0', () => {
 		expect(HOST_API_VERSION).toBe(SRC_HOST_API_VERSION);
-		expect(HOST_API_VERSION).toBe('1.25.0');
+		expect(HOST_API_VERSION).toBe('1.26.0');
 	});
 
 	it('capability risk and descriptions match the source', () => {
@@ -348,3 +348,8 @@ describe('vendored services contract parity', () => {
 		expect(validatePluginManifest(manifest)).toEqual(srcValidatePluginManifest(manifest));
 	});
 });
+
+import { MAIL_ERROR_MESSAGES } from '../index';
+import { MAIL_ERROR_MESSAGES as HOST_MAIL_ERRORS } from '../../../../src/shared/plugins/mail';
+it('ships the same fixed mail failure messages as the host', () =>
+	expect(MAIL_ERROR_MESSAGES).toEqual(HOST_MAIL_ERRORS));

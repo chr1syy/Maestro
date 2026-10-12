@@ -78,8 +78,9 @@ function pipeline(
 
 describe('pipelineValidation', () => {
 	describe('DEFAULT_TRIGGER_LABELS', () => {
-		it('covers all 12 CueEventType values', () => {
-			expect(Object.keys(DEFAULT_TRIGGER_LABELS)).toHaveLength(12);
+		it('covers all 13 CueEventType values', () => {
+			expect(Object.keys(DEFAULT_TRIGGER_LABELS)).toHaveLength(13);
+			expect(DEFAULT_TRIGGER_LABELS['relay.mail.received']).toBe('Mail Received');
 			expect(DEFAULT_TRIGGER_LABELS['app.startup']).toBe('Startup');
 			expect(DEFAULT_TRIGGER_LABELS['time.heartbeat']).toBe('Heartbeat');
 			expect(DEFAULT_TRIGGER_LABELS['time.scheduled']).toBe('Scheduled');
