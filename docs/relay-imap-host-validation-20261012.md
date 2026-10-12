@@ -33,6 +33,8 @@ TMPDIR="$PWD/.t" node ../../node_modules/vitest/vitest.mjs run --configLoader ru
 
 The normal pre-push hook must finish `npm run validate:push`: repository-wide formatting, renderer/main/CLI TypeScript, ESLint and the complete default test suite. Its settled result and PR URL belong in the PR evidence and shared continuation ledger; starting that hook is not a successful gate. The exact push receipt is `.maestro/imap-continuation/resumed-push.log`.
 
+The complete gate uses the existing Node **22.22.1** toolchain, matching CI's Node 22 configuration. An initial Node 25 gate was stopped after its experimental storage globals caused 74 failures in `AutoRunDocumentSelector.test.tsx`; the identical file passes all 86 tests under Node 22. The focused differential receipt is `.maestro/imap-continuation/node22-storage-repro.log`. Application code was unchanged for this environment correction. An earlier push's idle SSH connection closed during validation; the final atomic push uses per-command keepalives and publishes both the feature and a review base pinned to canonical RC, leaving the fork's old `rc` unchanged.
+
 ## Review and rollout limits
 
 Production plugin integration remains gated on the committed complete contract, passing repository gates and review. No plugin installation, Maestro restart, consent/settings change, live subscription or Discord reporting is authorized or performed. Packaged desktop UX and live mailbox compatibility remain unverified.
