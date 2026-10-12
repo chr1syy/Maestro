@@ -25,6 +25,8 @@ Existing dependencies are reused through a worktree-local `node_modules` symlink
 
 Counts overlap and are not a unique-test total. All listed runs settled successfully. Earlier failed or interrupted logs remain intact; they are not used as passing receipts.
 
+The complete default suite at `0d76abfa0` settled with 2,160 files passed, 1 skipped, 50,521 tests passed and 88 skipped, but exited 1 because an inherited modal focus timer ran after JSDOM teardown (`resumed-push-modal-timer-error.log`). This is a failed gate despite its passing assertions. A new lifecycle regression reproduced focus restoration after handler unmount; the existing effect now cancels its timer on cleanup. Both modal-handler suites pass all 114 tests (`modal-complete-green.log`). The final normal gate must rerun on the timer fix without suppressing uncaught errors or bypassing hooks.
+
 Review reproduced a mail proof failure when unchanged seven-field metadata was reordered during serialization: the actual sealed-store verification rejected it. The one-test red run exited 1 (`canonical-proof-red.log`). Mail proofs, event IDs and configuration equality now reuse `canonicalJson`; the same regression and the complete authorization/Cue run above exit 0. The credential namespace's primitive-array serialization remains byte-identical. The obsolete broad gate was stopped before editing; it is not counted as a passing run. Normalization is part of this unshipped contract; production integration remains gated.
 
 Fresh command lines, executed from the worktree (SDK command from `packages/plugin-sdk`):
