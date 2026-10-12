@@ -38,6 +38,8 @@ export interface McpServerSpec {
 	args: string[];
 	/** Extra env for the spawned bridge (e.g. ELECTRON_RUN_AS_NODE=1). */
 	env?: Record<string, string>;
+	/** Host-owned absolute proof-file path. Omitted means ordinary tools only. */
+	runTokenFile?: string;
 }
 
 /** Declares how an agent ingests an ephemeral MCP server config. Lives on the
@@ -74,6 +76,115 @@ export interface BuildMcpInjectionOpts {
 /** Fixed server name used across every strategy's config payload. */
 export const MCP_SERVER_NAME = 'maestro';
 
+/** Private bridge delivery channel; never contains the proof itself. */
+export const PLUGIN_RUN_TOKEN_FILE_ENV = 'MAESTRO_PLUGIN_RUN_TOKEN_FILE';
+
+/** Publication only: never use this lossy copy as executable configuration. */
+export interface McpProcessPublication {
+	readonly args: readonly string[];
+	readonly env: Readonly<Record<string, string | undefined>>;
+	/** Also true for rejected shapes: raw errors may echo unpublished input. */
+	readonly withheld: boolean;
+}
+
+/**
+ * Nonmutating, bundle-safe projection for logs and process DTOs. Withhold whole
+ * opaque MCP/config/env operands rather than parsing JSON/TOML or formatting a
+ * parser error (both may contain proofs/paths). All config overrides are opaque,
+ * including quoted/escaped TOML keys. Project BEFORE shell escaping or slicing.
+ * This is not an arbitrary secret scrubber or a caller-authority check.
+ */
+export function projectMcpProcessPublication(args: unknown, env?: unknown): McpProcessPublication {
+	const omitted = '<private MCP configuration omitted>';
+	const rejected: McpProcessPublication = Object.freeze({
+		args: Object.freeze(['<process publication unavailable>']),
+		env: Object.freeze({}),
+		withheld: true,
+	});
+	try {
+		// Bound scanning/copies in UTF-16 code units, independent of execution caps.
+		let remaining = 4 * 1024 * 1024;
+		const copyString = (value: unknown): string => {
+			if (typeof value !== 'string' || value.length > remaining) throw new Error();
+			remaining -= value.length;
+			return value;
+		};
+		if (!Array.isArray(args)) return rejected;
+		const argCount = args.length;
+		if (!Number.isInteger(argCount) || argCount < 0 || argCount > 4096) return rejected;
+		if (Reflect.ownKeys(args).length !== argCount + 1) return rejected;
+		const copiedArgs: string[] = [];
+		for (let i = 0; i < argCount; i++) {
+			const descriptor = Object.getOwnPropertyDescriptor(args, String(i));
+			if (!descriptor || !('value' in descriptor)) return rejected;
+			copiedArgs.push(copyString(descriptor.value));
+		}
+		const copiedEnv: Record<string, string | undefined> = Object.create(null);
+		if (env !== undefined) {
+			if (!env || typeof env !== 'object' || Array.isArray(env)) return rejected;
+			const proto = Object.getPrototypeOf(env);
+			if (proto !== Object.prototype && proto !== null) return rejected;
+			const keys = Reflect.ownKeys(env);
+			if (keys.length > 4096) return rejected;
+			for (const key of keys) {
+				if (typeof key !== 'string') return rejected;
+				copyString(key);
+				const descriptor = Object.getOwnPropertyDescriptor(env, key);
+				if (!descriptor || !('value' in descriptor)) return rejected;
+				copiedEnv[key] = descriptor.value === undefined ? undefined : copyString(descriptor.value);
+			}
+		}
+		// The canonical file channel, defensive token spellings and embedded
+		// configuration markers. Never publish a composite containing one.
+		const privateMarker = /MAESTRO_PLUGIN_RUN_TOKEN|runToken|run[-_]token|mcpServers|mcp_servers/i;
+		const opaqueOperand =
+			/^(?:--mcp-config|--config|-c|--env|--environment|-e|--run-token(?:-file)?|(?:--)?MAESTRO_PLUGIN_RUN_TOKEN(?:_FILE)?)$/i;
+		const opaqueInline = /^(?:--mcp-config|--config|--env|--environment|--run-token(?:-file)?)=/i;
+		let withheld = false;
+		let omitNext = false;
+		let unsafeOperand = false;
+		const publishedArgs = copiedArgs.map((arg) => {
+			if (omitNext) {
+				omitNext = false;
+				withheld = true;
+				// A missing value must not swallow another delivery flag and
+				// accidentally publish that flag's subsequent private operand.
+				if (arg.startsWith('-') || opaqueOperand.test(arg)) unsafeOperand = true;
+				return omitted;
+			}
+			if (opaqueOperand.test(arg)) {
+				omitNext = true;
+				withheld = true;
+				return arg;
+			}
+			if (opaqueInline.test(arg) || /^-[ce].+/i.test(arg) || privateMarker.test(arg)) {
+				withheld = true;
+				return omitted;
+			}
+			return arg;
+		});
+		if (omitNext || unsafeOperand) return rejected;
+		for (const key of Object.keys(copiedEnv)) {
+			if (
+				privateMarker.test(key) ||
+				/^(?:OPENCODE_CONFIG(?:_CONTENT)?|MCP_CONFIG(?:_FILE)?)$/i.test(key) ||
+				privateMarker.test(copiedEnv[key] ?? '')
+			) {
+				delete copiedEnv[key];
+				withheld = true;
+			}
+		}
+		return Object.freeze({
+			args: Object.freeze(publishedArgs),
+			env: Object.freeze(copiedEnv),
+			withheld,
+		});
+	} catch {
+		// Never stringify input, caught errors or native/parser causes.
+		return rejected;
+	}
+}
+
 /** `{ mcpServers: { maestro: { command, args, env? } } }` - the claude/generic shape. */
 function mcpServersJson(spec: McpServerSpec): string {
 	const entry: Record<string, unknown> = { command: spec.command, args: spec.args };
@@ -91,7 +202,25 @@ export function buildMcpInjection(
 	spec: McpServerSpec,
 	opts: BuildMcpInjectionOpts
 ): McpInjection {
-	switch (cap.strategy) {
+	const runTokenFile = spec.runTokenFile;
+	const strategy = cap.strategy;
+	// Override inherited/user env even for ordinary tools. Only host spawn code
+	// may select a proof file; env alone must not select another run's identity.
+	if (runTokenFile !== undefined && (typeof runTokenFile !== 'string' || !runTokenFile))
+		throw new Error('Invalid MCP proof file');
+	// Proof delivery has no supported temp-config or best-guess provider path.
+	// Refuse before copying env, serializing a path or calling the file builder.
+	if (
+		runTokenFile !== undefined &&
+		(cap.verified !== true ||
+			(strategy !== 'claude-mcp-config' && strategy !== 'codex-config-override'))
+	)
+		throw new Error('PrivateMcpSpawnFailed');
+	spec = {
+		...spec,
+		env: { ...spec.env, [PLUGIN_RUN_TOKEN_FILE_ENV]: runTokenFile ?? '' },
+	};
+	switch (strategy) {
 		case 'claude-mcp-config':
 			return {
 				globalArgs: ['--mcp-config', mcpServersJson(spec)],

@@ -13,16 +13,85 @@
  * stale relative to a freshly-toggled flag), matching the IPC handlers' gate.
  */
 import type { PluginManager } from './plugin-manager';
+import { ImapConnectionError } from './mail-imap-connection';
 
 let activePluginManager: PluginManager | null = null;
 let pluginsEnabledCheck: (() => boolean) | null = null;
+let managerTransition: object = {};
+let hostStopped = false;
+// At most one detached shutdown owner; retained only for bounded cleanup retry.
+let shutdownManager: PluginManager | null = null;
+let shutdownStopping = false;
 
 export function setActivePluginManager(
 	manager: PluginManager | null,
 	isEnabled?: () => boolean
 ): void {
+	if (hostStopped) {
+		// Shutdown is permanent, including assignments from synchronous abort hooks.
+		if (manager && manager === shutdownManager && shutdownStopping)
+			throw new ImapConnectionError('MAIL_DENIED');
+		try {
+			manager?.stopToolAuthority();
+		} catch {
+			throw new ImapConnectionError('MAIL_UNAVAILABLE');
+		}
+		if (manager) throw new ImapConnectionError('MAIL_DENIED');
+		return;
+	}
+	// Even an explicit clear while already detached cancels an older transition.
+	const transition = {};
+	managerTransition = transition;
+	if (activePluginManager === manager) {
+		pluginsEnabledCheck = isEnabled ?? null;
+		return;
+	}
+	const previous = activePluginManager;
+	// Remove ingress authority before cleanup can synchronously reenter this setter.
+	activePluginManager = null;
+	pluginsEnabledCheck = null;
+	let failed = false;
+	try {
+		previous?.stopToolAuthority();
+	} catch {
+		failed = true;
+	}
+	if (managerTransition !== transition || failed) {
+		// A newer transition owns the accessor. Never overwrite it or leave this
+		// abandoned candidate's proofs alive; an adopted candidate stays its owner.
+		if (manager && manager !== activePluginManager) {
+			try {
+				manager.stopToolAuthority();
+			} catch {
+				failed = true;
+			}
+		}
+		if (failed) throw new ImapConnectionError('MAIL_UNAVAILABLE');
+		return;
+	}
 	activePluginManager = manager;
 	pluginsEnabledCheck = isEnabled ?? null;
+}
+
+/** Confirmed host quit only. Detach before cleanup; repeated calls retry the
+ * same bounded owner without reopening ingress or accepting a replacement. */
+export function stopActivePluginManager(): void {
+	if (!hostStopped) {
+		hostStopped = true;
+		managerTransition = {};
+		shutdownManager = activePluginManager;
+		activePluginManager = null;
+		pluginsEnabledCheck = null;
+	}
+	if (shutdownStopping) return;
+	shutdownStopping = true;
+	try {
+		shutdownManager?.stopToolAuthority();
+	} catch {
+		throw new ImapConnectionError('MAIL_UNAVAILABLE');
+	} finally {
+		shutdownStopping = false;
+	}
 }
 
 export function getActivePluginManager(): PluginManager | null {

@@ -127,7 +127,14 @@ export interface HostResponse {
 export type HostControlMessage =
 	| { kind: 'init'; pluginId: string; entryCode?: string }
 	| { kind: 'invokeCommand'; commandId: string; args?: unknown }
-	| { kind: 'invokeTool'; id: number; commandId: string; args?: unknown }
+	| {
+			kind: 'invokeTool';
+			id: number;
+			commandId: string;
+			args?: unknown;
+			/** Internal host-issued nested handle; never an agent ID or model argument. */
+			invocationId?: string | null;
+	  }
 	| { kind: 'event'; topic: string; at: string; payload: unknown }
 	| { kind: 'shutdown' };
 

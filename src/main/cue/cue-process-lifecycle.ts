@@ -16,12 +16,13 @@ import { getOutputParser } from '../parsers';
 import { captureException } from '../utils/sentry';
 import { isWindows } from '../../shared/platformDetection';
 import { stripAnsiCodes } from '../../shared/stringUtils';
+import { projectMcpProcessPublication } from '../../shared/plugins/mcp-agent-config';
 
 const SIGKILL_DELAY_MS = 5000;
 
 // ─── Types ──────���────────────────────────────────────────────────────────────
 
-/** Metadata stored alongside each active Cue process */
+/** Main-only process handle with copied publication metadata (never spawn input). */
 interface CueActiveProcess {
 	child: ChildProcess;
 	command: string;
@@ -243,6 +244,14 @@ export function runProcess(
 		options;
 
 	return new Promise<ProcessRunResult>((resolve) => {
+		// Snapshot publication before native work or async callbacks. The original
+		// spec remains the private, exact input to spawn; never execute this copy.
+		const publication = projectMcpProcessPublication(spec.args, spec.env);
+		const command = projectMcpProcessPublication([spec.command]);
+		const remote = projectMcpProcessPublication(
+			spec.sshRemoteCommand === undefined ? [] : [spec.sshRemoteCommand]
+		);
+		const withheld = publication.withheld || command.withheld || remote.withheld;
 		let child: ChildProcess;
 		// Only attach a writable stdin pipe when the SSH wrapper actually
 		// needs to write a script or prompt down it. In local mode the prompt
@@ -265,10 +274,15 @@ export function runProcess(
 				stdio: [stdinMode, 'pipe', 'pipe'],
 			});
 		} catch (err) {
-			captureException(err, { operation: 'cue:spawn', runId, command: spec.command });
+			const publishedError = withheld ? new Error('Cue process spawn failed') : err;
+			captureException(publishedError, {
+				operation: 'cue:spawn',
+				runId,
+				command: command.args[0],
+			});
 			resolve({
 				stdout: '',
-				stderr: `Spawn error: ${err instanceof Error ? err.message : String(err)}`,
+				stderr: `Spawn error: ${publishedError instanceof Error ? publishedError.message : String(publishedError)}`,
 				exitCode: null,
 				status: 'failed',
 			});
@@ -280,12 +294,12 @@ export function runProcess(
 
 		activeProcesses.set(runId, {
 			child,
-			command: spec.command,
-			args: spec.args,
+			command: command.args[0],
+			args: [...publication.args],
 			cwd: spec.cwd,
 			toolType,
 			startTime: Date.now(),
-			sshRemoteCommand: spec.sshRemoteCommand,
+			sshRemoteCommand: withheld ? undefined : remote.args[0],
 			getStdout: () => stdout,
 			getStderr: () => stderr,
 		});
@@ -329,12 +343,13 @@ export function runProcess(
 
 		// Handle spawn errors (async - e.g. ENOENT after spawn returns)
 		child.on('error', (error) => {
-			captureException(error, {
+			const publishedError = withheld ? new Error('Cue process spawn failed') : error;
+			captureException(publishedError, {
 				operation: 'cue:childProcess:error',
 				runId,
-				command: spec.command,
+				command: command.args[0],
 			});
-			stderr += `\nSpawn error: ${error.message}`;
+			stderr += `\nSpawn error: ${publishedError.message}`;
 			finish('failed', null);
 		});
 
@@ -422,15 +437,22 @@ export function getProcessList(): CueProcessInfo[] {
 	const result: CueProcessInfo[] = [];
 	for (const [runId, entry] of activeProcesses) {
 		if (entry.child.pid) {
+			// Re-project at publication: main-only map consumers can mutate metadata.
+			const publication = projectMcpProcessPublication(entry.args);
+			const command = projectMcpProcessPublication([entry.command]);
+			const remote = projectMcpProcessPublication(
+				entry.sshRemoteCommand === undefined ? [] : [entry.sshRemoteCommand]
+			);
 			result.push({
 				runId,
 				pid: entry.child.pid,
-				command: entry.command,
-				args: entry.args,
+				command: command.args[0],
+				args: [...publication.args],
 				cwd: entry.cwd,
 				toolType: entry.toolType,
 				startTime: entry.startTime,
-				sshRemoteCommand: entry.sshRemoteCommand,
+				sshRemoteCommand:
+					publication.withheld || command.withheld || remote.withheld ? undefined : remote.args[0],
 			});
 		}
 	}

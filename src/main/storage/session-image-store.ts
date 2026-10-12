@@ -211,25 +211,40 @@ export async function resolveToDataUrl(value: string): Promise<string | null> {
  * Synchronously resolve a reference to its raw bytes and media type. The
  * send-to-agent path (process-manager/utils/imageUtils.ts) runs synchronously,
  * so it needs a sync resolver to turn a persisted ref back into bytes for
- * temp-file / stream-json hand-off. Returns null for a missing file; passes
- * inline data URLs through by decoding them.
+ * temp-file / stream-json hand-off. Ordinary calls return null for a missing
+ * file; captured host-private calls throw a fixed error for any read failure
+ * without inspecting the cause or logging the reference. Inline data URLs
+ * pass through by decoding them. This main-only policy confers no authority.
  */
-export function resolveToBytesSync(value: string): { buffer: Buffer; mediaType: string } | null {
-	if (isInlineImageDataUrl(value)) {
-		const parsed = parseDataUrl(value);
-		if (!parsed) return null;
-		return { buffer: Buffer.from(parsed.base64, 'base64'), mediaType: parsed.mediaType };
-	}
-	const filePath = resolveToFilePath(value);
-	if (!filePath) return null;
+export function resolveToBytesSync(
+	value: string,
+	withholdProviderOutput = false
+): { buffer: Buffer; mediaType: string } | null {
 	try {
-		const buffer = fs.readFileSync(filePath);
-		const ext = path.extname(filePath).slice(1);
-		return { buffer, mediaType: getImageMimeType(ext) };
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-		logger.warn(`Missing session image for ref: ${value}`, 'SessionImageStore');
-		return null;
+		if (isInlineImageDataUrl(value)) {
+			const parsed = parseDataUrl(value);
+			if (!parsed) return null;
+			return { buffer: Buffer.from(parsed.base64, 'base64'), mediaType: parsed.mediaType };
+		}
+		const filePath = resolveToFilePath(value);
+		if (!filePath) return null;
+		try {
+			const buffer = fs.readFileSync(filePath);
+			const ext = path.extname(filePath).slice(1);
+			return { buffer, mediaType: getImageMimeType(ext) };
+		} catch (err) {
+			// Missing files also fail closed for private calls: inspecting code to
+			// distinguish ENOENT can invoke an untrusted native getter.
+			if (withholdProviderOutput) throw new Error('PrivateMcpImageResolutionFailed');
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+			logger.warn(`Missing session image for ref: ${value}`, 'SessionImageStore');
+			return null;
+		}
+	} catch (error) {
+		// Include path preparation and inline decoding, before the file-read
+		// boundary, without exposing input paths or retaining a native cause.
+		if (withholdProviderOutput) throw new Error('PrivateMcpImageResolutionFailed');
+		throw error;
 	}
 }
 

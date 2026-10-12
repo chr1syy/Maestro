@@ -1,6 +1,6 @@
 // src/main/process-manager/spawners/ChildProcessSpawner.ts
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -14,12 +14,13 @@ import { StderrHandler } from '../handlers/StderrHandler';
 import { ExitHandler } from '../handlers/ExitHandler';
 import { buildChildProcessEnv, collectMaestroEnvVars } from '../utils/envBuilder';
 import { DEFAULT_QUERY_SOURCE } from '../../../shared/querySource';
-import { saveImageToTempFile, buildImagePromptPrefix } from '../utils/imageUtils';
+import { saveImageToTempFile, buildImagePromptPrefix, cleanupTempFiles } from '../utils/imageUtils';
 import { buildStreamJsonMessage } from '../utils/streamJsonBuilder';
 import { escapeArgsForShell, isPowerShellShell } from '../utils/shellEscape';
 import { isWindows } from '../../../shared/platformDetection';
 import { captureException } from '../../utils/sentry';
 import { nextSpawnGeneration, isSupersededGeneration } from '../generation';
+import { projectMcpProcessPublication } from '../../../shared/plugins/mcp-agent-config';
 
 /**
  * Handles spawning of child processes (non-PTY).
@@ -54,7 +55,14 @@ export class ChildProcessSpawner {
 	/**
 	 * Spawn a child process for a session
 	 */
-	spawn(config: ProcessConfig): SpawnResult {
+	spawn(
+		config: ProcessConfig,
+		withholdProviderOutput = false,
+		preparedOwnership?: {
+			capture(process: ManagedProcess, rollback: () => void): void;
+			fence(): void;
+		}
+	): SpawnResult {
 		const {
 			sessionId,
 			toolType,
@@ -74,6 +82,8 @@ export class ChildProcessSpawner {
 			sendPromptViaStdin,
 			sendPromptViaStdinRaw,
 		} = config;
+		const commandPublication = projectMcpProcessPublication([command]);
+		const commandToLog = commandPublication.args[0];
 
 		const hasImages = images && images.length > 0;
 		const capabilities = getAgentCapabilities(toolType);
@@ -104,122 +114,214 @@ export class ChildProcessSpawner {
 		// inside bash -c), skip the appending paths below and treat it as already-added.
 		let promptAddedToArgs = !!config.promptAlreadyInArgs;
 
-		if (hasImages && prompt && capabilities.supportsStreamJsonInput) {
-			// For agents that support stream-json input (like Claude Code)
-			// Always add --input-format stream-json when sending images via stdin.
-			// This flag is required for Claude Code to parse the JSON+base64 message
-			// correctly; without it, the raw JSON is treated as plain text prompt.
-			const needsInputFormat = !args.includes('--input-format')
-				? ['--input-format', 'stream-json']
-				: [];
-			finalArgs = [...args, ...needsInputFormat];
-			// Prompt will be sent via stdin as stream-json with embedded images (not in CLI args)
-		} else if (hasImages && prompt && (imageArgs || imagePromptBuilder)) {
-			// For agents that use file-based image args (like Codex, OpenCode) or
-			// prompt-embedded image mentions (like Copilot's @path syntax)
-			finalArgs = [...args];
+		let withholdErrors = withholdProviderOutput;
+		let spawnedChild: ChildProcess | undefined;
+		let registeredProcess: ManagedProcess | undefined;
+		let rolledBack = false;
+		let preparedExitStarted = false;
+		let nativePreparationEntered = false;
+		const listenerDisposers: (() => void)[] = [];
+		// Track only our listeners; retain inert error consumers after disposal so
+		// late native stream errors cannot become unhandled exceptions.
+		const listen = (
+			source: EventEmitter,
+			event: string,
+			listener: Parameters<EventEmitter['on']>[1]
+		) => {
+			if (withholdProviderOutput)
+				listenerDisposers.push(() => source.removeListener(event, listener));
+			source.on(event, listener);
+		};
+		const rollbackPrepared = () => {
+			if (!withholdProviderOutput || rolledBack) return;
+			rolledBack = true; // Fence data/settlement BEFORE abort/native callbacks.
+			if (registeredProcess) this.exitHandler.discardPrivateOutput(registeredProcess);
+			try {
+				preparedOwnership?.fence();
+			} catch {
+				/* The fence is irreversible even if an abort observer throws. */
+			}
+			for (const dispose of listenerDisposers.splice(0)) dispose();
+			let killFailed = false;
+			if (spawnedChild) {
+				for (const source of [
+					spawnedChild,
+					spawnedChild.stdin,
+					spawnedChild.stdout,
+					spawnedChild.stderr,
+				])
+					source?.on('error', () => {});
+				try {
+					// Prepared ownership admits local POSIX children only. Immediate
+					// SIGKILL needs no new timer and targets this child, never a reused key.
+					if (
+						spawnedChild.exitCode === null &&
+						spawnedChild.signalCode === null &&
+						!spawnedChild.kill('SIGKILL')
+					)
+						throw new Error('PrivateMcpSpawnFailed');
+				} catch {
+					killFailed = true;
+					logger.error('[ProcessManager] Prepared child rollback failed', 'ProcessManager', {
+						error: 'PrivateMcpSpawnFailed',
+					});
+				}
+				for (const stream of [spawnedChild.stdin, spawnedChild.stdout, spawnedChild.stderr]) {
+					try {
+						stream?.destroy();
+					} catch {
+						/* No native cause publication. */
+					}
+				}
+			}
+			// Cleanup belongs to the failed spawn even if a successor now owns the key.
+			if (!preparedExitStarted) cleanupTempFiles(tempImageFiles, true);
 			tempImageFiles = [];
-			for (let i = 0; i < images.length; i++) {
-				const tempPath = saveImageToTempFile(images[i], i);
-				if (tempPath) {
-					tempImageFiles.push(tempPath);
-				}
+			if (registeredProcess) this.exitHandler.discardPrivateOutput(registeredProcess);
+			if (registeredProcess && !preparedExitStarted) {
+				preparedExitStarted = true;
+				registeredProcess.tempImageFiles = undefined;
+				const failedProcess = registeredProcess;
+				const settleRollback = () => {
+					void this.exitHandler.handleExit(sessionId, 1, failedProcess, true).catch(() => {
+						logger.error('[ProcessManager] Prepared rollback settlement failed', 'ProcessManager', {
+							error: 'PrivateMcpSpawnFailed',
+						});
+					});
+				};
+				// A rejected kill is not an observed stop: retain tracking until close.
+				// The manager may retry its canonical exact-object kill in the meantime.
+				if (killFailed && spawnedChild?.exitCode === null && spawnedChild.signalCode === null)
+					spawnedChild.once('close', settleRollback);
+				else settleRollback();
 			}
-
-			const isResumeWithPromptEmbed =
-				capabilities.imageResumeMode === 'prompt-embed' && args.some((a) => a === 'resume');
-			const shouldEmbedImagesInPrompt = !!imagePromptBuilder || isResumeWithPromptEmbed;
-
-			if (shouldEmbedImagesInPrompt) {
-				// Some agents consume images by mentioning temp file paths inside the prompt
-				// instead of accepting a dedicated CLI image flag.
-				const imagePrefix = imagePromptBuilder
-					? imagePromptBuilder(tempImageFiles)
-					: buildImagePromptPrefix(tempImageFiles);
-				effectivePrompt = imagePrefix + prompt;
-				if (!promptViaStdin) {
-					if (promptArgs) {
-						finalArgs = [...finalArgs, ...promptArgs(effectivePrompt)];
-					} else if (noPromptSeparator) {
-						finalArgs = [...finalArgs, effectivePrompt];
-					} else {
-						finalArgs = [...finalArgs, '--', effectivePrompt];
-					}
-					promptAddedToArgs = true;
-				}
-				logger.debug('[ProcessManager] Embedded image paths in prompt', 'ProcessManager', {
-					sessionId,
-					imageCount: images.length,
-					tempFiles: tempImageFiles,
-					embedMode: imagePromptBuilder ? 'prompt-builder' : 'resume-prompt-embed',
-					promptViaStdin,
-				});
-			} else {
-				// Initial spawn: use -i flag as before
-				for (const tempPath of tempImageFiles) {
-					if (!imageArgs) {
-						continue;
-					}
-					finalArgs = [...finalArgs, ...imageArgs(tempPath)];
-				}
-				if (!promptViaStdin) {
-					if (promptArgs) {
-						finalArgs = [...finalArgs, ...promptArgs(prompt)];
-					} else if (noPromptSeparator) {
-						finalArgs = [...finalArgs, prompt];
-					} else {
-						finalArgs = [...finalArgs, '--', prompt];
-					}
-					promptAddedToArgs = true;
-				}
-				logger.debug('[ProcessManager] Using file-based image args', 'ProcessManager', {
-					sessionId,
-					imageCount: images.length,
-					tempFiles: tempImageFiles,
-					promptViaStdin,
-				});
-			}
-		} else if (prompt && !promptViaStdin && !promptAddedToArgs) {
-			// Regular batch mode - prompt as CLI arg
-			// SKIP this when prompt is sent via stdin to avoid shell escaping issues,
-			// or when the caller already embedded the prompt in args (promptAlreadyInArgs).
-			if (promptArgs) {
-				finalArgs = [...args, ...promptArgs(prompt)];
-			} else if (noPromptSeparator) {
-				finalArgs = [...args, prompt];
-			} else {
-				finalArgs = [...args, '--', prompt];
-			}
-			promptAddedToArgs = true;
-		} else {
-			finalArgs = args;
-		}
-
-		// Log spawn config
-		const spawnConfigLogFn = isWindows() ? logger.info.bind(logger) : logger.debug.bind(logger);
-		spawnConfigLogFn('[ProcessManager] spawn() config', 'ProcessManager', {
-			sessionId,
-			toolType,
-			platform: process.platform,
-			hasPrompt: !!prompt,
-			promptLength: prompt?.length,
-			promptPreview:
-				prompt && isWindows()
-					? {
-							first100: prompt.substring(0, 100),
-							last100: prompt.substring(Math.max(0, prompt.length - 100)),
-						}
-					: undefined,
-			hasImages,
-			hasImageArgs: !!imageArgs,
-			tempImageFilesCount: tempImageFiles.length,
-			command,
-			commandHasExtension: path.extname(command).length > 0,
-			baseArgsCount: args.length,
-			finalArgsCount: finalArgs.length,
-		});
+		};
 
 		try {
+			if (hasImages && prompt && capabilities.supportsStreamJsonInput) {
+				// For agents that support stream-json input (like Claude Code)
+				// Always add --input-format stream-json when sending images via stdin.
+				// This flag is required for Claude Code to parse the JSON+base64 message
+				// correctly; without it, the raw JSON is treated as plain text prompt.
+				const needsInputFormat = !args.includes('--input-format')
+					? ['--input-format', 'stream-json']
+					: [];
+				finalArgs = [...args, ...needsInputFormat];
+				// Prompt will be sent via stdin as stream-json with embedded images (not in CLI args)
+			} else if (hasImages && prompt && (imageArgs || imagePromptBuilder)) {
+				// For agents that use file-based image args (like Codex, OpenCode) or
+				// prompt-embedded image mentions (like Copilot's @path syntax)
+				finalArgs = [...args];
+				tempImageFiles = [];
+				for (let i = 0; i < images.length; i++) {
+					const tempPath = saveImageToTempFile(images[i], i, withholdProviderOutput);
+					if (tempPath) {
+						tempImageFiles.push(tempPath);
+					}
+				}
+
+				const isResumeWithPromptEmbed =
+					capabilities.imageResumeMode === 'prompt-embed' && args.some((a) => a === 'resume');
+				const shouldEmbedImagesInPrompt = !!imagePromptBuilder || isResumeWithPromptEmbed;
+
+				if (shouldEmbedImagesInPrompt) {
+					// Some agents consume images by mentioning temp file paths inside the prompt
+					// instead of accepting a dedicated CLI image flag.
+					const imagePrefix = imagePromptBuilder
+						? imagePromptBuilder(tempImageFiles)
+						: buildImagePromptPrefix(tempImageFiles);
+					effectivePrompt = imagePrefix + prompt;
+					if (!promptViaStdin) {
+						if (promptArgs) {
+							finalArgs = [...finalArgs, ...promptArgs(effectivePrompt)];
+						} else if (noPromptSeparator) {
+							finalArgs = [...finalArgs, effectivePrompt];
+						} else {
+							finalArgs = [...finalArgs, '--', effectivePrompt];
+						}
+						promptAddedToArgs = true;
+					}
+					logger.debug('[ProcessManager] Embedded image paths in prompt', 'ProcessManager', {
+						sessionId,
+						imageCount: images.length,
+						tempFiles: withholdProviderOutput ? undefined : tempImageFiles,
+						embedMode: imagePromptBuilder ? 'prompt-builder' : 'resume-prompt-embed',
+						promptViaStdin,
+					});
+				} else {
+					// Initial spawn: use -i flag as before
+					for (const tempPath of tempImageFiles) {
+						if (!imageArgs) {
+							continue;
+						}
+						finalArgs = [...finalArgs, ...imageArgs(tempPath)];
+					}
+					if (!promptViaStdin) {
+						if (promptArgs) {
+							finalArgs = [...finalArgs, ...promptArgs(prompt)];
+						} else if (noPromptSeparator) {
+							finalArgs = [...finalArgs, prompt];
+						} else {
+							finalArgs = [...finalArgs, '--', prompt];
+						}
+						promptAddedToArgs = true;
+					}
+					logger.debug('[ProcessManager] Using file-based image args', 'ProcessManager', {
+						sessionId,
+						imageCount: images.length,
+						tempFiles: withholdProviderOutput ? undefined : tempImageFiles,
+						promptViaStdin,
+					});
+				}
+			} else if (prompt && !promptViaStdin && !promptAddedToArgs) {
+				// Regular batch mode - prompt as CLI arg
+				// SKIP this when prompt is sent via stdin to avoid shell escaping issues,
+				// or when the caller already embedded the prompt in args (promptAlreadyInArgs).
+				if (promptArgs) {
+					finalArgs = [...args, ...promptArgs(prompt)];
+				} else if (noPromptSeparator) {
+					finalArgs = [...args, prompt];
+				} else {
+					finalArgs = [...args, '--', prompt];
+				}
+				promptAddedToArgs = true;
+			} else {
+				finalArgs = args;
+			}
+
+			// Publication copies never replace the actual args/env passed to spawn.
+			const argsPublication = projectMcpProcessPublication(finalArgs, customEnvVars);
+			const shellPublication = projectMcpProcessPublication([], shellEnvVars);
+			withholdErrors ||=
+				withholdProviderOutput ||
+				argsPublication.withheld ||
+				commandPublication.withheld ||
+				shellPublication.withheld;
+			// Log spawn config
+			const spawnConfigLogFn = isWindows() ? logger.info.bind(logger) : logger.debug.bind(logger);
+			spawnConfigLogFn('[ProcessManager] spawn() config', 'ProcessManager', {
+				sessionId,
+				toolType,
+				platform: process.platform,
+				hasPrompt: !!prompt,
+				promptLength: prompt?.length,
+				promptPreview:
+					prompt && isWindows() && !withholdProviderOutput
+						? {
+								first100: prompt.substring(0, 100),
+								last100: prompt.substring(Math.max(0, prompt.length - 100)),
+							}
+						: undefined,
+				hasImages,
+				hasImageArgs: !!imageArgs,
+				tempImageFilesCount: tempImageFiles.length,
+				command: commandToLog,
+				commandHasExtension: path.extname(command).length > 0,
+				baseArgsCount: args.length,
+				finalArgsCount: finalArgs.length,
+			});
+
+			nativePreparationEntered = true;
 			// Build environment
 			const isResuming =
 				args.some((arg) => arg === '--resume' || arg.startsWith('--resume=')) ||
@@ -231,10 +333,12 @@ export class ChildProcessSpawner {
 				config.extraPathDirs,
 				config.querySource
 			);
+			const publication = projectMcpProcessPublication(finalArgs, env);
+			withholdErrors ||= publication.withheld;
 
 			// Log environment variable application for troubleshooting
 			if (shellEnvVars && Object.keys(shellEnvVars).length > 0) {
-				const globalVarKeys = Object.keys(shellEnvVars);
+				const globalVarKeys = Object.keys(shellPublication.env);
 				logger.debug('[ProcessManager] Applying global environment variables', 'ProcessManager', {
 					sessionId: config.sessionId,
 					globalVarCount: globalVarKeys.length,
@@ -245,10 +349,10 @@ export class ChildProcessSpawner {
 			}
 
 			logger.debug('[ProcessManager] About to spawn child process', 'ProcessManager', {
-				command,
-				finalArgs,
+				command: commandToLog,
+				finalArgs: publication.args,
 				cwd,
-				PATH: env.PATH?.substring(0, 150),
+				PATH: publication.env.PATH?.substring(0, 150),
 				hasStdio: 'default (pipe)',
 			});
 
@@ -270,7 +374,7 @@ export class ChildProcessSpawner {
 				logger.info(
 					'[ProcessManager] Auto-enabling shell for Windows to allow PATH resolution of basename exe',
 					'ProcessManager',
-					{ command: spawnCommand }
+					{ command: commandToLog }
 				);
 			}
 
@@ -284,7 +388,7 @@ export class ChildProcessSpawner {
 				logger.info(
 					'[ProcessManager] Auto-enabling shell for Windows to spawn batch-file command',
 					'ProcessManager',
-					{ command: spawnCommand }
+					{ command: commandToLog }
 				);
 			}
 
@@ -298,7 +402,7 @@ export class ChildProcessSpawner {
 						logger.info(
 							'[ProcessManager] Auto-enabling shell for Windows to execute shell script',
 							'ProcessManager',
-							{ command: spawnCommand, shebang: fileContent.split('\n')[0] }
+							{ command: commandToLog }
 						);
 					}
 				} catch {
@@ -310,7 +414,7 @@ export class ChildProcessSpawner {
 				logger.debug(
 					'[ProcessManager] Forcing shell=true for agent spawn on Windows (runInShell or auto)',
 					'ProcessManager',
-					{ command: spawnCommand }
+					{ command: commandToLog }
 				);
 
 				// Use the shell escape utility for proper argument escaping
@@ -318,11 +422,12 @@ export class ChildProcessSpawner {
 				spawnArgs = escapeArgsForShell(finalArgs, shellPath);
 
 				const shellType = isPowerShellShell(shellPath) ? 'PowerShell' : 'cmd.exe';
+				const escapedPublication = escapeArgsForShell([...publication.args], shellPath);
 				logger.info(`[ProcessManager] Escaped args for ${shellType}`, 'ProcessManager', {
 					originalArgsCount: finalArgs.length,
 					escapedArgsCount: spawnArgs.length,
 					escapedPromptArgLength: spawnArgs[spawnArgs.length - 1]?.length,
-					escapedPromptArgPreview: spawnArgs[spawnArgs.length - 1]?.substring(0, 200),
+					escapedPromptArgPreview: escapedPublication.at(-1)?.substring(0, 200),
 					argsModified: finalArgs.some((arg, i) => arg !== spawnArgs[i]),
 				});
 			}
@@ -352,24 +457,34 @@ export class ChildProcessSpawner {
 			}
 
 			// Log spawn details
+			const spawnArgsToLog =
+				isWindows() && useShell
+					? escapeArgsForShell(
+							[...publication.args],
+							typeof config.shell === 'string' ? config.shell : undefined
+						)
+					: publication.args;
 			const spawnLogFn = isWindows() ? logger.info.bind(logger) : logger.debug.bind(logger);
 			spawnLogFn('[ProcessManager] About to spawn with shell option', 'ProcessManager', {
 				sessionId,
-				spawnCommand,
+				spawnCommand: commandToLog,
 				// show the actual shell value passed to spawn (boolean or shell path)
 				spawnShell: typeof spawnShell === 'string' ? spawnShell : !!spawnShell,
 				isWindows: isWindows(),
 				argsCount: spawnArgs.length,
 				promptArgLength: prompt ? spawnArgs[spawnArgs.length - 1]?.length : undefined,
-				fullCommandPreview: `${spawnCommand} ${spawnArgs.join(' ')}`,
+				fullCommandPreview: `${commandToLog} ${spawnArgsToLog.join(' ')}`,
 			});
 
-			const childProcess = spawn(spawnCommand, spawnArgs, {
+			const childProcess = (spawnedChild = spawn(spawnCommand, spawnArgs, {
 				cwd,
 				env,
 				shell: spawnShell,
 				stdio: ['pipe', 'pipe', 'pipe'],
-			});
+			}));
+
+			// Cover partial setup before a ManagedProcess/lifetime capture exists.
+			if (withholdProviderOutput) listen(childProcess, 'error', rollbackPrepared);
 
 			logger.debug('[ProcessManager] Child process spawned', 'ProcessManager', {
 				sessionId,
@@ -419,10 +534,9 @@ export class ChildProcessSpawner {
 				isStreamJsonMode,
 				isBatchMode,
 				hasSshStdinScript: !!config.sshStdinScript,
-				command: config.command,
+				command: commandToLog,
 				argsCount: finalArgs.length,
-				argsPreview:
-					finalArgs.length > 0 ? finalArgs[finalArgs.length - 1]?.substring(0, 500) : undefined,
+				argsPreview: publication.args.at(-1)?.substring(0, 500),
 			});
 
 			const managedProcess: ManagedProcess = {
@@ -485,11 +599,14 @@ export class ChildProcessSpawner {
 			// which stops working the moment the successor finishes and deletes its
 			// own entry - at which point a predecessor still draining would look
 			// current again. See process-manager/generation.ts.
+			if (rolledBack) return { pid: -1, success: false };
 			managedProcess.spawnGeneration = nextSpawnGeneration(sessionId);
+			registeredProcess = managedProcess;
 			this.processes.set(sessionId, managedProcess);
+			if (withholdProviderOutput) preparedOwnership?.capture(managedProcess, rollbackPrepared);
 
 			const isSuperseded = (): boolean =>
-				isSupersededGeneration(sessionId, managedProcess.spawnGeneration);
+				rolledBack || isSupersededGeneration(sessionId, managedProcess.spawnGeneration);
 
 			logger.debug('[ProcessManager] Setting up stdout/stderr/exit handlers', 'ProcessManager', {
 				sessionId,
@@ -499,7 +616,21 @@ export class ChildProcessSpawner {
 
 			// Handle stdin errors
 			if (childProcess.stdin) {
-				childProcess.stdin.on('error', (err) => {
+				listen(childProcess.stdin, 'error', (err: Error) => {
+					if (rolledBack) return;
+					if (withholdProviderOutput) {
+						rollbackPrepared();
+						return;
+					}
+					// Private native errors may have hostile getters. Do not inspect
+					// code/message/cause even to recognize an otherwise harmless EPIPE.
+					if (withholdErrors) {
+						logger.error('[ProcessManager] stdin error', 'ProcessManager', {
+							sessionId,
+							error: 'PrivateMcpSpawnFailed',
+						});
+						return;
+					}
 					const errorCode = (err as NodeJS.ErrnoException).code;
 					if (errorCode === 'EPIPE') {
 						logger.debug(
@@ -510,8 +641,8 @@ export class ChildProcessSpawner {
 					} else {
 						logger.error('[ProcessManager] stdin error', 'ProcessManager', {
 							sessionId,
-							error: String(err),
-							code: errorCode,
+							error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(err),
+							code: withholdErrors ? undefined : errorCode,
 						});
 					}
 				});
@@ -522,28 +653,31 @@ export class ChildProcessSpawner {
 				logger.debug('[ProcessManager] Attaching stdout data listener', 'ProcessManager', {
 					sessionId,
 				});
-				childProcess.stdout.setEncoding('utf8');
-				childProcess.stdout.on('error', (err) => {
+				if (!withholdProviderOutput) childProcess.stdout.setEncoding('utf8');
+				listen(childProcess.stdout, 'error', (err: Error) => {
+					if (rolledBack) return;
 					logger.error('[ProcessManager] stdout error', 'ProcessManager', {
 						sessionId,
-						error: String(err),
+						error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(err),
 					});
 				});
-				childProcess.stdout.on('data', (data: Buffer | string) => {
+				listen(childProcess.stdout, 'data', (data: Buffer | string) => {
 					if (isSuperseded()) return;
-					const output = data.toString();
+					// Complete withholding is independent of chunk boundaries/encoding.
+					// An empty raw event retains stdout liveness without provider bytes.
+					const output = withholdProviderOutput ? '' : data.toString();
 					// Emit raw stdout before processing for live-streaming consumers (e.g., group chat peek).
 					// Wrapped in try/catch so a failing listener cannot prevent stdoutHandler from running.
 					try {
 						this.emitter.emit('raw-stdout', sessionId, output);
 					} catch (err) {
-						void captureException(err);
+						void captureException(withholdErrors ? new Error('PrivateMcpSpawnFailed') : err);
 						logger.error('[ProcessManager] raw-stdout listener error', 'ProcessManager', {
 							sessionId,
-							error: String(err),
+							error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(err),
 						});
 					}
-					this.stdoutHandler.handleData(sessionId, output);
+					if (!withholdProviderOutput) this.stdoutHandler.handleData(sessionId, output);
 				});
 			} else {
 				logger.warn('[ProcessManager] childProcess.stdout is null', 'ProcessManager', {
@@ -556,26 +690,42 @@ export class ChildProcessSpawner {
 				logger.debug('[ProcessManager] Attaching stderr data listener', 'ProcessManager', {
 					sessionId,
 				});
-				childProcess.stderr.setEncoding('utf8');
-				childProcess.stderr.on('error', (err) => {
+				if (!withholdProviderOutput) childProcess.stderr.setEncoding('utf8');
+				listen(childProcess.stderr, 'error', (err: Error) => {
+					if (rolledBack) return;
 					logger.error('[ProcessManager] stderr error', 'ProcessManager', {
 						sessionId,
-						error: String(err),
+						error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(err),
 					});
 				});
-				childProcess.stderr.on('data', (data: Buffer | string) => {
-					if (isSuperseded()) return;
+				listen(childProcess.stderr, 'data', (data: Buffer | string) => {
+					if (isSuperseded() || withholdProviderOutput) return;
 					const stderrData = data.toString();
 					this.stderrHandler.handleData(sessionId, stderrData);
 				});
 			}
+
+			// Prepared native error and close must settle this exact child only once.
+			const settleExit = (code: number): void => {
+				if (withholdProviderOutput && preparedExitStarted) return;
+				if (withholdProviderOutput) preparedExitStarted = true;
+				void this.exitHandler
+					.handleExit(sessionId, code, managedProcess, withholdProviderOutput)
+					.catch((err) => {
+						logger.error('[ProcessManager] handleExit threw', 'ProcessManager', {
+							sessionId,
+							error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(err),
+						});
+					});
+			};
 
 			// Handle close (NOT exit) to ensure all stdout/stderr data is fully consumed.
 			// The 'exit' event can fire before the stdio streams have been drained,
 			// which causes data loss for short-lived processes where the result is
 			// emitted near the end of stdout (e.g., tab-naming, batch operations).
 			// The 'close' event guarantees all stdio streams are closed first.
-			childProcess.on('close', (code) => {
+			listen(childProcess, 'close', (code: number | null) => {
+				if (rolledBack) return;
 				if (isSuperseded()) {
 					logger.warn('[ProcessManager] Ignoring exit from superseded process', 'ProcessManager', {
 						sessionId,
@@ -587,25 +737,30 @@ export class ChildProcessSpawner {
 				// Hand the exiting process in explicitly: it may already have been
 				// unregistered, and handleExit must settle THIS process rather than
 				// whatever currently owns the session id.
-				void this.exitHandler.handleExit(sessionId, code || 0, managedProcess).catch((err) => {
-					logger.error('[ProcessManager] handleExit threw', 'ProcessManager', {
-						sessionId,
-						error: String(err),
-					});
-				});
+				settleExit(code || 0);
 			});
 
 			// Handle errors
-			childProcess.on('error', (error) => {
+			listen(childProcess, 'error', (error: Error) => {
+				if (rolledBack) return;
+				// An abort observer may have installed a successor before this
+				// callback. Failed-child cleanup still belongs to the captured child.
+				if (withholdProviderOutput) {
+					rollbackPrepared();
+					return;
+				}
 				if (isSuperseded()) {
 					logger.warn('[ProcessManager] Ignoring error from superseded process', 'ProcessManager', {
 						sessionId,
 						pid: childProcess.pid,
-						error: String(error),
+						error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(error),
 					});
 					return;
 				}
-				this.exitHandler.handleError(sessionId, error);
+				this.exitHandler.handleError(
+					sessionId,
+					withholdErrors ? new Error('PrivateMcpSpawnFailed') : error
+				);
 			});
 
 			if (config.sshStdinScript) {
@@ -616,7 +771,7 @@ export class ChildProcessSpawner {
 					scriptLength: config.sshStdinScript.length,
 				});
 				childProcess.stdin?.write(config.sshStdinScript);
-				childProcess.stdin?.end();
+				if (!rolledBack) childProcess.stdin?.end();
 			} else if (config.sendPromptViaStdinRaw && effectivePrompt) {
 				// Raw stdin mode: send prompt as literal text (non-stream-json agents on Windows)
 				// Note: When sending via stdin, PowerShell treats the input as literal text,
@@ -626,35 +781,45 @@ export class ChildProcessSpawner {
 					promptLength: effectivePrompt.length,
 				});
 				childProcess.stdin?.write(effectivePrompt);
-				childProcess.stdin?.end();
+				if (!rolledBack) childProcess.stdin?.end();
 			} else if (isStreamJsonMode && effectivePrompt && !promptAddedToArgs) {
 				// Stream-json mode: send the message via stdin as JSON.
 				// Only write when prompt was NOT already added to CLI args.
 				// Without this guard, agents like Codex (whose --json flag sets isStreamJsonMode
 				// for output parsing) would receive the prompt both as a CLI arg and as stream-json
 				// stdin, causing unexpected behavior.
-				const streamJsonMessage = buildStreamJsonMessage(effectivePrompt, images || []);
+				// Carry the captured host policy through parsing and persisted-image
+				// resolution before either helper can publish a reference/native cause.
+				const streamJsonMessage = buildStreamJsonMessage(
+					effectivePrompt,
+					images || [],
+					withholdProviderOutput
+				);
 				logger.debug('[ProcessManager] Sending stream-json message via stdin', 'ProcessManager', {
 					sessionId,
 					messageLength: streamJsonMessage.length,
 					imageCount: (images || []).length,
 					hasImages: !!(images && images.length > 0),
 				});
+				if (rolledBack) return { pid: -1, success: false };
 				childProcess.stdin?.write(streamJsonMessage + '\n');
-				childProcess.stdin?.end();
+				if (!rolledBack) childProcess.stdin?.end();
 			} else if (isBatchMode) {
 				// Regular batch mode: close stdin immediately
 				logger.debug('[ProcessManager] Closing stdin for batch mode', 'ProcessManager', {
 					sessionId,
 				});
-				childProcess.stdin?.end();
+				if (!rolledBack) childProcess.stdin?.end();
 			}
 
+			if (rolledBack) return { pid: -1, success: false };
 			return { pid: childProcess.pid || -1, success: true };
 		} catch (error) {
-			void captureException(error);
+			if (!withholdProviderOutput && !nativePreparationEntered) throw error;
+			rollbackPrepared();
+			void captureException(withholdErrors ? new Error('PrivateMcpSpawnFailed') : error);
 			logger.error('[ProcessManager] Failed to spawn process', 'ProcessManager', {
-				error: String(error),
+				error: withholdErrors ? 'PrivateMcpSpawnFailed' : String(error),
 			});
 			return { pid: -1, success: false };
 		}

@@ -5,6 +5,8 @@
  */
 
 import { logger } from '../../../utils/logger';
+import { WebSocket } from 'ws';
+import { ImapConnectionError } from '../../../plugins/mail-imap-connection';
 import {
 	getActivePluginManager,
 	isPluginsFeatureEnabled,
@@ -68,50 +70,90 @@ export async function handlePluginsCallTool(
 	client: WebClient,
 	message: WebClientMessage
 ): Promise<void> {
+	// Only the bridge's private envelope carries proof. Identity inside model
+	// args/sessionId/callerAgentId is never considered, even on ordinary calls.
+	const verified = Object.hasOwn(message, 'runToken');
+	const runProof = verified ? message.runToken : undefined;
+	const requestId = message.requestId;
+	const socket = client.socket;
 	const respond = (extra: Record<string, unknown>): void =>
 		ctx.send(client, {
 			type: 'plugins_call_tool_result',
-			requestId: message.requestId,
+			requestId,
 			...extra,
 		});
-	const toolId = typeof message.toolId === 'string' ? message.toolId : '';
-	if (!toolId) {
-		respond({ ok: false, error: 'Missing toolId' });
-		return;
-	}
-	const manager = getActivePluginManager();
-	if (!manager || !isPluginsFeatureEnabled()) {
-		respond({ ok: false, error: 'PluginsDisabled' });
-		return;
-	}
-	const declaredTool = manager.getContributions().tools.find((t) => t.id === toolId);
-	if (!declaredTool) {
-		// Only DECLARED `tools` are model-callable; never let a tools/call name
-		// resolve to an arbitrary command handler in the sandbox's shared map.
-		respond({ ok: false, error: `Unknown tool: ${toolId}` });
-		return;
-	}
-	const args = 'args' in message ? message.args : undefined;
-	let argText = '';
 	try {
-		argText = JSON.stringify(args ?? {});
-	} catch {
-		argText = '';
-	}
-	// Rate risk on the declared tool's human name + description + the model's
-	// args: catches a destructive tool by identity AND destructive args, without
-	// the slug noise of the raw toolId. Follow-up: per-tool risk metadata + a
-	// user-approval path for HIGH instead of a hard block.
-	const riskText = `${declaredTool.name} ${declaredTool.description} ${argText}`;
-	const verdict = evaluatePluginDispatch(riskText);
-	if (!verdict.eligible) {
-		respond({ ok: false, blocked: true, risk: verdict.risk, reason: verdict.reason });
-		return;
-	}
-	try {
+		const toolId = typeof message.toolId === 'string' ? message.toolId : '';
+		if (!toolId) {
+			respond({ ok: false, error: verified ? 'MAIL_INVALID' : 'Missing toolId' });
+			return;
+		}
+		const manager = getActivePluginManager();
+		if (!manager || !isPluginsFeatureEnabled()) {
+			respond({ ok: false, error: verified ? 'MAIL_DENIED' : 'PluginsDisabled' });
+			return;
+		}
+		const declaredTool = manager.getContributions().tools.find((t) => t.id === toolId);
+		if (!declaredTool) {
+			// Only DECLARED `tools` are model-callable; never let a tools/call name
+			// resolve to an arbitrary command handler in the sandbox's shared map.
+			respond({ ok: false, error: verified ? 'MAIL_DENIED' : `Unknown tool: ${toolId}` });
+			return;
+		}
+		const args = 'args' in message ? message.args : undefined;
+		let argText = '';
+		try {
+			argText = JSON.stringify(args ?? {});
+		} catch {
+			argText = '';
+		}
+		// Rate risk on the declared tool's human name + description + the model's
+		// args: catches a destructive tool by identity AND destructive args, without
+		// the slug noise of the raw toolId. Follow-up: per-tool risk metadata + a
+		// user-approval path for HIGH instead of a hard block.
+		const riskText = `${declaredTool.name} ${declaredTool.description} ${argText}`;
+		const verdict = evaluatePluginDispatch(riskText);
+		if (!verdict.eligible) {
+			respond({ ok: false, blocked: true, risk: verdict.risk, reason: verdict.reason });
+			return;
+		}
+		if (verified) {
+			const assertTransport = () => {
+				if (
+					getActivePluginManager() !== manager ||
+					client.socket !== socket ||
+					socket.readyState !== WebSocket.OPEN
+				)
+					throw new ImapConnectionError('MAIL_DENIED');
+			};
+			const assertEnabled = () => {
+				assertTransport();
+				if (!isPluginsFeatureEnabled()) throw new ImapConnectionError('MAIL_DENIED');
+				assertTransport();
+			};
+			assertEnabled();
+			await manager.invokeVerifiedTool(toolId, args, runProof, (result, assertActive) => {
+				// Publish inside manager completion: an await here would reopen the
+				// gap between its final run/record/child check and result delivery.
+				assertEnabled();
+				assertActive();
+				assertTransport();
+				respond({ ok: true, result });
+			});
+			return;
+		}
 		const result = await manager.invokeTool(toolId, args);
 		respond({ ok: true, result });
 	} catch (error) {
-		respond({ ok: false, error: error instanceof Error ? error.message : String(error) });
+		respond({
+			ok: false,
+			error: verified
+				? error instanceof ImapConnectionError
+					? error.code
+					: 'MAIL_DENIED'
+				: error instanceof Error
+					? error.message
+					: String(error),
+		});
 	}
 }

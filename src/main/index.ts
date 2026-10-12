@@ -18,6 +18,7 @@ import * as https from 'https';
 import type { LookupFunction } from 'net';
 import WebSocket from 'ws';
 import { readFile } from 'fs/promises';
+import { realpathSync, lstatSync } from 'fs';
 // Sentry is imported dynamically below to avoid module-load-time access to electron.app
 // which causes "Cannot read properties of undefined (reading 'getAppPath')" errors
 import { ProcessManager } from './process-manager';
@@ -38,6 +39,11 @@ import { PianolaRelearnScheduler } from './pianola/pianola-relearn-scheduler';
 import { createPianolaLifecycle } from './pianola/pianola-lifecycle';
 import { execFile } from 'child_process';
 import { PluginManager } from './plugins/plugin-manager';
+import { PluginToolRunIdentity } from './plugins/plugin-tool-run-identity';
+import { PluginToolRunProofFiles } from './plugins/plugin-tool-run-proof-file';
+import { ImapConnectionError } from './plugins/mail-imap-connection';
+import { getRecord, type PluginRecord } from '../shared/plugins/plugin-registry';
+import { isValidAgentId } from '../shared/agentIds';
 import { resolveTrustedKeys } from '../shared/plugins/publisher-keys';
 import { seedBundledPlugins } from './plugins/bundled-plugins';
 import { SpawnBinaryRegistry } from './plugins/spawn-binary-registry';
@@ -47,7 +53,11 @@ import { PermissionBroker } from './plugins/permission-broker';
 import { PluginSandboxHost } from './plugins/plugin-sandbox-host';
 import { PluginBackgroundSupervisor } from './plugins/plugin-background-supervisor';
 import { PluginGroupingRegistry } from './plugins/plugin-grouping-registry';
-import { setActivePluginManager } from './plugins/plugin-manager-singleton';
+import {
+	getActivePluginManager,
+	setActivePluginManager,
+	stopActivePluginManager,
+} from './plugins/plugin-manager-singleton';
 import { PluginSchedulerHost } from './plugins/plugin-scheduler-host';
 import {
 	buildHostCallHandlers,
@@ -606,8 +616,15 @@ registerCadenzaIpcHandlers({ getMainWindow: () => mainWindow, settingsStore: sto
 store.onDidChange('encoreFeatures', (encoreFeatures) => {
 	if (encoreFeatures?.concerto !== true) closeCadenzaHudWindow();
 	if (encoreFeatures?.plugins !== true) {
-		pluginSandboxHost?.stopAll();
-		pluginGroupingRegistry?.clearAll();
+		try {
+			// The manager fences run issuance and aborts proofs before child callbacks.
+			if (pluginManager) pluginManager.stopAllSandboxes();
+			else pluginSandboxHost?.stopAll();
+		} catch {
+			logger.warn('Plugin feature-stop cleanup failed', 'Plugins');
+		} finally {
+			pluginGroupingRegistry?.clearAll();
+		}
 	}
 	if (!arePluginHostViewsEnabled()) {
 		pluginHostViews.purgeAll();
@@ -1518,6 +1535,104 @@ app
 		});
 		// Expose the same instance to the IPC registration phase below.
 		pluginAuthStore = authStore;
+		// Exactly one production registry, shared by manager ingress, issuance and
+		// sandbox nested handles. No spawn caller issues a proof here.
+		let toolIdentity: PluginToolRunIdentity | undefined;
+		let toolProofFiles: PluginToolRunProofFiles | undefined;
+		const toolProofBase = app.getPath('userData');
+		const assertToolProofLocation = (): void => {
+			if (
+				DEMO_MODE ||
+				!['linux', 'darwin'].includes(process.platform) ||
+				app.getPath('userData') !== toolProofBase ||
+				realpathSync(toolProofBase) !== toolProofBase
+			)
+				throw new ImapConnectionError('MAIL_UNAVAILABLE');
+			// userData is broker-protected, but custom locations must also be outside
+			// every registered local project and any containing Git/Obsidian root.
+			const sessions = sessionsStore.get('sessions', []);
+			if (!Array.isArray(sessions)) throw new ImapConnectionError('MAIL_DENIED');
+			for (const session of sessions) {
+				if (!session || typeof session !== 'object') throw new ImapConnectionError('MAIL_DENIED');
+				if (session.sessionSshRemoteConfig?.enabled || session.sshRemoteConfig?.enabled) continue;
+				if (typeof session.cwd !== 'string' || typeof session.projectRoot !== 'string')
+					throw new ImapConnectionError('MAIL_UNAVAILABLE');
+				for (const project of [session.cwd, session.projectRoot, session.fullPath]) {
+					if (project === undefined) continue;
+					if (typeof project !== 'string' || !path.isAbsolute(project))
+						throw new ImapConnectionError('MAIL_UNAVAILABLE');
+					const canonical = realpathSync(project);
+					if (
+						[path.relative(canonical, toolProofBase), path.relative(toolProofBase, canonical)].some(
+							(relative) =>
+								relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`))
+						)
+					)
+						throw new ImapConnectionError('MAIL_UNAVAILABLE');
+				}
+			}
+			let ancestor = toolProofBase;
+			for (let count = 0; ; count++) {
+				if (count >= 64) throw new ImapConnectionError('MAIL_UNAVAILABLE');
+				for (const marker of ['.git', '.obsidian']) {
+					try {
+						lstatSync(path.join(ancestor, marker));
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+						throw error;
+					}
+					throw new ImapConnectionError('MAIL_UNAVAILABLE');
+				}
+				const next = path.dirname(ancestor);
+				if (next === ancestor) break;
+				ancestor = next;
+			}
+		};
+		const assertToolOwnerActive = (): void => {
+			if (
+				!toolOwner ||
+				pluginManager !== toolOwner ||
+				getActivePluginManager() !== toolOwner ||
+				resolveEncoreFeatures(store.get('encoreFeatures')).plugins !== true
+			)
+				throw new ImapConnectionError('MAIL_DENIED');
+		};
+		try {
+			assertToolProofLocation();
+			toolIdentity = new PluginToolRunIdentity((agentId) => {
+				assertToolOwnerActive();
+				assertToolProofLocation();
+				const sessions = sessionsStore.get('sessions', []);
+				if (!Array.isArray(sessions)) throw new ImapConnectionError('MAIL_DENIED');
+				const matches = sessions.filter((session) => session?.id === agentId);
+				if (
+					matches.length !== 1 ||
+					!isValidAgentId(matches[0].toolType) ||
+					matches[0].toolType === 'terminal' ||
+					matches[0].sessionSshRemoteConfig?.enabled ||
+					matches[0].sshRemoteConfig?.enabled
+				)
+					throw new ImapConnectionError('MAIL_DENIED');
+				assertToolOwnerActive();
+			});
+			toolProofFiles = PluginToolRunProofFiles.provision(toolIdentity, toolProofBase);
+			assertToolProofLocation();
+		} catch {
+			// Unsupported/unsafe storage never downgrades into anonymous authority.
+			try {
+				toolIdentity?.stop();
+			} catch {
+				// Still attempt independent resource cleanup; nothing was issued here.
+			}
+			try {
+				toolProofFiles?.stop();
+			} catch {
+				// Construction has no run resources. Never log a native path/cause.
+			}
+			toolIdentity = undefined;
+			toolProofFiles = undefined;
+			logger.warn('Verified plugin tool authority unavailable', 'Plugins');
+		}
 		const trustedKeysFor = (): string[] => {
 			const keys = store.get('pluginTrustedKeys', []) as unknown;
 			const userKeys = Array.isArray(keys)
@@ -1530,6 +1645,31 @@ app
 		// The live grant source every enforcement seam now reads (sealed, identity-
 		// bound, anti-rollback) instead of the forgeable on-disk store.
 		const grantsOf = (pluginId: string) => authStore.readGrants(pluginId);
+		const assertToolRecordActive = (record: PluginRecord): void => {
+			try {
+				assertToolOwnerActive();
+				assertToolProofLocation();
+				toolOwner!.assertToolRecordCurrent(record);
+				const identity = pluginIdentity(record.source, trustedKeysFor());
+				if (
+					!identity ||
+					identity.signatureStatus !== 'trusted' ||
+					!authStore.verify(
+						record.id,
+						identity,
+						(record.manifest?.permissions ?? []).map((permission) => permission.capability)
+					).authorized
+				)
+					throw new ImapConnectionError('MAIL_DENIED');
+				// Reuse the anchored, persistent, dual-identity mail admission check.
+				// A null configuration is permitted here and confers no account rights.
+				authStore.readMailConfiguration(record.id, identity);
+				assertToolOwnerActive();
+				toolOwner!.assertToolRecordCurrent(record);
+			} catch {
+				throw new ImapConnectionError('MAIL_DENIED');
+			}
+		};
 
 		// First-party plugin bridges (encore-lifts L0): one host-owned lifecycle
 		// bridge per Encore feature definition. Enable mints the definition's
@@ -2259,6 +2399,13 @@ app
 		});
 		pluginGroupingRegistry = groupingRegistry;
 		const sandboxHost = new PluginSandboxHost({
+			toolIdentity,
+			assertToolPluginActive: (pluginId) => {
+				assertToolOwnerActive();
+				const record = getRecord(toolOwner!.getRegistry(), pluginId);
+				if (!record) throw new ImapConnectionError('MAIL_DENIED');
+				assertToolRecordActive(record);
+			},
 			broker: pluginBroker,
 			handlers: buildHostCallHandlers({
 				broker: pluginBroker,
@@ -2467,6 +2614,9 @@ app
 		});
 		pluginSandboxHost = sandboxHost;
 		pluginManager = new PluginManager({
+			toolIdentity,
+			toolProofFiles,
+			assertToolRecordActive,
 			isEnabled: () => {
 				const ef = store.get('encoreFeatures', {}) as Record<string, boolean>;
 				return ef.plugins === true;
@@ -2509,6 +2659,7 @@ app
 				}
 			},
 		});
+		const toolOwner = pluginManager;
 
 		let consentWindowRef: OpenedConsentWindow | null = null;
 		const closeConsentWindow = (): void => {
@@ -3117,6 +3268,17 @@ quitHandler = createQuitHandler({
 	getActiveGroomingSessionCount,
 	cleanupAllGroomingSessions,
 	closeStatsDB,
+	stopPluginToolAuthority: () => {
+		const manager = pluginManager;
+		const activeManager = getActivePluginManager();
+		try {
+			// Permanently detach ingress before any retirement callback can reenter.
+			stopActivePluginManager();
+		} finally {
+			// Also retire a constructed manager that has not yet reached registration.
+			if (manager && manager !== activeManager) manager.stopToolAuthority();
+		}
+	},
 	stopCliWatcher: () => {
 		cliWatcher.stop();
 		// Tear down the discovery-file watchdog so it doesn't try to rewrite

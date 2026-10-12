@@ -25,6 +25,12 @@ import {
 	type ToolResult,
 } from '../../shared/plugins/rpc-protocol';
 import type { PluginEvent } from '../../shared/plugins/events';
+import {
+	PluginToolRunIdentity,
+	type PluginToolInvocationContext,
+	type PluginToolCallerContext,
+} from './plugin-tool-run-identity';
+import { ImapConnectionError } from './mail-imap-connection';
 
 export interface SandboxControlEvent {
 	topic: string;
@@ -40,6 +46,10 @@ export type HostCallHandlers = Partial<Record<HostMethod, HostCallHandler>>;
 export interface PluginSandboxHostDeps {
 	broker: PermissionBroker;
 	handlers: HostCallHandlers;
+	/** Host-private verified tool path. Both dependencies are mandatory for that path. */
+	toolIdentity?: PluginToolRunIdentity;
+	/** Recheck exact plugin identity/consent/feature generation; never supplied by a child. */
+	assertToolPluginActive?: (pluginId: string) => void;
 	/** Forward plugin console/log lines somewhere visible. */
 	onLog?: (pluginId: string, level: string, message: string) => void;
 	/** Notified when a child exits unexpectedly (non-zero / crash). */
@@ -104,6 +114,8 @@ interface PendingTool {
 
 interface RunningPlugin {
 	proc: UtilityProcess;
+	/** Stops invocation authority synchronously, before shutdown/exit callbacks. */
+	lifetime: AbortController;
 	shutdownTimer?: NodeJS.Timeout;
 	inFlight: number;
 	windowStart: number;
@@ -138,15 +150,32 @@ function toActivitySnapshot(a: Activity): ActivitySnapshot {
 }
 
 export class PluginSandboxHost {
+	private readonly toolIdentity?: PluginToolRunIdentity;
+	private readonly assertToolPluginActive?: (pluginId: string) => void;
 	private running = new Map<string, RunningPlugin>();
 	/** Per-plugin observability, keyed by plugin id. Separate from `running` so
 	 *  it survives a crashed child (crash counts must persist). */
 	private activity = new Map<string, Activity>();
 
-	constructor(private readonly deps: PluginSandboxHostDeps) {}
+	constructor(private readonly deps: PluginSandboxHostDeps) {
+		this.toolIdentity = deps.toolIdentity;
+		this.assertToolPluginActive =
+			typeof deps.assertToolPluginActive === 'function'
+				? deps.assertToolPluginActive.bind(deps)
+				: undefined;
+	}
 
 	isRunning(pluginId: string): boolean {
 		return this.running.has(pluginId);
+	}
+
+	/** Host-private exact-child assertion; conveys no run/account authority. */
+	captureToolLifetime(pluginId: string): () => void {
+		const record = this.running.get(pluginId);
+		return () => {
+			if (!record || this.running.get(pluginId) !== record || record.lifetime.signal.aborted)
+				throw new ImapConnectionError('MAIL_DENIED');
+		};
 	}
 
 	runningIds(): string[] {
@@ -223,6 +252,7 @@ export class PluginSandboxHost {
 
 		const record: RunningPlugin = {
 			proc,
+			lifetime: new AbortController(),
 			inFlight: 0,
 			windowStart: Date.now(),
 			windowCount: 0,
@@ -238,12 +268,11 @@ export class PluginSandboxHost {
 			void this.handleChildMessage(pluginId, proc, data);
 		});
 		proc.on('exit', (code: number) => {
-			const existing = this.running.get(pluginId);
-			if (existing?.shutdownTimer) clearTimeout(existing.shutdownTimer);
-			// Fail every outstanding tool round-trip: the child that owed a reply
-			// is gone, so the awaiting caller must reject rather than hang.
-			if (existing)
-				this.rejectPendingTools(existing, 'plugin exited before returning a tool result');
+			if (record.shutdownTimer) clearTimeout(record.shutdownTimer);
+			record.lifetime.abort();
+			this.rejectPendingTools(record, 'plugin exited before returning a tool result');
+			// An old child's delayed exit must never remove a replacement sandbox.
+			if (this.running.get(pluginId) !== record) return;
 			this.running.delete(pluginId);
 			const act = this.activity.get(pluginId);
 			if (act) act.inFlight = 0;
@@ -291,42 +320,147 @@ export class PluginSandboxHost {
 	 * plugin is not running, the args cannot be serialized or exceed the size cap,
 	 * too many tool calls are already in flight, the round-trip exceeds
 	 * {@link TOOL_INVOKE_TIMEOUT_MS}, or the child exits before replying.
+	 * A fourth, host-private registry-issued run context enables a nested handle.
+	 * The verified manager supplies it; production issuance remains unwired.
+	 * Args never confer caller authority, and an explicit invalid context denies.
 	 */
-	invokeTool(pluginId: string, commandId: string, args?: unknown): Promise<unknown> {
+	invokeTool(
+		pluginId: string,
+		commandId: string,
+		args?: unknown,
+		runContext?: unknown
+	): Promise<unknown> {
 		const record = this.running.get(pluginId);
-		if (!record) return Promise.reject(new Error(`plugin "${pluginId}" is not running`));
-		// Bound the host->child payload exactly like invokeCommand / HostRequest.
-		let serialized: string;
+		const verified = arguments.length >= 4;
+		if (!record && !verified)
+			return Promise.reject(new Error(`plugin "${pluginId}" is not running`));
+		const identity = this.toolIdentity;
+		const assertPlugin = this.assertToolPluginActive;
+		let handle: string | undefined;
+		let invocation: PluginToolInvocationContext | undefined;
+		let checkRun: (() => void) | undefined;
+		let capturedArgs: unknown;
+		const assertSandbox = this.captureToolLifetime(pluginId);
+		const safeError = (error: unknown): Error =>
+			verified
+				? new ImapConnectionError(error instanceof ImapConnectionError ? error.code : 'MAIL_DENIED')
+				: error instanceof Error
+					? error
+					: new Error('tool invocation failed');
 		try {
-			serialized = JSON.stringify(args ?? null);
-		} catch {
-			return Promise.reject(new Error('tool args are not serializable'));
-		}
-		if (serialized.length > MAX_MESSAGE_BYTES) {
-			return Promise.reject(new Error('tool args exceed size limit'));
-		}
-		if (record.pendingTools.size >= MAX_PENDING_TOOLS) {
-			return Promise.reject(new Error('too many concurrent tool invocations'));
-		}
-		const id = record.nextToolId++;
-		return new Promise<unknown>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				record.pendingTools.delete(id);
-				reject(new Error(`tool "${commandId}" timed out after ${TOOL_INVOKE_TIMEOUT_MS}ms`));
-			}, TOOL_INVOKE_TIMEOUT_MS);
-			// Never let a pending tool timer keep the process alive on shutdown.
-			if (typeof timer.unref === 'function') timer.unref();
-			record.pendingTools.set(id, { resolve, reject, timer });
+			assertSandbox();
+			// Serialize once: getters/toJSON cannot change the posted args after admission.
+			let serialized: string | undefined;
 			try {
-				record.proc.postMessage({ kind: 'invokeTool', id, commandId, args });
-			} catch (err) {
-				record.pendingTools.delete(id);
+				serialized = JSON.stringify(args ?? null);
+			} catch {
+				throw new Error('tool args are not serializable');
+			}
+			if (typeof serialized !== 'string') throw new Error('tool args are not serializable');
+			if (serialized.length > MAX_MESSAGE_BYTES) throw new Error('tool args exceed size limit');
+			capturedArgs = JSON.parse(serialized);
+			assertSandbox();
+			if (verified) {
+				if (!(identity instanceof PluginToolRunIdentity) || typeof assertPlugin !== 'function')
+					throw new ImapConnectionError('MAIL_DENIED');
+				handle = identity.issueInvocation(runContext, pluginId, {
+					signal: record!.lifetime.signal,
+					assertActive: () => {
+						assertSandbox();
+						assertPlugin(pluginId);
+						assertSandbox();
+					},
+				});
+				invocation = identity.resolveInvocation(pluginId, handle);
+				// issueInvocation proved exact frozen context membership, not structural shape.
+				checkRun = (runContext as PluginToolCallerContext).assertActive;
+			}
+			assertSandbox();
+			if (record!.pendingTools.size >= MAX_PENDING_TOOLS)
+				throw new Error('too many concurrent tool invocations');
+			if (!Number.isSafeInteger(record!.nextToolId) || record!.nextToolId < 1)
+				throw new Error('tool correlation limit exceeded');
+		} catch (error) {
+			if (handle) identity?.releaseInvocation(handle);
+			return Promise.reject(safeError(error));
+		}
+		// Admission proved this exact record, rechecked after all host callbacks.
+		const running = record!;
+		const id = running.nextToolId++;
+		return new Promise<unknown>((resolve, reject) => {
+			let settled = false;
+			const cleanup = () => {
+				settled = true;
+				running.pendingTools.delete(id);
 				clearTimeout(timer);
-				reject(
-					new Error(
-						`failed to post tool invocation: ${err instanceof Error ? err.message : String(err)}`
-					)
+				invocation?.signal.removeEventListener('abort', onAbort);
+				if (handle) identity?.releaseInvocation(handle);
+			};
+			const fail = (error: unknown) => {
+				if (settled) return;
+				cleanup();
+				reject(safeError(error));
+			};
+			const onAbort = () => fail(new ImapConnectionError('MAIL_CANCELED'));
+			const timer = setTimeout(() => {
+				fail(
+					verified
+						? new ImapConnectionError('MAIL_TIMEOUT')
+						: new Error(`tool "${commandId}" timed out after ${TOOL_INVOKE_TIMEOUT_MS}ms`)
 				);
+			}, TOOL_INVOKE_TIMEOUT_MS);
+			if (typeof timer.unref === 'function') timer.unref();
+			running.pendingTools.set(id, {
+				timer,
+				reject: fail,
+				resolve: (value) => {
+					if (settled) return;
+					try {
+						assertSandbox();
+						invocation?.assertActive();
+						assertSandbox();
+						// Verified completion is bounded before releasing the nested lifetime.
+						// Snapshot once; any serialization callbacks are followed by live checks.
+						if (verified) {
+							const serialized = JSON.stringify(value === undefined ? null : value);
+							if (typeof serialized !== 'string') throw new ImapConnectionError('MAIL_INVALID');
+							if (serialized.length > MAX_MESSAGE_BYTES)
+								throw new ImapConnectionError('MAIL_LIMIT');
+							value = JSON.parse(serialized);
+							invocation!.assertActive();
+							assertSandbox();
+						}
+						if (settled) return; // Reentrant authority callback canceled this call.
+						cleanup();
+						// Releasing a handle aborts retained nested contexts and may reenter host code.
+						checkRun?.();
+						if (verified) assertPlugin!(pluginId);
+						assertSandbox();
+						checkRun?.();
+						assertSandbox();
+						resolve(value);
+					} catch (error) {
+						if (settled) reject(safeError(error));
+						else fail(error);
+					}
+				},
+			});
+			invocation?.signal.addEventListener('abort', onAbort, { once: true });
+			try {
+				assertSandbox();
+				invocation?.assertActive();
+				assertSandbox();
+				if (invocation?.signal.aborted) onAbort();
+				if (settled) return;
+				running.proc.postMessage({
+					kind: 'invokeTool',
+					id,
+					commandId,
+					args: capturedArgs,
+					...(handle ? { invocationId: handle } : {}),
+				});
+			} catch (error) {
+				fail(error);
 			}
 		});
 	}
@@ -334,7 +468,7 @@ export class PluginSandboxHost {
 	/** Reject and clear every outstanding tool round-trip for a plugin (called
 	 *  when the child exits so awaiting callers never hang). */
 	private rejectPendingTools(record: RunningPlugin, reason: string): void {
-		for (const pending of record.pendingTools.values()) {
+		for (const pending of [...record.pendingTools.values()]) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error(reason));
 		}
@@ -369,7 +503,9 @@ export class PluginSandboxHost {
 	/** Stop a plugin: ask it to shut down, then hard-kill after a grace period. */
 	stop(pluginId: string): void {
 		const record = this.running.get(pluginId);
-		if (!record) return;
+		if (!record || record.lifetime.signal.aborted) return;
+		record.lifetime.abort();
+		this.rejectPendingTools(record, 'plugin stopped before returning a tool result');
 		this.deps.onStop?.(pluginId);
 		try {
 			record.proc.postMessage({ kind: 'shutdown' });
@@ -396,6 +532,8 @@ export class PluginSandboxHost {
 		proc: UtilityProcess,
 		data: unknown
 	): Promise<void> {
+		const current = this.running.get(pluginId);
+		if (!current || current.proc !== proc || current.lifetime.signal.aborted) return;
 		if (typeof data !== 'object' || data === null) return;
 		const msg = data as Record<string, unknown>;
 

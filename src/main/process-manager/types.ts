@@ -16,6 +16,13 @@ export interface SdkProcessController {
 	kill: () => void;
 }
 
+/** Main-process preparation only; never accept this through process:spawn IPC.
+ * A lifetime proves one exact spawned process is live, not agent/mail policy. */
+export interface ProcessRunLifetime {
+	readonly signal: AbortSignal;
+	assertActive(): void;
+}
+
 /**
  * Configuration for spawning a new process
  */

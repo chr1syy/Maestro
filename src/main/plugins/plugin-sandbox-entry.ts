@@ -211,15 +211,27 @@ const BOOTSTRAP_SOURCE = String.raw`(function bootstrap(bridge) {
 	function invokeTool(json) {
 		var msg;
 		try { msg = JSON.parse(json); } catch (e) { return Promise.resolve(JSON.stringify({ ok: false, error: 'malformed tool invocation' })); }
+		if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+			return Promise.resolve(JSON.stringify({ ok: false, error: 'malformed tool invocation' }));
+		}
+		var verified = Object.prototype.hasOwnProperty.call(msg, 'invocationId');
+		var invocationId = verified ? msg.invocationId : null;
+		if (verified && (typeof invocationId !== 'string' || invocationId.length !== 64 ||
+			!/^[0-9a-f]{64}$/.test(invocationId))) {
+			return Promise.resolve(JSON.stringify({ ok: false, error: 'malformed tool invocation' }));
+		}
+		// Context-realm data only. Args cannot override it, and copies confer no host authority.
+		var context = Object.freeze({ invocationId: invocationId });
 		var commandId = msg && typeof msg.commandId === 'string' ? msg.commandId : '';
 		var handler = commandHandlers.get(commandId);
 		if (!handler) {
+			if (verified) return Promise.resolve(JSON.stringify({ ok: false, error: 'tool invocation failed' }));
 			safeLog('warn', 'no handler registered for tool "' + commandId + '"');
 			return Promise.resolve(JSON.stringify({ ok: false, error: 'no handler registered for tool "' + commandId + '"' }));
 		}
 		return new Promise(function (resolve) {
 			try {
-				Promise.resolve(handler(msg.args)).then(
+				Promise.resolve(handler(msg.args, context)).then(
 					function (result) {
 						var body;
 						try { body = JSON.stringify({ ok: true, result: result === undefined ? null : result }); }
@@ -227,11 +239,19 @@ const BOOTSTRAP_SOURCE = String.raw`(function bootstrap(bridge) {
 						resolve(body);
 					},
 					function (err) {
+						if (context.invocationId) {
+							resolve(JSON.stringify({ ok: false, error: 'tool invocation failed' }));
+							return;
+						}
 						safeLog('error', 'tool "' + commandId + '" threw: ' + String(err));
 						resolve(JSON.stringify({ ok: false, error: err && err.message ? String(err.message) : String(err) }));
 					}
 				);
 			} catch (err) {
+				if (context.invocationId) {
+					resolve(JSON.stringify({ ok: false, error: 'tool invocation failed' }));
+					return;
+				}
 				safeLog('error', 'tool "' + commandId + '" threw: ' + String(err));
 				resolve(JSON.stringify({ ok: false, error: err && err.message ? String(err.message) : String(err) }));
 			}
@@ -503,23 +523,49 @@ if (parentPort) {
 			return;
 		}
 		if (msg.kind === 'invokeTool') {
-			const id = typeof msg.id === 'number' ? msg.id : -1;
+			if (typeof msg.id !== 'number' || !Number.isSafeInteger(msg.id) || msg.id < 1) return;
+			const id = msg.id;
+			const verified = Object.hasOwn(msg, 'invocationId');
 			const reply = (res: Omit<ToolResult, 'kind' | 'id'>): void => {
 				parentPort?.postMessage({ kind: 'toolResult', id, ...res });
 			};
-			if (!activeRealm) {
-				reply({ ok: false, error: 'plugin is not running' });
+			// Preserve field presence: JSON must not erase an explicit undefined proof
+			// and turn a malformed verified invocation into an ordinary call.
+			if (
+				verified &&
+				(typeof msg.invocationId !== 'string' ||
+					msg.invocationId.length !== 64 ||
+					!/^[0-9a-f]{64}$/.test(msg.invocationId))
+			) {
+				reply({ ok: false, error: 'malformed tool invocation' });
 				return;
 			}
-			void activeRealm
-				.invokeTool(JSON.stringify({ commandId: msg.commandId, args: msg.args }))
+			const realm = activeRealm;
+			if (!realm) {
+				reply({ ok: false, error: verified ? 'tool invocation failed' : 'plugin is not running' });
+				return;
+			}
+			// Keep sync serialization/entry failures on the same correlated error path.
+			void Promise.resolve()
+				.then(() => {
+					if (activeRealm !== realm) throw new Error('tool invocation failed');
+					return realm.invokeTool(
+						JSON.stringify({
+							commandId: msg.commandId,
+							args: msg.args,
+							...(verified ? { invocationId: msg.invocationId } : {}),
+						})
+					);
+				})
 				.then((json) => {
+					if (activeRealm !== realm) throw new Error('tool invocation failed');
 					try {
 						reply(JSON.parse(json) as Omit<ToolResult, 'kind' | 'id'>);
 					} catch {
 						reply({ ok: false, error: 'malformed tool result' });
 					}
-				});
+				})
+				.catch(() => reply({ ok: false, error: 'tool invocation failed' }));
 			return;
 		}
 		if (msg.kind === 'event') {
