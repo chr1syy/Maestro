@@ -620,15 +620,20 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				const slicedOutput = sliceHeadByChars(result.stdout, SOURCE_OUTPUT_MAX_CHARS);
 
 				const outputRunId = crypto.randomUUID();
-				const outputEvent: CueEvent = {
-					...event,
-					id: crypto.randomUUID(),
-					payload: {
-						...event.payload,
-						sourceOutput: slicedOutput,
-						outputPromptPhase: true,
-					},
-				};
+				// Mail provenance authenticates exactly seven metadata fields. Agent output
+				// belongs in the output prompt/result, never in the mail event payload.
+				const outputEvent: CueEvent =
+					event.type === 'relay.mail.received'
+						? event
+						: {
+								...event,
+								id: crypto.randomUUID(),
+								payload: {
+									...event.payload,
+									sourceOutput: slicedOutput,
+									outputPromptPhase: true,
+								},
+							};
 
 				// Output-prompt phase is logically a child of the parent run:
 				// inherit the same chain root, point parent at the parent run.
@@ -663,6 +668,7 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				let outputResult: CueRunResult | undefined;
 				let outputStatus: CueRunResult['status'] = 'failed';
 				try {
+					if (!authorizeMailCueEvent(event, sessionId, subscriptionName)) return;
 					outputResult = await deps.onCueRun({
 						runId: outputRunId,
 						sessionId,
