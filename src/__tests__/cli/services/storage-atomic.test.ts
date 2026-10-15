@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { once } from 'events';
+import { Worker } from 'worker_threads';
 
 vi.mock('fs', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('fs')>();
@@ -68,5 +70,55 @@ describe('CLI settings persistence', () => {
 			...JSON.parse(original),
 			fontSize: 18,
 		});
+	});
+
+	it('a concurrent reader sees complete settings while the CLI write is paused at 512 KiB', async () => {
+		const actual = await vi.importActual<typeof import('fs')>('fs');
+		const progress = new Int32Array(new SharedArrayBuffer(8));
+		const reader = new Worker(
+			`
+			const fs = require('fs');
+			const { parentPort, workerData } = require('worker_threads');
+			const progress = new Int32Array(workerData.progress);
+			const read = (phase) => {
+				try {
+					const settings = JSON.parse(fs.readFileSync(workerData.settingsPath, 'utf8'));
+					parentPort.postMessage({ phase, fontSize: settings.fontSize, keys: settings.pluginTrustedKeys });
+				} catch (error) {
+					parentPort.postMessage({ phase, error: error.name });
+				}
+			};
+			parentPort.postMessage('ready');
+			Atomics.wait(progress, 0, 0, 5000);
+			read('during');
+			Atomics.store(progress, 1, 1);
+			Atomics.notify(progress, 1);
+			parentPort.once('message', () => read('after'));
+			`,
+			{ eval: true, workerData: { settingsPath, progress: progress.buffer } }
+		);
+		try {
+			expect(await once(reader, 'message')).toEqual(['ready']);
+			vi.mocked(fs.writeFileSync).mockImplementationOnce((file, contents, options) => {
+				const payload = String(contents);
+				actual.writeFileSync(file, payload.slice(0, 524_288), options);
+				Atomics.store(progress, 0, 1);
+				Atomics.notify(progress, 0);
+				if (Atomics.wait(progress, 1, 0, 5000) === 'timed-out') {
+					throw new Error('Concurrent settings reader did not finish');
+				}
+				actual.appendFileSync(file, payload.slice(524_288), options);
+			});
+			const during = once(reader, 'message');
+			expect(writeSettingValue('fontSize', 18)).toBe(true);
+			expect(await during).toEqual([
+				{ phase: 'during', fontSize: 14, keys: ['fixture-publisher'] },
+			]);
+			const after = once(reader, 'message');
+			reader.postMessage('read committed settings');
+			expect(await after).toEqual([{ phase: 'after', fontSize: 18, keys: ['fixture-publisher'] }]);
+		} finally {
+			await reader.terminate();
+		}
 	});
 });
