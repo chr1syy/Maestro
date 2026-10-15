@@ -110,6 +110,7 @@ describe('extensionModel first-party projection (all Encore features)', () => {
 			'concerto',
 			'board',
 			'groupsPlus',
+			'ttsr',
 			'webLogin',
 			'computerHistory',
 			'quickChat',

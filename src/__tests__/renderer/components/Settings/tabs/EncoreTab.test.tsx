@@ -174,6 +174,13 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 			ephemeralHistory: true,
 		},
 		setQuickChatSettings: vi.fn(),
+		// TTSR
+		ttsrEnabled: false,
+		setTtsrEnabled: vi.fn(),
+		ttsrDisabledRules: [],
+		setTtsrDisabledRules: vi.fn(),
+		ttsrContextMode: 'keep',
+		setTtsrContextMode: vi.fn(),
 		...mockUseSettingsOverrides,
 	}),
 }));

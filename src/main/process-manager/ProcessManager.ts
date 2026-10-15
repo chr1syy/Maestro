@@ -8,6 +8,7 @@ import type {
 	SpawnResult,
 	CommandResult,
 	ParsedEvent,
+	ParsedEventObserver,
 	AgentOutputParser,
 } from './types';
 import { PtySpawner } from './spawners/PtySpawner';
@@ -102,6 +103,21 @@ export class ProcessManager extends EventEmitter {
 		);
 		this.localCommandRunner = new LocalCommandRunner(this);
 		this.sshCommandRunner = new SshCommandRunner(this);
+	}
+
+	/**
+	 * Install (or clear, with `null`) an observer for every normalized agent
+	 * event, before routing/coalescing. Used by Time-Traveling Stream Rules to
+	 * watch the live stream without the process manager knowing that subsystem
+	 * exists. Late-bound because the observer is built after this manager.
+	 *
+	 * Only the structured-output spawners carry a stdout parser; PTY/terminal
+	 * output has no parsed events (Gate A tier C: out of scope).
+	 */
+	setParsedEventObserver(observer: ParsedEventObserver | null): void {
+		this.childProcessSpawner.setParsedEventObserver(observer);
+		this.opencodeServerSpawner.setParsedEventObserver(observer);
+		this.codexAppServerSpawner.setParsedEventObserver(observer);
 	}
 
 	/**
@@ -321,7 +337,7 @@ export class ProcessManager extends EventEmitter {
 		try {
 			this.emit('spawn', config);
 		} catch {
-			// Capture is best-effort; never let it break process spawning.
+			// Listeners (agent-run capture, TTSR) are best-effort.
 		}
 	}
 

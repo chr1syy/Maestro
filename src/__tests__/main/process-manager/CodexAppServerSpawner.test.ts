@@ -269,6 +269,9 @@ describe('CodexAppServerSpawner', () => {
 		const server = new FakeAppServer(driver.onClientMessage);
 		const h = createHarness(server);
 
+		const observer = vi.fn();
+		h.spawner.setParsedEventObserver(observer);
+
 		const result = h.spawner.spawn(h.config());
 		expect(result).toEqual({ pid: 4242, success: true });
 		expect(h.processes.get(h.sessionId)?.codexAppServer).toBeDefined();
@@ -299,6 +302,10 @@ describe('CodexAppServerSpawner', () => {
 			input: [{ type: 'text', text: 'Reply with the word OK' }],
 		});
 
+		expect(observer).toHaveBeenCalledWith(
+			h.sessionId,
+			expect.objectContaining({ text: finalAgentMessage(fixture) })
+		);
 		expect(h.data.join('')).toContain(finalAgentMessage(fixture));
 		expect(h.sessionIds).toEqual(['01a129a3-ae2d-7a03-a717-b7374d497e31']);
 		expect(h.errors).toEqual([]);
