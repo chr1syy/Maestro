@@ -23,6 +23,8 @@ const originalEnv = { ...process.env };
 vi.mock('fs', () => ({
 	readFileSync: vi.fn(),
 	writeFileSync: vi.fn(),
+	renameSync: vi.fn(),
+	unlinkSync: vi.fn(),
 	appendFileSync: vi.fn(),
 	existsSync: vi.fn(),
 	readdirSync: vi.fn(),
@@ -245,6 +247,10 @@ describe('storage service', () => {
 
 			expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
 			expect(vi.mocked(fs.writeFileSync).mock.calls[0][0]).toBe(
+				path.join(syncDir, 'maestro-settings.json.tmp')
+			);
+			expect(fs.renameSync).toHaveBeenCalledWith(
+				path.join(syncDir, 'maestro-settings.json.tmp'),
 				path.join(syncDir, 'maestro-settings.json')
 			);
 		});

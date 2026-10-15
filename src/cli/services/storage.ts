@@ -19,6 +19,8 @@ import {
 	normalizeHistoryEntries,
 } from '../../shared/history';
 import { resolveSyncDir } from '../../shared/syncPath';
+import { assertSerializedJsonIsSafe } from '../../shared/jsonUtils';
+import { atomicWriteFileSync } from '../../shared/maestro-lib/storage/atomic-json-store';
 
 // Get the Maestro config directory path. Delegates to the shared resolver
 // (`src/shared/userDataDir.ts`) so this CLI and the standalone Cue engine
@@ -83,7 +85,9 @@ function writeStoreFile<T>(filename: string, data: T): void {
 		fs.mkdirSync(dirPath, { recursive: true });
 	}
 	const filePath = path.join(dirPath, filename);
-	fs.writeFileSync(filePath, JSON.stringify(data, null, '\t'), 'utf-8');
+	const serialized = JSON.stringify(data, null, '\t');
+	assertSerializedJsonIsSafe(serialized, filePath);
+	atomicWriteFileSync(filePath, serialized);
 }
 
 // Store file structures (as used by Electron Store)

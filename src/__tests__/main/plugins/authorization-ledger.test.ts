@@ -461,6 +461,26 @@ describe('AuthorizationStore - verify (refresh-time gate)', () => {
 		});
 	});
 
+	it.each([
+		['untrusted', 'trusted'],
+		['trusted', 'untrusted'],
+	] as const)(
+		'requires user consent for a same-publisher trust change from %s to %s',
+		(before, after) => {
+			const store = newStore();
+			store.mint('a', caps('fs:read', '/d'), ident('h1', before, 'keyX'));
+			const persisted = fs.readFileSync(ledgerPath);
+
+			expect(store.verify('a', ident('h1', after, 'keyX'), ['fs:read'])).toMatchObject({
+				authorized: false,
+				reason: 'identity-changed',
+				caps: [],
+			});
+			expect(store.entryIdentity('a')).toEqual(ident('h1', before, 'keyX'));
+			expect(fs.readFileSync(ledgerPath)).toEqual(persisted);
+		}
+	);
+
 	it('not-authorized when never minted', () => {
 		expect(newStore().verify('a', ident('h1'), ['fs:read'])).toMatchObject({
 			authorized: false,

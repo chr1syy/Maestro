@@ -613,6 +613,9 @@ const settingsWatcher = createSettingsWatcher({
 		// clear is unconditional because the previous value is not available
 		// here, and the only cost of an unnecessary one is a single `which`.
 		clearGhCache();
+		// CLI trust edits bypass settings:set. Recheck signatures and authorization
+		// against the new settings without replacing the sealed consent ledger.
+		pluginManager?.refresh();
 	},
 });
 

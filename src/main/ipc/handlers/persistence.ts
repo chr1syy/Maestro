@@ -41,6 +41,7 @@ import { backupGroupsBeforeWipe } from '../../stores/groups-backup';
 import { backupSessionsBeforeWipe } from '../../stores/sessions-backup';
 import { createKeyedWriteQueue } from '../../utils/atomic-json-store';
 import { clearGhCache } from '../../utils/cliDetection';
+import { getActivePluginManager } from '../../plugins/plugin-manager-singleton';
 import { mergeUsagePeaks, type UsagePeaks } from '../../../shared/usagePeaks';
 import { compactSessionToolOutputs } from '../../../shared/toolOutput';
 import {
@@ -423,6 +424,9 @@ export function registerPersistenceHandlers(
 			);
 			return false;
 		}
+		// Signatures and running code must follow persisted publisher trust immediately.
+		if (key === 'pluginTrustedKeys') getActivePluginManager()?.refresh();
+
 		logger.info(`Settings updated: ${key}`, 'Settings', { key, value: toPersist });
 
 		// Settings are global: cascade this change to every OTHER window so all

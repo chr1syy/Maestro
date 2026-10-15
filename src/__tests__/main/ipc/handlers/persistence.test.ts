@@ -20,6 +20,8 @@ import {
 import type Store from 'electron-store';
 import type { StoredSession } from '../../../../main/stores/types';
 import type { WebServer } from '../../../../main/web-server';
+import { setActivePluginManager } from '../../../../main/plugins/plugin-manager-singleton';
+import type { PluginManager } from '../../../../main/plugins/plugin-manager';
 import { broadcastBridgeEvent } from '../../../../main/web-server/handlers/bridgeHandlers';
 
 // Mock electron's ipcMain and app
@@ -421,6 +423,27 @@ describe('persistence IPC handlers', () => {
 	});
 
 	describe('settings:set', () => {
+		it('reconciles publisher trust only after a successful persisted trust change', async () => {
+			const refresh = vi.fn(() => {
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('pluginTrustedKeys', []);
+			});
+			setActivePluginManager({ refresh } as unknown as PluginManager);
+			try {
+				expect(await handlers.get('settings:set')!({}, 'pluginTrustedKeys', [])).toBe(true);
+				expect(refresh).toHaveBeenCalledTimes(1);
+				refresh.mockClear();
+				await handlers.get('settings:set')!({}, 'fontSize', 16);
+				expect(refresh).not.toHaveBeenCalled();
+				mockSettingsStore.set.mockImplementationOnce(() => {
+					throw new Error('write failed');
+				});
+				expect(await handlers.get('settings:set')!({}, 'pluginTrustedKeys', [])).toBe(false);
+				expect(refresh).not.toHaveBeenCalled();
+			} finally {
+				setActivePluginManager(null);
+			}
+		});
+
 		it.each(['mediaModelDirectory.child', 'mediaModelDirectory.child.deep'])(
 			'rejects nested media key %s without overwriting the directory',
 			async (key) => {
