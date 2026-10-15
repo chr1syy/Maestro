@@ -22,6 +22,7 @@ import {
 	Bot,
 	ScanEye,
 	KeyRound,
+	KanbanSquare,
 	ShieldCheck,
 	ShieldAlert,
 	ShieldX,
@@ -65,6 +66,7 @@ const BUILTIN_ICONS: Record<string, LucideIcon> = {
 	pianola: Bot,
 	computerHistory: ScanEye,
 	maestroRun: KeyRound,
+	board: KanbanSquare,
 };
 
 const TRUST_META: Record<

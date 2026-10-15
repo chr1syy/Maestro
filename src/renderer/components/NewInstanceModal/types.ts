@@ -106,7 +106,8 @@ export interface EditAgentModalProps {
 		codexTransport?: CodexTransport,
 		acceptTranslationLimitations?: boolean,
 		selectedUserResources?: string[],
-		migrationPlanId?: string
+		migrationPlanId?: string,
+		boardWorker?: boolean
 	) => void | Promise<void>;
 	theme: Theme;
 	session: Session | null;

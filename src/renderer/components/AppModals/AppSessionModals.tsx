@@ -95,8 +95,12 @@ export interface AppSessionModalsProps {
 		/** Codex only: spend a reset credit automatically on quota exhaustion. Defaults off. */
 		codexAutoResetOnExhaustion?: boolean,
 		/** Codex only: which transport chat turns use. `undefined` means `exec`. */
-		codexTransport?: CodexTransport
-	) => void;
+		codexTransport?: CodexTransport,
+		acceptTranslationLimitations?: boolean,
+		selectedUserResources?: string[],
+		migrationPlanId?: string,
+		boardWorker?: boolean
+	) => void | Promise<void>;
 	editAgentSession: Session | null;
 
 	// RenameSessionModal
