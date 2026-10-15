@@ -34,6 +34,12 @@ import {
 	disposeGlobalHotkey,
 } from './global-hotkey-manager';
 import { CueEngine } from './cue/cue-engine';
+import { installTtsrRuntime, type TtsrRuntime } from './ttsr';
+import {
+	DEFAULT_TTSR_CONTEXT_MODE,
+	isTtsrContextMode,
+	type TtsrContextMode,
+} from '../shared/ttsr-types';
 import { createCueSupervisorHooks } from './cue/cue-first-party';
 import { PianolaSupervisor, type AutoWatchSession } from './pianola/pianola-supervisor';
 import { PianolaRelearnScheduler } from './pianola/pianola-relearn-scheduler';
@@ -165,6 +171,21 @@ import { setupIpcHandlers } from './ipc/bootstrap';
 import { stopCoworkingBridge } from './coworking/coworking-bridge';
 import { initializeStatsDB, closeStatsDB } from './stats';
 import { createSshRemoteStoreAdapter } from './utils/ssh-remote-resolver';
+import { listBoards, saveBoard, setBoardSavedListener } from './board/board-storage';
+import { setProfilesSavedListener } from './profiles/profile-storage';
+import {
+	resolveCardOverrides,
+	resolveCardAssignment,
+	spawnBoardCard,
+	decomposeBoardCard,
+	cancelBoardCardRun,
+	type BoardSpawnContext,
+} from './board/board-spawn';
+import { selectPoolAgentIds } from '../shared/board/pool';
+import { autoDecomposeBoard } from './board/board-decompose';
+import { buildBoardCardToastPayload } from './board/board-toast';
+import { startCardPr } from './board/board-pr';
+import { PROMPT_IDS } from '../shared/promptDefinitions';
 import { stopSessionCleanup } from './group-chat/group-chat-moderator';
 import { initializePrompts, getPrompt, savePrompt } from './prompt-manager';
 import { captureException } from './utils/sentry';
@@ -501,6 +522,8 @@ let processManager: ProcessManager | null = null;
 let webServer: WebServer | null = null;
 let agentDetector: AgentDetector | null = null;
 let cueEngine: CueEngine | null = null;
+/** Time-Traveling Stream Rules runtime; null until the process manager exists. */
+let ttsrRuntime: TtsrRuntime | null = null;
 let pianolaSupervisor: PianolaSupervisor | null = null;
 let pianolaRelearnScheduler: PianolaRelearnScheduler | null = null;
 let pluginManager: PluginManager | null = null;
@@ -526,6 +549,18 @@ const safeSend = createSafeSend(() => BrowserWindow.getAllWindows());
 // Hydrate capability snapshots from disk and wire IPC broadcaster so the
 // renderer status pills update live as detection / spawn-error events fire.
 capabilitySnapshots.init(agentCapabilitiesStore, createSnapshotBroadcaster(safeSend));
+
+// Board: push `board:changed` whenever board.yaml is persisted (by the
+// dispatcher tick, an IPC mutation, or auto-decompose) so the kanban reconciles
+// on the event instead of polling. Storage itself stays host-agnostic - the CLI
+// imports the same module and never sets a listener. Payload is the project
+// root only; the renderer refetches, so no board data crosses the bridge here.
+setBoardSavedListener((projectRoot) => safeSend('board:changed', { projectRoot }));
+
+// Agent Profiles: same deal for `.maestro/profiles.yaml`, so the Profiles modal
+// (and the Board's role picker behind it) reconcile after a CLI or second-window
+// write instead of showing a stale list until the user hits refresh.
+setProfilesSavedListener((projectRoot) => safeSend('profiles:changed', { projectRoot }));
 
 // Create CLI activity watcher with dependency injection (Phase 4 refactoring)
 const cliWatcher = createCliWatcher({
@@ -578,6 +613,9 @@ const settingsWatcher = createSettingsWatcher({
 		// clear is unconditional because the previous value is not available
 		// here, and the only cost of an unnecessary one is a single `which`.
 		clearGhCache();
+		// CLI trust edits bypass settings:set. Recheck signatures and authorization
+		// against the new settings without replacing the sealed consent ledger.
+		pluginManager?.refresh();
 	},
 });
 
@@ -698,6 +736,41 @@ store.onDidChange('encoreFeatures', () => {
 		.catch((err) => void captureException(err, { operation: 'maestroRun:flagChange' }));
 });
 
+// ── TTSR gate snapshot ──
+// These four values are read from the stdout hot path: `TtsrRuntime.observe`
+// consults the gate for EVERY parsed event of EVERY agent, and the enabled path
+// re-reads the rest several times per event. electron-store (conf 10.x) re-reads
+// and re-parses the whole settings JSON file on every `get`, so reading them live
+// would mean synchronous disk I/O per token. Snapshot them here and refresh on
+// change, so the deps handed to `installTtsrRuntime` only ever read memory and a
+// toggle still takes effect without an app restart.
+let ttsrEnabledSetting = store.get('ttsrEnabled', false) === true;
+let ttsrEncoreFlag = (store.get('encoreFeatures', {}) as Record<string, boolean>).ttsr === true;
+let ttsrDisabledRuleNames = readTtsrDisabledRules(store.get('ttsrDisabledRules', []));
+let ttsrContextModeSetting: TtsrContextMode = readTtsrContextMode(
+	store.get('ttsrContextMode', DEFAULT_TTSR_CONTEXT_MODE)
+);
+
+function readTtsrContextMode(value: unknown): TtsrContextMode {
+	return isTtsrContextMode(value) ? value : DEFAULT_TTSR_CONTEXT_MODE;
+}
+
+function readTtsrDisabledRules(value: unknown): string[] {
+	return Array.isArray(value) ? (value as string[]) : [];
+}
+
+store.onDidChange('ttsrEnabled', (value) => {
+	ttsrEnabledSetting = value === true;
+});
+store.onDidChange('encoreFeatures', (value) => {
+	ttsrEncoreFlag = (value as Record<string, boolean> | undefined)?.ttsr === true;
+});
+store.onDidChange('ttsrDisabledRules', (value) => {
+	ttsrDisabledRuleNames = readTtsrDisabledRules(value);
+});
+store.onDidChange('ttsrContextMode', (value) => {
+	ttsrContextModeSetting = readTtsrContextMode(value);
+});
 // Collectors for a support (debug) package. One object shared by the debug and
 // feedback IPC handlers and the CLI bridge, so every path builds the same zip.
 // Getters resolve the live instances at package time, not whatever existed here.
@@ -1037,6 +1110,20 @@ app
 			() => (store.get('encoreFeatures', {}) as Record<string, boolean>).opencodeServer === true,
 			{ appVersion: app.getVersion() }
 		);
+		// Time-Traveling Stream Rules: watch every agent's normalized output
+		// stream and match `.maestro/rules/*.md`. Gated live on the `ttsr` Encore
+		// flag AND the `ttsrEnabled` setting, so it is a no-op while off.
+		ttsrRuntime = installTtsrRuntime(processManager, {
+			// In-memory reads only (see the TTSR gate snapshot above): these run on
+			// the stdout hot path, so a `store.get` here would be a disk read per
+			// parsed event.
+			isGloballyEnabled: () => ttsrEnabledSetting && ttsrEncoreFlag,
+			getDisabledRules: () => ttsrDisabledRuleNames,
+			// Fallback teardown mode for projects whose `.maestro/ttsr.yaml` does
+			// not name one; a project that does still wins.
+			getContextMode: () => ttsrContextModeSetting,
+			safeSend,
+		});
 		// Note: webServer is created on-demand when user enables web interface (see setupWebServerCallbacks)
 		agentDetector = new AgentDetector();
 
@@ -1276,6 +1363,36 @@ app
 		if ((store.get('encoreFeatures', {}) as Record<string, boolean>).usageStats !== false) {
 			usageRefreshScheduler.start();
 		}
+
+		// Board Phase 3: host context the board card spawner needs. Resolves a
+		// card's assignee profile to its base Left Bar agent and runs it through
+		// the same `executeCuePrompt` path Cue uses (SSH/custom config honored).
+		const boardSpawnContext: BoardSpawnContext = {
+			getStoredSessions: () => sessionsStore.get('sessions', []) as Array<Record<string, any>>,
+			getAgentConfig: (toolType) => getAgentConfigForAgent(toolType),
+			resolveAgentPath: async (toolType) => {
+				if (!agentDetector) return undefined;
+				const detected = await agentDetector.getAgent(toolType);
+				return detected?.available && detected.path ? detected.path : undefined;
+			},
+			getSshStore: () => createSshRemoteStoreAdapter(store),
+			getConductorProfile: () => (store.get('conductorProfile', '') as string) || undefined,
+			// Board Phase 6 worker pool: opt-in (`boardWorker: true`) agents whose
+			// working directory is inside the board's project dir (or a sub-folder),
+			// in Left Bar order. Only these float role-only cards.
+			getPoolAgentIds: (projectRoot) => {
+				const sessions = sessionsStore.get('sessions', []) as Array<Record<string, any>>;
+				return selectPoolAgentIds(
+					projectRoot,
+					sessions.map((s) => ({
+						id: s.id,
+						dir: s.projectRoot || s.cwd || s.fullPath,
+						boardWorker: s.boardWorker === true,
+					}))
+				);
+			},
+			nowMs: () => Date.now(),
+		};
 
 		// Warm any provider the strict startup pass left cold (no auto-refresh
 		// interval picked, no eligible recent maestro-p session, Codex not sampled
@@ -1705,6 +1822,142 @@ app
 			// Surface Cue run lifecycle (`cue.runStarted` / `cue.runFinished`) to
 			// subscribed plugins (events:subscribe). Metadata-only; null-safe.
 			emitPluginEvent: (event) => pluginEventBus?.emit(event),
+			// Board Phase 3: the task-DAG dispatcher rides this engine's tick. All
+			// board side effects are injected here so the engine core stays
+			// board-agnostic. The dispatch pass is gated on BOTH `maestroCue` and
+			// `board` (Board requires Cue) inside the engine's board pass.
+			board: {
+				getEncoreFeatures: () => {
+					const ef = store.get('encoreFeatures', {}) as Record<string, boolean>;
+					return { maestroCue: ef.maestroCue === true, board: ef.board === true };
+				},
+				getProjectRoots: () => {
+					const sessions = sessionsStore.get('sessions', []) as Array<Record<string, any>>;
+					const roots = new Set<string>();
+					for (const s of sessions) {
+						const root = s.projectRoot || s.cwd || s.fullPath;
+						if (typeof root === 'string' && root.length > 0) roots.add(root);
+					}
+					return [...roots];
+				},
+				listBoards: (projectRoot) => listBoards(projectRoot),
+				saveBoard: (projectRoot, board) => {
+					saveBoard(projectRoot, board);
+				},
+				resolveOverrides: (projectRoot, card) =>
+					resolveCardOverrides(projectRoot, card, boardSpawnContext),
+				// Board Phase 6 worker pool: resolve each card to a FREE opt-in worker
+				// in the project dir. Takes precedence over resolveOverrides.
+				assign: (projectRoot, card, busy) =>
+					resolveCardAssignment(projectRoot, card, busy, boardSpawnContext),
+				spawnCard: (projectRoot, request) =>
+					spawnBoardCard(projectRoot, request, boardSpawnContext),
+				// Stop button: kill the card's in-flight agent process. The run is
+				// addressed by the Cue run id `board-spawn.ts` minted for it, so the
+				// project root is not needed here.
+				cancelCardRun: (_projectRoot, cardId) => cancelBoardCardRun(cardId),
+				// Terminal card transitions surface as toasts through the SAME
+				// `remote:notifyToast` relay Cue's notify action uses. A blocked card
+				// needs a human, so its toast is sticky; a done card auto-dismisses.
+				notifyCard: (projectRoot, event) => {
+					const blocked = event.kind === 'blocked';
+					// Board Phase 5: the same terminal transition is republished on the
+					// plugin event bus so OTHER plugins can build on the Board. Metadata
+					// only - the toast below carries the run summary, the event never
+					// does (summaries can quote agent output).
+					const common = {
+						boardId: event.boardId,
+						cardId: event.cardId,
+						cardTitle: event.cardTitle,
+						projectPath: projectRoot,
+						...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+						...(event.workerAgentId ? { workerAgentId: event.workerAgentId } : {}),
+					};
+					const at = new Date().toISOString();
+					if (blocked) {
+						pluginEventBus?.emit({
+							topic: 'board.cardBlocked',
+							at,
+							payload: { ...common, ...(event.outcome ? { outcome: event.outcome } : {}) },
+						});
+					} else if (event.kind === 'done') {
+						// Deliberately no plugin event for `review`: a card awaiting human
+						// approval is neither completed nor blocked, and there is no
+						// `board.cardNeedsReview` topic yet, so emitting either existing topic
+						// would lie to plugins. That transition stays toast-only for now.
+						pluginEventBus?.emit({
+							topic: 'board.cardCompleted',
+							at,
+							payload: {
+								...common,
+								...(event.worktreeBranch ? { worktreeBranch: event.worktreeBranch } : {}),
+							},
+						});
+					}
+					// The done/review/blocked toast (including its pooled click-to-jump onto the
+					// worker agent) is built by the pure `buildBoardCardToastPayload` helper
+					// so the exact payload can be unit-tested without importing this module.
+					safeSend('remote:notifyToast', buildBoardCardToastPayload(event));
+				},
+				// Board F3: a `done` card that opted into `prOnDone` gets its worktree
+				// branch pushed and a pull request opened. Fire-and-forget (the dispatch
+				// pass must never wait on git/gh); the result surfaces as its own toast.
+				createCardPr: (projectRoot, boardId, cardId) =>
+					startCardPr(projectRoot, boardId, cardId, {
+						notify: (payload) => safeSend('remote:notifyToast', payload),
+						onLog: (_level, message) => logger.cue(message, 'Board'),
+					}),
+				// Board Phase 5: every card status transition goes out on the plugin
+				// event bus (metadata only - ids, statuses, attempt, worker). Null-safe;
+				// no-op when plugins are disabled.
+				onCardStatusChanged: (projectRoot, event) =>
+					pluginEventBus?.emit({
+						topic: 'board.cardStatusChanged',
+						at: new Date().toISOString(),
+						payload: {
+							boardId: event.boardId,
+							cardId: event.cardId,
+							cardTitle: event.cardTitle,
+							fromStatus: event.fromStatus,
+							toStatus: event.toStatus,
+							projectPath: projectRoot,
+							...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+							...(event.workerAgentId ? { workerAgentId: event.workerAgentId } : {}),
+						},
+					}),
+				// Board Phase 5: a finished auto-decompose pass, counts only.
+				onBoardDecomposed: (projectRoot, boardId, triageCardCount) =>
+					pluginEventBus?.emit({
+						topic: 'board.decomposed',
+						at: new Date().toISOString(),
+						payload: { boardId, triageCardCount, projectPath: projectRoot },
+					}),
+				// OPTIONAL auto-decompose (Board Phase 5), off by default. Only runs when
+				// a board sets `autoDecompose: true`; loads the editable prompt template
+				// and fans triage cards into child cards via the same spawn plumbing.
+				decompose: async (projectRoot, board) => {
+					const template = getPrompt(PROMPT_IDS.BOARD_DECOMPOSE);
+					// `board` here is the snapshot the tick loaded, and each LLM pass
+					// takes minutes, so the children are merged into a board re-read
+					// from disk and persisted per card (reload + save below) rather
+					// than by writing this stale snapshot back afterwards - which used
+					// to revert every status change the dispatcher made in between.
+					return await autoDecomposeBoard(board, {
+						promptTemplate: template,
+						spawn: (prompt, card) =>
+							decomposeBoardCard(projectRoot, card, prompt, boardSpawnContext),
+						reload: () => listBoards(projectRoot).find((b) => b.id === board.id) ?? null,
+						save: (merged) => {
+							saveBoard(projectRoot, merged);
+						},
+						onLog: (level, message) => {
+							if (level === 'error') logger.error(message, 'Board');
+							else if (level === 'warn') logger.warn(message, 'Board');
+							else logger.cue(message, 'Board');
+						},
+					});
+				},
+			},
 			getUsageStatsEnabled: () => resolveEncoreFeatures(store.get('encoreFeatures')).usageStats,
 			// How far back the engine-start prune keeps cue_events. Read on every
 			// start (not captured once) so changing the setting takes effect the
@@ -3305,6 +3558,7 @@ app
 			getPluginAuthStore: () => pluginAuthStore,
 			getPluginEventBus: () => pluginEventBus,
 			getInteractiveReplayController: () => interactiveReplayController,
+			getTtsrRuntime: () => ttsrRuntime,
 			setNoteSessionActivated: (fn) => {
 				noteSessionActivatedInPersistence = fn;
 			},
@@ -3526,6 +3780,9 @@ app
 		// Electron auto-unregisters globalShortcuts on quit, but be explicit so the
 		// behavior survives any future change to that policy.
 		app.on('will-quit', disposeGlobalHotkey);
+		// TTSR repeat bookkeeping is written debounced; force the last write out so
+		// a rule that fired seconds before quit is still remembered next launch.
+		app.on('will-quit', () => ttsrRuntime?.flushState());
 		// Release parquet file descriptors (and their cached scans) on the way
 		// out. The idle reaper would get to them eventually, but a preview tab
 		// left open otherwise holds a descriptor until the process dies.

@@ -4,5 +4,6 @@ export { DirectorNotesSection } from './DirectorNotesSection';
 export { MaestroRunSection } from './MaestroRunSection';
 export { QuickChatSection } from './QuickChatSection';
 export { SymphonyRegistrySection } from './SymphonyRegistrySection';
+export { TtsrSettingsSection } from './TtsrSettingsSection';
 export { UsageStatsSection } from './UsageStatsSection';
 export { WakatimeSettings } from './WakatimeSettings';

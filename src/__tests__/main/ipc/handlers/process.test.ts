@@ -525,6 +525,36 @@ describe('process IPC handlers', () => {
 			).rejects.toThrow('Failed to spawn claude-code');
 		});
 
+		it.each([true, false])(
+			'commits TTSR deferred reminders only after a successful spawn (success=%s)',
+			async (success) => {
+				const commit = vi.fn();
+				deps.peekTtsrReminders = vi.fn(() => ({ text: 'Follow the project rule.', commit }));
+				registerProcessHandlers(deps);
+				mockAgentDetector.getAgent.mockResolvedValue({ id: 'claude-code' });
+				mockProcessManager.spawn.mockReturnValue({ pid: success ? 123 : -1, success });
+
+				const result = handlers.get('process:spawn')!({} as Electron.IpcMainInvokeEvent, {
+					sessionId: 'session-reminders',
+					toolType: 'claude-code',
+					cwd: '/test',
+					command: 'claude',
+					args: [],
+					prompt: 'Continue the task.',
+				});
+				if (success) {
+					await expect(result).resolves.toMatchObject({ success: true });
+				} else {
+					await expect(result).rejects.toThrow('Failed to spawn claude-code');
+				}
+
+				expect(mockProcessManager.spawn).toHaveBeenCalledWith(
+					expect.objectContaining({ prompt: expect.stringContaining('Follow the project rule.') })
+				);
+				expect(commit).toHaveBeenCalledTimes(success ? 1 : 0);
+			}
+		);
+
 		it('should pass environment variables to spawn', async () => {
 			const mockAgent = {
 				id: 'claude-code',

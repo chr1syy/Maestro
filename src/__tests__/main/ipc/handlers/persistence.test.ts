@@ -25,6 +25,8 @@ import {
 import type Store from 'electron-store';
 import type { StoredSession } from '../../../../main/stores/types';
 import type { WebServer } from '../../../../main/web-server';
+import { setActivePluginManager } from '../../../../main/plugins/plugin-manager-singleton';
+import type { PluginManager } from '../../../../main/plugins/plugin-manager';
 import { broadcastBridgeEvent } from '../../../../main/web-server/handlers/bridgeHandlers';
 
 // Mock electron's ipcMain and app
@@ -426,6 +428,109 @@ describe('persistence IPC handlers', () => {
 	});
 
 	describe('settings:set', () => {
+		it('native publisher restoration refreshes real signatures without promoting existing consent', async () => {
+			const disk = await import('fs');
+			const os = await import('os');
+			const { PluginManager } = await import('../../../../main/plugins/plugin-manager');
+			const { pluginIdentity } = await import('../../../../main/plugins/plugin-identity');
+			const { AuthorizationStore, shouldDisablePluginForVerifyResult, noAnchor } =
+				await import('../../../../main/plugins/authorization-ledger');
+			const { makeSigningKeys, signPluginDir } =
+				await import('../../plugins/plugin-signing-helper');
+			const directory = disk.mkdtempSync(path.join(os.tmpdir(), 'native-trust-recovery-'));
+			const previousUserData = process.env.MAESTRO_USER_DATA;
+			process.env.MAESTRO_USER_DATA = directory;
+			try {
+				const source = path.join(directory, 'plugins', 'recovery.fixture');
+				disk.mkdirSync(source, { recursive: true });
+				disk.writeFileSync(
+					path.join(source, 'plugin.json'),
+					JSON.stringify({
+						id: 'recovery.fixture',
+						name: 'Recovery fixture',
+						version: '1.0.0',
+						tier: 1,
+						maestro: { minHostApi: '1.0.0' },
+						entry: 'main.js',
+						permissions: [{ capability: 'ui:panel' }],
+					})
+				);
+				disk.writeFileSync(path.join(source, 'main.js'), 'module.exports = {};');
+				const signer = makeSigningKeys();
+				signPluginDir(source, signer);
+				let trustedKeys = ['another-publisher'];
+				const auth = new AuthorizationStore({
+					seal: { available: () => false, seal: () => Buffer.alloc(0), unseal: () => '' },
+					anchor: noAnchor(),
+					ledgerPath: path.join(directory, 'authorization'),
+				});
+				const manager = new PluginManager({
+					isEnabled: () => true,
+					trustedKeys: () => trustedKeys,
+					verifyRecord: (record) => ({
+						disable: shouldDisablePluginForVerifyResult(
+							auth.verify(record.id, pluginIdentity(record.source, trustedKeys)!, ['ui:panel'])
+						),
+					}),
+				});
+				manager.refresh();
+				const consentIdentity = pluginIdentity(source, trustedKeys)!;
+				expect(consentIdentity.signatureStatus).toBe('untrusted');
+				auth.mint('recovery.fixture', [{ capability: 'ui:panel' }], consentIdentity);
+				manager.setEnabled('recovery.fixture', true);
+				expect(manager.getRegistry().records[0]).toMatchObject({
+					enabled: true,
+					loadStatus: 'ok',
+					signature: { status: 'untrusted' },
+				});
+				const grants = auth.readGrants('recovery.fixture');
+				mockSettingsStore.set.mockImplementation((key, value) => {
+					if (key === 'pluginTrustedKeys') trustedKeys = value;
+				});
+				setActivePluginManager(manager);
+
+				expect(
+					await handlers.get('settings:set')!({}, 'pluginTrustedKeys', [
+						...trustedKeys,
+						signer.publicKeyB64,
+					])
+				).toBe(true);
+				expect(manager.getRegistry().records[0]).toMatchObject({
+					enabled: false,
+					signature: { status: 'trusted' },
+				});
+				expect(trustedKeys).toEqual(['another-publisher', signer.publicKeyB64]);
+				expect(auth.entryIdentity('recovery.fixture')).toEqual(consentIdentity);
+				expect(auth.readGrants('recovery.fixture')).toEqual(grants);
+			} finally {
+				setActivePluginManager(null);
+				if (previousUserData === undefined) delete process.env.MAESTRO_USER_DATA;
+				else process.env.MAESTRO_USER_DATA = previousUserData;
+				disk.rmSync(directory, { recursive: true, force: true });
+			}
+		});
+
+		it('reconciles publisher trust only after a successful persisted trust change', async () => {
+			const refresh = vi.fn(() => {
+				expect(mockSettingsStore.set).toHaveBeenCalledWith('pluginTrustedKeys', []);
+			});
+			setActivePluginManager({ refresh } as unknown as PluginManager);
+			try {
+				expect(await handlers.get('settings:set')!({}, 'pluginTrustedKeys', [])).toBe(true);
+				expect(refresh).toHaveBeenCalledTimes(1);
+				refresh.mockClear();
+				await handlers.get('settings:set')!({}, 'fontSize', 16);
+				expect(refresh).not.toHaveBeenCalled();
+				mockSettingsStore.set.mockImplementationOnce(() => {
+					throw new Error('write failed');
+				});
+				expect(await handlers.get('settings:set')!({}, 'pluginTrustedKeys', [])).toBe(false);
+				expect(refresh).not.toHaveBeenCalled();
+			} finally {
+				setActivePluginManager(null);
+			}
+		});
+
 		it.each(['mediaModelDirectory.child', 'mediaModelDirectory.child.deep'])(
 			'rejects nested media key %s without overwriting the directory',
 			async (key) => {

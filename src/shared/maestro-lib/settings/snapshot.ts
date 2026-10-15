@@ -57,6 +57,7 @@ export const ENCORE_FEATURE_LABELS: Record<EncoreFlag, string> = {
 	symphony: 'Symphony',
 	maestroCue: 'Maestro Cue',
 	pianola: 'Pianola',
+	board: 'Board',
 	plugins: 'Plugins',
 	coworking: 'Coworking',
 	opencodeServer: 'OpenCode server',
@@ -66,6 +67,7 @@ export const ENCORE_FEATURE_LABELS: Record<EncoreFlag, string> = {
 	computerHistory: 'Computer History',
 	quickChat: 'Quick Chat',
 	maestroRun: 'MaestroRun',
+	ttsr: 'Time-Traveling Stream Rules',
 };
 
 /** One `key: value` line of a provider's config, ready to print. A secret is already masked. */
