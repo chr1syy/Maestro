@@ -1,5 +1,4 @@
 import { ipcMain } from 'electron';
-import { execFileNoThrow } from '../../../utils/execFile';
 import { execGit, execGitReadOnly } from '../../../utils/remote-git';
 import { getSshRemoteById } from '../../../stores';
 import { withIpcErrorLogging, createIpcHandler } from '../../../utils/ipcHandler';
