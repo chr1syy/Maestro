@@ -103,7 +103,8 @@ export interface SessionLifecycleReturn {
 		codexTransport?: CodexTransport,
 		acceptTranslationLimitations?: boolean,
 		selectedUserResources?: string[],
-		migrationPlanId?: string
+		migrationPlanId?: string,
+		boardWorker?: boolean
 	) => void | Promise<void>;
 	/** Rename the currently-selected tab (persists to agent session storage + history) */
 	handleRenameTab: (newName: string) => void;
@@ -199,7 +200,8 @@ export function useSessionLifecycle(deps: SessionLifecycleDeps): SessionLifecycl
 			codexTransport?: CodexTransport,
 			acceptTranslationLimitations?: boolean,
 			selectedUserResources?: string[],
-			migrationPlanId?: string
+			migrationPlanId?: string,
+			boardWorker?: boolean
 		) => {
 			const before = useSessionStore.getState().sessions.find((s) => s.id === sessionId);
 			if (toolType && before && toolType !== before.toolType) {
@@ -274,6 +276,7 @@ export function useSessionLifecycle(deps: SessionLifecycleDeps): SessionLifecycl
 					// Codex because `resolveCodexTransport` ignores it there. Only the
 					// opt-in is stored, so choosing Standard clears the field.
 					codexTransport: codexTransport === 'app-server' ? 'app-server' : undefined,
+					...(boardWorker === undefined ? {} : { boardWorker }),
 				};
 
 				const next = { ...s, ...updatedFields };

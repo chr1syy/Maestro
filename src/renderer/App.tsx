@@ -149,6 +149,7 @@ import { useCapabilitiesPriming } from './hooks/agent/useCapabilitiesPriming';
 import { useSymphonyContribution } from './hooks/symphony/useSymphonyContribution';
 import { useCueAutoDiscovery } from './hooks/useCueAutoDiscovery';
 import { useCueVisibilityWiring } from './hooks/cue/useCueVisibilityWiring';
+import { useTtsr } from './hooks/useTtsr';
 
 // Import contexts
 import { useLayerStack } from './contexts/LayerStackContext';
@@ -393,6 +394,10 @@ function MaestroConsoleInner() {
 		setCueModalOpen,
 		// Pianola Modal - pianolaModalOpen now self-sourced in AppStandaloneModals
 		setPianolaModalOpen,
+		// Board Modal - boardModalOpen now self-sourced in AppStandaloneModals
+		setBoardModalOpen,
+		// Agent Profiles Modal - profilesModalOpen self-sourced in AppStandaloneModals
+		setProfilesModalOpen,
 		// Maestro Cue YAML Editor - open state, sessionId, projectRoot self-sourced in AppStandaloneModals
 		closeCueYamlEditor,
 	} = useModalActions();
@@ -557,6 +562,18 @@ function MaestroConsoleInner() {
 	useEffect(() => {
 		if (!encoreFeatures.concerto) getModalActions().setConcertoStageOpen(false);
 	}, [encoreFeatures.concerto]);
+
+	// Board depends on Maestro Cue: force-close the Board modal when either the
+	// Board flag or its Cue dependency turns off (mirrors the Cue force-close).
+	useEffect(() => {
+		if (!encoreFeatures.board || !encoreFeatures.maestroCue) setBoardModalOpen(false);
+	}, [encoreFeatures.board, encoreFeatures.maestroCue, setBoardModalOpen]);
+
+	// Agent Profiles ships with Board, so it follows the Board flag alone (it has
+	// no Cue dependency of its own: profiles are editable without a running tick).
+	useEffect(() => {
+		if (!encoreFeatures.board) setProfilesModalOpen(false);
+	}, [encoreFeatures.board, setProfilesModalOpen]);
 
 	// --- KEYBOARD SHORTCUT HELPERS ---
 	const { isShortcut, isTabShortcut, isPaneShortcut } = useKeyboardShortcutHelpers({
@@ -1060,6 +1077,11 @@ function MaestroConsoleInner() {
 	// Ensures the single pinned Pianola agent exists once sessions are loaded and
 	// the pianola flag is on. Does not steal focus from the active agent.
 	usePianolaAgent(encoreFeatures);
+
+	// --- TTSR (Time-Traveling Stream Rules, gated by Encore Feature) ---
+	// Main matches rules against the live stream and aborts the turn on its own;
+	// this subscription performs the corrective respawn that continues it.
+	useTtsr(!!encoreFeatures.ttsr);
 
 	// --- CUE VISIBILITY WIRING (PR-B 1.4) ---
 	// Forwards document visibility to the main-process Cue scanner
@@ -3169,6 +3191,26 @@ function MaestroConsoleInner() {
 		handleDeleteAllArchivedGroupChats,
 	});
 
+	// TTSR rule authoring is delegated to the agent: the Rules tab composes a
+	// brief and this puts it in front of the active agent as a normal turn.
+	const handleSendPromptToAgent = useCallback(
+		(prompt: string) => {
+			// No input handler means no agent tab is mounted to receive the turn.
+			// Silently dropping the click would leave the user waiting for a rule
+			// nothing is writing.
+			if (!processInputRef.current) {
+				notifyToast({
+					color: 'yellow',
+					title: 'Maestro',
+					message: 'No active agent input to send this to. Open an agent tab and try again.',
+				});
+				return;
+			}
+			void processInputRef.current(prompt);
+		},
+		[processInputRef]
+	);
+
 	const rightPanelProps = useRightPanelProps({
 		// Theme (computed externally from settingsStore + themeId)
 		theme,
@@ -3219,6 +3261,7 @@ function MaestroConsoleInner() {
 
 		// File linking
 		handleMainPanelFileClick,
+		handleSendPromptToAgent,
 
 		// Document Graph handlers
 		handleFocusFileInGraph,
@@ -3631,6 +3674,12 @@ function MaestroConsoleInner() {
 							encoreFeatures.directorNotes ? () => setDirectorNotesOpen(true) : undefined
 						}
 						onOpenMaestroCue={encoreFeatures.maestroCue ? () => setCueModalOpen(true) : undefined}
+						onOpenBoard={
+							encoreFeatures.board && encoreFeatures.maestroCue
+								? () => setBoardModalOpen(true)
+								: undefined
+						}
+						onOpenProfiles={encoreFeatures.board ? () => setProfilesModalOpen(true) : undefined}
 						onOpenPianola={encoreFeatures.pianola ? () => setPianolaModalOpen(true) : undefined}
 						onConfigureCue={encoreFeatures.maestroCue ? handleConfigureCue : undefined}
 						onCloseTabSwitcher={handleCloseTabSwitcher}

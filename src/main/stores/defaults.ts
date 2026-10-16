@@ -151,6 +151,11 @@ export const SETTINGS_DEFAULTS: MaestroSettings = {
 	},
 	// Throughput Gauge: scope, metric, layout, style, and rate window
 	throughputGaugeSettings: { ...DEFAULT_THROUGHPUT_GAUGE_SETTINGS },
+	// TTSR: master runtime switch (AND'd with the `ttsr` Encore flag), globally
+	// disabled rule names, interrupt teardown mode, and the built-in rule enable map
+	ttsrEnabled: false,
+	ttsrDisabledRules: [],
+	ttsrContextMode: 'keep',
 	// Utility agent for auxiliary tasks (tab naming, context grooming); null = use session agent
 	utilityAgentId: null,
 	utilityModelId: null,

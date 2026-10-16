@@ -184,6 +184,13 @@ vi.mock('../../../../../renderer/hooks/settings/useSettings', () => ({
 			windowMs: 10000,
 		},
 		setThroughputGaugeSettings: vi.fn(),
+		// TTSR
+		ttsrEnabled: false,
+		setTtsrEnabled: vi.fn(),
+		ttsrDisabledRules: [],
+		setTtsrDisabledRules: vi.fn(),
+		ttsrContextMode: 'keep',
+		setTtsrContextMode: vi.fn(),
 		...mockUseSettingsOverrides,
 	}),
 }));

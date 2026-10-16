@@ -23,6 +23,7 @@ import {
 	ScanEye,
 	KeyRound,
 	Gauge,
+	KanbanSquare,
 	ShieldCheck,
 	ShieldAlert,
 	ShieldX,
@@ -67,6 +68,7 @@ const BUILTIN_ICONS: Record<string, LucideIcon> = {
 	computerHistory: ScanEye,
 	maestroRun: KeyRound,
 	throughputGauge: Gauge,
+	board: KanbanSquare,
 };
 
 const TRUST_META: Record<
