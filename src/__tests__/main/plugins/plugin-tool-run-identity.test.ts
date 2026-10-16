@@ -9,6 +9,64 @@ import {
 } from '../../../main/plugins/plugin-tool-run-identity';
 
 describe('PluginToolRunIdentity', () => {
+	it('does not recover proof authority or receipts after a host restart', () => {
+		const before = new PluginToolRunIdentity();
+		const token = before.issue('agent-a', 60_000, 'sh.maestro.relay/send');
+		before.recordReceipt(token, 'sh.maestro.relay/send', { messageIds: ['101'] });
+		expect(before.getReceipts(token)).toHaveLength(1);
+
+		const after = new PluginToolRunIdentity();
+		expect(after.resolve(token)).toEqual({ callerAgentId: null });
+		expect(after.getReceipts(token)).toEqual([]);
+	});
+
+	it('isolates receipts between concurrent runs of the same originating agent', () => {
+		const runs = new PluginToolRunIdentity();
+		const first = runs.issue('agent-a', 60_000, 'sh.maestro.relay/send');
+		const second = runs.issue('agent-a', 60_000, 'sh.maestro.relay/send');
+		runs.recordReceipt(second, 'sh.maestro.relay/send', { messageIds: ['202'] });
+		expect(runs.getReceipts(first)).toEqual([]);
+		runs.recordReceipt(first, 'sh.maestro.relay/send', { messageIds: ['201'] });
+		expect(runs.getReceipts(first)[0].messageIds).toEqual(['201']);
+		expect(runs.getReceipts(first)[0].runId).not.toBe(runs.getReceipts(second)[0].runId);
+		runs.revoke(first);
+		runs.recordReceipt(first, 'sh.maestro.relay/send', { messageIds: ['203'] });
+		expect(runs.getReceipts(first)).toEqual([]);
+		expect(runs.getReceipts(second)[0].messageIds).toEqual(['202']);
+	});
+
+	it('does not make model or plugin result routing fields part of a receipt', () => {
+		const runs = new PluginToolRunIdentity();
+		const token = runs.issue('agent-a', 60_000, 'sh.maestro.relay/send');
+		runs.recordReceipt(token, 'sh.maestro.relay/send', {
+			messageIds: ['301'],
+			agentId: 'other-agent',
+			runId: 'invented-run',
+			dispatchId: 'invented-dispatch',
+			threadId: '302',
+		});
+		expect(runs.getReceipts(token)).toEqual([
+			{
+				agentId: 'agent-a',
+				runId: expect.stringMatching(/^[0-9a-f]{32}$/),
+				toolId: 'sh.maestro.relay/send',
+				messageIds: ['301'],
+			},
+		]);
+		// No host-observed call arguments or dispatch binding are retained.
+		// These IDs alone cannot prove delivery to a particular Relay thread.
+	});
+
+	it('cannot interpret an error without IDs as proof that no send occurred', () => {
+		const runs = new PluginToolRunIdentity();
+		const token = runs.issue('agent-a', 60_000, 'sh.maestro.relay/send');
+		// The remote may have accepted the message before the connection failed.
+		runs.recordReceipt(token, 'sh.maestro.relay/send', { error: 'connection lost' });
+		expect(runs.getReceipts(token)).toEqual([]);
+		// The existing API has no durable attempt marker. An empty receipt set
+		// must not become a retry decision in the proposed completion service.
+	});
+
 	it('binds distinct local runs to exact agents and revokes a completed run', () => {
 		const runs = new PluginToolRunIdentity();
 		const a = runs.issue('agent-a');

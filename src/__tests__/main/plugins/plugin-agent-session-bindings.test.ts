@@ -87,4 +87,15 @@ describe('plugin provider session bindings', () => {
 		expect(() => restarted.assertOwned('relay', 'agent-a', 'provider-1')).not.toThrow();
 		expect(() => restarted.assertOwned('relay', 'agent-a', 'provider-2')).toThrow(/not owned/);
 	});
+
+	it('retains agent ownership but has no per-thread provider-session constraint', () => {
+		const bindings = new PluginAgentSessionBindings(baseDir);
+		bindings.remember('relay', 'agent-a', 'thread-one-provider');
+		bindings.remember('relay', 'agent-a', 'thread-two-provider');
+		const restarted = new PluginAgentSessionBindings(baseDir);
+		// Both sessions are resumable by the same plugin/agent. No thread ID is
+		// accepted by assertOwned, so it cannot reject a cross-thread resume.
+		expect(() => restarted.assertOwned('relay', 'agent-a', 'thread-one-provider')).not.toThrow();
+		expect(() => restarted.assertOwned('relay', 'agent-a', 'thread-two-provider')).not.toThrow();
+	});
 });
