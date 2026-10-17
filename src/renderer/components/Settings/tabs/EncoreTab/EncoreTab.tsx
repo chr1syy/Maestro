@@ -33,7 +33,7 @@ export type { EncoreTabProps } from './types';
  * marketplace a `settingsBodies` map keyed by Encore flag; ExtensionDetails
  * renders the matching body in its Settings sub-tab.
  */
-export function EncoreTab({ theme, isOpen }: EncoreTabProps) {
+export function EncoreTab({ theme, isOpen, tileRequest }: EncoreTabProps) {
 	const settings = useSettings();
 
 	const wakatimeState = useWakatimeSettingsState({
@@ -130,7 +130,7 @@ export function EncoreTab({ theme, isOpen }: EncoreTabProps) {
 
 	return (
 		<div className="space-y-5">
-			<ExtensionsView theme={theme} settingsBodies={settingsBodies} />
+			<ExtensionsView theme={theme} settingsBodies={settingsBodies} tileRequest={tileRequest} />
 		</div>
 	);
 }

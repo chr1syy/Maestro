@@ -203,6 +203,8 @@ export interface UseSettingsReturn {
 	audioFeedbackCommand: string;
 	setAudioFeedbackCommand: (value: string) => void;
 	toastDuration: number;
+	notificationCenterEnabled: boolean;
+	setNotificationCenterEnabled: (value: boolean) => void;
 	notificationCenterLarge: boolean;
 	setNotificationCenterLarge: (value: boolean) => void;
 	notificationCenterDetails: boolean;

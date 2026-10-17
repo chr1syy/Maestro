@@ -104,6 +104,7 @@ import {
 	profileUpdate,
 	profileDelete,
 } from './commands/profile';
+import { hostStart, hostStatus, hostStop } from './commands/host';
 import { createAgent } from './commands/create-agent';
 import { createGroup } from './commands/create-group';
 import { removeGroup } from './commands/remove-group';
@@ -169,7 +170,7 @@ import {
 	feedbackSubmit,
 	feedbackSubscribe,
 } from './commands/feedback';
-import { stats, statsQuery } from './commands/stats';
+import { stats, statsQuery, statsTokens } from './commands/stats';
 import { renameAgent } from './commands/rename-agent';
 import { renameGroup } from './commands/rename-group';
 import { updateGroup } from './commands/update-group';
@@ -1698,6 +1699,51 @@ program
 	.option('--json', 'Output as JSON (for scripting)')
 	.action((options) => doctor(cliVersion, options));
 
+// Host commands - run Maestro's runtime detached (no desktop) and control that process
+const host = program
+	.command('host')
+	.description('Run the Maestro runtime detached, with no desktop app, and control it');
+
+host
+	.command('start')
+	.description('Start a detached host that serves this data directory over the bridge')
+	.option('--data-dir <path>', 'Maestro data directory (default: resolved like the desktop app)')
+	.option('--dev', 'Use the development data directory')
+	.option('--port <port>', 'Port to listen on (default: any free port)')
+	.option(
+		'--foreground',
+		'Serve in this process instead of detaching (what the detached child runs)'
+	)
+	.option(
+		'--stop-grace <seconds>',
+		'On SIGTERM/SIGINT, wait this long for work in flight before stopping (default 30; 0 stops at once)'
+	)
+	.option('--json', 'Output as JSON (for scripting)')
+	.action((options) => hostStart(options, cliVersion));
+
+host
+	.command('status')
+	.description('Report the host: pid, uptime, lock holder, Cue state, and work in flight')
+	.option('--data-dir <path>', 'Maestro data directory (default: resolved like the desktop app)')
+	.option('--dev', 'Use the development data directory')
+	.option('--json', 'Output as JSON (for scripting)')
+	.action((options) => hostStatus(options));
+
+host
+	.command('stop')
+	.description(
+		'Stop the host (refuses while a turn, Auto Run or Cue run is in flight, unless --wait or --force)'
+	)
+	.option('--data-dir <path>', 'Maestro data directory (default: resolved like the desktop app)')
+	.option('--dev', 'Use the development data directory')
+	.option(
+		'--wait [seconds]',
+		'Wait for work in flight to finish (default 300s), then stop; never forces'
+	)
+	.option('--force', 'Stop even with work in flight; a run records how it ended first')
+	.option('--json', 'Output as JSON (for scripting)')
+	.action((options) => hostStop(options));
+
 // Completions command - emit a shell completion script (introspects the program)
 program
 	.command('completions <shell>')
@@ -2510,6 +2556,10 @@ computerHistory
 	.option('--retention-days <n>', 'Keep this many days (default 90)')
 	.option('--max-gb <n>', 'Keep at most this many GB (default 25)')
 	.option('--snapshots <on|off>', 'Record visible window text snapshots')
+	.option(
+		'--skip-private-windows <on|off>',
+		'Never record private / incognito browser windows (default on)'
+	)
 	.option('--digests <on|off>', 'Have an agent write 15-minute digests (off by default)')
 	.option('--digest-agent <id>', 'Agent that writes digests (empty string clears it)')
 	.option(
@@ -2905,6 +2955,12 @@ quickChatCmd
 	.action((options) => quickChat('hide', {}, options));
 
 quickChatCmd
+	.command('return')
+	.description('Close the Quick Chat window and bring Maestro forward (Cmd+` in the window)')
+	.option('--json', 'Output as JSON (for scripting)')
+	.action((options) => quickChat('return', {}, options));
+
+quickChatCmd
 	.command('toggle')
 	.description('Open the window, focus it, or close it (exactly what the hotkey does)')
 	.option('--json', 'Output as JSON (for scripting)')
@@ -3297,6 +3353,16 @@ program
 	.option('-r, --range <range>', 'Time range: day, week, month, quarter, year, all (default: week)')
 	.option('--json', 'Output the full aggregation object as JSON')
 	.action(stats);
+
+program
+	.command('stats-tokens')
+	.description(
+		'Show token usage, cost, and tokens per second (average and peak) per provider and model'
+	)
+	.option('-r, --range <range>', 'Time range: day, week, month, quarter, year, all (default: week)')
+	.option('--refresh', "Re-read changed transcripts instead of the app's cached result")
+	.option('--json', 'Output the full token usage object as JSON')
+	.action(statsTokens);
 
 program
 	.command('stats-query <sql>')

@@ -42,6 +42,7 @@ import { FIRST_PARTY_PLUGINS } from '../../../../shared/plugins/first-party';
 import { pluginSettingsId } from '../../../../shared/plugins/panel-host';
 import { getModalActions, useModalStore } from '../../../stores/modalStore';
 import { launchFromSettings } from '../../../utils/launchFromSettings';
+import type { EncoreTileRequest } from '../tabs/EncoreTab/types';
 
 interface ExtensionDetailsProps {
 	theme: Theme;
@@ -59,6 +60,9 @@ interface ExtensionDetailsProps {
 	 * the Plugins tab). Absent for plugins and for features with no inline
 	 * config (e.g. Pianola, whose config is its own modal). */
 	settingsBody?: ReactNode;
+	/** A deep link into this tile's settings. Each new request shows the
+	 * Settings sub-tab, even when the pane was already open on Help. */
+	settingsRequest?: EncoreTileRequest | null;
 }
 
 type ExtensionSubTab = 'help' | 'settings' | 'permissions';
@@ -94,6 +98,7 @@ export function ExtensionDetails({
 	onRevoke,
 	getGrants,
 	settingsBody,
+	settingsRequest,
 }: ExtensionDetailsProps) {
 	// Grants are tagged with the plugin they belong to, so switching plugins never
 	// reads the previous plugin's snapshot before the new plugin's async load
@@ -189,6 +194,10 @@ export function ExtensionDetails({
 		setSettingValues({});
 		setActiveSubTab(extStateRef.current === 'enabled' && hasSettingsTab ? 'settings' : 'help');
 	}, [ext.key, hasSettingsTab]);
+
+	useEffect(() => {
+		if (settingsRequest && hasSettingsTab) setActiveSubTab('settings');
+	}, [settingsRequest, hasSettingsTab]);
 
 	const openConfigure = useCallback(async () => {
 		if (!canConfigurePlugin) {

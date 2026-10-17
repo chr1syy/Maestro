@@ -2087,15 +2087,16 @@ macOS: show the Accessibility prompt. Linux: turn on the desktop accessibility b
 
 Show settings, or change them with the flags below
 
-| Option                      | Description                                                        | Default |
-| --------------------------- | ------------------------------------------------------------------ | ------- |
-| `--retention-days <n>`      | Keep this many days (default 90)                                   | -       |
-| `--max-gb <n>`              | Keep at most this many GB (default 25)                             | -       |
-| `--snapshots <on\|off>`     | Record visible window text snapshots                               | -       |
-| `--digests <on\|off>`       | Have an agent write 15-minute digests (off by default)             | -       |
-| `--digest-agent <id>`       | Agent that writes digests (empty string clears it)                 | -       |
-| `--digest-rollup <on\|off>` | Also write 6-hour roll-ups from the 15-minute digests (default on) | -       |
-| `--json`                    | Output as JSON (for scripting)                                     | -       |
+| Option                             | Description                                                        | Default |
+| ---------------------------------- | ------------------------------------------------------------------ | ------- |
+| `--retention-days <n>`             | Keep this many days (default 90)                                   | -       |
+| `--max-gb <n>`                     | Keep at most this many GB (default 25)                             | -       |
+| `--snapshots <on\|off>`            | Record visible window text snapshots                               | -       |
+| `--skip-private-windows <on\|off>` | Never record private / incognito browser windows (default on)      | -       |
+| `--digests <on\|off>`              | Have an agent write 15-minute digests (off by default)             | -       |
+| `--digest-agent <id>`              | Agent that writes digests (empty string clears it)                 | -       |
+| `--digest-rollup <on\|off>`        | Also write 6-hour roll-ups from the 15-minute digests (default on) | -       |
+| `--json`                           | Output as JSON (for scripting)                                     | -       |
 
 ## `maestro-cli pianola`
 
@@ -2521,6 +2522,14 @@ Close the Quick Chat window; the conversation is kept
 | -------- | ------------------------------ | ------- |
 | `--json` | Output as JSON (for scripting) | -       |
 
+## `maestro-cli quick-chat return`
+
+Close the Quick Chat window and bring Maestro forward (Cmd+` in the window)
+
+| Option   | Description                    | Default |
+| -------- | ------------------------------ | ------- |
+| `--json` | Output as JSON (for scripting) | -       |
+
 ## `maestro-cli quick-chat toggle`
 
 Open the window, focus it, or close it (exactly what the hotkey does)
@@ -2909,6 +2918,16 @@ Show aggregated Usage Dashboard metrics for a time range
 | --------------------- | ---------------------------------------------------------------- | ------- |
 | `-r, --range <range>` | Time range: day, week, month, quarter, year, all (default: week) | -       |
 | `--json`              | Output the full aggregation object as JSON                       | -       |
+
+## `maestro-cli stats-tokens`
+
+Show token usage, cost, and tokens per second (average and peak) per provider and model
+
+| Option                | Description                                                      | Default |
+| --------------------- | ---------------------------------------------------------------- | ------- |
+| `-r, --range <range>` | Time range: day, week, month, quarter, year, all (default: week) | -       |
+| `--refresh`           | Re-read changed transcripts instead of the app's cached result   | -       |
+| `--json`              | Output the full token usage object as JSON                       | -       |
 
 ## `maestro-cli stats-query <sql>`
 

@@ -185,6 +185,11 @@ export function extensionBadge(
 	return null;
 }
 
+/** The tile key of a first-party feature (see UnifiedExtension.key). */
+export function builtinExtensionKey(flag: keyof EncoreFeatureFlags): string {
+	return `builtin:${flag}`;
+}
+
 /** Project a first-party feature flag onto a tile. */
 export function builtinExtension(
 	def: BuiltinFeatureDef,
@@ -193,7 +198,7 @@ export function builtinExtension(
 	const on = flags[def.flag] === true;
 	const backing = def.pluginBacking;
 	return {
-		key: `builtin:${def.flag}`,
+		key: builtinExtensionKey(def.flag),
 		kind: 'builtin',
 		id: def.flag,
 		name: backing.name,
