@@ -1,6 +1,6 @@
 {
 	"name": "maestro",
-	"version": "1.1.0-RC.local.20261017105559.rcfba8adae.relay.voice.idle",
+	"version": "1.1.0-RC.local.20261017185756.rc94a3c569.startupfix",
 	"description": "Maestro hones fractured attention into focused intent.",
 	"main": "dist/main/bootstrap.js",
 	"author": {
@@ -317,6 +317,7 @@
 			]
 		},
 		"deb": {
+			"afterInstall": "build/after-install.tpl",
 			"depends": [
 				"libgtk-3-0",
 				"libnotify4",
