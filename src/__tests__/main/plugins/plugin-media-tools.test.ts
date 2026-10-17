@@ -643,7 +643,7 @@ describe('media tools boundary', () => {
 			{ directory: current, models: ['base'] },
 			{ directory: other, models: ['small'] },
 		]);
-		expect(result.checkedDirectories).toHaveLength(7);
+		expect(result.checkedDirectories).toHaveLength(process.platform === 'win32' ? 5 : 7);
 		expect(enumerate).not.toHaveBeenCalled();
 		expect((await resolveMediaRuntime(current)).models).toEqual({
 			base: path.join(current, 'ggml-base.bin'),
