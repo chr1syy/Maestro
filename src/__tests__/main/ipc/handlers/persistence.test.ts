@@ -91,9 +91,11 @@ vi.mock('../../../../main/themes', () => ({
 vi.mock('../../../../main/plugins/plugin-media-tools', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../../../../main/plugins/plugin-media-tools')>()),
 	resolveMediaRuntime: vi.fn(),
+	detectHostMediaTools: vi.fn(),
 	getMediaToolStatus: vi.fn(),
 }));
 import {
+	detectHostMediaTools,
 	resolveMediaRuntime,
 	getMediaToolStatus,
 } from '../../../../main/plugins/plugin-media-tools';
@@ -414,6 +416,31 @@ describe('persistence IPC handlers', () => {
 			expect(mockSettingsStore.get).toHaveBeenCalledWith('shortcuts.openCommandPalette');
 			expect(result).toEqual({ ctrl: true, key: 'k' });
 		});
+	});
+
+	it('proposes using the live host preference, then persists only an explicit canonical save', async () => {
+		const proposals = {
+			tools: [],
+			checkedDirectories: ['/manual'],
+			directories: [{ directory: '/detected', models: ['base'] }],
+		};
+		let saved = '/manual';
+		mockSettingsStore.get.mockImplementation(() => saved);
+		mockSettingsStore.set.mockImplementation((_key, value) => {
+			saved = value;
+		});
+		vi.mocked(detectHostMediaTools).mockResolvedValue(proposals as never);
+		expect(await handlers.get('settings:detectMediaTools')!({})).toEqual(proposals);
+		expect(detectHostMediaTools).toHaveBeenCalledWith('/manual');
+		expect(mockSettingsStore.set).not.toHaveBeenCalled();
+		vi.mocked(fs.realpath).mockResolvedValue('/canonical/detected');
+		vi.mocked(fs.stat).mockResolvedValue({ isDirectory: () => true } as never);
+		expect(await handlers.get('settings:set')!({}, 'mediaModelDirectory', '/detected')).toBe(true);
+		expect(await handlers.get('settings:get')!({}, 'mediaModelDirectory')).toBe(
+			'/canonical/detected'
+		);
+		await handlers.get('settings:mediaStatus')!({});
+		expect(resolveMediaRuntime).toHaveBeenLastCalledWith('/canonical/detected');
 	});
 
 	it('reads media status using the live host setting', async () => {

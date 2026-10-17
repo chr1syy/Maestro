@@ -5,8 +5,10 @@ import { useSettingsStore } from '../../../../renderer/stores/settingsStore';
 import { mockTheme } from '../../../helpers/mockTheme';
 import { THEMES } from '../../../../shared/themes';
 
+const persistDirectory = useSettingsStore.getState().setMediaModelDirectory;
 const getMediaStatus = vi.fn();
 const setDirectory = vi.fn();
+const detectMediaTools = vi.fn();
 
 beforeEach(() => {
 	getMediaStatus
@@ -14,10 +16,95 @@ beforeEach(() => {
 		.mockResolvedValue({ profiles: [], models: [], missing: ['model-directory'] });
 	setDirectory.mockReset().mockResolvedValue(false);
 	window.maestro.settings.getMediaStatus = getMediaStatus;
+	window.maestro.settings.detectMediaTools = detectMediaTools;
+	detectMediaTools.mockReset().mockResolvedValue({
+		tools: ['ffmpeg', 'ffprobe', 'whisper-cli'],
+		checkedDirectories: ['/existing/models'],
+		directories: [{ directory: '/existing/models', models: ['base'] }],
+	});
 	useSettingsStore.setState({ mediaModelDirectory: '', setMediaModelDirectory: setDirectory });
 });
 
 describe('HostMediaSection', () => {
+	it('detects a bounded proposal without saving or replacing an explicit draft', async () => {
+		useSettingsStore.setState({ mediaModelDirectory: '/manual/models' });
+		render(<HostMediaSection theme={mockTheme} />);
+		fireEvent.click(screen.getByText('Auto-detect'));
+		expect(await screen.findByText('Models: base')).toBeInTheDocument();
+		expect(screen.getByLabelText('Whisper model directory')).toHaveValue('/manual/models');
+		expect(setDirectory).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByText('Use this directory'));
+		expect(screen.getByLabelText('Whisper model directory')).toHaveValue('/existing/models');
+		expect(setDirectory).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByText('Save directory'));
+		await waitFor(() => expect(setDirectory).toHaveBeenCalledWith('/existing/models'));
+	});
+
+	it('persists a chosen proposal through the real store action and restores it on remount', async () => {
+		let persisted = '';
+		useSettingsStore.setState({ setMediaModelDirectory: persistDirectory });
+		vi.mocked(window.maestro.settings.set).mockImplementation(async (key, value) => {
+			expect(key).toBe('mediaModelDirectory');
+			persisted = value as string;
+			return true;
+		});
+		vi.mocked(window.maestro.settings.get).mockImplementation(async () => persisted);
+		getMediaStatus.mockImplementation(async () =>
+			persisted
+				? { profiles: ['whisper-cli'], models: ['base'], missing: [] }
+				: { profiles: [], models: [], missing: ['model-directory'] }
+		);
+		const view = render(<HostMediaSection theme={mockTheme} />);
+		fireEvent.click(screen.getByText('Auto-detect'));
+		await screen.findByText('Models: base');
+		expect(persisted).toBe('');
+		fireEvent.click(screen.getByText('Use this directory'));
+		expect(persisted).toBe('');
+		fireEvent.click(screen.getByText('Save directory'));
+		await screen.findByText('Host media status: Ready');
+		expect(persisted).toBe('/existing/models');
+		expect(useSettingsStore.getState().mediaModelDirectory).toBe(persisted);
+		view.unmount();
+		render(<HostMediaSection theme={mockTheme} />);
+		expect(screen.getByLabelText('Whisper model directory')).toHaveValue(persisted);
+		await screen.findByText('Available models: base');
+	});
+
+	it('requires a choice when several model folders are found', async () => {
+		detectMediaTools.mockResolvedValue({
+			tools: [],
+			checkedDirectories: [],
+			directories: [
+				{ directory: '/first', models: ['base'] },
+				{ directory: '/second', models: ['small'] },
+			],
+		});
+		render(<HostMediaSection theme={mockTheme} />);
+		fireEvent.click(screen.getByText('Auto-detect'));
+		await screen.findByText('Multiple model folders found. Choose one explicitly.');
+		expect(screen.getByLabelText('Whisper model directory')).toHaveValue('');
+		fireEvent.click(screen.getAllByText('Use this directory')[1]);
+		expect(screen.getByLabelText('Whisper model directory')).toHaveValue('/second');
+		expect(setDirectory).not.toHaveBeenCalled();
+	});
+
+	it('keeps manual input on no result and allows retry after a sanitized detection failure', async () => {
+		detectMediaTools
+			.mockRejectedValueOnce(new Error('private host path'))
+			.mockResolvedValueOnce({ tools: [], checkedDirectories: ['/missing'], directories: [] });
+		render(<HostMediaSection theme={mockTheme} />);
+		fireEvent.change(screen.getByLabelText('Whisper model directory'), {
+			target: { value: '/manual' },
+		});
+		fireEvent.click(screen.getByText('Auto-detect'));
+		await screen.findByText(/Could not detect host media tools/);
+		expect(screen.queryByText('private host path')).not.toBeInTheDocument();
+		fireEvent.click(screen.getByText('Auto-detect'));
+		await screen.findByText(/No supported multilingual models found/);
+		expect(screen.getByLabelText('Whisper model directory')).toHaveValue('/manual');
+		expect(setDirectory).not.toHaveBeenCalled();
+	});
+
 	it.each(['ayu-light', 'solarized-dark'])(
 		'shows actual missing prerequisites using %s',
 		async (themeId) => {

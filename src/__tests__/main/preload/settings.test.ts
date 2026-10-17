@@ -45,6 +45,13 @@ describe('Settings Preload API', () => {
 			expect(mockInvoke).toHaveBeenCalledWith('settings:mediaStatus');
 		});
 
+		it('exposes host-only read-only media proposals without arguments', async () => {
+			const result = { tools: [], checkedDirectories: ['/models'], directories: [] };
+			mockInvoke.mockResolvedValue(result);
+			expect(await api.detectMediaTools()).toEqual(result);
+			expect(mockInvoke).toHaveBeenCalledWith('settings:detectMediaTools');
+		});
+
 		describe('get', () => {
 			it('should invoke settings:get with key', async () => {
 				mockInvoke.mockResolvedValue('test-value');

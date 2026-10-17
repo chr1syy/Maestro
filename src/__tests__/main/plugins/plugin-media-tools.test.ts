@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { PluginMediaTools, resolveMediaRuntime } from '../../../main/plugins/plugin-media-tools';
+import {
+	PluginMediaTools,
+	resolveMediaRuntime,
+	detectHostMediaTools,
+} from '../../../main/plugins/plugin-media-tools';
 import { MEDIA_LIMITS } from '../../../shared/plugins/media-tools';
 import { PluginServiceHost } from '../../../main/plugins/plugin-service-host';
 import {
@@ -17,6 +21,8 @@ import {
 } from '../../../shared/plugins/permissions';
 import type { PermissionGrant } from '../../../shared/plugins/permissions';
 import { logger } from '../../../main/utils/logger';
+
+vi.mock('node:os', async (original) => ({ ...(await original<typeof import('node:os')>()) }));
 
 const native = vi.hoisted(() => ({ execFile: vi.fn(), paths: vi.fn() }));
 vi.mock('node:child_process', () => ({ execFile: native.execFile }));
@@ -37,8 +43,12 @@ let probeCodec: string;
 let whisperJson: string;
 let diagnostics: Error | null;
 let grants: PermissionGrant[];
+let modelFixture: Buffer;
 
 beforeEach(async () => {
+	modelFixture = Buffer.alloc(1024 * 1024);
+	modelFixture.writeUInt32LE(0x67676d6c, 0);
+	modelFixture.writeUInt32LE(51865, 4);
 	root = await fs.mkdtemp(path.join(os.tmpdir(), 'maestro-media-test-'));
 	grant = true;
 	hold = false;
@@ -588,10 +598,86 @@ describe('media tools boundary', () => {
 		expect(await fs.readdir(root)).toEqual([]);
 	});
 
+	it('finds an installed multilingual model as a proposal without enabling it', async () => {
+		vi.spyOn(os, 'homedir').mockReturnValue(root);
+		vi.stubEnv('MAESTRO_MEDIA_MODEL_DIR', '');
+		native.paths.mockResolvedValue([]);
+		const directory = path.join(root, 'code', 'whisper.cpp', 'models');
+		await fs.mkdir(directory, { recursive: true });
+		const file = await fs.open(path.join(directory, 'ggml-base.bin'), 'w');
+		const header = Buffer.alloc(12);
+		header.writeUInt32LE(0x67676d6c, 0);
+		header.writeUInt32LE(51865, 4);
+		await file.write(header);
+		await file.truncate(147951465);
+		await file.close();
+		await fs.writeFile(path.join(directory, 'for-tests-ggml-small.bin'), header);
+		expect((await resolveMediaRuntime()).models).toEqual({});
+		const detected = await detectHostMediaTools();
+		expect(detected.directories).toEqual([{ directory, models: ['base'] }]);
+		expect((await resolveMediaRuntime()).models).toEqual({});
+		expect(native.execFile).not.toHaveBeenCalled();
+	});
+
+	it('does not advertise fake models even when named like supported models', async () => {
+		native.paths.mockResolvedValue([]);
+		await fs.writeFile(path.join(root, 'ggml-base.bin'), 'model');
+		expect((await resolveMediaRuntime(root)).models).toEqual({});
+	});
+
+	it('deduplicates canonical proposals, reports ambiguity, and never searches nested data', async () => {
+		vi.spyOn(os, 'homedir').mockReturnValue(root);
+		native.paths.mockResolvedValue([]);
+		const current = path.join(root, 'current');
+		const other = path.join(root, 'whisper.cpp', 'models');
+		const alias = path.join(root, 'alias');
+		await fs.mkdir(current);
+		await fs.mkdir(other, { recursive: true });
+		await fs.writeFile(path.join(current, 'ggml-base.bin'), modelFixture);
+		await fs.writeFile(path.join(other, 'ggml-small.bin'), modelFixture);
+		await fs.symlink(current, alias, 'dir');
+		vi.stubEnv('MAESTRO_MEDIA_MODEL_DIR', alias);
+		const enumerate = vi.spyOn(fs, 'readdir');
+		const result = await detectHostMediaTools(current);
+		expect(result.directories).toEqual([
+			{ directory: current, models: ['base'] },
+			{ directory: other, models: ['small'] },
+		]);
+		expect(result.checkedDirectories).toHaveLength(7);
+		expect(enumerate).not.toHaveBeenCalled();
+		expect((await resolveMediaRuntime(current)).models).toEqual({
+			base: path.join(current, 'ggml-base.bin'),
+		});
+	});
+
+	it.each(['english-header', 'bad-magic', 'test-name', 'english-name', 'unreadable'])(
+		'excludes %s from status and proposals',
+		async (reason) => {
+			native.paths.mockResolvedValue([]);
+			vi.spyOn(os, 'homedir').mockReturnValue(root);
+			vi.stubEnv('MAESTRO_MEDIA_MODEL_DIR', '');
+			if (reason === 'english-header') modelFixture.writeUInt32LE(51864, 4);
+			if (reason === 'bad-magic') modelFixture.writeUInt32LE(0, 0);
+			const name =
+				reason === 'test-name'
+					? 'for-tests-ggml-base.bin'
+					: reason === 'english-name'
+						? 'ggml-base.en.bin'
+						: 'ggml-base.bin';
+			await fs.writeFile(path.join(root, name), modelFixture);
+			if (reason === 'unreadable')
+				vi.spyOn(fs, 'open').mockRejectedValue(
+					Object.assign(new Error('private'), { code: 'EACCES' })
+				);
+			expect((await resolveMediaRuntime(root)).models).toEqual({});
+			expect((await detectHostMediaTools(root)).directories).toEqual([]);
+		}
+	);
+
 	it('reports only available model IDs and keeps path overrides host-only', async () => {
 		const modelRoot = path.join(root, 'models');
 		await fs.mkdir(modelRoot);
-		await fs.writeFile(path.join(modelRoot, 'ggml-base.bin'), 'model');
+		await fs.writeFile(path.join(modelRoot, 'ggml-base.bin'), modelFixture);
 		await fs.writeFile(path.join(root, 'private'), 'secret');
 		await fs.symlink(path.join(root, 'private'), path.join(modelRoot, 'ggml-small.bin'));
 		vi.stubEnv('MAESTRO_MEDIA_MODEL_DIR', modelRoot);
@@ -612,13 +698,13 @@ describe('media tools boundary', () => {
 		const configured = path.join(root, 'configured');
 		await fs.mkdir(fallback);
 		await fs.mkdir(configured);
-		await fs.writeFile(path.join(fallback, 'ggml-small.bin'), 'model');
-		await fs.writeFile(path.join(configured, 'ggml-base.bin'), 'model');
+		await fs.writeFile(path.join(fallback, 'ggml-small.bin'), modelFixture);
+		await fs.writeFile(path.join(configured, 'ggml-base.bin'), modelFixture);
 		vi.stubEnv('MAESTRO_MEDIA_MODEL_DIR', fallback);
 		expect(Object.keys((await resolveMediaRuntime(configured)).models)).toEqual(['base']);
 		expect(Object.keys((await resolveMediaRuntime('')).models)).toEqual(['small']);
 		expect(Object.keys((await resolveMediaRuntime()).models)).toEqual(['small']);
-		await fs.writeFile(path.join(configured, 'ggml-tiny.bin'), 'model');
+		await fs.writeFile(path.join(configured, 'ggml-tiny.bin'), modelFixture);
 		expect(Object.keys((await resolveMediaRuntime(configured)).models)).toEqual(['tiny', 'base']);
 	});
 
@@ -626,7 +712,7 @@ describe('media tools boundary', () => {
 		'fails closed for invalid host directory %j even with an environment fallback',
 		async (directory) => {
 			native.paths.mockResolvedValue([]);
-			await fs.writeFile(path.join(root, 'ggml-base.bin'), 'model');
+			await fs.writeFile(path.join(root, 'ggml-base.bin'), modelFixture);
 			vi.stubEnv('MAESTRO_MEDIA_MODEL_DIR', root);
 			expect((await resolveMediaRuntime(directory)).models).toEqual({});
 		}
@@ -638,8 +724,8 @@ describe('media tools boundary', () => {
 		const alias = path.join(root, 'alias');
 		await fs.mkdir(modelRoot);
 		await fs.symlink(modelRoot, alias, 'dir');
-		await fs.writeFile(path.join(modelRoot, 'ggml-base.bin'), 'model');
-		await fs.writeFile(path.join(modelRoot, 'ggml-base.en.bin'), 'model');
+		await fs.writeFile(path.join(modelRoot, 'ggml-base.bin'), modelFixture);
+		await fs.writeFile(path.join(modelRoot, 'ggml-base.en.bin'), modelFixture);
 		await fs.writeFile(path.join(root, 'secret'), 'secret');
 		await fs.symlink(path.join(root, 'secret'), path.join(modelRoot, 'ggml-small.bin'));
 		await fs.mkdir(path.join(modelRoot, 'ggml-medium.bin'));

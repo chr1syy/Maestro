@@ -289,6 +289,7 @@ interface MaestroAPI {
 		set: (key: string, value: unknown) => Promise<boolean>;
 		getAll: () => Promise<Record<string, unknown>>;
 		getMediaStatus?: () => Promise<import('../shared/plugins/media-tools').MediaToolStatus>;
+		detectMediaTools?: () => Promise<import('../shared/hostMedia').HostMediaDetection>;
 		onExternalChange: (handler: () => void) => () => void;
 	};
 	sessions: {
