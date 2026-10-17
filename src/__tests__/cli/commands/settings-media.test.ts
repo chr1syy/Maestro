@@ -64,7 +64,10 @@ describe('CLI host media settings parity', () => {
 		expect(writeSettingValue).toHaveBeenCalledWith('mediaModelDirectory', '');
 	});
 	it('reports the allowed local models through the host runtime resolver', async () => {
-		await fs.writeFile(path.join(root, 'ggml-base.bin'), 'fixture');
+		const model = Buffer.alloc(1024 * 1024);
+		model.writeUInt32LE(0x67676d6c, 0);
+		model.writeUInt32LE(51865, 4);
+		await fs.writeFile(path.join(root, 'ggml-base.bin'), model);
 		vi.mocked(readSettingValue).mockReturnValue(root);
 		await settingsMediaStatus();
 		expect(readSettingValue).toHaveBeenCalledWith('mediaModelDirectory');

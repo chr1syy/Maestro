@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AudioLines } from 'lucide-react';
+import type { HostMediaDetection } from '../../../shared/hostMedia';
 import type { MediaToolStatus } from '../../../shared/plugins/media-tools';
 import { useSettingsStore } from '../../stores/settingsStore';
 import type { Theme } from '../../types';
@@ -16,6 +17,9 @@ export function HostMediaSection({ theme }: { theme: Theme }) {
 	const [status, setStatus] = useState<MediaToolStatus | null>(null);
 	const [statusError, setStatusError] = useState('');
 	const [refresh, setRefresh] = useState(0);
+	const [detecting, setDetecting] = useState(false);
+	const [detection, setDetection] = useState<HostMediaDetection | null>(null);
+	const [detectionError, setDetectionError] = useState('');
 	const supported = !!window.maestro?.settings?.getMediaStatus;
 
 	useEffect(() => setDraft(directory), [directory]);
@@ -36,6 +40,23 @@ export function HostMediaSection({ theme }: { theme: Theme }) {
 			active = false;
 		};
 	}, [directory, refresh, supported]);
+
+	const detect = async () => {
+		if (detecting || !window.maestro.settings.detectMediaTools) return;
+		setDetecting(true);
+		setDetection(null);
+		setDetectionError('');
+		try {
+			setDetection(await window.maestro.settings.detectMediaTools());
+			setRefresh((n) => n + 1);
+		} catch {
+			setDetectionError(
+				'Could not detect host media tools. Try again or choose a model directory manually.'
+			);
+		} finally {
+			setDetecting(false);
+		}
+	};
 
 	const save = async () => {
 		if (saving) return;
@@ -73,7 +94,8 @@ export function HostMediaSection({ theme }: { theme: Theme }) {
 					<p className="text-xs opacity-70 mt-0.5 mb-2">
 						Choose the local folder containing multilingual ggml-&lt;model&gt;.bin files, such as
 						ggml-base.bin. This host setting takes precedence over MAESTRO_MEDIA_MODEL_DIR. Leave it
-						empty to use that environment fallback.
+						empty to use that environment fallback. This is a model folder, not a tools folder.
+						Tools are found separately using Maestro's host PATH and standard binary locations.
 					</p>
 					<FormInput
 						id="host-media-directory"
@@ -96,6 +118,70 @@ export function HostMediaSection({ theme }: { theme: Theme }) {
 				>
 					{saving ? 'Saving...' : 'Save directory'}
 				</button>
+				<p className="text-xs opacity-70">
+					Auto-detect checks the current setting, host environment and a short list of standard
+					whisper.cpp model folders. It does not search recursively, install anything or save a
+					setting. Select a proposal, then choose Save directory. Manual settings stay in effect
+					until saved.
+				</p>
+				<button
+					type="button"
+					disabled={saving || detecting || !window.maestro.settings.detectMediaTools}
+					onClick={() => void detect()}
+					className="w-full px-3 py-2 rounded border text-sm disabled:opacity-55"
+					style={{ borderColor: theme.colors.border, backgroundColor: theme.colors.bgActivity }}
+				>
+					{detecting ? 'Detecting...' : 'Auto-detect'}
+				</button>
+				<div aria-live="polite" className="text-xs space-y-2">
+					{detectionError && <p style={{ color: theme.colors.error }}>{detectionError}</p>}
+					{detection && (
+						<>
+							<p>Detected tools: {detection.tools.join(', ') || 'None'}</p>
+							<p>
+								{detection.directories.length === 0
+									? 'No supported multilingual models found in the checked folders.'
+									: detection.directories.length > 1
+										? 'Multiple model folders found. Choose one explicitly.'
+										: 'Model folder found. Review before saving.'}
+							</p>
+							{detection.directories.map((candidate) => (
+								<div key={candidate.directory} className="space-y-1">
+									<p className="break-all">{candidate.directory}</p>
+									<p>Models: {candidate.models.join(', ')}</p>
+									<button
+										type="button"
+										disabled={saving}
+										onClick={() => {
+											setDraft(candidate.directory);
+											setError('');
+										}}
+										className="w-full px-3 py-2 rounded border text-sm disabled:opacity-55"
+										style={{
+											borderColor: theme.colors.border,
+											backgroundColor: theme.colors.bgActivity,
+										}}
+									>
+										Use this directory
+									</button>
+								</div>
+							))}
+							<details>
+								<summary>Checked folders</summary>
+								{detection.checkedDirectories.map((directory) => (
+									<p key={directory} className="break-all">
+										{directory}
+									</p>
+								))}
+							</details>
+							<p className="opacity-70">
+								Only supported multilingual ggml filenames with a plausible header and size are
+								listed. English-only, test, unreadable and unsupported files are excluded. Status is
+								a prerequisite check; recognition still validates the model at runtime.
+							</p>
+						</>
+					)}
+				</div>
 				<div role="status" aria-live="polite" className="text-xs space-y-1">
 					{!supported ? (
 						<p>Host media status is available in the desktop app.</p>

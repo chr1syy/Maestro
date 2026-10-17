@@ -161,6 +161,17 @@ existing settings store. The broker re-reads the setting at call time, so no hos
 plugin restart is required. Plugins cannot write this host setting through their SDK.
 This configures the model directory only; select an available model in Relay.
 
+**Auto-detect** is a read-only host diagnostic. It reuses the runtime's canonical
+binary discovery (host PATH, standard binary locations and executable overrides).
+It proposes model folders from the existing preference, `MAESTRO_MEDIA_MODEL_DIR`,
+`~/whisper.cpp/models`, `~/code/whisper.cpp/models`, `~/.local/share/whisper.cpp/models`
+and, on Unix, `/usr/local/share/whisper.cpp/models` and `/usr/share/whisper.cpp/models`.
+The UI lists the checked folders, detected tools and each canonical proposal's models.
+There is no recursive directory search, download, install, grant or automatic write.
+Multiple proposals require an explicit choice. **Use this directory** fills the input;
+**Save directory** validates and persists through the existing host setting path.
+The model directory contains model files; it is not a shared directory for all tools.
+
 A non-empty `mediaModelDirectory` takes precedence over the host launch environment's
 `MAESTRO_MEDIA_MODEL_DIR`. An empty or absent setting uses that environment fallback;
 an invalid non-empty setting fails closed rather than using another directory.
@@ -180,6 +191,11 @@ when their launch environments differ.
 
 Only allowlisted multilingual filenames are considered. Model paths are canonicalized;
 symlinks escaping the approved directory, non-files and unreadable files are rejected.
+The resolver reads only the first eight bytes and checks ggml magic, a multilingual
+vocabulary (51865 or 51866), and a minimum size of 1 MiB. This rejects test stubs,
+English-only headers and clearly invalid files, but is a plausibility check rather
+than a full integrity or successful-inference guarantee. Recognition still validates
+model contents at execution time.
 If status lists only `base`, Relay must select `base`; selecting `small` requires an
 available `ggml-small.bin`. A ready host profile does not mean every model is available.
 This setting downloads or installs nothing.

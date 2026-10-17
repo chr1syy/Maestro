@@ -17,6 +17,7 @@ import {
 	type MediaProbe,
 	type MediaToolStatus,
 } from '../../shared/plugins/media-tools';
+import type { HostMediaDetection } from '../../shared/hostMedia';
 import type { EgressGuard } from './net-egress-guard';
 
 type Tool = 'ffprobe' | 'ffmpeg' | 'whisper-cli';
@@ -106,31 +107,95 @@ export async function resolveMediaRuntime(configuredDirectory?: unknown): Promis
 			}
 		}
 	}
-	const models: Runtime['models'] = {};
 	// A non-empty host setting takes precedence. Invalid stored values fail closed.
 	const directory =
 		configuredDirectory === undefined || configuredDirectory === ''
 			? process.env.MAESTRO_MEDIA_MODEL_DIR
 			: configuredDirectory;
-	if (typeof directory === 'string' && directory && path.isAbsolute(directory)) {
-		try {
-			const root = await fs.realpath(directory);
-			for (const id of MEDIA_MODEL_IDS) {
+	return { binaries, models: await resolveMediaModels(directory) };
+}
+
+/** Bounded filename/header probes; never enumerate a directory or read a whole model. */
+async function resolveMediaModels(directory: unknown): Promise<Runtime['models']> {
+	const models: Runtime['models'] = {};
+	if (typeof directory !== 'string' || !directory || !path.isAbsolute(directory)) return models;
+	try {
+		const root = await fs.realpath(directory);
+		for (const id of MEDIA_MODEL_IDS) {
+			try {
+				const real = await fs.realpath(path.join(root, `ggml-${id}.bin`));
+				if (path.dirname(real) !== root) continue;
+				// Nonblocking + no-follow prevents a swapped FIFO/link from hanging discovery.
+				const file = await fs.open(
+					real,
+					constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0)
+				);
 				try {
-					const real = await fs.realpath(path.join(root, `ggml-${id}.bin`));
-					// A symlink cannot expose a file outside the host-approved model directory.
-					if (path.dirname(real) !== root || !(await fs.stat(real)).isFile()) continue;
-					await fs.access(real, constants.R_OK);
+					const stat = await file.stat();
+					if (!stat.isFile() || stat.size < 1024 * 1024) continue;
+					const header = Buffer.alloc(8);
+					const { bytesRead } = await file.read(header, 0, header.length, 0);
+					// ggml magic + multilingual vocabulary; .en models have 51864 tokens.
+					if (
+						bytesRead !== 8 ||
+						header.readUInt32LE(0) !== 0x67676d6c ||
+						![51865, 51866].includes(header.readUInt32LE(4))
+					)
+						continue;
 					models[id] = real;
-				} catch {
-					/* absent models are not installed */
+				} finally {
+					await file.close();
 				}
+			} catch {
+				/* missing, unreadable, test-only or unsupported model */
 			}
+		}
+	} catch {
+		/* unavailable root */
+	}
+	return models;
+}
+
+/** Read-only host proposal. Does not change runtime selection, preferences or grants. */
+export async function detectHostMediaTools(
+	configuredDirectory?: unknown
+): Promise<HostMediaDetection> {
+	const runtime = await resolveMediaRuntime(configuredDirectory);
+	const home = os.homedir();
+	const candidates = [
+		configuredDirectory,
+		process.env.MAESTRO_MEDIA_MODEL_DIR,
+		path.join(home, 'whisper.cpp', 'models'),
+		path.join(home, 'code', 'whisper.cpp', 'models'),
+		path.join(home, '.local', 'share', 'whisper.cpp', 'models'),
+		...(process.platform === 'win32'
+			? []
+			: ['/usr/local/share/whisper.cpp/models', '/usr/share/whisper.cpp/models']),
+	];
+	const checkedDirectories = [
+		...new Set(
+			candidates.filter((v): v is string => typeof v === 'string' && !!v && path.isAbsolute(v))
+		),
+	];
+	const directories: HostMediaDetection['directories'] = [];
+	const seen = new Set<string>();
+	for (const candidate of checkedDirectories) {
+		try {
+			const directory = await fs.realpath(candidate);
+			if (seen.has(directory)) continue;
+			seen.add(directory);
+			const available = await resolveMediaModels(directory);
+			const models = MEDIA_MODEL_IDS.filter((id) => !!available[id]);
+			if (models.length) directories.push({ directory, models });
 		} catch {
-			/* unavailable */
+			/* absent roots are expected; no recursive search or fallback selection */
 		}
 	}
-	return { binaries, models };
+	return {
+		tools: (['ffprobe', 'ffmpeg', 'whisper-cli'] as const).filter((t) => !!runtime.binaries[t]),
+		checkedDirectories,
+		directories,
+	};
 }
 
 /** Shared by the broker and the host settings diagnostic. Never exposes filesystem paths. */

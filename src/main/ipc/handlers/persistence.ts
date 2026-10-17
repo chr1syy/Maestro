@@ -17,6 +17,7 @@ import * as fs from 'fs/promises';
 import { logger } from '../../utils/logger';
 import {
 	getMediaToolStatus,
+	detectHostMediaTools,
 	resolveMediaRuntime,
 	resolveMediaModelDirectory,
 } from '../../plugins/plugin-media-tools';
@@ -402,6 +403,10 @@ export function registerPersistenceHandlers(
 		logger.debug(`Settings read: ${key}`, 'Settings', { key, value });
 		return value;
 	});
+
+	ipcMain.handle('settings:detectMediaTools', async () =>
+		detectHostMediaTools(settingsStore.get('mediaModelDirectory'))
+	);
 
 	ipcMain.handle('settings:mediaStatus', async () =>
 		getMediaToolStatus(await resolveMediaRuntime(settingsStore.get('mediaModelDirectory')))

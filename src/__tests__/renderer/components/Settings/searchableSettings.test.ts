@@ -106,6 +106,11 @@ describe('searchableSettings', () => {
 			'MAESTRO_MEDIA_MODEL_DIR',
 			'Available models',
 			'Check status',
+			'Auto-detect',
+			'Use this directory',
+			'Checked folders',
+			'Detected tools',
+			'multilingual ggml',
 		])('finds host media settings for %s', (query) => {
 			expect(searchSettings(query).some((s) => s.id === 'environment-host-media')).toBe(true);
 		});

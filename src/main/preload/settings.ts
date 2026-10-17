@@ -9,6 +9,7 @@
 
 import { ipcRenderer } from 'electron';
 import type { Group } from '../../shared/types';
+import type { HostMediaDetection } from '../../shared/hostMedia';
 import type { MediaToolStatus } from '../../shared/plugins/media-tools';
 import type { SessionTranscriptPatch } from '../../shared/sessionTranscript';
 
@@ -30,6 +31,8 @@ export function createSettingsApi() {
 		getAll: () => ipcRenderer.invoke('settings:getAll'),
 		/** Read-only host diagnostic; does not execute media tools or require a plugin grant. */
 		getMediaStatus: (): Promise<MediaToolStatus> => ipcRenderer.invoke('settings:mediaStatus'),
+		detectMediaTools: (): Promise<HostMediaDetection> =>
+			ipcRenderer.invoke('settings:detectMediaTools'),
 		/** Listen for external settings file changes (e.g., from maestro-cli) */
 		onExternalChange: (handler: () => void) => {
 			const wrappedHandler = () => handler();
