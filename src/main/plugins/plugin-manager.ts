@@ -101,6 +101,8 @@ export interface PluginManagerDeps {
 	toolIdentity?: PluginToolRunIdentity;
 	/** Host-private resource owner bound to exactly toolIdentity. No implicit fallback. */
 	toolProofFiles?: PluginToolRunProofFiles;
+	/** Required only for hardened file issuance: live host storage policy, never plugin input. */
+	assertToolProofStorageActive?: () => void;
 	/** Required for verified tools: live sealed consent/on-disk identity and generation.
 	 * Refresh-time verifyRecord and plain-JSON grants are not substitutes. */
 	assertToolRecordActive?: (record: PluginRecord) => void;
@@ -156,6 +158,7 @@ export class PluginManager {
 	private toolAuthorityStopped = false;
 	private readonly toolIdentity?: PluginToolRunIdentity;
 	private readonly toolProofFiles?: PluginToolRunProofFiles;
+	private readonly assertToolProofStorageActive?: () => void;
 	private readonly toolSandbox?: PluginSandboxLifecycle;
 	private readonly assertToolRecordActive?: (record: PluginRecord) => void;
 	private readonly isToolFeatureEnabled: () => boolean;
@@ -163,6 +166,10 @@ export class PluginManager {
 	constructor(private readonly deps: PluginManagerDeps) {
 		this.toolIdentity = deps.toolIdentity;
 		this.toolProofFiles = deps.toolProofFiles;
+		this.assertToolProofStorageActive =
+			typeof deps.assertToolProofStorageActive === 'function'
+				? deps.assertToolProofStorageActive.bind(deps)
+				: undefined;
 		this.toolSandbox = deps.sandbox;
 		this.isToolFeatureEnabled = deps.isEnabled.bind(deps);
 		this.assertToolRecordActive =
@@ -847,12 +854,14 @@ export class PluginManager {
 			const identity = this.toolIdentity;
 			const files = this.toolProofFiles;
 			const sandbox = this.toolSandbox;
+			const assertStorage = this.assertToolProofStorageActive;
 			if (
 				!(identity instanceof PluginToolRunIdentity) ||
 				!(files instanceof PluginToolRunProofFiles) ||
 				!sandbox ||
 				typeof sandbox.captureToolLifetime !== 'function' ||
 				!this.assertToolRecordActive ||
+				!assertStorage ||
 				!(authority?.signal instanceof AbortSignal) ||
 				typeof authority.assertActive !== 'function'
 			)
@@ -878,6 +887,8 @@ export class PluginManager {
 				if (!this.isToolFeatureEnabled()) throw new ImapConnectionError('MAIL_DENIED');
 				assertCurrent();
 				files.assertIdentity(identity);
+				assertMailActivityAuthority(assertStorage);
+				assertCurrent();
 				assertMailActivityAuthority(checkRun);
 				assertCurrent();
 				if (!this.isToolFeatureEnabled()) throw new ImapConnectionError('MAIL_DENIED');

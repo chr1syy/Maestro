@@ -231,6 +231,54 @@ describe('production host-handler deps wiring (FC2 - wired and gated)', () => {
 	});
 });
 
+describe('production mail storage boundary', () => {
+	it.each(['MailHostService', 'createMailCueHost'])(
+		'checks hardened storage before %s read policy can authorize an account',
+		(factory) => {
+			let policy: ts.ArrowFunction | undefined;
+			const visit = (node: ts.Node): void => {
+				if (
+					(ts.isNewExpression(node) || ts.isCallExpression(node)) &&
+					ts.isIdentifier(node.expression) &&
+					node.expression.text === factory
+				) {
+					const deps = node.arguments?.[0];
+					if (deps && ts.isObjectLiteralExpression(deps)) {
+						for (const property of deps.properties) {
+							if (
+								ts.isPropertyAssignment(property) &&
+								property.name.getText(sf) === 'assertPolicyActive' &&
+								ts.isArrowFunction(property.initializer)
+							)
+								policy = property.initializer;
+						}
+					}
+				}
+				ts.forEachChild(node, visit);
+			};
+			visit(sf);
+			expect(policy, `${factory} must wire a read policy`).toBeDefined();
+			const js = ts.transpileModule(`const policy = ${policy!.getText(sf)};`, {
+				compilerOptions: { target: ts.ScriptTarget.ES2024 },
+			}).outputText;
+			const mailIdentityFor = vi.fn();
+			const denyStorage = vi.fn(() => {
+				throw new Error('MAIL_DENIED');
+			});
+			const checkPolicy = new Function(
+				'assertToolProofStorageActive',
+				'mailIdentityFor',
+				`${js}\nreturn policy;`
+			)(denyStorage, mailIdentityFor);
+			expect(() => checkPolicy('relay', {}, 'fixture-agent', 'read', 'account')).toThrow(
+				'MAIL_DENIED'
+			);
+			expect(denyStorage).toHaveBeenCalledOnce();
+			expect(mailIdentityFor).not.toHaveBeenCalled();
+		}
+	);
+});
+
 describe('production Relay origin backfill', () => {
 	it('respects provider account roots and skips missing or disabled SSH remotes', async () => {
 		let withinBackfill = false;

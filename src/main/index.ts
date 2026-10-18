@@ -52,7 +52,6 @@ import { getMaestroRunService } from './maestro-run';
 import { createMaestroRunForApp } from './maestro-run/bootstrap';
 import { execFile } from 'child_process';
 import { PluginManager } from './plugins/plugin-manager';
-import { PluginToolRunIdentity } from './plugins/plugin-tool-run-identity';
 import { PluginToolRunProofFiles } from './plugins/plugin-tool-run-proof-file';
 import { ImapConnectionError } from './plugins/mail-imap-connection';
 import { getRecord, type PluginRecord } from '../shared/plugins/plugin-registry';
@@ -1768,9 +1767,9 @@ app
 		});
 		// Expose the same instance to the IPC registration phase below.
 		pluginAuthStore = authStore;
-		// Exactly one production registry, shared by manager ingress, issuance and
-		// sandbox nested handles. No spawn caller issues a proof here.
-		let toolIdentity: PluginToolRunIdentity | undefined;
+		// Generic tool identity must survive unavailable optional proof-file storage.
+		// Manager ingress, existing run issuance and sandbox handles share this registry.
+		const toolIdentity = pluginToolRunIdentity;
 		let toolProofFiles: PluginToolRunProofFiles | undefined;
 		const toolProofBase = app.getPath('userData');
 		const assertToolProofLocation = (): void => {
@@ -1830,43 +1829,42 @@ app
 			)
 				throw new ImapConnectionError('MAIL_DENIED');
 		};
+		toolIdentity.setAgentActiveAssertion((agentId) => {
+			assertToolOwnerActive();
+			const sessions = sessionsStore.get('sessions', []);
+			if (!Array.isArray(sessions)) throw new ImapConnectionError('MAIL_DENIED');
+			const matches = sessions.filter((session) => session?.id === agentId);
+			if (
+				matches.length !== 1 ||
+				!isValidAgentId(matches[0].toolType) ||
+				matches[0].toolType === 'terminal' ||
+				matches[0].sessionSshRemoteConfig?.enabled ||
+				matches[0].sshRemoteConfig?.enabled
+			)
+				throw new ImapConnectionError('MAIL_DENIED');
+			assertToolOwnerActive();
+		});
 		try {
 			assertToolProofLocation();
-			toolIdentity = pluginToolRunIdentity;
-			toolIdentity.setAgentActiveAssertion((agentId) => {
-				assertToolOwnerActive();
-				assertToolProofLocation();
-				const sessions = sessionsStore.get('sessions', []);
-				if (!Array.isArray(sessions)) throw new ImapConnectionError('MAIL_DENIED');
-				const matches = sessions.filter((session) => session?.id === agentId);
-				if (
-					matches.length !== 1 ||
-					!isValidAgentId(matches[0].toolType) ||
-					matches[0].toolType === 'terminal' ||
-					matches[0].sessionSshRemoteConfig?.enabled ||
-					matches[0].sshRemoteConfig?.enabled
-				)
-					throw new ImapConnectionError('MAIL_DENIED');
-				assertToolOwnerActive();
-			});
 			toolProofFiles = PluginToolRunProofFiles.provision(toolIdentity, toolProofBase);
 			assertToolProofLocation();
 		} catch {
-			// Unsupported/unsafe storage never downgrades into anonymous authority.
-			try {
-				toolIdentity?.stop();
-			} catch {
-				// Still attempt independent resource cleanup; nothing was issued here.
-			}
+			// Keep optional hardened delivery closed without stopping unrelated tools.
 			try {
 				toolProofFiles?.stop();
 			} catch {
 				// Construction has no run resources. Never log a native path/cause.
 			}
-			toolIdentity = undefined;
 			toolProofFiles = undefined;
-			logger.warn('Verified plugin tool authority unavailable', 'Plugins');
+			logger.warn('Hardened plugin tool proof storage unavailable', 'Plugins');
 		}
+		const assertToolProofStorageActive = (): void => {
+			assertToolOwnerActive();
+			assertToolProofLocation();
+			if (!toolProofFiles) throw new ImapConnectionError('MAIL_DENIED');
+			toolProofFiles.assertIdentity(toolIdentity);
+			assertToolOwnerActive();
+		};
 		const trustedKeysFor = (): string[] => {
 			const keys = store.get('pluginTrustedKeys', []) as unknown;
 			const userKeys = Array.isArray(keys)
@@ -1882,7 +1880,6 @@ app
 		const assertToolRecordActive = (record: PluginRecord): void => {
 			try {
 				assertToolOwnerActive();
-				assertToolProofLocation();
 				toolOwner!.assertToolRecordCurrent(record);
 				const identity = pluginIdentity(record.source, trustedKeysFor());
 				if (
@@ -2777,6 +2774,7 @@ app
 			toolIdentity: pluginToolRunIdentity,
 			identityFor: mailIdentityFor,
 			assertPolicyActive: (id, identity, agentId, right, accountId) => {
+				assertToolProofStorageActive();
 				const current = mailIdentityFor(id);
 				if (
 					current.contentHash !== identity.contentHash ||
@@ -2813,6 +2811,7 @@ app
 				isSubscriptionActive: (id, name, source) =>
 					cueEngine?.isMailSubscriptionActive(id, name, source) === true,
 				assertPolicyActive: (id, identity, agent, right, account) => {
+					assertToolProofStorageActive();
 					mailIdentityFor(id);
 					if (
 						sessionsStore
@@ -3148,6 +3147,7 @@ app
 		pluginManager = new PluginManager({
 			toolIdentity,
 			toolProofFiles,
+			assertToolProofStorageActive,
 			assertToolRecordActive,
 			serviceAvailable: (id, requirement) => serviceAvailable?.(id, requirement) === true,
 			isEnabled: () => {
