@@ -359,6 +359,7 @@ export async function buildSpawnSpec(
 			{
 				command: process.execPath,
 				args: [resolveMaestroCliScriptPath(), 'mcp', 'serve'],
+				runTokenFile: pluginRunProofFile,
 				env: {
 					ELECTRON_RUN_AS_NODE: '1',
 					MAESTRO_PLUGIN_RUN_TOKEN_FILE: pluginRunProofFile,

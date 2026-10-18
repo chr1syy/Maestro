@@ -67,7 +67,19 @@ describe('handleConfigureCue', () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	it('cancels pending focus restoration when the handlers unmount', () => {
+		vi.useFakeTimers();
+		const focus = vi.spyOn(document.body, 'focus');
+		const { unmount } = renderHandlers();
+
+		unmount();
+		act(() => vi.advanceTimersByTime(50));
+
+		expect(focus).not.toHaveBeenCalled();
 	});
 
 	it('carries the right-clicked agent through so its row can be marked', async () => {

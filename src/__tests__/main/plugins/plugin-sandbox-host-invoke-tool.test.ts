@@ -38,7 +38,12 @@ vi.mock('../../../main/utils/logger', () => ({
 }));
 
 import { PluginSandboxHost } from '../../../main/plugins/plugin-sandbox-host';
-import type { PermissionBroker } from '../../../main/plugins/permission-broker';
+import { createMailHostFixture } from '../../helpers/mailHostFixture';
+import {
+	buildHostCallHandlers,
+	type HostHandlerDeps,
+} from '../../../main/plugins/plugin-host-handlers';
+import { PermissionBroker } from '../../../main/plugins/permission-broker';
 import { createSandboxRealm } from '../../../main/plugins/plugin-sandbox-entry';
 import { PluginServiceHost } from '../../../main/plugins/plugin-service-host';
 import type { PluginMediaTools } from '../../../main/plugins/plugin-media-tools';
@@ -513,6 +518,79 @@ describe('PluginSandboxHost.invokeTool request/response', () => {
 			await assertion;
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+});
+
+describe('verified mail SDK / VM / host RPC loopback', () => {
+	it('supplies a frozen caller context, denies spoofing, and releases authority at tool completion', async () => {
+		const f = await createMailHostFixture();
+		const dir = path.join(f.dir, 'plugin');
+		fs.mkdirSync(dir);
+		fs.writeFileSync(path.join(dir, 'main.js'), '// synthetic');
+		const broker = new PermissionBroker({ getGrants: () => f.store.readGrants(f.pluginId) });
+		const host = new PluginSandboxHost({
+			broker,
+			toolIdentity: f.runs,
+			assertToolPluginActive: () => {},
+			handlers: buildHostCallHandlers({ broker, mail: f.service } as HostHandlerDeps),
+		});
+		let lastContext: { invocationId?: string; context?: unknown } | undefined;
+		const realm = createSandboxRealm({
+			send: (json) => queueMicrotask(() => emit('message', JSON.parse(json))),
+			log: vi.fn(),
+			timerStart: vi.fn(),
+			timerClear: vi.fn(),
+		});
+		realm.init(f.pluginId);
+		proc.postMessage.mockImplementation((message) => {
+			if (message.kind === 'invokeTool') {
+				lastContext = message;
+				void realm
+					.invokeTool(JSON.stringify(message))
+					.then((json) =>
+						emit('message', { kind: 'toolResult', id: message.id, ...JSON.parse(json) })
+					);
+			} else if (typeof message.id === 'number') realm.deliverResponse(JSON.stringify(message));
+		});
+		try {
+			host.start(f.pluginId, dir, 'main.js');
+			realm.runScript(
+				`module.exports={activate:function(sdk){sdk.commands.register('headers',async function(args,ctx){return {frozen:Object.isFrozen(ctx),agent:ctx.callerAgentId,result:await sdk.mail.readHeaders({invocationId:ctx.mailInvocationId||args.invocationId,reference:args.reference})};});}};`,
+				'mail-loopback'
+			);
+			await realm.activate();
+			const runContext = f.runs.resolveVerified(f.token);
+			const verified = await host.invokeTool(
+				f.pluginId,
+				'headers',
+				{ reference: f.reference },
+				{ runContext }
+			);
+			expect(verified).toEqual({
+				frozen: true,
+				agent: f.agentId,
+				result: {
+					ok: true,
+					value: { reference: f.reference, subject: 'synthetic report', sender: 'Example' },
+				},
+			});
+			const released = lastContext!.invocationId;
+			expect(() => f.runs.resolveInvocation(f.pluginId, released)).toThrow();
+			const spoofed = await host.invokeTool(
+				f.pluginId,
+				'headers',
+				{ reference: f.reference, invocationId: released },
+				{ callerAgentId: f.agentId }
+			);
+			expect(spoofed).toMatchObject({ result: { ok: false, error: { code: 'MAIL_DENIED' } } });
+			expect(f.connect).toHaveBeenCalledTimes(1);
+			expect(JSON.stringify(proc.postMessage.mock.calls)).not.toContain('synthetic-secret');
+		} finally {
+			const stopped = host.stop(f.pluginId);
+			emit('exit', 0);
+			await stopped;
+			f.dispose();
 		}
 	});
 });

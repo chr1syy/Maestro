@@ -239,6 +239,13 @@ export interface TemplateContext {
 	conductorProfile?: string;
 	// Cue event context (for Cue automation prompts)
 	cue?: {
+		mailReference?: string;
+		mailAccountId?: string;
+		mailFolder?: string;
+		mailUidValidity?: string;
+		mailUid?: string;
+		mailReceivedAt?: string;
+		mailSizeBytes?: string;
 		eventType?: string;
 		eventTimestamp?: string;
 		triggerName?: string;
@@ -368,6 +375,13 @@ export const TEMPLATE_VARIABLES = [
 		cueOnly: true,
 	},
 	{ variable: '{{CUE_EVENT_TIMESTAMP}}', description: 'Cue event timestamp', cueOnly: true },
+	{ variable: '{{CUE_MAIL_REFERENCE}}', description: 'Host mail reference', cueOnly: true },
+	{ variable: '{{CUE_MAIL_ACCOUNT_ID}}', description: 'Host mail account id', cueOnly: true },
+	{ variable: '{{CUE_MAIL_FOLDER}}', description: 'Host mail folder', cueOnly: true },
+	{ variable: '{{CUE_MAIL_UIDVALIDITY}}', description: 'Host mail uidvalidity', cueOnly: true },
+	{ variable: '{{CUE_MAIL_UID}}', description: 'Host mail uid', cueOnly: true },
+	{ variable: '{{CUE_MAIL_RECEIVED_AT}}', description: 'Host mail received at', cueOnly: true },
+	{ variable: '{{CUE_MAIL_SIZE_BYTES}}', description: 'Host mail size bytes', cueOnly: true },
 	{ variable: '{{CUE_EVENT_TYPE}}', description: 'Cue event type', cueOnly: true },
 	{
 		variable: '{{CUE_GH_ASSIGNEES}}',
@@ -677,6 +691,14 @@ export function substituteTemplateVariables(template: string, context: TemplateC
 
 		// Cue variables
 		CUE_EVENT_TYPE: context.cue?.eventType || '',
+		CUE_MAIL_REFERENCE: context.cue?.mailReference || '',
+		CUE_MAIL_ACCOUNT_ID: context.cue?.mailAccountId || '',
+		CUE_MAIL_FOLDER: context.cue?.mailFolder || '',
+		CUE_MAIL_UIDVALIDITY: context.cue?.mailUidValidity || '',
+		CUE_MAIL_UID: context.cue?.mailUid || '',
+		CUE_MAIL_RECEIVED_AT: context.cue?.mailReceivedAt || '',
+		CUE_MAIL_SIZE_BYTES: context.cue?.mailSizeBytes || '',
+
 		CUE_EVENT_TIMESTAMP: context.cue?.eventTimestamp || '',
 		CUE_TRIGGER_NAME: context.cue?.triggerName || '',
 		CUE_RUN_ID: context.cue?.runId || '',

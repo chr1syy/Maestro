@@ -48,6 +48,18 @@ export class ExitHandler {
 		this.bufferManager = deps.bufferManager;
 	}
 
+	/** Exact-object disposal shared by private settlement and failed-spawn rollback. */
+	discardPrivateOutput(managedProcess: ManagedProcess): void {
+		if (managedProcess.dataBufferTimeout) clearTimeout(managedProcess.dataBufferTimeout);
+		managedProcess.dataBufferTimeout = undefined;
+		managedProcess.dataBuffer = '';
+		managedProcess.jsonBuffer = '';
+		managedProcess.stdoutBuffer = '';
+		managedProcess.stderrBuffer = '';
+		managedProcess.streamedText = '';
+		managedProcess.provisionalError = undefined;
+	}
+
 	/**
 	 * Handle process exit event.
 	 *
@@ -60,12 +72,49 @@ export class ExitHandler {
 		sessionId: string,
 		code: number,
 		exitingProcess?: ManagedProcess,
-		signal?: NodeJS.Signals | null,
+		withholdOrSignal: boolean | NodeJS.Signals | null = false,
 		stdinError?: Error
 	): Promise<void> {
+		const withholdProviderOutput = typeof withholdOrSignal === 'boolean' ? withholdOrSignal : false;
+		const signal = typeof withholdOrSignal === 'string' ? withholdOrSignal : null;
 		const managedProcess = exitingProcess ?? this.processes.get(sessionId);
 		if (!managedProcess) {
 			this.emitter.emit('exit', sessionId, code);
+			return;
+		}
+
+		// The captured spawner policy bypasses every provider parser, disk fallback,
+		// preview, provisional error and result path, including an exit remainder.
+		if (withholdProviderOutput) {
+			// Exact-object cleanup also runs after synchronous notification reentry.
+			// Never flush: a listener may have refilled buffers or armed a new timer.
+
+			this.discardPrivateOutput(managedProcess);
+			// Private disposal is exact-object work, including rollback after a
+			// reentrant successor. Only session notifications require live ownership.
+			if (this.isSuperseded(sessionId, managedProcess)) return;
+			try {
+				try {
+					if (!managedProcess.interrupted && !managedProcess.errorEmitted) {
+						managedProcess.errorEmitted = true;
+						this.emitter.emit('agent-error', sessionId, {
+							type: 'agent_crashed',
+							message: 'Private provider output unavailable',
+							recoverable: false,
+							agentId: managedProcess.toolType,
+							sessionId,
+							timestamp: Date.now(),
+						} satisfies AgentError);
+					}
+				} finally {
+					this.finishExit(sessionId, code, managedProcess, true);
+				}
+			} catch {
+				// Do not inspect a listener/native cause that may echo private delivery.
+				throw new Error('PrivateMcpSpawnFailed');
+			} finally {
+				this.discardPrivateOutput(managedProcess);
+			}
 			return;
 		}
 
@@ -434,37 +483,58 @@ export class ExitHandler {
 			}
 		}
 
-		// Clean up temp image files if any
-		if (managedProcess.tempImageFiles && managedProcess.tempImageFiles.length > 0) {
-			cleanupTempFiles(managedProcess.tempImageFiles);
-		}
+		this.finishExit(sessionId, code, managedProcess, false, settlement);
+	}
 
-		// Emit query-complete for batch mode processes. Listeners flush buffered data
-		// and thinking text and send WakaTime heartbeats. No stats row is written from
-		// it: the renderer records each turn, with its tokens and cost, and a second
-		// writer here double-counted every Auto Run turn.
-		if (isBatchMode && managedProcess.querySource) {
-			const duration = Date.now() - managedProcess.startTime;
-			this.emitter.emit('query-complete', sessionId, {
-				sessionId,
-				agentType: toolType,
-				source: managedProcess.querySource,
-				startTime: managedProcess.startTime,
-				duration,
-				projectPath: managedProcess.projectPath,
-				tabId: managedProcess.tabId,
-			});
-			logger.debug('[ProcessManager] Query complete event emitted', 'ProcessManager', {
-				sessionId,
-				duration,
-				source: managedProcess.querySource,
-			});
+	/** Shared settlement for ordinary and completely withheld child output. */
+	private finishExit(
+		sessionId: string,
+		code: number,
+		managedProcess: ManagedProcess,
+		withholdProviderOutput = false,
+		settlement?: TurnSettlement
+	): void {
+		if (this.isSuperseded(sessionId, managedProcess)) return;
+		const { isBatchMode, toolType } = managedProcess;
+		let notificationFailed = false;
+		try {
+			// Clean up temp image files if any
+			if (managedProcess.tempImageFiles && managedProcess.tempImageFiles.length > 0) {
+				cleanupTempFiles(managedProcess.tempImageFiles, withholdProviderOutput);
+			}
+
+			// Emit query-complete for batch mode processes. Listeners flush buffered data
+			// and thinking text and send WakaTime heartbeats. No stats row is written from
+			// it: the renderer records each turn, with its tokens and cost, and a second
+			// writer here double-counted every Auto Run turn.
+			if (isBatchMode && managedProcess.querySource) {
+				const duration = Date.now() - managedProcess.startTime;
+				this.emitter.emit('query-complete', sessionId, {
+					sessionId,
+					agentType: toolType,
+					source: managedProcess.querySource,
+					startTime: managedProcess.startTime,
+					duration,
+					projectPath: managedProcess.projectPath,
+					tabId: managedProcess.tabId,
+				});
+				logger.debug('[ProcessManager] Query complete event emitted', 'ProcessManager', {
+					sessionId,
+					duration,
+					source: managedProcess.querySource,
+				});
+			}
+		} catch (error) {
+			if (!withholdProviderOutput) throw error;
+			// Retire private ownership even if cleanup/query listeners throw.
+			// The caller normalizes failure only after settlement and output disposal.
+			notificationFailed = true;
 		}
 
 		// Final flush: ensure any data buffered during exit processing
 		// (e.g., from jsonBuffer remainder or streamedText fallback) is emitted
 		// before the exit event, so listeners see all data before exit fires.
-		this.bufferManager.flushDataBuffer(sessionId, managedProcess);
+		if (!withholdProviderOutput) this.bufferManager.flushDataBuffer(sessionId, managedProcess);
 
 		// Re-checked immediately before settling the turn: `flushDataBuffer` above
 		// is async-adjacent enough that a replacement can still land between the
@@ -487,6 +557,7 @@ export class ExitHandler {
 			this.processes.delete(sessionId);
 		}
 		this.emitter.emit('exit', sessionId, code, undefined, settlement);
+		if (notificationFailed) throw new Error('PrivateMcpSpawnFailed');
 	}
 
 	/**

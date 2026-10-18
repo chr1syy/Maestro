@@ -20,16 +20,14 @@ import {
 	buildMcpInjection,
 	mergeMcpInjectionArgs,
 	MCP_CONFIG_BY_AGENT,
+	projectMcpProcessPublication,
 } from '../../../../shared/plugins/mcp-agent-config';
 import type { InteractiveReplayController } from '../../../agents/claude-interactive-replay';
 import type { ProcessConfig as ProcessSpawnConfig } from '../../../process-manager/types';
 import type { AgentConfigsData } from '../../../stores/types';
 import { logger } from '../../../utils/logger';
 import { isWindows } from '../../../../shared/platformDetection';
-import {
-	applySystemPromptDelivery,
-	redactSystemPromptArg,
-} from '../../../utils/system-prompt-delivery';
+import { applySystemPromptDelivery } from '../../../utils/system-prompt-delivery';
 import {
 	buildCallerIdentityEnv,
 	withoutCallerIdentityEnv,
@@ -137,16 +135,16 @@ async function handleProcessSpawnImpl(
 			config = { ...config, sessionCustomPath: detection.path };
 			if (detection.path !== requestedCustomPath) {
 				logger.info(`Resolved updated local custom path for ${config.toolType}`, LOG_CONTEXT, {
-					requestedCustomPath,
-					resolvedCustomPath: detection.path,
+					requestedCustomPath: projectMcpProcessPublication([requestedCustomPath]).args[0],
+					resolvedCustomPath: projectMcpProcessPublication([detection.path]).args[0],
 				});
 			}
 		} else {
 			invalidLocalCustomPath = true;
 			config = { ...config, sessionCustomPath: undefined };
 			logger.warn(`Ignoring invalid local custom path for ${config.toolType}`, LOG_CONTEXT, {
-				requestedCustomPath,
-				fallbackPath: agent?.path || config.command,
+				requestedCustomPath: projectMcpProcessPublication([requestedCustomPath]).args[0],
+				fallbackPath: projectMcpProcessPublication([agent?.path || config.command]).args[0],
 			});
 		}
 	}
@@ -156,10 +154,12 @@ async function handleProcessSpawnImpl(
 	logFn(`Spawn config received`, LOG_CONTEXT, {
 		platform: process.platform,
 		configToolType: config.toolType,
-		configCommand: config.command,
+		configCommand: projectMcpProcessPublication([config.command]).args[0],
 		agentId: agent?.id,
-		agentCommand: agent?.command,
-		agentPath: agent?.path,
+		agentCommand: agent?.command
+			? projectMcpProcessPublication([agent.command]).args[0]
+			: undefined,
+		agentPath: agent?.path ? projectMcpProcessPublication([agent.path]).args[0] : undefined,
 		agentPathExtension: agent?.path ? require('path').extname(agent.path) : 'none',
 		hasAgentSessionId: !!config.agentSessionId,
 		hasPrompt: !!config.prompt,
@@ -428,6 +428,7 @@ async function handleProcessSpawnImpl(
 				throw error;
 			}
 			const mcpSpec = {
+				runTokenFile: pluginRunProofFile,
 				command: process.execPath,
 				args: [resolveMaestroCliScriptPath(), 'mcp', 'serve', '--tab', baseSessionId],
 				env: {
@@ -463,9 +464,8 @@ async function handleProcessSpawnImpl(
 				setTimeout(() => {
 					fsp.rm(mcpTmpDir, { recursive: true, force: true }).catch((err: unknown) => {
 						if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-							captureException(err instanceof Error ? err : new Error(String(err)), {
+							captureException(new Error('McpConfigCleanupFailed'), {
 								context: 'mcp config temp dir cleanup',
-								dir: mcpTmpDir,
 							});
 						}
 					});
@@ -525,7 +525,11 @@ async function handleProcessSpawnImpl(
 			// abort on the first tool call).
 			logger.error('Failed to prepare permission relay', LOG_CONTEXT, {
 				sessionId: config.sessionId,
-				error: e instanceof Error ? e.message : String(e),
+				error: projectMcpProcessPublication(finalArgs, effectiveCustomEnvVars).withheld
+					? 'PrivateMcpSpawnFailed'
+					: e instanceof Error
+						? e.message
+						: String(e),
 			});
 			reportSpawnRefusal(
 				deps,
@@ -638,14 +642,24 @@ async function handleProcessSpawnImpl(
 				: config.agentSessionId;
 
 	// Redact system prompt content from logged args (can be large and sensitive)
-	const argsToLog = redactSystemPromptArg(finalArgs);
+	const publication = projectMcpProcessPublication(finalArgs, effectiveCustomEnvVars);
+	const appendPromptIdx = publication.args.indexOf('--append-system-prompt');
+	const argsToLog =
+		appendPromptIdx !== -1
+			? [
+					...publication.args.slice(0, appendPromptIdx + 1),
+					`<${publication.args[appendPromptIdx + 1]?.length ?? 0} chars>`,
+					...publication.args.slice(appendPromptIdx + 2),
+				]
+			: publication.args;
+	const commandToLog = projectMcpProcessPublication([config.command]).args[0];
 
-	logger.info(`Spawning process: ${config.command}`, LOG_CONTEXT, {
+	logger.info(`Spawning process: ${commandToLog}`, LOG_CONTEXT, {
 		sessionId: config.sessionId,
 		toolType: config.toolType,
 		cwd: config.cwd,
-		command: config.command,
-		fullCommand: `${config.command} ${argsToLog.join(' ')}`,
+		command: commandToLog,
+		fullCommand: `${commandToLog} ${argsToLog.join(' ')}`,
 		args: argsToLog,
 		requiresPty: agent?.requiresPty || false,
 		shell: shellToUse,
@@ -668,7 +682,7 @@ async function handleProcessSpawnImpl(
 	await addBreadcrumb('agent', `Spawn: ${config.toolType}`, {
 		sessionId: config.sessionId,
 		toolType: config.toolType,
-		command: config.command,
+		command: commandToLog,
 		hasPrompt: !!config.prompt,
 	});
 
@@ -714,8 +728,8 @@ async function handleProcessSpawnImpl(
 
 	if (config.sessionCustomPath) {
 		logger.debug(`Using session-level custom path for ${config.toolType}`, LOG_CONTEXT, {
-			customPath: config.sessionCustomPath,
-			originalCommand: config.command,
+			customPath: projectMcpProcessPublication([config.sessionCustomPath]).args[0],
+			originalCommand: commandToLog,
 		});
 	}
 
@@ -755,8 +769,8 @@ async function handleProcessSpawnImpl(
 
 		logger.info(`Forcing shell execution for agent on Windows for PATH access`, LOG_CONTEXT, {
 			agentId: agent?.id,
-			command: commandToSpawn,
-			args: argsToSpawn,
+			command: projectMcpProcessPublication([commandToSpawn]).args[0],
+			args: projectMcpProcessPublication(argsToSpawn, customEnvVarsToPass).args,
 			shell: shellToUse,
 			shellSource: shellConfig.source,
 		});
@@ -867,7 +881,7 @@ async function handleProcessSpawnImpl(
 			logger.warn(`Skipped omp model catalog prime: no absolute binary path`, LOG_CONTEXT, {
 				sessionId: config.sessionId,
 				sessionCustomPath: config.sessionCustomPath,
-				agentPath: agent?.path,
+				agentPath: agent?.path ? projectMcpProcessPublication([agent.path]).args[0] : undefined,
 				binaryName: agent?.binaryName,
 			});
 		} else {
@@ -907,7 +921,7 @@ async function handleProcessSpawnImpl(
 				// the first turn will show the fallback window until the prime lands.
 				logger.warn(`omp prime exceeded spawn cap, continuing in background`, LOG_CONTEXT, {
 					sessionId: config.sessionId,
-					command: ompPrimeBinaryPath,
+					command: projectMcpProcessPublication([ompPrimeBinaryPath]).args[0],
 					elapsedMs: Date.now() - primeStartedAt,
 					capMs: OMP_PRIME_SPAWN_CAP_MS,
 				});

@@ -30,6 +30,10 @@ import { isValidServiceCallTarget } from './services';
  * brokered host call; there is no generic "eval"/"exec arbitrary" capability.
  */
 export type PluginCapability =
+	| 'mail:accounts'
+	| 'mail:read'
+	| 'mail:body'
+	| 'mail:attachments'
 	| 'fs:read' // read files under a path scope
 	| 'fs:write' // write files under a path scope
 	| 'services:call'
@@ -68,6 +72,10 @@ export type PluginCapability =
 	| 'ui:render-unsafe'; // high-trust custom UI in host-approved, non-protected regions
 
 export const PLUGIN_CAPABILITIES: readonly PluginCapability[] = [
+	'mail:accounts',
+	'mail:read',
+	'mail:body',
+	'mail:attachments',
 	'fs:read',
 	'fs:write',
 	'services:call',
@@ -110,6 +118,11 @@ export const PLUGIN_CAPABILITIES: readonly PluginCapability[] = [
 export type CapabilityRisk = 'low' | 'medium' | 'high';
 
 const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
+	'mail:accounts': 'medium',
+	'mail:read': 'high',
+	'mail:body': 'high',
+	'mail:attachments': 'high',
+
 	'notifications:toast': 'low',
 	'settings:read': 'low',
 	'agents:read': 'low',
@@ -162,6 +175,11 @@ const CAPABILITY_RISK: Record<PluginCapability, CapabilityRisk> = {
 type ScopeKind = 'path' | 'host' | 'allowlist' | 'none';
 
 const CAPABILITY_SCOPE_KIND: Record<PluginCapability, ScopeKind> = {
+	'mail:accounts': 'none',
+	'mail:read': 'allowlist',
+	'mail:body': 'allowlist',
+	'mail:attachments': 'allowlist',
+
 	'fs:read': 'path',
 	'fs:write': 'path',
 	'fs:watch': 'path',
@@ -540,6 +558,14 @@ export function describeCapability(capability: PluginCapability): string {
 			return 'Call an explicitly bound plugin service (exact provider/service; bounded requests and results)';
 		case 'services:provide':
 			return 'Provide an own declared host-mediated service (exact service ID; no direct plugin IPC)';
+		case 'mail:accounts':
+			return 'Request host-owned mail setup and view own account intent (no credentials or agent identities)';
+		case 'mail:read':
+			return 'Read headers of exact mail accounts for independently authorized agents';
+		case 'mail:body':
+			return 'Read complete plain text from exact mail accounts for independently authorized agents';
+		case 'mail:attachments':
+			return 'Read bounded attachments from exact mail accounts for independently authorized agents';
 		case 'media:tools':
 			return 'Download Discord voice attachments and run fixed local media tools (8 MiB, 120 seconds; no general file or process access)';
 		case 'net:fetch':

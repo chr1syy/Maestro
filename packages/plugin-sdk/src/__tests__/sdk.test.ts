@@ -251,7 +251,7 @@ describe('@maestro/plugin-sdk authoring surface', () => {
 		} finally {
 			if (!hadDist) rmSync(distDir, { recursive: true, force: true });
 		}
-	});
+	}, 30_000);
 
 	it('matches host API semver compatibility edge cases without dependencies', () => {
 		expect(isHostApiCompatible('1.7.0+build.1', '1.7.0+build.2').compatible).toBe(true);

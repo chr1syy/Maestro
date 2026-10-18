@@ -31,6 +31,7 @@ export const CUE_EVENT_LABELS: Record<CueEventType, string> = {
 	'task.pending': 'Pending Task',
 	'cli.trigger': 'CLI Trigger',
 	'webhook.received': 'Webhook',
+	'relay.mail.received': 'Mail Received',
 };
 
 /**

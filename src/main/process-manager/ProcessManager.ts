@@ -9,6 +9,7 @@ import type {
 	CommandResult,
 	ParsedEvent,
 	AgentOutputParser,
+	ProcessRunLifetime,
 } from './types';
 import { PtySpawner } from './spawners/PtySpawner';
 import { ChildProcessSpawner } from './spawners/ChildProcessSpawner';
@@ -39,6 +40,8 @@ import {
 } from '../coworking/coworking-types';
 import { resolveOwningMaestroSessionId } from '../coworking/coworking-session-id';
 import { getBridgeSocketPath } from '../coworking/coworking-socket-path';
+import { currentSpawnGeneration } from './generation';
+import { MCP_CONFIG_BY_AGENT } from '../../shared/plugins/mcp-agent-config';
 import {
 	stopProcess,
 	INTERACTIVE_STOP_GRACE_MS,
@@ -67,6 +70,12 @@ export class ProcessManager extends EventEmitter {
 	private codexAppServerSpawner: CodexAppServerSpawner;
 	private localCommandRunner: LocalCommandRunner;
 	private sshCommandRunner: SshCommandRunner;
+	// Stop ownership follows the actual managed object, never a reusable session key.
+	private readonly processRunStops = new WeakMap<ManagedProcess, () => void>();
+	// Publication policy outlives authority: stop/exit must not restore raw errors.
+	// Weak ownership neither grants authority nor follows a reused session ID.
+	private readonly privateOutputProcesses = new WeakSet<ManagedProcess>();
+	private preparingProcessRun?: { readonly sessionId: string };
 
 	constructor(
 		/**
@@ -110,6 +119,21 @@ export class ProcessManager extends EventEmitter {
 	 * retain replacement semantics so shell restarts continue to work.
 	 */
 	spawn(config: ProcessConfig): SpawnResult {
+		return this.spawnProcess(config, false);
+	}
+
+	/** Captured host-only policy; never derive it from IPC config or model args. */
+	private spawnProcess(
+		config: ProcessConfig,
+		withholdProviderOutput: boolean,
+		preparedOwnership?: {
+			capture(process: ManagedProcess, rollback: () => void): void;
+			fence(): void;
+		}
+	): SpawnResult {
+		// A preparation callback cannot steal the exact slot it is preparing.
+		if (this.preparingProcessRun?.sessionId === config.sessionId)
+			throw new Error('ProcessRunUnavailable');
 		// Expand a leading `~` in the working directory before spawning. node-pty
 		// and child_process hand `cwd` straight to the OS, which - unlike a shell -
 		// does not expand `~`. A session whose cwd is persisted as `~/project` (or
@@ -136,14 +160,15 @@ export class ProcessManager extends EventEmitter {
 		// edit files nobody asked it to.
 		const cwdProblem = unusableCwdReason(config.cwd);
 		if (cwdProblem) {
-			logger.error(`[ProcessManager] Refusing to spawn: ${cwdProblem}`, 'ProcessManager', {
+			const message = withholdProviderOutput ? 'PrivateMcpSpawnFailed' : cwdProblem;
+			logger.error(`[ProcessManager] Refusing to spawn: ${message}`, 'ProcessManager', {
 				sessionId: config.sessionId,
 				toolType: config.toolType,
-				cwd: config.cwd,
+				cwd: withholdProviderOutput ? undefined : config.cwd,
 			});
 			this.emit('agent-error', config.sessionId, {
 				type: 'unknown',
-				message: cwdProblem,
+				message,
 				recoverable: false,
 				agentId: config.toolType,
 				sessionId: config.sessionId,
@@ -282,19 +307,36 @@ export class ProcessManager extends EventEmitter {
 						},
 					};
 
-		// The Codex app-server child is spawned per turn (no shared server to
-		// fingerprint, unlike OpenCode serve), so it takes the coworking env like
-		// any CLI spawn and is routed after the injection.
-		let result: SpawnResult;
-		if (this.shouldUseCodexAppServer(configWithCoworkingSession)) {
-			result = this.codexAppServerSpawner.spawn(configWithCoworkingSession);
-		} else if (this.shouldUsePty(configWithCoworkingSession)) {
-			result = this.ptySpawner.spawn(configWithCoworkingSession);
-		} else {
-			result = this.childProcessSpawner.spawn(configWithCoworkingSession);
-		}
+		const usePty = this.shouldUsePty(configWithCoworkingSession);
+		// The lifecycle event is publication, not executable configuration. Capture
+		// its closed metadata before native preparation/callbacks can run; neither
+		// the config nor any nested executable input is shared with subscribers.
+		// Keep the existing required shape for capture/correlation consumers while
+		// withholding all prepared input, independently of delivery flag spelling.
+		const spawnPublication: ProcessConfig = withholdProviderOutput
+			? Object.freeze({
+					sessionId: config.sessionId,
+					toolType: config.toolType,
+					cwd: config.cwd,
+					command: '',
+					args: [],
+					tabId: config.tabId,
+					projectPath: config.projectPath,
+				})
+			: config;
+		if (withholdProviderOutput) Object.freeze(spawnPublication.args);
+		const result =
+			!withholdProviderOutput && this.shouldUseCodexAppServer(configWithCoworkingSession)
+				? this.codexAppServerSpawner.spawn(configWithCoworkingSession)
+				: usePty
+					? this.ptySpawner.spawn(configWithCoworkingSession)
+					: this.childProcessSpawner.spawn(
+							configWithCoworkingSession,
+							withholdProviderOutput,
+							preparedOwnership
+						);
 
-		this.emitSpawn(config);
+		if (result.success) this.emitSpawn(spawnPublication);
 
 		return result;
 	}
@@ -310,6 +352,172 @@ export class ProcessManager extends EventEmitter {
 			this.emit('spawn', config);
 		} catch {
 			// Capture is best-effort; never let it break process spawning.
+		}
+	}
+
+	/** Main-only synchronous preparation for later private MCP proof delivery.
+	 * Ordinary spawn callers get no lifetime. No token/file is issued here, and
+	 * unsupported paths are refused rather than silently given weaker authority. */
+	spawnWithRunLifetime(
+		config: ProcessConfig,
+		prepare: (lifetime: ProcessRunLifetime) => Pick<ProcessConfig, 'args' | 'customEnvVars'>
+	): SpawnResult {
+		const controller = new AbortController();
+		let state: 'preparing' | 'spawning' | 'running' | 'closed' = 'preparing';
+		let managed: ManagedProcess | undefined;
+		let owned: ManagedProcess | undefined;
+		let ownedSessionId: string | undefined;
+		let generation: number | undefined;
+		let child: ManagedProcess['childProcess'];
+		let rollbackChild: (() => void) | undefined;
+		const stop = () => {
+			if (state === 'closed') return;
+			state = 'closed'; // Fence before abort hooks can synchronously reenter.
+			if (managed && this.processRunStops.get(managed) === stop)
+				this.processRunStops.delete(managed);
+			child?.removeListener('exit', stop);
+			child?.removeListener('error', stop);
+			child?.removeListener('close', stop);
+			controller.abort();
+		};
+		let preparation: { readonly sessionId: string } | undefined;
+		try {
+			// Copy mutable spawn inputs before trusted preparation may invoke callbacks.
+			const snapshot: ProcessConfig = {
+				...config,
+				args: [...config.args],
+				customEnvVars: config.customEnvVars ? { ...config.customEnvVars } : undefined,
+				shellEnvVars: config.shellEnvVars ? { ...config.shellEnvVars } : undefined,
+				images: config.images ? [...config.images] : undefined,
+				extraPathDirs: config.extraPathDirs ? [...config.extraPathDirs] : undefined,
+			};
+			const sessionId = snapshot.sessionId;
+			const capability = MCP_CONFIG_BY_AGENT[snapshot.toolType];
+			if (
+				typeof prepare !== 'function' ||
+				typeof sessionId !== 'string' ||
+				!sessionId ||
+				this.preparingProcessRun ||
+				this.processes.has(sessionId) ||
+				!['linux', 'darwin'].includes(process.platform) ||
+				!['claude-code', 'codex'].includes(snapshot.toolType) ||
+				!capability?.verified ||
+				snapshot.command === process.execPath ||
+				snapshot.requiresPty ||
+				snapshot.runInShell ||
+				snapshot.sshRemoteId ||
+				snapshot.sshRemoteHost ||
+				snapshot.sshStdinScript ||
+				snapshot.sshRemoteCommand
+			)
+				throw new Error('ProcessRunUnavailable');
+			const beforeGeneration = currentSpawnGeneration(sessionId);
+			if (!Number.isSafeInteger(beforeGeneration) || beforeGeneration >= Number.MAX_SAFE_INTEGER)
+				throw new Error('ProcessRunUnavailable');
+			preparation = Object.freeze({ sessionId });
+			this.preparingProcessRun = preparation;
+			const lifetime = Object.freeze({
+				signal: controller.signal,
+				assertActive: () => {
+					const alive =
+						state === 'preparing'
+							? this.preparingProcessRun === preparation &&
+								!this.processes.has(sessionId) &&
+								currentSpawnGeneration(sessionId) === beforeGeneration
+							: state === 'running' &&
+								managed !== undefined &&
+								this.processes.get(sessionId) === managed &&
+								managed.sessionId === sessionId &&
+								managed.toolType === snapshot.toolType &&
+								!managed.isTerminal &&
+								!managed.ptyProcess &&
+								!managed.sdkController &&
+								!managed.sshRemoteId &&
+								!managed.sshRemoteHost &&
+								managed.spawnGeneration === generation &&
+								currentSpawnGeneration(sessionId) === generation &&
+								!managed.interrupted &&
+								managed.childProcess === child &&
+								child?.exitCode === null &&
+								child.signalCode === null;
+					if (!alive || controller.signal.aborted) {
+						stop();
+						throw new Error('ProcessRunInactive');
+					}
+				},
+			});
+			lifetime.assertActive();
+			const prepared = prepare(lifetime);
+			lifetime.assertActive();
+			if (!Array.isArray(prepared?.args) || !prepared.args.every((arg) => typeof arg === 'string'))
+				throw new Error('ProcessRunUnavailable');
+			const spawnConfig: ProcessConfig = {
+				...snapshot,
+				args: [...prepared.args],
+				customEnvVars: prepared.customEnvVars ? { ...prepared.customEnvVars } : undefined,
+			};
+			lifetime.assertActive();
+			this.preparingProcessRun = undefined;
+			state = 'spawning'; // No authority until the exact child is captured.
+			// Prepared runs may carry private delivery: until a useful-output policy
+			// is reviewed, no provider content may cross a publication boundary.
+			const result = this.spawnProcess(spawnConfig, true, {
+				capture: (process, rollback) => {
+					// Capture before parser/stdin preparation can fail or synchronously
+					// reenter. Never discover ownership from a reusable session key later.
+					owned = managed = process;
+					ownedSessionId = sessionId;
+					child = process.childProcess;
+					generation = process.spawnGeneration;
+					rollbackChild = rollback;
+					this.privateOutputProcesses.add(process);
+					this.processRunStops.set(process, stop);
+					child?.prependOnceListener('exit', stop);
+					child?.prependOnceListener('error', stop);
+					child?.prependOnceListener('close', stop);
+				},
+				fence: stop,
+			});
+			if (
+				!result.success ||
+				controller.signal.aborted ||
+				!managed ||
+				managed.sessionId !== sessionId ||
+				managed.toolType !== snapshot.toolType ||
+				managed.isTerminal ||
+				managed.ptyProcess ||
+				managed.sdkController ||
+				!child ||
+				managed.childProcess !== child ||
+				!Number.isSafeInteger(result.pid) ||
+				result.pid <= 0 ||
+				child.pid !== result.pid ||
+				managed.pid !== result.pid ||
+				generation !== beforeGeneration + 1
+			)
+				throw new Error('ProcessRunUnavailable');
+			owned = managed;
+			ownedSessionId = sessionId;
+			state = 'running';
+			lifetime.assertActive();
+			return result;
+		} catch {
+			stop();
+			// The spawner owns the actual native child even after session reuse.
+			rollbackChild?.();
+			// Retry canonical kill only if failed rollback still owns this exact child.
+			if (
+				owned &&
+				ownedSessionId &&
+				this.processes.get(ownedSessionId) === owned &&
+				owned.childProcess === child
+			)
+				this.kill(ownedSessionId);
+			// Never disclose preparation/native causes.
+			throw new Error('ProcessRunUnavailable');
+		} finally {
+			if (preparation && this.preparingProcessRun === preparation)
+				this.preparingProcessRun = undefined;
 		}
 	}
 
@@ -432,10 +640,13 @@ export class ProcessManager extends EventEmitter {
 			}
 			return false;
 		} catch (error) {
-			void captureException(error);
+			const publishedError = this.privateOutputProcesses.has(process)
+				? new Error('PrivateMcpSpawnFailed')
+				: error;
+			void captureException(publishedError);
 			logger.error('[ProcessManager] Failed to write to process', 'ProcessManager', {
 				sessionId,
-				error: String(error),
+				error: String(publishedError),
 			});
 			return false;
 		}
@@ -477,6 +688,9 @@ export class ProcessManager extends EventEmitter {
 	interrupt(sessionId: string): boolean {
 		const process = this.processes.get(sessionId);
 		if (!process) return false;
+		const privateOutput = this.privateOutputProcesses.has(process);
+		this.processRunStops.get(process)?.();
+		if (this.processes.get(sessionId) !== process) return false;
 
 		// Mark the turn as user-interrupted BEFORE signalling. `interrupt()` (unlike
 		// `kill()`) leaves the process in the map, so its `close` still reaches
@@ -504,14 +718,16 @@ export class ProcessManager extends EventEmitter {
 						label: 'interrupt',
 					}
 				);
+
 				return true;
 			}
 			return false;
 		} catch (error) {
-			void captureException(error);
+			const publishedError = privateOutput ? new Error('PrivateMcpSpawnFailed') : error;
+			void captureException(publishedError);
 			logger.error('[ProcessManager] Failed to interrupt process', 'ProcessManager', {
 				sessionId,
-				error: String(error),
+				error: String(publishedError),
 			});
 			return false;
 		}
@@ -554,6 +770,9 @@ export class ProcessManager extends EventEmitter {
 	): boolean {
 		const proc = this.processes.get(sessionId);
 		if (!proc) return false;
+		const privateOutput = this.privateOutputProcesses.has(proc);
+		this.processRunStops.get(proc)?.();
+		if (this.processes.get(sessionId) !== proc) return false;
 
 		// A kill is a stop Maestro asked for (a closed tab, the Process Monitor, a
 		// watchdog), so the exit it causes is not a crash. The resolver reads any
@@ -564,7 +783,12 @@ export class ProcessManager extends EventEmitter {
 			if (proc.dataBufferTimeout) {
 				clearTimeout(proc.dataBufferTimeout);
 			}
-			this.bufferManager.flushDataBuffer(sessionId);
+			if (privateOutput) {
+				proc.dataBufferTimeout = undefined;
+				proc.dataBuffer = undefined;
+			} else {
+				this.bufferManager.flushDataBuffer(sessionId);
+			}
 
 			if (proc.sdkController) {
 				// Server-backed process (OpenCode SDK, Codex app-server): the stop
@@ -600,13 +824,14 @@ export class ProcessManager extends EventEmitter {
 					}
 				);
 			}
-			this.processes.delete(sessionId);
+			if (this.processes.get(sessionId) === proc) this.processes.delete(sessionId);
 			return true;
 		} catch (error) {
-			void captureException(error);
+			const publishedError = privateOutput ? new Error('PrivateMcpSpawnFailed') : error;
+			void captureException(publishedError);
 			logger.error('[ProcessManager] Failed to kill process', 'ProcessManager', {
 				sessionId,
-				error: String(error),
+				error: String(publishedError),
 			});
 			return false;
 		}

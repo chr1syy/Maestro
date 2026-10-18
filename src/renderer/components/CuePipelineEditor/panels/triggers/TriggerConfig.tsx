@@ -88,7 +88,7 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 	);
 
 	const updateConfig = useCallback(
-		(key: string, value: string | number) => {
+		(key: string, value: string | number | NonNullable<TriggerNodeData['config']['mail']>) => {
 			const updated = { ...localConfig, [key]: value };
 			setLocalConfig(updated);
 			debouncedUpdate(updated);
@@ -451,6 +451,56 @@ export function TriggerConfig({ node, theme, onUpdateNode }: TriggerConfigProps)
 						<code>maestro-cli cue trigger "{data.customLabel || data.label || 'name'}"</code>.
 						Supports an optional <code>--prompt</code> override.
 					</div>
+				</div>
+			);
+		case 'relay.mail.received':
+			return (
+				<div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+					{nameField}
+					{(
+						[
+							['plugin_id', 'Plugin ID'],
+							['account_id', 'Account ID'],
+							['account_revision', 'Account revision'],
+							['mailbox', 'Mailbox'],
+							['interval_minutes', 'Poll interval (minutes)'],
+						] as const
+					).map(([key, label]) => (
+						<label key={key} style={themedLabelStyle}>
+							{label}
+							<input
+								style={themedInputStyle}
+								type={key === 'account_revision' || key === 'interval_minutes' ? 'number' : 'text'}
+								min={1}
+								value={
+									localConfig.mail?.[key] ??
+									(key === 'mailbox'
+										? 'INBOX'
+										: key === 'interval_minutes' || key === 'account_revision'
+											? 1
+											: '')
+								}
+								onChange={(event) =>
+									updateConfig('mail', {
+										plugin_id: '',
+										account_id: '',
+										account_revision: 1,
+										mailbox: 'INBOX',
+										interval_minutes: 1,
+										...localConfig.mail,
+										[key]:
+											key === 'account_revision' || key === 'interval_minutes'
+												? Number(event.target.value)
+												: event.target.value,
+									})
+								}
+							/>
+						</label>
+					))}
+					<p style={{ color: theme.colors.textDim, fontSize: 12 }}>
+						Requires exact plugin account permission and this agent's independent read right. Obtain
+						the current account revision from trusted mail setup.
+					</p>
 				</div>
 			);
 		case 'webhook.received': {

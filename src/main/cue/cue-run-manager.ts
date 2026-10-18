@@ -1,3 +1,4 @@
+import { authorizeMailCueEvent } from './triggers/cue-mail-trigger-source';
 /**
  * Cue Run Manager - concurrency control, queue management, and run execution.
  *
@@ -255,15 +256,15 @@ export interface CueRunManager {
 		autoRun?: CueAutoRunConfig,
 		/** The subscription's model choice, threaded through the queue. */
 		turnSettings?: CueTurnSettings
-	): void;
+	): void | boolean;
 	stopRun(runId: string): boolean;
-	stopAll(): void;
+	stopAll(): void | boolean;
 	getActiveRuns(): CueRunResult[];
 	getActiveRunCount(sessionId: string): number;
 	getActiveRunMap(): Map<string, ActiveRun>;
 	getQueueStatus(): Map<string, number>;
-	clearQueue(sessionId: string, preserveStartup?: boolean): void;
-	reset(): void;
+	clearQueue(sessionId: string, preserveStartup?: boolean): void | boolean;
+	reset(): void | boolean;
 }
 
 export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
@@ -397,9 +398,14 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 			// row first - the dispatch promise may outlive another drain/reset
 			// cycle and we must not leave a ghost row referencing an in-flight run.
 			queue.splice(i, 1);
-			if (entry.persistId) deps.queuePersistence?.remove(entry.persistId);
+			if (!authorizeMailCueEvent(entry.event, sessionId, entry.subscriptionName)) {
+				if (entry.persistId) deps.queuePersistence?.remove(entry.persistId);
+				continue;
+			}
+			if (entry.persistId && entry.event.type !== 'relay.mail.received')
+				deps.queuePersistence?.remove(entry.persistId);
 			activeRunCount.set(sessionId, currentCount + 1);
-			doExecuteCueRun(
+			const execution = doExecuteCueRun(
 				sessionId,
 				entry.prompt,
 				entry.event,
@@ -416,6 +422,11 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				entry.autoRun,
 				entry.turnSettings
 			);
+			if (entry.persistId && entry.event.type === 'relay.mail.received')
+				void execution.then(
+					() => deps.queuePersistence?.remove(entry.persistId!),
+					() => deps.queuePersistence?.remove(entry.persistId!)
+				);
 		}
 
 		// Clean up empty queue
@@ -468,6 +479,10 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 		autoRun?: CueAutoRunConfig,
 		turnSettings?: CueTurnSettings
 	): Promise<void> {
+		if (!authorizeMailCueEvent(event, sessionId, subscriptionName)) {
+			activeRunCount.set(sessionId, Math.max(0, (activeRunCount.get(sessionId) ?? 1) - 1));
+			return;
+		}
 		const sessionName = getSessionName(sessionId);
 		const settings = deps.getSessionSettings(sessionId);
 		const runId = crypto.randomUUID();
@@ -535,6 +550,7 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 		deps.onRunStarted?.({ runId, sessionId, subscriptionName });
 
 		try {
+			if (!authorizeMailCueEvent(event, sessionId, subscriptionName)) return;
 			const runResult = await deps.onCueRun({
 				runId,
 				sessionId,
@@ -604,15 +620,20 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				const slicedOutput = sliceHeadByChars(result.stdout, SOURCE_OUTPUT_MAX_CHARS);
 
 				const outputRunId = crypto.randomUUID();
-				const outputEvent: CueEvent = {
-					...event,
-					id: crypto.randomUUID(),
-					payload: {
-						...event.payload,
-						sourceOutput: slicedOutput,
-						outputPromptPhase: true,
-					},
-				};
+				// Mail provenance authenticates exactly seven metadata fields. Agent output
+				// belongs in the output prompt/result, never in the mail event payload.
+				const outputEvent: CueEvent =
+					event.type === 'relay.mail.received'
+						? event
+						: {
+								...event,
+								id: crypto.randomUUID(),
+								payload: {
+									...event.payload,
+									sourceOutput: slicedOutput,
+									outputPromptPhase: true,
+								},
+							};
 
 				// Output-prompt phase is logically a child of the parent run:
 				// inherit the same chain root, point parent at the parent run.
@@ -647,6 +668,7 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				let outputResult: CueRunResult | undefined;
 				let outputStatus: CueRunResult['status'] = 'failed';
 				try {
+					if (!authorizeMailCueEvent(event, sessionId, subscriptionName)) return;
 					outputResult = await deps.onCueRun({
 						runId: outputRunId,
 						sessionId,
@@ -860,7 +882,8 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 			notify?: CueNotifyConfig,
 			autoRun?: CueAutoRunConfig,
 			turnSettings?: CueTurnSettings
-		): void {
+		): void | boolean {
+			if (!authorizeMailCueEvent(event, sessionId, subscriptionName)) return false;
 			const settings = deps.getSessionSettings(sessionId);
 			const maxConcurrent = settings?.max_concurrent ?? 1;
 			const queueSize = settings?.queue_size ?? 0;
@@ -905,7 +928,7 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 						'cue',
 						`[CUE] Queue disabled for "${sessionName}" (queue_size=${queueSize}), dropping incoming event`
 					);
-					return;
+					return false;
 				}
 
 				if (!eventQueue.has(sessionId)) {
@@ -918,6 +941,8 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 					// onQueueOverflow callback (12B) - without it the drop is
 					// invisible except to someone scraping logs.
 					const dropped = queue[0];
+					if (event.type === 'relay.mail.received' || dropped.event.type === 'relay.mail.received')
+						return false;
 					deps.onQueueOverflow?.({
 						sessionId,
 						sessionName,
@@ -961,7 +986,7 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				// entries that actually made it into the live queue. Safe
 				// wrappers mean a persist failure cannot break the live queue.
 				if (deps.queuePersistence && persistId) {
-					deps.queuePersistence.persist(sessionId, persistId, {
+					const persisted = deps.queuePersistence.persist(sessionId, persistId, {
 						event,
 						subscriptionName,
 						prompt,
@@ -977,18 +1002,52 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 						notify,
 						turnSettings,
 					});
+					if (event.type === 'relay.mail.received' && persisted !== true) {
+						queue.splice(queue.indexOf(queuedEntry), 1);
+						deps.queuePersistence.remove(persistId);
+						return false;
+					}
 				}
 
 				deps.onLog(
 					'cue',
 					`[CUE] Event queued for "${sessionName}" (${queue.length}/${queueSize} in queue, ${currentCount}/${maxConcurrent} concurrent)`
 				);
-				return;
+				if (event.type === 'relay.mail.received' && !deps.queuePersistence) {
+					queue.splice(queue.indexOf(queuedEntry), 1);
+					return false;
+				}
+				return true;
 			}
 
 			// Slot available - dispatch immediately
+			let mailPersistId: string | undefined;
+			if (event.type === 'relay.mail.received') {
+				if (!deps.queuePersistence) return false;
+				mailPersistId = crypto.randomUUID();
+				const persisted = deps.queuePersistence.persist(sessionId, mailPersistId, {
+					event,
+					subscriptionName,
+					prompt,
+					outputPrompt,
+					cliOutput,
+					action,
+					command,
+					chainDepth,
+					queuedAt: queuedAtOverride ?? Date.now(),
+					chainRootId,
+					parentEventId,
+					autoRun,
+					notify,
+					turnSettings,
+				});
+				if (persisted !== true || !authorizeMailCueEvent(event, sessionId, subscriptionName)) {
+					deps.queuePersistence.remove(mailPersistId);
+					return false;
+				}
+			}
 			activeRunCount.set(sessionId, currentCount + 1);
-			doExecuteCueRun(
+			const execution = doExecuteCueRun(
 				sessionId,
 				prompt,
 				event,
@@ -1005,6 +1064,12 @@ export function createCueRunManager(deps: CueRunManagerDeps): CueRunManager {
 				autoRun,
 				turnSettings
 			);
+			if (mailPersistId)
+				void execution.then(
+					() => deps.queuePersistence?.remove(mailPersistId!),
+					() => deps.queuePersistence?.remove(mailPersistId!)
+				);
+			return true;
 		},
 
 		stopRun(runId: string): boolean {

@@ -40,6 +40,16 @@ export type AgentSendProgressEvent =
  * never be called - the broker denies it and no handler is registered for it.
  */
 export const HOST_API = {
+	'mail.listAccounts': { capability: 'mail:accounts' },
+	'mail.requestSetup': { capability: 'mail:accounts' },
+	'mail.readHeaders': { capability: 'mail:read' },
+	'mail.searchHeaders': { capability: 'mail:read' },
+	'mail.readBody': { capability: 'mail:body' },
+	'mail.listAttachments': { capability: 'mail:attachments' },
+	'mail.openAttachment': { capability: 'mail:attachments' },
+	'mail.readAttachment': { capability: 'mail:attachments' },
+	'mail.closeAttachment': { capability: 'mail:attachments' },
+
 	'fs.read': { capability: 'fs:read' },
 	'fs.write': { capability: 'fs:write' },
 	'services.register': { capability: 'services:provide' },
@@ -174,6 +184,8 @@ export type HostControlMessage =
 			id: number;
 			commandId: string;
 			args?: unknown;
+			/** Internal host-issued nested handle; never an agent ID or model argument. */
+			invocationId?: string | null;
 			context: PluginToolCallerContext;
 	  }
 	| { kind: 'event'; topic: string; at: string; payload: unknown }
@@ -213,6 +225,27 @@ export function extractTarget(method: HostMethod, params: unknown): string | und
 		unknown
 	>;
 	switch (method) {
+		case 'mail.searchHeaders':
+		case 'mail.readAttachment':
+		case 'mail.closeAttachment': {
+			const descriptor = Object.getOwnPropertyDescriptor(p, 'accountId');
+			return descriptor && 'value' in descriptor && typeof descriptor.value === 'string'
+				? descriptor.value
+				: undefined;
+		}
+		case 'mail.readHeaders':
+		case 'mail.readBody':
+		case 'mail.listAttachments':
+		case 'mail.openAttachment': {
+			const ref = Object.getOwnPropertyDescriptor(p, 'reference');
+			if (!ref || !('value' in ref) || !ref.value || typeof ref.value !== 'object')
+				return undefined;
+			const account = Object.getOwnPropertyDescriptor(ref.value, 'accountId');
+			return account && 'value' in account && typeof account.value === 'string'
+				? account.value
+				: undefined;
+		}
+
 		case 'services.register':
 		case 'services.unregister':
 		case 'services.readiness':

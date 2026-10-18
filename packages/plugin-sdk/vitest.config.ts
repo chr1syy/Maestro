@@ -7,6 +7,7 @@ import { defineConfig } from 'vitest/config';
 // SDK is a dependency-free type facade.
 export default defineConfig({
 	root: import.meta.dirname,
+	cacheDir: import.meta.dirname + '/.cache/vitest',
 	test: {
 		globals: true,
 		environment: 'node',

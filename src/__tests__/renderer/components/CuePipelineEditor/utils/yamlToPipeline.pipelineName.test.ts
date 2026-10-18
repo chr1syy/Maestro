@@ -137,3 +137,27 @@ describe('pipeline_name-based grouping', () => {
 		expect(pipelines[0].name).toBe('legacy');
 	});
 });
+
+import { pipelineToYamlSubscriptions } from '../../../../../renderer/components/CuePipelineEditor/utils/pipelineToYaml';
+it('preserves a closed exact-account mail source through visual editor roundtrip', () => {
+	const mail = {
+		plugin_id: 'synthetic-plugin',
+		account_id: 'a'.repeat(32),
+		account_revision: 4,
+		mailbox: 'INBOX',
+		interval_minutes: 1,
+	};
+	const sub: CueSubscription = {
+		name: 'mail-sub',
+		pipeline_name: 'mail-pipeline',
+		event: 'relay.mail.received',
+		enabled: true,
+		agent_id: 'sess-a',
+		prompt: 'Mail {{CUE_MAIL_REFERENCE}}',
+		mail,
+	};
+	const pipelines = subscriptionsToPipelines([sub], makeSessions([['sess-a', 'Synthetic']]));
+	expect(pipelines).toHaveLength(1);
+	const result = pipelineToYamlSubscriptions(pipelines[0]);
+	expect(result.find((item) => item.event === 'relay.mail.received')?.mail).toEqual(mail);
+});

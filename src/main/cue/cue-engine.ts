@@ -1,3 +1,4 @@
+import { matchesMailCueSubscription } from './triggers/cue-mail-trigger-source';
 /**
  * Cue Engine Core - thin façade for Maestro Cue event-driven automation.
  *
@@ -423,7 +424,7 @@ export class CueEngine {
 				autoRun,
 				turnSettings
 			) => {
-				this.runManager.execute(
+				return this.runManager.execute(
 					sessionId,
 					prompt,
 					event,
@@ -663,10 +664,11 @@ export class CueEngine {
 				// Remove the persisted row immediately - runManager.execute will
 				// re-persist with a fresh id when it re-queues (or dispatches
 				// immediately if a slot is available).
-				this.queuePersistence.remove(entry.persistId);
+				if (entry.event.type !== 'relay.mail.received')
+					this.queuePersistence.remove(entry.persistId);
 				// Pass the original queuedAt so drainQueue's staleness check
 				// still reflects real user wait time, not the restart time.
-				this.runManager.execute(
+				const accepted = this.runManager.execute(
 					sessionId,
 					entry.prompt,
 					entry.event,
@@ -695,6 +697,8 @@ export class CueEngine {
 					entry.autoRun,
 					entry.turnSettings
 				);
+				if (entry.event.type === 'relay.mail.received' && accepted === true)
+					this.queuePersistence.remove(entry.persistId);
 			}
 		}
 
@@ -1156,6 +1160,16 @@ export class CueEngine {
 		}
 
 		return { writtenRoots };
+	}
+
+	isMailSubscriptionActive(
+		sessionId: string,
+		name: string,
+		source: CueEvent['mailSource']
+	): boolean {
+		if (!this.isEnabled()) return false;
+		const sub = this.registry.get(sessionId)?.config.subscriptions.find((sub) => sub.name === name);
+		return !!sub && matchesMailCueSubscription(sub, source);
 	}
 
 	/** Returns all sessions with their parsed subscriptions (for graph visualization) */

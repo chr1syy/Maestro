@@ -114,6 +114,15 @@ Local Claude API-mode and Codex desktop, Cue, and desktop-backed `maestro-cli se
 
 The proof is scoped to the local same-user process boundary. A model with full shell access can act as that OS user and may read its own proof file; this mechanism authenticates plugin tool calls, not arbitrary local commands by that user. The plugin must still enforce its target policy. A bridge whose desktop connection fails reports tool-call errors. No Discord delivery is implied by a model's own prose.
 
+Generic authenticated tool identity is independent of optional hardened proof-file
+storage. A registered project overlapping the host data directory, or an unrelated
+deleted worktree, can make that storage unavailable without disabling Relay
+replies. Generic calls still require the current manager, exact live local agent,
+current sandbox, trusted plugin identity and sealed authorization. Hardened file
+issuance and mail read/Cue policy retain their live storage checks and deny when
+the private owner was not provisioned. No storage fallback or mail permission is
+added by this separation.
+
 ## Token storage
 
 `maestro.storage.set` writes the plugin's private KV data to `<userData>/plugin-data/<pluginId>/store.json`. On POSIX, the base/plugin directories are owner-only (`0700`), new temporary and replacement files are owner-only (`0600`), and old stores are hardened before reading. Unsafe symlinks are rejected. Windows applies the platform's file ACL behavior; POSIX mode bits are not an access-control mechanism there. The token remains plaintext for the local user and should never be copied into global `shellEnvVars`, prompts, logs, or the plugin panel response.

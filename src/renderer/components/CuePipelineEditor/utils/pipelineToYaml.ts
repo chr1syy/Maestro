@@ -154,6 +154,9 @@ function applyTriggerEventConfig(sub: CueSubscription, triggerData: TriggerNodeD
 		sub.label = triggerData.customLabel;
 	}
 	switch (triggerData.eventType) {
+		case 'relay.mail.received':
+			sub.mail = triggerData.config.mail;
+			break;
 		case 'time.heartbeat':
 			if (triggerData.config.interval_minutes) {
 				sub.interval_minutes = triggerData.config.interval_minutes;

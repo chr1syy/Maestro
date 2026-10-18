@@ -1,3 +1,4 @@
+import { parseCueMailSource } from '../../../../shared/plugins/mail';
 /**
  * pipelineValidation - Pure pipeline graph validation.
  *
@@ -29,6 +30,7 @@ export const DEFAULT_TRIGGER_LABELS: Record<CueEventType, string> = {
 	'task.pending': 'Pending Task',
 	'cli.trigger': 'CLI Trigger',
 	'webhook.received': 'Webhook',
+	'relay.mail.received': 'Mail Received',
 };
 
 /**
@@ -47,6 +49,13 @@ function validateTriggerConfig(
 	const cfg = data.config ?? {};
 	const label = data.customLabel ? `"${data.customLabel}"` : `${data.eventType}`;
 	switch (data.eventType) {
+		case 'relay.mail.received':
+			try {
+				parseCueMailSource(cfg.mail);
+			} catch {
+				errors.push(`${pipelineName}: exact mail source configuration is required`);
+			}
+			break;
 		case 'time.heartbeat':
 			if (
 				typeof cfg.interval_minutes !== 'number' ||
