@@ -6,6 +6,8 @@ import { asThinkingMode } from '../../../shared/types';
 import { getSessionIdsBusyWithCli } from '../../../shared/cli-activity';
 import { isAiTabProcessActive } from '../../utils/agent-busy';
 import { isImageRef, resolveToDataUrlSync } from '../../storage/session-image-store';
+import { getAutoRunStateTracker } from '../../autorun/autorun-state-tracker';
+import type { DesktopTabEntry, DesktopSessionsSnapshot } from '../../../shared/desktopTabs';
 
 export function registerSessionCallbacks(
 	server: WebServer,
@@ -107,16 +109,30 @@ export function registerSessionCallbacks(
 	// session store (same source the renderer pushes to via `sessions:save`),
 	// then reconciles it with live managed-process and CLI-activity evidence.
 	server.setListDesktopSessionsCallback(() => {
+		const capturedAt = Date.now();
 		const sessions = sessionsStore.get<StoredSession[]>('sessions', []);
 		const byId = new Map(sessions.map((session) => [session.id, session]));
 		const processManager = getProcessManager();
+		let complete = !!processManager;
 		// Resolved once: this used to be a per-agent call that re-read and
 		// re-parsed the CLI activity file on every iteration.
 		const cliBusySessionIds = getSessionIdsBusyWithCli();
-		const entries = [];
+		const entries: DesktopTabEntry[] = [];
+		const owners = sessions.map((s) => ({
+			id: s.id,
+			cwd: s.cwd,
+			parentSessionId: typeof s.parentSessionId === 'string' ? s.parentSessionId : null,
+			groupId: typeof s.groupId === 'string' && s.groupId ? s.groupId : null,
+			isPianola: s.isPianola === true,
+			remote: !!s.sshRemoteId || !!s.sshRemote || s.sessionSshRemoteConfig?.enabled === true,
+		}));
 		for (const s of sessions) {
+			if (s.aiTabs != null && !Array.isArray(s.aiTabs)) complete = false;
 			const aiTabs = (s.aiTabs as Array<Record<string, any>> | undefined) ?? [];
 			const cliBusy = cliBusySessionIds.has(s.id);
+			// Auto Run owns its agent between process turns too. Never resume
+			// its parked/stopping work through a conversational scope reply.
+			const autoRun = getAutoRunStateTracker().getState(s.id);
 			const ancestors: NonNullable<
 				import('../../../shared/desktopTabs').DesktopTabEntry['supervision']
 			>['ancestors'] = [];
@@ -132,6 +148,7 @@ export function registerSessionCallbacks(
 				seen.add(parentId);
 				ancestors.push({
 					id: parent.id,
+					groupId: typeof parent.groupId === 'string' && parent.groupId ? parent.groupId : null,
 					cwd: parent.cwd,
 					parentSessionId:
 						typeof parent.parentSessionId === 'string' ? parent.parentSessionId : null,
@@ -144,7 +161,10 @@ export function registerSessionCallbacks(
 				parentId = typeof parent.parentSessionId === 'string' ? parent.parentSessionId : null;
 			}
 			for (const tab of aiTabs) {
-				if (!tab || typeof tab.id !== 'string') continue;
+				if (!tab || typeof tab.id !== 'string') {
+					complete = false;
+					continue;
+				}
 				const logs = Array.isArray(tab.logs) ? tab.logs : [];
 				const lastLog = logs[logs.length - 1];
 				const isActiveTab = tab.id === s.activeTabId;
@@ -186,11 +206,22 @@ export function registerSessionCallbacks(
 					supervision: {
 						cwd: s.cwd,
 						parentSessionId: typeof s.parentSessionId === 'string' ? s.parentSessionId : null,
+						groupId: typeof s.groupId === 'string' && s.groupId ? s.groupId : null,
 						ancestors,
 						lineageComplete,
 						isPianola: s.isPianola === true,
 						remote: !!s.sshRemoteId || !!s.sshRemote || s.sessionSshRemoteConfig?.enabled === true,
 						errorPaused: s.agentErrorPaused === true,
+						paused:
+							s.agentErrorPaused === true ||
+							!!tab.agentError ||
+							!!tab.wizardState?.isActive ||
+							autoRun?.isRunning === true ||
+							autoRun?.errorPaused === true ||
+							autoRun?.isStopping === true,
+						// CLI activity is agent-scoped; do not infer which sibling
+						// tab is safe to address from its selected-tab status.
+						busy: managedProcessActive || cliBusy,
 						consult: !!tab.consultOrigin,
 						ephemeral: tab.quickChat === true && tab.hidden === true,
 						cursorAvailable:
@@ -208,7 +239,13 @@ export function registerSessionCallbacks(
 				});
 			}
 		}
-		return entries;
+		return {
+			supervisionVersion: 1,
+			complete,
+			capturedAt,
+			owners,
+			sessions: entries,
+		} satisfies DesktopSessionsSnapshot;
 	});
 
 	// `maestro-cli session show <tabId>` - return the tab's conversation

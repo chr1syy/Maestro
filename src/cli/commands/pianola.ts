@@ -34,6 +34,7 @@ import {
 	type PianolaNotifyEvent,
 } from '../../shared/pianola/pianola-watcher';
 import { matchHasNarrowingPredicate } from '../../shared/pianola/pianola-policy';
+import { pianolaScopeSnapshotFromDesktop } from '../../shared/pianola/pianola-scope-cycle';
 // Enum arrays are single-sourced from types.ts; alias to the CLI's local names.
 import {
 	RULE_SCOPES,
@@ -52,6 +53,15 @@ import type {
 
 const DEFAULT_INTERVAL_SECONDS = 5;
 const POLL_TAIL = 40;
+
+/** Scope discovery reuses the native session-list transport, with a strict contract. */
+export async function readPianolaScopeSnapshot(client: Pick<MaestroClient, 'sendCommand'>) {
+	const response = await client.sendCommand<unknown>(
+		{ type: 'list_desktop_sessions' },
+		'desktop_sessions_list'
+	);
+	return pianolaScopeSnapshotFromDesktop(response);
+}
 
 export interface PianolaWatchOptions {
 	agent?: string;
@@ -100,13 +110,13 @@ export function ensurePianolaEnabled(json?: boolean): void {
  * actually halts an in-flight watcher (the startup `ensurePianolaEnabled` guard
  * only runs once).
  */
-function pianolaEnabledNow(): boolean {
+export function pianolaEnabledNow(): boolean {
 	const flags = readSettingValue('encoreFeatures') as Record<string, unknown> | undefined;
 	return flags?.pianola === true;
 }
 
 /** Build the desktop toast for a blocking ask the user must see. */
-function buildNotifyToastCommand(event: PianolaNotifyEvent): Record<string, unknown> {
+export function buildNotifyToastCommand(event: PianolaNotifyEvent): Record<string, unknown> {
 	const topic = event.classification.topic || 'a decision';
 	const prefix =
 		event.kind === 'handoff_failed'

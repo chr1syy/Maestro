@@ -6,6 +6,7 @@
  */
 import { createHash } from 'crypto';
 import { canonicalJson } from '../canonicalJson';
+import type { DesktopSessionsSnapshot } from '../desktopTabs';
 import type { PianolaFsStore } from './fs-store';
 import {
 	resolvePianolaScopeOwnership,
@@ -30,6 +31,7 @@ import {
 	type WatchTarget,
 } from './pianola-watcher';
 import type { PianolaDecisionRecord, PianolaSupervisedTarget } from './storage';
+import { decide } from './pianola-policy';
 import type { PianolaMessage } from './types';
 
 export interface PianolaScopeSnapshotTab extends PianolaScopeTab {
@@ -152,6 +154,78 @@ function assertSnapshot(snapshot: PianolaScopeSnapshot): void {
 		throw new Error('Incomplete or ambiguous Pianola scope snapshot');
 }
 
+/** Adapt the native tab-list response without accepting a legacy/partial census. */
+export function pianolaScopeSnapshotFromDesktop(raw: unknown): PianolaScopeSnapshot {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+		throw new Error('Missing native supervision snapshot');
+	const response = raw as Partial<DesktopSessionsSnapshot> & { success?: boolean };
+	if (
+		response.success !== true ||
+		response.supervisionVersion !== 1 ||
+		response.complete !== true ||
+		!Array.isArray(response.owners) ||
+		!Array.isArray(response.sessions) ||
+		response.owners.length > 10000 ||
+		response.sessions.length > 10000 ||
+		response.owners.some(
+			(owner) =>
+				!owner ||
+				typeof owner.id !== 'string' ||
+				!owner.id ||
+				typeof owner.cwd !== 'string' ||
+				!owner.cwd ||
+				!(owner.parentSessionId === null || typeof owner.parentSessionId === 'string') ||
+				typeof owner.isPianola !== 'boolean' ||
+				typeof owner.remote !== 'boolean'
+		)
+	)
+		throw new Error('Incomplete native supervision census');
+	const owners = response.owners;
+	if (new Set(response.sessions.map((tab) => tab?.tabId)).size !== response.sessions.length)
+		throw new Error('Ambiguous native supervision tab IDs');
+	const tabs = response.sessions.map((tab) => {
+		const info = tab?.supervision;
+		const owner = owners.find((candidate) => candidate.id === tab?.agentId);
+		if (
+			!tab ||
+			typeof tab.tabId !== 'string' ||
+			!tab.tabId ||
+			!Number.isSafeInteger(tab.createdAt) ||
+			tab.createdAt < 0 ||
+			!info ||
+			typeof info.lineageComplete !== 'boolean' ||
+			!owner ||
+			info.cwd !== owner.cwd ||
+			info.parentSessionId !== owner.parentSessionId ||
+			info.groupId !== owner.groupId ||
+			info.isPianola !== owner.isPianola ||
+			info.remote !== owner.remote ||
+			typeof info.paused !== 'boolean' ||
+			typeof info.busy !== 'boolean'
+		)
+			throw new Error('Incomplete native supervision tab metadata');
+		return {
+			agentId: tab.agentId,
+			tabId: tab.tabId,
+			createdAt: tab.createdAt,
+			paused: info.paused,
+			busy: info.busy,
+			consult: info.consult,
+			ephemeral: info.ephemeral,
+			cursorAvailable: info.cursorAvailable,
+			cursor: info.cursor,
+		};
+	});
+	const snapshot = {
+		capturedAt: response.capturedAt!,
+		complete: true,
+		owners,
+		tabs,
+	};
+	assertSnapshot(snapshot);
+	return snapshot;
+}
+
 /**
  * Hash the identity binding. Directory and group moves that remain selected
  * preserve cursors; changing an owner's parent lineage requires a baseline.
@@ -208,7 +282,7 @@ function deliveryOutcome(result: PianolaScopeDeliveryResult): { success: boolean
 export async function runPianolaScopeCycle(
 	scopeId: string,
 	deps: PianolaScopeCycleDeps,
-	options: { dryRun: boolean }
+	options: { dryRun: boolean; maxTabs?: number; shouldStop?: () => boolean }
 ): Promise<PianolaScopeCycleResult> {
 	const targets = deps.store.readSupervisorTargets();
 	const scopes = scopesFrom(targets);
@@ -216,8 +290,32 @@ export async function runPianolaScopeCycle(
 	let checkpoint = deps.store.readScopeCheckpoint(scopeId);
 	const result: PianolaScopeCycleResult = { status: 'suspended', iterations: [], issues: [] };
 	let persistenceFailed = false;
+	const startedSuspended = checkpoint?.status === 'suspended';
+	let externallySuspended = false;
 	const persist = (): void => {
 		try {
+			// The host may suspend the scope while this child awaits I/O. Never
+			// overwrite that pause with an older in-memory armed checkpoint.
+			const current = deps.store.readScopeCheckpoint(scopeId);
+			if (current?.status === 'suspended' && !startedSuspended) externallySuspended = true;
+			if (
+				externallySuspended ||
+				!deps.store
+					.readSupervisorTargets()
+					.some((target) => target.id === scopeId && target.enabled)
+			)
+				checkpoint!.status = 'suspended';
+			for (const saved of checkpoint!.tabs) {
+				const durable = current?.tabs.find(
+					(tab) => tab.agentId === saved.agentId && tab.tabId === saved.tabId
+				);
+				if (
+					saved.unresolvedIntent &&
+					durable?.unresolvedIntent?.decisionId === saved.unresolvedIntent.decisionId &&
+					durable.unresolvedIntent.admitted
+				)
+					saved.unresolvedIntent.admitted = true;
+			}
 			deps.store.writeScopeCheckpoint(checkpoint!);
 		} catch (error) {
 			persistenceFailed = true;
@@ -271,7 +369,6 @@ export async function runPianolaScopeCycle(
 		if (!liveKeys.has(canonicalJson([saved.agentId, saved.tabId]))) saved.status = 'closed';
 	}
 	const working: Array<{ tab: PianolaScopeSnapshotTab; saved: PianolaScopeCheckpointTab }> = [];
-	let baselineUnavailable = false;
 	for (const tab of snapshot.tabs) {
 		const key = canonicalJson([tab.agentId, tab.tabId]);
 		let saved = savedByKey.get(key);
@@ -287,9 +384,8 @@ export async function runPianolaScopeCycle(
 			continue;
 		}
 		if (!tab.cursorAvailable) {
-			// Initial activation requires a complete baseline. Once armed, isolate
-			// this tab rather than losing unrelated tabs' pending work.
-			if (firstActivation || resume) baselineUnavailable = true;
+			// Isolate an unavailable cursor even during enrollment. When it
+			// becomes available, this tab receives its own fresh baseline.
 			if (saved) saved.status = 'suspended';
 			result.issues.push(`Transcript cursor unavailable: ${tab.agentId}/${tab.tabId}`);
 			continue;
@@ -346,6 +442,7 @@ export async function runPianolaScopeCycle(
 			!tab.paused &&
 			!tab.busy &&
 			(!sameCursor(saved.lastSeen, tab.cursor) ||
+				saved.baselineBusy ||
 				saved.state.pendingRetry ||
 				saved.state.pendingHandoff)
 		)
@@ -354,12 +451,25 @@ export async function runPianolaScopeCycle(
 	if (checkpoint.tabs.length > 10000) throw new Error('Pianola scope checkpoint membership limit');
 	checkpoint.configurationFingerprint = configurationFingerprint;
 	checkpoint.lastSnapshotAt = snapshot.capturedAt;
-	checkpoint.status = baselineUnavailable ? 'baselining' : 'armed';
+	checkpoint.status = 'armed';
 	// Commit the entire membership/baseline before any rule, handoff or notice.
 	persist();
 	result.status = checkpoint.status;
 	if (checkpoint.status !== 'armed') return result;
-	for (const { tab, saved } of working) {
+	// Rotate over the census, not just changed tabs, so a failing/active prefix
+	// cannot starve later agents. One scope child does serial, bounded work.
+	const start = (checkpoint.nextTabIndex ?? 0) % Math.max(1, snapshot.tabs.length);
+	const maxTabs = Math.max(1, Math.min(100, Math.floor(options.maxTabs ?? 20)));
+	const positions = new Map(snapshot.tabs.map((tab, index) => [tab, index]));
+	working.sort(
+		(a, b) =>
+			((positions.get(a.tab)! - start + snapshot.tabs.length) % snapshot.tabs.length) -
+			((positions.get(b.tab)! - start + snapshot.tabs.length) % snapshot.tabs.length)
+	);
+	for (const { tab, saved } of working.slice(0, maxTabs)) {
+		if (options.shouldStop?.() || externallySuspended) break;
+		checkpoint.nextTabIndex = (positions.get(tab)! + 1) % snapshot.tabs.length;
+		persist();
 		try {
 			const target: WatchTarget = {
 				agentId: tab.agentId,
@@ -387,7 +497,8 @@ export async function runPianolaScopeCycle(
 			const actionableIds = new Set(messages.slice(offset).map((message) => message.id));
 			if (saved.baselineBusy && saved.baseline) {
 				const streamed = messages[offset - 1];
-				if (streamed?.content.length > saved.baseline.textLength) actionableIds.add(streamed.id);
+				if (streamed?.id === saved.baseline.id && streamed.role === 'assistant')
+					actionableIds.add(streamed.id);
 			}
 			let latestRecord: PianolaDecisionRecord | undefined;
 			const guard = async (): Promise<PianolaScopeDeliveryGuard> => {
@@ -399,6 +510,7 @@ export async function runPianolaScopeCycle(
 					!tab.cursor
 				)
 					throw new Error('Missing post-baseline delivery evidence');
+				if (options.shouldStop?.() || externallySuspended) throw new Error('Scope worker stopping');
 				const currentTargets = deps.store.readSupervisorTargets();
 				const currentScopes = scopesFrom(currentTargets);
 				const currentScope = currentScopes.find((candidate) => candidate.id === scopeId);
@@ -462,6 +574,7 @@ export async function runPianolaScopeCycle(
 				{ ...options, canActOnMessage: (messageId) => actionableIds.has(messageId) }
 			);
 			saved.state = iteration.state;
+			saved.baselineBusy = false;
 			saved.lastSeen = tab.cursor;
 			saved.unresolvedIntent = null;
 			persist();
@@ -478,4 +591,127 @@ export async function runPianolaScopeCycle(
 		}
 	}
 	return result;
+}
+
+/**
+ * Synchronous native admission before invoking the renderer's normal send path.
+ * Persist a claim first: duplicate admissions and unknown receipts stay blocked.
+ * This is for rule answers; manager decisions use the decision lifecycle adapter.
+ */
+export function admitPianolaScopeReply(
+	raw: unknown,
+	answer: string,
+	snapshot: PianolaScopeSnapshot,
+	store: Pick<
+		PianolaFsStore,
+		| 'readSupervisorTargets'
+		| 'readScopeCheckpoint'
+		| 'writeScopeCheckpoint'
+		| 'readDecisions'
+		| 'readRules'
+		| 'appendDecision'
+	>
+): PianolaScopeDeliveryGuard {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Missing scope guard');
+	const guard = raw as PianolaScopeDeliveryGuard;
+	if (
+		![
+			'scopeId',
+			'configurationFingerprint',
+			'bindingFingerprint',
+			'agentId',
+			'tabId',
+			'messageId',
+			'decisionId',
+		].every((key) => typeof (raw as Record<string, unknown>)[key] === 'string') ||
+		!guard.cursor ||
+		!isPianolaScopeCursor(guard.cursor)
+	)
+		throw new Error('Invalid scope guard');
+	assertSnapshot(snapshot);
+	const targets = store.readSupervisorTargets();
+	const scopes = scopesFrom(targets);
+	const scope = scopes.find((candidate) => candidate.id === guard.scopeId);
+	const tab = snapshot.tabs.find(
+		(candidate) => candidate.agentId === guard.agentId && candidate.tabId === guard.tabId
+	);
+	if (
+		!scope?.enabled ||
+		scope.selection.mode !== 'agents-and-groups' ||
+		pianolaScopeConfigurationFingerprint(scope) !== guard.configurationFingerprint ||
+		!tab ||
+		tab.busy ||
+		!tab.cursorAvailable ||
+		!sameCursor(tab.cursor, guard.cursor)
+	)
+		throw new Error('Scope or pending ask changed');
+	const owner = resolvePianolaScopeOwnership(
+		tab,
+		snapshot.owners,
+		scopes,
+		targets.filter((target) => target.kind === 'watch')
+	);
+	if (
+		owner.kind !== 'scope' ||
+		owner.scopeId !== scope.id ||
+		bindingFingerprint(scope, tab.agentId, snapshot.owners) !== guard.bindingFingerprint
+	)
+		throw new Error('Scope ownership changed');
+	const checkpoint = store.readScopeCheckpoint(scope.id);
+	const saved = checkpoint?.tabs.find(
+		(candidate) => candidate.agentId === tab.agentId && candidate.tabId === tab.tabId
+	);
+	if (
+		!checkpoint ||
+		checkpoint.status !== 'armed' ||
+		checkpoint.configurationFingerprint !== guard.configurationFingerprint ||
+		snapshot.capturedAt < (checkpoint.lastSnapshotAt ?? checkpoint.activatedAt) ||
+		!saved ||
+		saved.status !== 'active' ||
+		saved.bindingFingerprint !== guard.bindingFingerprint ||
+		saved.unresolvedIntent?.decisionId !== guard.decisionId ||
+		saved.unresolvedIntent.messageId !== guard.messageId ||
+		saved.unresolvedIntent.admitted
+	)
+		throw new Error('Scope intent missing or already admitted');
+	const decisions = store.readDecisions();
+	if (
+		decisions.some(
+			(candidate) =>
+				candidate.agentId === tab.agentId &&
+				candidate.tabId === tab.tabId &&
+				candidate.classification.evidence.messageId === guard.messageId &&
+				!candidate.dryRun &&
+				(candidate.dispatched || candidate.deliveryStatus === 'admitted')
+		)
+	)
+		throw new Error('Ask already admitted or answered');
+	const record = decisions.find((candidate) => candidate.id === guard.decisionId);
+	if (
+		!record ||
+		record.dryRun ||
+		record.dispatched ||
+		record.agentId !== tab.agentId ||
+		record.tabId !== tab.tabId ||
+		record.classification.evidence.messageId !== guard.messageId ||
+		record.decision.action !== 'auto_answer' ||
+		record.decision.answer !== answer
+	)
+		throw new Error('Missing rule answer intent');
+	const currentDecision = decide(record.classification, store.readRules(), {
+		tabId: tab.tabId,
+		projectPath: snapshot.owners.find((candidate) => candidate.id === tab.agentId)!.cwd,
+	});
+	if (
+		currentDecision.action !== 'auto_answer' ||
+		currentDecision.matchedRuleId !== record.decision.matchedRuleId ||
+		currentDecision.answer !== answer
+	)
+		throw new Error('Rule answer no longer authorized');
+	// Independent of checkpoint writes by the worker, this audit claim survives
+	// a crash between native admission and the recipient's receipt.
+	store.appendDecision({ ...record, deliveryStatus: 'admitted' });
+	saved.unresolvedIntent.admitted = true;
+	store.writeScopeCheckpoint(checkpoint);
+	return guard;
 }

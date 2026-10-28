@@ -44,6 +44,7 @@ import type {
 } from './types';
 import {
 	handleSendCommand,
+	handlePianolaScopeReply,
 	handleSwitchMode,
 	handleSelectSession,
 	handleCrossAgentAsk,
@@ -267,6 +268,10 @@ export class WebSocketMessageHandler {
 
 			case 'subscribe':
 				this.handleSubscribe(client, message);
+				break;
+
+			case 'pianola_scope_reply':
+				void handlePianolaScopeReply(this.ctx, client, message);
 				break;
 
 			case 'send_command':

@@ -13,6 +13,69 @@ import { noteDispatchDelegation } from './agentDelegation';
 import { LOG_CONTEXT } from './shared';
 import type { WebClient, WebClientMessage, MessageHandlerContext } from './types';
 
+import { getSettingsStore } from '../../../stores';
+import * as pianolaStore from '../../../pianola/pianola-store-main';
+import {
+	admitPianolaScopeReply,
+	pianolaScopeSnapshotFromDesktop,
+} from '../../../../shared/pianola/pianola-scope-cycle';
+
+/** Scope delivery never falls back to unguarded send_command on older hosts. */
+export async function handlePianolaScopeReply(
+	ctx: MessageHandlerContext,
+	client: WebClient,
+	message: WebClientMessage
+): Promise<void> {
+	let admitted = false;
+	const reply = (status: 'accepted' | 'rejected' | 'unknown', error?: string) =>
+		ctx.send(client, {
+			type: 'pianola_scope_reply_result',
+			status,
+			error,
+			requestId: message.requestId,
+		});
+	try {
+		if (!client.cli) throw new Error('Scope admission requires the native CLI');
+		const flags = getSettingsStore().get('encoreFeatures', {}) as Record<string, boolean>;
+		if (flags.pianola !== true) throw new Error('Pianola disabled');
+		if (
+			!ctx.callbacks.executeCommand ||
+			typeof message.answer !== 'string' ||
+			!message.answer.trim()
+		)
+			throw new Error('Scope answer unavailable');
+		const snapshot = pianolaScopeSnapshotFromDesktop({
+			success: true,
+			...ctx.callbacks.listDesktopSessions?.(),
+		});
+		const raw = message.guard as Record<string, unknown> | undefined;
+		if (!raw || raw.agentId !== message.sessionId || raw.tabId !== message.tabId)
+			throw new Error('Scope recipient mismatch');
+		const guard = admitPianolaScopeReply(raw, message.answer, snapshot, pianolaStore);
+		admitted = true;
+		const accepted = await ctx.callbacks.executeCommand(
+			guard.agentId,
+			message.answer,
+			'ai',
+			guard.tabId,
+			false,
+			undefined,
+			true,
+			true
+		);
+		reply(
+			accepted ? 'accepted' : 'rejected',
+			accepted ? undefined : 'Renderer refused scope answer'
+		);
+	} catch (error) {
+		// Any error after native admission may have delivered; never invite a retry.
+		reply(
+			admitted ? 'unknown' : 'rejected',
+			error instanceof Error ? error.message : 'Scope admission failed'
+		);
+	}
+}
+
 /**
  * Timeout bounds for a cross-agent consult. A consult spawns a whole agent turn,
  * so the floor is generous and the ceiling is an hour - past that the caller has

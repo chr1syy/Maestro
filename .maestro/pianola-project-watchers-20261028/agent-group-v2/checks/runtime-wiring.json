@@ -1,0 +1,113 @@
+{
+	"taskId": "V2-03",
+	"sourceFiles": [
+		"src/cli/commands/pianola-supervise.ts",
+		"src/cli/commands/pianola.ts",
+		"src/cli/index.ts",
+		"src/cli/services/pianola-store.ts",
+		"src/main/pianola/pianola-store-main.ts",
+		"src/main/pianola/pianola-supervisor.ts",
+		"src/main/web-server/WebServer.ts",
+		"src/main/web-server/callbacks/commandCallbacks.ts",
+		"src/main/web-server/callbacks/sessionCallbacks.ts",
+		"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+		"src/main/web-server/handlers/messageHandlers/commands.ts",
+		"src/main/web-server/handlers/messageHandlers/sessions.ts",
+		"src/main/web-server/handlers/messageHandlers/types.ts",
+		"src/main/web-server/managers/CallbackRegistry.ts",
+		"src/main/web-server/types.ts",
+		"src/shared/desktopTabs.ts",
+		"src/shared/pianola/pianola-scope-checkpoint.ts",
+		"src/shared/pianola/pianola-scope-cycle.ts",
+		"src/shared/pianola/storage.ts",
+		"src/cli/commands/pianola-scope-watch.ts"
+	],
+	"checks": [
+		{
+			"check": "format",
+			"command": [
+				"node_modules/.bin/prettier",
+				"--check",
+				"src/cli/commands/pianola-supervise.ts",
+				"src/cli/commands/pianola.ts",
+				"src/cli/index.ts",
+				"src/cli/services/pianola-store.ts",
+				"src/main/pianola/pianola-store-main.ts",
+				"src/main/pianola/pianola-supervisor.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/callbacks/commandCallbacks.ts",
+				"src/main/web-server/callbacks/sessionCallbacks.ts",
+				"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts",
+				"src/main/web-server/handlers/messageHandlers/sessions.ts",
+				"src/main/web-server/handlers/messageHandlers/types.ts",
+				"src/main/web-server/managers/CallbackRegistry.ts",
+				"src/main/web-server/types.ts",
+				"src/shared/desktopTabs.ts",
+				"src/shared/pianola/pianola-scope-checkpoint.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/storage.ts",
+				"src/cli/commands/pianola-scope-watch.ts"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-03-format.log"
+		},
+		{
+			"check": "lint",
+			"command": [
+				"node_modules/.bin/eslint",
+				"src/cli/commands/pianola-supervise.ts",
+				"src/cli/commands/pianola.ts",
+				"src/cli/index.ts",
+				"src/cli/services/pianola-store.ts",
+				"src/main/pianola/pianola-store-main.ts",
+				"src/main/pianola/pianola-supervisor.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/callbacks/commandCallbacks.ts",
+				"src/main/web-server/callbacks/sessionCallbacks.ts",
+				"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts",
+				"src/main/web-server/handlers/messageHandlers/sessions.ts",
+				"src/main/web-server/handlers/messageHandlers/types.ts",
+				"src/main/web-server/managers/CallbackRegistry.ts",
+				"src/main/web-server/types.ts",
+				"src/shared/desktopTabs.ts",
+				"src/shared/pianola/pianola-scope-checkpoint.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/storage.ts",
+				"src/cli/commands/pianola-scope-watch.ts"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-03-lint.log"
+		},
+		{
+			"check": "diff",
+			"command": [
+				"git",
+				"diff",
+				"HEAD",
+				"--check"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-03-diff.log"
+		},
+		{
+			"check": "types",
+			"command": [
+				"node",
+				".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-03-typecheck.cjs"
+			],
+			"exitCode": 0,
+			"result": "10 source roots including ambient declarations, zero diagnostics",
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-03-typecheck.log"
+		}
+	],
+	"tests": {
+		"authored": false,
+		"executed": false,
+		"reason": "V2-03 explicitly separates regression authoring in V2-06 from execution in V2-07."
+	},
+	"installedRuntimeVerified": false,
+	"productiveCoverageChanged": false,
+	"pushValidationSuite": "Skipped for this branch push as explicitly instructed; hooks unchanged."
+}

@@ -22,7 +22,7 @@ export interface PianolaScopeCheckpointTab {
 	state: WatchState;
 	status: 'active' | 'suspended' | 'closed';
 	/** An intent persisted before delivery; an unknown outcome is never retried blindly. */
-	unresolvedIntent: { decisionId: string; messageId: string } | null;
+	unresolvedIntent: { decisionId: string; messageId: string; admitted?: boolean } | null;
 }
 
 export interface PianolaScopeCheckpoint {
@@ -32,6 +32,8 @@ export interface PianolaScopeCheckpoint {
 	activatedAt: number;
 	/** Last complete metadata census; new membership alone is not new activity. */
 	lastSnapshotAt?: number;
+	/** Round-robin position in the current native tab census. */
+	nextTabIndex?: number;
 	status: 'baselining' | 'armed' | 'suspended';
 	tabs: PianolaScopeCheckpointTab[];
 }
@@ -98,6 +100,7 @@ export function validatePianolaScopeCheckpoint(
 		(raw.lastSnapshotAt !== undefined &&
 			(!nonnegativeInteger(raw.lastSnapshotAt) || raw.lastSnapshotAt < raw.activatedAt)) ||
 		(raw.status !== 'baselining' && raw.status !== 'armed' && raw.status !== 'suspended') ||
+		(raw.nextTabIndex !== undefined && !nonnegativeInteger(raw.nextTabIndex)) ||
 		!Array.isArray(raw.tabs) ||
 		raw.tabs.length > 10000
 	)
@@ -122,7 +125,9 @@ export function validatePianolaScopeCheckpoint(
 			tab.unresolvedIntent !== null &&
 			(!record(tab.unresolvedIntent) ||
 				!id(tab.unresolvedIntent.decisionId) ||
-				!id(tab.unresolvedIntent.messageId))
+				!id(tab.unresolvedIntent.messageId) ||
+				(tab.unresolvedIntent.admitted !== undefined &&
+					typeof tab.unresolvedIntent.admitted !== 'boolean'))
 		)
 			return null;
 		const key = JSON.stringify([tab.agentId, tab.tabId]);

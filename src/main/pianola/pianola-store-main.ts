@@ -50,3 +50,6 @@ export const readSupervisorTargets = store.readSupervisorTargets;
 export const writeSupervisorTargets = store.writeSupervisorTargets;
 export const upsertSupervisorTarget = store.upsertSupervisorTarget;
 export const removeSupervisorTarget = store.removeSupervisorTarget;
+
+export const readScopeCheckpoint = store.readScopeCheckpoint;
+export const writeScopeCheckpoint = store.writeScopeCheckpoint;

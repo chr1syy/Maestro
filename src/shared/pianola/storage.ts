@@ -143,6 +143,8 @@ export interface PianolaDecisionRecord {
 	decision: PianolaDecision;
 	/** True if Pianola actually sent a message (auto-answer that was dispatched). */
 	dispatched: boolean;
+	/** Native admission happened; until an outcome arrives delivery is uncertain. */
+	deliveryStatus?: 'admitted';
 	/** True if running in dry-run mode (never dispatches). */
 	dryRun: boolean;
 	/** Populated when a dispatch attempt failed. */
@@ -272,6 +274,7 @@ export function validatePianolaDecisionRecord(raw: unknown): PianolaDecisionReco
 	if (typeof raw.dispatched !== 'boolean' || typeof raw.dryRun !== 'boolean') return null;
 	if (raw.projectPath !== undefined && typeof raw.projectPath !== 'string') return null;
 	if (raw.error !== undefined && typeof raw.error !== 'string') return null;
+	if (raw.deliveryStatus !== undefined && raw.deliveryStatus !== 'admitted') return null;
 	if (!isValidClassification(raw.classification)) return null;
 	if (!isValidDecision(raw.decision)) return null;
 	return raw as unknown as PianolaDecisionRecord;

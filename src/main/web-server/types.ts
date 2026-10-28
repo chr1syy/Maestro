@@ -5,7 +5,7 @@
 
 import type { AutoRunBroadcastState } from '../../shared/autoRunBroadcast';
 import type { QueueSteerResult } from '../../shared/chatSteering';
-import type { DesktopTabEntry } from '../../shared/desktopTabs';
+import type { DesktopTabEntry, DesktopSessionsSnapshot } from '../../shared/desktopTabs';
 import type { SnoozeCommandRequest, SnoozeCommandResult } from '../../shared/snoozeCommands';
 import type { WindowCommandRequest, WindowCommandResult } from '../../shared/windowCommands';
 import type { UsageStats } from '../../shared/types';
@@ -327,7 +327,9 @@ export type ExecuteCommandCallback = (
 	 * (the renderer selects it "for visual feedback"), so the web/mobile client and
 	 * every in-app caller keep focusing exactly as they do now.
 	 */
-	background?: boolean
+	background?: boolean,
+	/** Throw on a missing/malformed receipt instead of reporting a rejection. */
+	requireDeliveryReceipt?: boolean
 ) => Promise<boolean>;
 
 /**
@@ -976,7 +978,7 @@ export interface GetSessionHistoryOptions {
 }
 
 /** Callback to enumerate all open AI tabs across all desktop agents. */
-export type ListDesktopSessionsCallback = () => DesktopSessionEntry[];
+export type ListDesktopSessionsCallback = () => DesktopSessionEntry[] | DesktopSessionsSnapshot;
 
 /** Callback to fetch a tab's full conversation history by tabId. */
 export type GetSessionHistoryCallback = (

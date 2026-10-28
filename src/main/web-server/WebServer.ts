@@ -1273,7 +1273,8 @@ export class WebServer {
 				tabId?: string,
 				force?: boolean,
 				images?: string[],
-				background?: boolean
+				background?: boolean,
+				requireDeliveryReceipt?: boolean
 			) =>
 				this.callbackRegistry.executeCommand(
 					sessionId,
@@ -1282,7 +1283,8 @@ export class WebServer {
 					tabId,
 					force,
 					images,
-					background
+					background,
+					...(requireDeliveryReceipt ? [true] : [])
 				),
 			switchMode: async (sessionId: string, mode: 'ai' | 'terminal', background?: boolean) =>
 				this.callbackRegistry.switchMode(sessionId, mode, background),

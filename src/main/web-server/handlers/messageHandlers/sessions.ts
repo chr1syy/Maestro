@@ -421,8 +421,8 @@ export function handleListDesktopSessions(
 	// A missing callback is distinct from a valid snapshot with no open tabs.
 	// Treating both as an empty list could retire a scoped watch's baselines.
 	const capturedAt = Date.now();
-	const sessions = ctx.callbacks.listDesktopSessions?.();
-	if (!sessions) {
+	const snapshot = ctx.callbacks.listDesktopSessions?.();
+	if (!snapshot) {
 		ctx.send(client, {
 			type: 'desktop_sessions_list',
 			success: false,
@@ -436,8 +436,9 @@ export function handleListDesktopSessions(
 	ctx.send(client, {
 		type: 'desktop_sessions_list',
 		success: true,
-		sessions,
-		capturedAt,
+		// Old callbacks remain usable for ordinary tab-list clients, but must
+		// never masquerade as a complete supervision census.
+		...(Array.isArray(snapshot) ? { sessions: snapshot, capturedAt } : snapshot),
 		requestId: message.requestId,
 	});
 }

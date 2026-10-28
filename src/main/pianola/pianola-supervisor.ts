@@ -30,8 +30,14 @@ import {
 	readSupervisorTargets,
 	writeSupervisorTargets,
 	supervisorFilePath,
+	readScopeCheckpoint,
+	writeScopeCheckpoint,
 } from './pianola-store-main';
 import type { PianolaSupervisedTarget, PianolaSupervisedKind } from '../../shared/pianola/storage';
+import {
+	resolvePianolaScopeOwnership,
+	type PianolaScopeCandidate,
+} from '../../shared/pianola/pianola-scope';
 import { generateUUID } from '../../shared/uuid';
 
 const LOG_CONTEXT = '[PianolaSupervisor]';
@@ -107,6 +113,11 @@ export interface PianolaSupervisorDeps {
 /** Only fields needed to register a newly persisted agent's first AI tab. */
 export interface AutoWatchSession {
 	id: string;
+	cwd?: string;
+	groupId?: string;
+	sshRemoteId?: string;
+	sshRemote?: unknown;
+	sessionSshRemoteConfig?: { enabled?: boolean };
 	isPianola?: boolean;
 	parentSessionId?: string;
 	activeTabId?: string;
@@ -180,6 +191,22 @@ export class PianolaSupervisor {
 			next.filter((target) => target.kind === 'watch').map((target) => target.agentId)
 		);
 		const registered: string[] = [];
+		const scopes: PianolaScopeCandidate[] = next.flatMap((target) =>
+			target.kind === 'watch-scope' && target.selection && target.managerAgentId
+				? [{ ...target, selection: target.selection, managerAgentId: target.managerAgentId }]
+				: []
+		);
+		const owners = current.map((session) => ({
+			id: session.id,
+			cwd: session.cwd ?? '',
+			groupId: session.groupId ?? null,
+			parentSessionId: session.parentSessionId ?? null,
+			isPianola: session.isPianola === true,
+			remote:
+				!!session.sshRemoteId ||
+				!!session.sshRemote ||
+				session.sessionSshRemoteConfig?.enabled === true,
+		}));
 		for (const id of this.pendingAutoWatchIds) {
 			const session = sessionsById.get(id);
 			if (!session || session.isPianola || session.parentSessionId || watchedIds.has(id)) {
@@ -194,6 +221,21 @@ export class PianolaSupervisor {
 					? session.activeTabId
 					: aiTabIds[0];
 			if (!tabId) continue;
+			if (scopes.length) {
+				const ownership = resolvePianolaScopeOwnership(
+					{ agentId: id, tabId, paused: false, consult: false, ephemeral: false },
+					owners,
+					scopes,
+					[]
+				);
+				if (
+					ownership.kind === 'scope' ||
+					(ownership.kind === 'excluded' && ownership.reason !== 'outside selected scope')
+				) {
+					this.pendingAutoWatchIds.delete(id);
+					continue;
+				}
+			}
 			next.push({
 				id: generateUUID(),
 				kind: 'watch',
@@ -254,6 +296,7 @@ export class PianolaSupervisor {
 			const target = byId.get(id);
 			if (!target || !target.enabled) {
 				this.stopChild(id);
+				if (this.children.get(id)?.target.kind === 'watch-scope') this.suspendScopeCheckpoint(id);
 				this.children.delete(id);
 			}
 		}
@@ -262,7 +305,11 @@ export class PianolaSupervisor {
 		// later restart uses the latest args. A target already in backing-off keeps
 		// its scheduled restart; a stopped/failed target is not auto-restarted here.
 		for (const target of targets) {
-			if (!target.enabled) continue;
+			if (!target.enabled) {
+				// Paused before startup also needs a fresh baseline on resume.
+				if (target.kind === 'watch-scope') this.suspendScopeCheckpoint(target.id);
+				continue;
+			}
 			const existing = this.children.get(target.id);
 			if (!existing) {
 				this.spawn(target);
@@ -416,9 +463,8 @@ export class PianolaSupervisor {
 				String(target.intervalSeconds ?? 5),
 			];
 		}
-		// A scoped watch must not fall through to orchestration. Until its
-		// baseline and guarded delivery are wired it cannot start a worker.
-		if (target.kind === 'watch-scope') return null;
+		// One worker owns all chats in the selection, including future members.
+		if (target.kind === 'watch-scope') return ['pianola', 'watch-scope', target.id];
 		if (!target.planId) return null;
 		return [
 			'pianola',
@@ -467,7 +513,10 @@ export class PianolaSupervisor {
 					// Tell the watch/orchestrate process which agent IS Pianola (so it
 					// never acts on itself and can route decision handoffs) and where the
 					// bundled CLI is for any sub-invocations.
-					MAESTRO_AGENT_ID: this.deps.getPianolaAgentId() ?? '',
+					MAESTRO_AGENT_ID:
+						target.kind === 'watch-scope'
+							? (target.managerAgentId ?? '')
+							: (this.deps.getPianolaAgentId() ?? ''),
 					MAESTRO_CLI_JS: cliScriptPath,
 				},
 				stdio: ['ignore', 'pipe', 'pipe'],
@@ -591,9 +640,33 @@ export class PianolaSupervisor {
 
 	/** Kill all children but leave the watcher running (so a re-enable reconciles). */
 	private killAll(): void {
+		// Feature-off at startup has no live children, but must still suspend the
+		// previous boot's cursors before a later opt-in can resume them.
+		const scopeIds = new Set(
+			readSupervisorTargets()
+				.filter((target) => target.kind === 'watch-scope')
+				.map((target) => target.id)
+		);
 		for (const id of [...this.children.keys()]) {
+			if (this.children.get(id)?.target.kind === 'watch-scope') scopeIds.add(id);
 			this.stopChild(id);
 			this.children.delete(id);
+		}
+		for (const id of scopeIds) this.suspendScopeCheckpoint(id);
+	}
+
+	/** Pause is durable even if the worker is stopped during an I/O wait. */
+	private suspendScopeCheckpoint(id: string): void {
+		try {
+			const checkpoint = readScopeCheckpoint(id);
+			if (checkpoint) {
+				checkpoint.status = 'suspended';
+				writeScopeCheckpoint(checkpoint);
+			}
+		} catch (error) {
+			// Corruption in one scope must not prevent stopping the other children.
+			void captureException(error, { operation: 'pianola:supervisor:suspendScope', id });
+			logger.error(`Cannot suspend scope checkpoint ${id}`, LOG_CONTEXT);
 		}
 	}
 

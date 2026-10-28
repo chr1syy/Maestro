@@ -183,6 +183,7 @@ import {
 	computerHistoryStatus,
 } from './commands/computer-history';
 import { setVerbosity } from './output/verbosity';
+import { pianolaWatchScope } from './commands/pianola-scope-watch';
 import { pianolaWatch, pianolaRules, pianolaAddRule, pianolaLog } from './commands/pianola';
 import { pianolaLearn } from './commands/pianola-learn';
 import { pianolaProfile, pianolaSetProfile } from './commands/pianola-profile';
@@ -2149,6 +2150,14 @@ computerHistory
 const pianola = program
 	.command('pianola')
 	.description('Pianola manager agent: watch tabs, auto-answer or escalate per your rules');
+
+pianola
+	.command('watch-scope <scope-id>')
+	.description('Run one registered agent/group selection under the native supervisor')
+	.option('--once', 'Run one bounded scope cycle and exit')
+	.option('--dry-run', 'Classify and record without sending answers')
+	.option('--json', 'Output cycle status as JSON')
+	.action((scopeId, options) => pianolaWatchScope(scopeId, options));
 
 pianola
 	.command('watch <tab-id>')

@@ -63,6 +63,56 @@
 			],
 			"responsibleActor": "V2-03 Auto Run agent",
 			"nextAction": "V2-03: wire groupId (string or null for every native owner) and parentSessionId into the desktop snapshot, production scope worker scheduling and CLI admission. Use the contract above, then preserve guarded revalidation, baseline/dedup and per-tab failure isolation. V2-04 sets the configured manager; V2-05 exposes selection controls. No productive activation."
+		},
+		{
+			"taskId": "V2-03",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "complete",
+			"changedFiles": [
+				"src/cli/commands/pianola-supervise.ts",
+				"src/cli/commands/pianola.ts",
+				"src/cli/index.ts",
+				"src/cli/services/pianola-store.ts",
+				"src/main/pianola/pianola-store-main.ts",
+				"src/main/pianola/pianola-supervisor.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/callbacks/commandCallbacks.ts",
+				"src/main/web-server/callbacks/sessionCallbacks.ts",
+				"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts",
+				"src/main/web-server/handlers/messageHandlers/sessions.ts",
+				"src/main/web-server/handlers/messageHandlers/types.ts",
+				"src/main/web-server/managers/CallbackRegistry.ts",
+				"src/main/web-server/types.ts",
+				"src/shared/desktopTabs.ts",
+				"src/shared/pianola/pianola-scope-checkpoint.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/storage.ts",
+				"src/cli/commands/pianola-scope-watch.ts",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/runtime-wiring.json",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-01.md"
+			],
+			"commit": "This record is included in MAESTRO: wire native Pianola scope workers and guarded admission",
+			"parentCommit": "6f9d275d130bacd3d0cb81f848d2c0622abb3226",
+			"contract": {
+				"productionCallChain": "Existing createPianolaLifecycle -> supervisor start/reconcile -> one pianola watch-scope <scope-id> child per persisted enabled selection -> registered CLI action -> createPianolaScopeWorkerDeps -> runPianolaScopeCycle. Legacy path scopes report an explicit reconfiguration failure instead of falling through to orchestration.",
+				"discovery": "Each native session census includes every current owner, groupId (string or null), parentSessionId and open AI tab. Polling discovers new tabs/agents and membership/lineage changes without per-tab processes or per-poll inference. Existing explicit watches are retained; future legacy Auto-Watch does not override a matching scope, disabled scope or exclusion.",
+				"scheduling": "At most 20 changed, ready tabs per serial worker cycle; persisted nextTabIndex rotates over the native census to avoid starvation by failing/active prefixes. Unavailable tab cursors are isolated even on enrollment. Metadata/checkpoint corruption fails closed; native supervisor restart/backoff and health remain in use.",
+				"baselineAndRecovery": "Existing tab checkpoints are committed before work. Old/new enrollment, ancestry/config binding, paused tabs and ownership changes use existing baseline/dedup logic. A stream busy on enrollment is checked after completion under its original message ID, including unchanged final text. Full transcript fetch plus cursor/identity checks preserves current-turn risk. Scope disable/Encore-off suspends its checkpoint; worker persistence preserves host suspension and admitted intents. Restart after a crash restores durable state.",
+				"guardedSend": "Worker uses dedicated pianola_scope_reply, with no send_command fallback. Native authenticated CLI admission rechecks Encore, current owner/membership/paused/busy state, configuration/binding, exact recipient/cursor, persisted unresolved intent and current rule/answer. It appends deliveryStatus=admitted to the existing audit and claims the checkpoint before invoking the ordinary renderer send path with an explicit tab, background=true, no force/queue, and requireDeliveryReceipt=true.",
+				"deliverySafety": "Optional audit deliveryStatus=admitted and checkpoint unresolvedIntent.admitted are backward compatible. The native claim prevents duplicate answers for the same agent/tab/message across overlapping requests. A definitive renderer rejection permits the existing bounded retry; a timeout/malformed receipt/disconnect is unknown and leaves intent/audit claim in place without blind retry. Legacy dispatch receipt behavior is unchanged.",
+				"nextDecisionSeam": "This increment composes rule answers and existing human escalation only. V2-04 must wire Mira judgment, guarded manager completion and persisted actor/next-action lifecycle; it must reuse native admission and retain unknown-delivery state. The configured manager comes from the selection; no globally hardcoded manager or live configuration was added."
+			},
+			"evidence": [
+				"checks/runtime-wiring.json records scoped changed-source Prettier, ESLint and diff checks (all exit 0); scoped TypeScript program with main config, Node ambient types and the production CLI/native roots reports zero diagnostics.",
+				"No tests were authored or executed. The four preexisting staged test files are preserved for V2-06; execution and controlled acceptance remain later tasks. No installed-runtime or end-to-end success claim.",
+				"Entry staged/unstaged binary patches are saved in auto-run/Working/V2-03-before-*.patch. Useful predecessor source WIP is incorporated into this task; test WIP remains staged and is excluded from the task commit.",
+				"No productive agent messages, watcher activation, Cue changes, install/restart, extra agents/worktrees, full suite or hook/CI configuration edits. PR publication remains V2-15 after the listed regression/acceptance tasks. Branch-only push and preservation receipts are under auto-run/Working/V2-03-*.json/log."
+			],
+			"responsibleActor": "V2-04 Auto Run agent",
+			"nextAction": "V2-04: connect persisted rule/Mira/Chris lifecycle and guarded manager answers to this production worker/native admission. Configure manager bd4b5d0b-1ec3-4280-9549-b9584c0da261 only in the eventual selection configuration; do not activate productive watches. V2-06 authors regressions for stream completion with unchanged text, initial missing-cursor isolation, round-robin fairness, native claims/unknown receipts and actual CLI/supervisor wiring; V2-07 executes them."
 		}
 	]
 }
