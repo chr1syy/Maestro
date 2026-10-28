@@ -104,6 +104,7 @@ const POLL_MS = 4000;
 export interface PianolaSupervisorState {
 	targets: PianolaSupervisedTarget[];
 	health: PianolaSupervisorHealth[];
+	checkpoints: PianolaSupervisorSnapshot['checkpoints'];
 	saveScope: (target: Partial<PianolaSupervisedTarget>) => Promise<void>;
 	watched: WatchedAgentRow[];
 	watchable: WatchableAgent[];
@@ -131,6 +132,7 @@ export function usePianolaSupervisor(): PianolaSupervisorState {
 	const sessions = useSessionStore((s) => s.sessions);
 	const [targets, setTargets] = useState<PianolaSupervisedTarget[]>([]);
 	const [health, setHealth] = useState<PianolaSupervisorHealth[]>([]);
+	const [checkpoints, setCheckpoints] = useState<PianolaSupervisorSnapshot['checkpoints']>([]);
 	const autoWatchNewAgents = useSettingsStore((s) => s.pianolaAutoWatchNewAgents);
 	const saveAutoWatchNewAgents = useSettingsStore((s) => s.setPianolaAutoWatchNewAgents);
 	const setAutoWatchNewAgents = useCallback(
@@ -172,6 +174,7 @@ export function usePianolaSupervisor(): PianolaSupervisorState {
 			if (mountedRef.current && mutationEpochRef.current === epoch) {
 				setTargets(snap.targets);
 				setHealth(snap.health);
+				setCheckpoints(snap.checkpoints ?? []);
 			}
 		} catch (err) {
 			// Feature turned off -> clear stale watched rows (nothing is watched when
@@ -180,6 +183,7 @@ export function usePianolaSupervisor(): PianolaSupervisorState {
 			if (mountedRef.current && mutationEpochRef.current === epoch && isPianolaDisabled(err)) {
 				setTargets([]);
 				setHealth([]);
+				setCheckpoints([]);
 			}
 		}
 	}, []);
@@ -199,6 +203,7 @@ export function usePianolaSupervisor(): PianolaSupervisorState {
 				if (mountedRef.current) {
 					setTargets(snap.targets);
 					setHealth(snap.health);
+					setCheckpoints(snap.checkpoints ?? []);
 				}
 			} catch (err) {
 				mutationEpochRef.current += 1;
@@ -251,6 +256,7 @@ export function usePianolaSupervisor(): PianolaSupervisorState {
 	return {
 		targets,
 		health,
+		checkpoints,
 		saveScope: (target) => mutate(window.maestro.pianola.supervisor.add(target), 'save selection'),
 		watched,
 		watchable,

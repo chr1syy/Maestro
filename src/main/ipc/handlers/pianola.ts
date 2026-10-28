@@ -21,6 +21,7 @@ import {
 	writeRules,
 	readDecisions,
 	readSupervisorTargets,
+	readScopeCheckpoint,
 	upsertSupervisorTarget,
 	removeSupervisorTarget,
 	readSuggestions,
@@ -36,6 +37,7 @@ import {
 	type PianolaSuggestionsFile,
 } from '../../../shared/pianola/storage';
 import type { PianolaRule } from '../../../shared/pianola/types';
+import type { PianolaScopeCheckpoint } from '../../../shared/pianola/pianola-scope-checkpoint';
 import type { PianolaSupervisor, PianolaSupervisorHealth } from '../../pianola/pianola-supervisor';
 import { generateUUID } from '../../../shared/uuid';
 import { getActingUser } from '../../web-server/auth/acting-user';
@@ -47,6 +49,11 @@ const LOG_CONTEXT = '[Pianola]';
 export interface PianolaSupervisorSnapshot {
 	targets: PianolaSupervisedTarget[];
 	health: PianolaSupervisorHealth[];
+	checkpoints: Array<{
+		scopeId: string;
+		checkpoint: PianolaScopeCheckpoint | null;
+		error?: string;
+	}>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -87,10 +94,26 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 	const { settingsStore, supervisor } = deps;
 
 	/** Current persisted targets + live health, returned by every supervisor channel. */
-	const snapshot = (): PianolaSupervisorSnapshot => ({
-		targets: readSupervisorTargets(),
-		health: supervisor.getHealth(),
-	});
+	const snapshot = (): PianolaSupervisorSnapshot => {
+		const targets = readSupervisorTargets();
+		return {
+			targets,
+			health: supervisor.getHealth(),
+			checkpoints: targets
+				.filter((target) => target.kind === 'watch-scope')
+				.map((target) => {
+					try {
+						return { scopeId: target.id, checkpoint: readScopeCheckpoint(target.id) };
+					} catch (error) {
+						return {
+							scopeId: target.id,
+							checkpoint: null,
+							error: error instanceof Error ? error.message : 'Checkpoint unavailable',
+						};
+					}
+				}),
+		};
+	};
 
 	const wrappedGetRules = withIpcErrorLogging(
 		handlerOpts('getRules'),

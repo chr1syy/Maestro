@@ -66,6 +66,7 @@ export function PianolaScopeControls({
 			{scopes.map((scope) => {
 				const health = supervisor.health.find((item) => item.id === scope.id);
 				const state = !scope.enabled ? 'Paused' : (health?.state ?? 'Not running');
+				const evidence = supervisor.checkpoints.find((item) => item.scopeId === scope.id);
 				return (
 					<div
 						key={scope.id}
@@ -92,6 +93,31 @@ export function PianolaScopeControls({
 							· Worker health does not establish individual chat coverage.
 							{health?.lastError ? ` ${health.lastError}` : ''}
 						</div>
+						{evidence?.error && (
+							<div className="text-xs">Checkpoint unavailable: {evidence.error}</div>
+						)}
+						{evidence?.checkpoint && (
+							<div className="text-xs" style={{ color: theme.colors.textDim }}>
+								Checkpoint {evidence.checkpoint.status}, last census:{' '}
+								{evidence.checkpoint.lastSnapshotAt
+									? new Date(evidence.checkpoint.lastSnapshotAt).toLocaleString()
+									: 'not yet recorded'}
+								.
+								{Array.from(new Set(evidence.checkpoint.tabs.map((tab) => tab.agentId))).map(
+									(agentId) => {
+										const tabs = evidence.checkpoint!.tabs.filter((tab) => tab.agentId === agentId);
+										return (
+											<div key={agentId}>
+												{sessions.find((session) => session.id === agentId)?.name ?? agentId}:{' '}
+												{tabs.filter((tab) => tab.status === 'active').length} active,{' '}
+												{tabs.filter((tab) => tab.status === 'suspended').length} suspended,{' '}
+												{tabs.filter((tab) => tab.status === 'closed').length} closed at census
+											</div>
+										);
+									}
+								)}
+							</div>
+						)}
 					</div>
 				);
 			})}
