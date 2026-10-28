@@ -258,6 +258,22 @@
 			],
 			"responsibleActor": "V2-10 Auto Run agent",
 			"nextAction": "V2-10: persist source-linked candidates/rejections; explicit accept/edit activation; invalidate conflicts and flag active learned rules. V2-11/V2-12 author/run regressions. Verify outstanding predecessor receipts before acceptance."
+		},
+		{
+			"taskId": "V2-10",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "in_progress",
+			"changedFiles": [
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json"
+			],
+			"commit": "Investigation recorded in this task attempt",
+			"evidence": [
+				"Suggestions storage currently discards candidate evidence and overwrites all staged data on each relearn; IPC approval persists the supplied rule unchanged, so the disabled V2-09 proposal stays disabled. Existing approval also accepts a supplied rule without verifying that it is still a current candidate.",
+				"The V2-09 synthesis suppresses existing-rule candidates, so conflict detection for accepted rules requires separately evaluating evidence against learned rule provenance. No implementation or tests completed in this attempt."
+			],
+			"responsibleActor": "Next V2-10 Auto Run agent",
+			"nextAction": "Implement persistent candidate and rejection identities, evidence and conflict review; validate acceptance against current staging and activate the exact reviewed rule, then complete edit/reject UI and scoped static checks. Keep existing staged test work intact."
 		}
 	]
 }
