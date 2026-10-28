@@ -276,6 +276,36 @@
 			],
 			"responsibleActor": "Next V2-10 Auto Run agent",
 			"nextAction": "Implement correction-aware settlement notification and durable candidate/rejection and learned-rule provenance; revalidate approval against current settled evidence, flag active conflicts, expose accept/edit/reject and source examples, then run scoped static checks. Preserve predecessor staged tests; keep V2-10 unchecked until all criteria are met."
+		},
+		{
+			"taskId": "V2-13",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "complete",
+			"changedFiles": [
+				"src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+				"src/__tests__/integration/pianola-native-acceptance.config.ts",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks-plan.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-13-HARNESS.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/V2-13-static.cjs",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/V2-13-static.json",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-03.md"
+			],
+			"parentCommit": "616652d8154db7d8d9db09244b1874f3ed0dfab6",
+			"commit": "Included in MAESTRO: add isolated Pianola native acceptance harness; exact commit/push receipt in auto-run/Working/V2-13-delivery.json",
+			"evidence": [
+				"Authored 16 isolated integration cases using actual native lifecycle/supervisor, supervisor-selected CLI worker, production desktop callbacks and native handlers/admission, real filesystem stores, human settlement events/relearn scheduler and Suggestions IPC. No production decision logic mocked or hand-authored decision records seeded.",
+				"Dedicated Node/fork config collects only this harness. checks-plan.md records the exact bounded execution command and receipt locations; V2-13-HARNESS.md maps expected production traces and explicitly states the OS/renderer/transport boundaries.",
+				"Filesystem, MaestroClient, process and recipient boundaries fail closed; negative controls reject outside stores, nonfixture recipients and generic send fallbacks. Per-case traces will record real claims, decisions, checkpoints, Suggestions and all guarded I/O on execution.",
+				"Changed-source Prettier, applicable test ESLint and scoped TypeScript passed; checks/V2-13-static.json has zero root or dependency diagnostics. Static driver includes existing Node/DNS/renderer ambient types. No harness or other tests executed, as explicitly required by V2-13; no full suite/validate:push.",
+				"Source inspection finds unfinished V2-10 approval persists disabled proposal unchanged. The harness requires native explicit acceptance to activate it rather than pre-enabling its payload. This is an expected source gap, not a claimed observed test result.",
+				"Predecessor ledger still leaves V2-05/V2-10 in progress and has no V2-06/07/11/12 completion receipts. Only V2-13 authoring is complete. No candidate readiness, installed/runtime or CI success claimed; installed:false.",
+				"No productive messages/store changes, install/restart/live coverage/Cue changes, agents/worktrees or delegation. No task images supplied/analyzed. Configured model hints do not establish actual execution; effective model/effort telemetry unavailable.",
+				"Entry staged/unstaged state preserved in Working/V2-13-entry.patch and entry-index.json. Commit uses a separate index; original staged test blobs and staged PROGRESS deletion remain preserved. Branch-only push uses HUSKY=0 with command-local hooksPath override because installed hook scripts run directly; no global/versioned hook or CI changes. PR review/publication remains V2-15 after acceptance."
+			],
+			"responsibleActor": "V2-14 Auto Run agent",
+			"nextAction": "Execute only the checks-plan.md harness command, resolve unfinished prerequisite implementation and missing regression receipts, fix scoped defects and rerun affected checks. Require enabled native approval plus fourth-ask scoped match, source-linked candidate approval/rejection/conflict handling and all SPEC criteria before writing acceptance.json. Retain installed:false and no install/restart/live activation; V2-15 owns PR publication."
 		}
 	]
 }

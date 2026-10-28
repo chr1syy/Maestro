@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "harnessExecuted": false,
+  "roots": [
+    "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+    "src/__tests__/integration/pianola-native-acceptance.config.ts"
+  ],
+  "ambientRoots": [
+    "src/types/dns-packet.d.ts",
+    "src/renderer/global.d.ts"
+  ],
+  "compilerOptions": {
+    "config": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/tsconfig.main.json",
+    "nodeAmbientTypes": true,
+    "domLibrary": true
+  },
+  "changedRootDiagnostics": [],
+  "dependencyDiagnostics": []
+}
