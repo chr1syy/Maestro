@@ -226,6 +226,20 @@ function validateMatch(raw: unknown): PianolaRule['match'] | null {
 			return null;
 		match.kinds = raw.kinds as PianolaSignalKind[];
 	}
+	if (raw.groupId !== undefined) {
+		if (raw.groupId !== null && (typeof raw.groupId !== 'string' || !raw.groupId.trim()))
+			return null;
+		match.groupId = raw.groupId as string | null;
+	}
+	if (raw.exactQuestion !== undefined) {
+		if (
+			typeof raw.exactQuestion !== 'string' ||
+			!raw.exactQuestion.trim() ||
+			raw.exactQuestion.length > 16000
+		)
+			return null;
+		match.exactQuestion = raw.exactQuestion;
+	}
 	if (raw.topicIncludes !== undefined) {
 		if (!isStringArray(raw.topicIncludes)) return null;
 		match.topicIncludes = raw.topicIncludes;
@@ -253,6 +267,11 @@ export function validatePianolaRule(raw: unknown): PianolaRule | null {
 	if (match === null) return null;
 
 	if (raw.scopeId !== undefined && typeof raw.scopeId !== 'string') return null;
+	if (
+		(raw.scope === 'agent' || raw.scope === 'group') &&
+		(typeof raw.scopeId !== 'string' || !raw.scopeId.trim() || raw.scopeId.length > 200)
+	)
+		return null;
 	if (raw.answer !== undefined && typeof raw.answer !== 'string') return null;
 	if (raw.description !== undefined && typeof raw.description !== 'string') return null;
 

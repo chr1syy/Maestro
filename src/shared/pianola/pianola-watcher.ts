@@ -49,6 +49,7 @@ export interface WatchTarget {
 	tabId: string;
 	agentId: string;
 	projectPath?: string;
+	groupId?: string | null;
 }
 
 /**
@@ -380,6 +381,8 @@ export async function runWatchIteration(
 	const decision = decide(classification, rules, {
 		projectPath: target.projectPath,
 		tabId: target.tabId,
+		agentId: target.agentId,
+		groupId: target.groupId,
 	});
 
 	// Thought-based handoff. When the rules did not cover this ask (the policy fell

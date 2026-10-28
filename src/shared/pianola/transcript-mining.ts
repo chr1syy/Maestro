@@ -46,6 +46,8 @@ export interface DecisionPair {
 	repliedAt: string;
 	/** Missing provenance remains inspectable but is never a learning sample. */
 	evidence?: PianolaHumanDecisionEvidence;
+	/** Conflicting snapshots of one source veto learning without increasing count. */
+	conflictingEvidence?: boolean;
 }
 
 /** Convert committed explicit human resolutions. Recipient delivery is a separate outcome.
@@ -87,9 +89,10 @@ export function settledDecisionPairs(records: readonly PianolaDecisionRecord[]):
 
 /** Dedup by recipient ask AND answer event, never by a generic yes or risk label. */
 export function confirmedHumanDecisionPairs(pairs: readonly DecisionPair[]): DecisionPair[] {
-	const asks = new Set<string>();
+	const asks = new Map<string, DecisionPair>();
 	const answers = new Set<string>();
-	return pairs.filter((pair) => {
+	const confirmed: DecisionPair[] = [];
+	for (const pair of pairs) {
 		const evidence = pair.evidence;
 		if (
 			!isValidHumanDecisionEvidence(evidence) ||
@@ -100,14 +103,22 @@ export function confirmedHumanDecisionPairs(pairs: readonly DecisionPair[]): Dec
 			pair.askedAt !== evidence.askedAt ||
 			pair.repliedAt !== evidence.answeredAt
 		)
-			return false;
+			continue;
 		const askKey = canonicalJson([evidence.agentId, evidence.tabId, evidence.questionMessageId]);
 		const answerKey = canonicalJson([evidence.actorId, evidence.answerMessageId]);
-		if (asks.has(askKey) || answers.has(answerKey)) return false;
-		asks.add(askKey);
+		const previous = asks.get(askKey);
+		if (previous) {
+			if (previous.reply !== pair.reply || pair.conflictingEvidence)
+				previous.conflictingEvidence = true;
+			continue;
+		}
+		if (answers.has(answerKey)) continue;
+		const sample = { ...pair };
+		asks.set(askKey, sample);
 		answers.add(answerKey);
-		return true;
-	});
+		confirmed.push(sample);
+	}
+	return confirmed;
 }
 
 /** Aggregate view over a set of decision pairs. */

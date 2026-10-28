@@ -521,6 +521,7 @@ export async function runPianolaScopeCycle(
 				agentId: tab.agentId,
 				tabId: tab.tabId,
 				projectPath: snapshot.owners.find((owner) => owner.id === tab.agentId)!.cwd,
+				groupId: snapshot.owners.find((owner) => owner.id === tab.agentId)!.groupId,
 			};
 			const history = await deps.readTranscript(target);
 			const messages = history.messages;
@@ -876,6 +877,8 @@ export function admitPianolaScopeReply(
 			throw new Error('Missing rule answer intent');
 		const currentDecision = decide(record.classification, store.readRules(), {
 			tabId: tab.tabId,
+			agentId: tab.agentId,
+			groupId: snapshot.owners.find((owner) => owner.id === tab.agentId)!.groupId,
 			projectPath: snapshot.owners.find((candidate) => candidate.id === tab.agentId)!.cwd,
 		});
 		if (

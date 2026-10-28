@@ -225,6 +225,39 @@
 			],
 			"responsibleActor": "V2-09 Auto Run agent",
 			"nextAction": "V2-09: consume verified deduplicated DecisionPair.evidence, establish concrete action/condition equivalence and explicit agent/group scope, three configurable independent samples, contradictions and per-action approval limits. Preserve unknown-semantics exclusion. V2-11/12 author/run production regressions and verify predecessor completion before acceptance."
+		},
+		{
+			"taskId": "V2-09",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "complete",
+			"changedFiles": [
+				"src/main/pianola/pianola-lifecycle.ts",
+				"src/main/pianola/pianola-relearn.ts",
+				"src/main/stores/types.ts",
+				"src/shared/pianola/pianola-classifier.ts",
+				"src/shared/pianola/pianola-policy.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/pianola-synthesis.ts",
+				"src/shared/pianola/pianola-watcher.ts",
+				"src/shared/pianola/storage.ts",
+				"src/shared/pianola/transcript-mining.ts",
+				"src/shared/pianola/types.ts",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-09-narrow-candidates.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/narrow-candidates-static.json",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-02.md"
+			],
+			"commit": "Included in MAESTRO: scope Pianola learning to exact human decisions; delivery receipt in auto-run/Working/V2-09-delivery.json",
+			"parentCommit": "35484fc1bb614cfa41067871f89fa2139ae9ee5d",
+			"contract": "See V2-09-narrow-candidates.md: closed safe action grammar, three configurable independent matching human answers, conflict veto, disabled exact-condition agent/group proposals and native evaluation/admission. Candidate evidence persistence/approval remains V2-10.",
+			"evidence": [
+				"Changed-source lint/format/scoped types and whitespace passed. No tests authored/executed per task separation.",
+				"Four entry-staged test files preserved outside task commit; no productive mutations, install/restart or installed runtime claim.",
+				"Actual effective model/effort telemetry unavailable; configured hints are not execution evidence."
+			],
+			"responsibleActor": "V2-10 Auto Run agent",
+			"nextAction": "V2-10: persist source-linked candidates/rejections; explicit accept/edit activation; invalidate conflicts and flag active learned rules. V2-11/V2-12 author/run regressions. Verify outstanding predecessor receipts before acceptance."
 		}
 	]
 }

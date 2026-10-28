@@ -28,7 +28,7 @@ export interface RelearnDeps {
 	/** Read attributable settled decisions; unknown-origin imports are filtered again. */
 	mine: () => Promise<DecisionPair[]>;
 	/** Read the user's current rules + global decision-profile markdown (live state). */
-	readExisting: () => { rules: PianolaRule[]; profile: string };
+	readExisting: () => { rules: PianolaRule[]; profile: string; minSamples?: number };
 	/** Persist the staged suggestions. Proposal-only; never the live profile/rules. */
 	writeSuggestions: (file: PianolaSuggestionsFile) => void;
 	/** Relaunch any enabled supervised target whose child is not alive. Returns count. */
@@ -72,9 +72,10 @@ export async function runRelearnJob(deps: RelearnDeps): Promise<RelearnResult> {
 
 	try {
 		const pairs = confirmedHumanDecisionPairs(await deps.mine());
-		const { rules, profile } = deps.readExisting();
+		const { rules, profile, minSamples } = deps.readExisting();
 		const { proposals, profileDiff } = synthesizeSuggestions({
 			pairs,
+			minSamples,
 			existingRules: rules,
 			existingProfile: profile,
 			now: deps.now(),

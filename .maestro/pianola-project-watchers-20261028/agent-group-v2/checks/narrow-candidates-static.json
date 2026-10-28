@@ -1,0 +1,42 @@
+{
+  "taskId": "V2-09",
+  "kind": "source-static-only",
+  "changedSourceFiles": [
+    "src/main/pianola/pianola-lifecycle.ts",
+    "src/main/pianola/pianola-relearn.ts",
+    "src/main/stores/types.ts",
+    "src/shared/pianola/pianola-classifier.ts",
+    "src/shared/pianola/pianola-policy.ts",
+    "src/shared/pianola/pianola-scope-cycle.ts",
+    "src/shared/pianola/pianola-synthesis.ts",
+    "src/shared/pianola/pianola-watcher.ts",
+    "src/shared/pianola/storage.ts",
+    "src/shared/pianola/transcript-mining.ts",
+    "src/shared/pianola/types.ts"
+  ],
+  "checks": [
+    {
+      "command": "node_modules/.bin/eslint src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn.ts src/main/stores/types.ts src/shared/pianola/pianola-classifier.ts src/shared/pianola/pianola-policy.ts src/shared/pianola/pianola-scope-cycle.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/pianola-watcher.ts src/shared/pianola/storage.ts src/shared/pianola/transcript-mining.ts src/shared/pianola/types.ts",
+      "exitCode": 0
+    },
+    {
+      "command": "node_modules/.bin/prettier --check src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn.ts src/main/stores/types.ts src/shared/pianola/pianola-classifier.ts src/shared/pianola/pianola-policy.ts src/shared/pianola/pianola-scope-cycle.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/pianola-watcher.ts src/shared/pianola/storage.ts src/shared/pianola/transcript-mining.ts src/shared/pianola/types.ts",
+      "exitCode": 0
+    },
+    {
+      "command": "node .maestro/pianola-project-watchers-20261028/auto-run/Working/V2-08-typecheck.cjs",
+      "exitCode": 0,
+      "result": "11 changed roots; zero diagnostics"
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0
+    }
+  ],
+  "tests": {
+    "authored": false,
+    "executed": false,
+    "reason": "V2-11 authors; V2-12 executes"
+  },
+  "installedRuntimeVerified": false
+}
