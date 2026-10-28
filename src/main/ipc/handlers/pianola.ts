@@ -37,7 +37,14 @@ import {
 	type PianolaSuggestionsFile,
 } from '../../../shared/pianola/storage';
 import type { PianolaRule } from '../../../shared/pianola/types';
-import type { PianolaScopeCheckpoint } from '../../../shared/pianola/pianola-scope-checkpoint';
+import {
+	pianolaScopeConfigurationFingerprint,
+	pianolaCoverageRegistryFingerprint,
+} from '../../../shared/pianola/pianola-scope-cycle';
+import type {
+	PianolaScopeCoverage,
+	PianolaScopeCheckpoint,
+} from '../../../shared/pianola/pianola-scope-checkpoint';
 import type { PianolaSupervisor, PianolaSupervisorHealth } from '../../pianola/pianola-supervisor';
 import { generateUUID } from '../../../shared/uuid';
 import { getActingUser } from '../../web-server/auth/acting-user';
@@ -57,6 +64,7 @@ export interface PianolaSupervisorSnapshot {
 		scopeId: string;
 		checkpoint: PianolaScopeCheckpoint | null;
 		error?: string;
+		coverage?: PianolaScopeCoverage;
 	}>;
 }
 
@@ -100,21 +108,134 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 	/** Current persisted targets + live health, returned by every supervisor channel. */
 	const snapshot = (): PianolaSupervisorSnapshot => {
 		const targets = readSupervisorTargets();
+		const health = supervisor.getHealth();
+		const now = Date.now();
+		const registryFingerprint = pianolaCoverageRegistryFingerprint(targets);
 		return {
 			targets,
-			health: supervisor.getHealth(),
+			health,
 			checkpoints: targets
 				.filter((target) => target.kind === 'watch-scope')
 				.map((target) => {
+					let checkpoint: PianolaScopeCheckpoint | null = null;
+					let error: string | undefined;
 					try {
-						return { scopeId: target.id, checkpoint: readScopeCheckpoint(target.id) };
-					} catch (error) {
-						return {
-							scopeId: target.id,
-							checkpoint: null,
-							error: error instanceof Error ? error.message : 'Checkpoint unavailable',
-						};
+						checkpoint = readScopeCheckpoint(target.id);
+					} catch (cause) {
+						error = cause instanceof Error ? cause.message : 'Checkpoint unavailable';
 					}
+					const worker = health.find((item) => item.id === target.id);
+					const configurationFingerprint =
+						target.selection && target.managerAgentId
+							? pianolaScopeConfigurationFingerprint({
+									...target,
+									selection: target.selection,
+									managerAgentId: target.managerAgentId,
+								})
+							: null;
+					const censusAt = checkpoint?.lastSnapshotAt ?? null;
+					const ageMs = censusAt === null ? null : now - censusAt;
+					// Three missed polls with a 30s floor; this measures metadata
+					// freshness, never answer delivery or recipient acknowledgment.
+					const staleAfterMs = Math.max(30_000, (target.intervalSeconds ?? 5) * 3000);
+					const fresh =
+						ageMs !== null &&
+						ageMs >= 0 &&
+						ageMs <= staleAfterMs &&
+						checkpoint?.configurationFingerprint === configurationFingerprint &&
+						checkpoint?.coverageRegistryFingerprint === registryFingerprint &&
+						(worker?.startedAt === undefined || censusAt! >= worker.startedAt);
+					let status: PianolaScopeCoverage['status'];
+					let reason: string;
+					let nextActor: PianolaScopeCoverage['nextActor'] = 'operator';
+					let nextAction: string;
+					if (!target.enabled) {
+						status = 'paused';
+						reason = 'Scope disabled';
+						nextActor = 'none';
+						nextAction = 'Explicitly resume the scope to continue monitoring';
+					} else if (
+						error ||
+						checkpoint?.lastCycleError ||
+						target.selection?.mode !== 'agents-and-groups' ||
+						worker?.state !== 'running'
+					) {
+						status = 'blocked';
+						reason =
+							error ??
+							checkpoint?.lastCycleError?.reason ??
+							(target.selection?.mode !== 'agents-and-groups'
+								? 'Legacy scope requires explicit agent/group selection'
+								: (worker?.lastError ?? `Worker ${worker?.state ?? 'not registered'}`));
+						nextAction = error
+							? 'Repair the checkpoint before resuming; preserve uncertain delivery intents'
+							: checkpoint?.lastCycleError
+								? 'Restore complete native census access; worker retries on its next cycle'
+								: 'Restore valid native selection and a running scope worker';
+					} else if (!fresh) {
+						status = 'stale';
+						reason = 'No fresh census for the current configuration and worker';
+						nextAction =
+							'Obtain a complete native census with the current registry; inspect worker errors if it remains stale';
+					} else if (checkpoint?.status !== 'armed') {
+						status = 'blocked';
+						reason = `Checkpoint ${checkpoint?.status ?? 'missing'}`;
+						nextAction = 'Restore the native census and arm the scope through its worker';
+					} else {
+						status = 'covered';
+						reason = 'Fresh native census for current selection';
+						nextActor = 'worker';
+						nextAction = 'Continue bounded transcript monitoring';
+					}
+					const tabs: PianolaScopeCoverage['tabs'] = (checkpoint?.tabs ?? []).map((tab) => {
+						const observation = tab.coverage;
+						const historicalStatus =
+							tab.status === 'closed' ? 'closed' : (observation?.status ?? 'stale');
+						const overridden = historicalStatus !== 'closed' && status !== 'covered';
+						return {
+							agentId: tab.agentId,
+							tabId: tab.tabId,
+							status: overridden ? (status === 'blocked' ? 'suspended' : status) : historicalStatus,
+							ownerScopeId: overridden || !fresh ? null : (observation?.ownerScopeId ?? null),
+							observedAt: observation?.observedAt ?? null,
+							reason: overridden
+								? reason
+								: (observation?.reason ?? 'Historical tab without current coverage observation'),
+							nextActor: overridden ? nextActor : (observation?.nextActor ?? 'operator'),
+							nextAction: overridden
+								? nextAction
+								: (observation?.nextAction ?? 'Obtain a fresh native census'),
+							...(observation?.status === 'blocked' ? { error: observation.reason } : {}),
+						};
+					});
+					if (
+						status === 'covered' &&
+						tabs.some((tab) => tab.status === 'blocked' || tab.status === 'stale')
+					) {
+						status = 'blocked';
+						reason = 'One or more tabs have incomplete or failed coverage';
+						nextActor = 'operator';
+						nextAction =
+							'Resolve the per-agent/tab errors below; healthy tabs continue independently';
+					}
+					return {
+						scopeId: target.id,
+						checkpoint,
+						...(error ? { error } : {}),
+						coverage: {
+							configurationFingerprint,
+							checkpointFingerprint: checkpoint?.configurationFingerprint ?? null,
+							censusAt,
+							ageMs,
+							staleAfterMs,
+							fresh,
+							status,
+							reason,
+							nextActor,
+							nextAction,
+							tabs,
+						},
+					};
 				}),
 		};
 	};

@@ -126,6 +126,32 @@ export function pianolaScopeConfigurationFingerprint(scope: PianolaScopeCandidat
 	});
 }
 
+/** All registry entries that can change ownership; labels/cadence are immaterial. */
+export function pianolaCoverageRegistryFingerprint(targets: PianolaSupervisedTarget[]): string {
+	return fingerprint(
+		targets
+			.filter((target) => target.kind === 'watch-scope' || target.kind === 'watch')
+			.map((target) =>
+				target.kind === 'watch-scope'
+					? {
+							id: target.id,
+							enabled: target.enabled,
+							createdAt: target.createdAt,
+							configuration:
+								target.selection && target.managerAgentId
+									? pianolaScopeConfigurationFingerprint({
+											...target,
+											selection: target.selection,
+											managerAgentId: target.managerAgentId,
+										})
+									: null,
+						}
+					: { id: target.id, enabled: target.enabled, agentId: target.agentId, tabId: target.tabId }
+			)
+			.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+	);
+}
+
 function scopesFrom(targets: PianolaSupervisedTarget[]): PianolaScopeCandidate[] {
 	if (new Set(targets.map((target) => target.id)).size !== targets.length)
 		throw new Error('Ambiguous Pianola registry IDs');
@@ -350,9 +376,32 @@ export async function runPianolaScopeCycle(
 		result.issues.push('Legacy scope requires explicit agent/group selection');
 		return result;
 	}
-	const snapshot = await deps.readSnapshot();
-	assertSnapshot(snapshot);
 	const configurationFingerprint = pianolaScopeConfigurationFingerprint(scope);
+	let snapshot: PianolaScopeSnapshot;
+	try {
+		snapshot = await deps.readSnapshot();
+		assertSnapshot(snapshot);
+		if (checkpoint && snapshot.capturedAt < (checkpoint.lastSnapshotAt ?? checkpoint.activatedAt))
+			throw new Error('Pianola host clock precedes activation; scope remains inert');
+	} catch (error) {
+		// Keep the last successful census as historical evidence, while exposing
+		// the most recent failure immediately (even within its freshness window).
+		if (!checkpoint)
+			checkpoint = {
+				version: 1,
+				scopeId,
+				configurationFingerprint,
+				activatedAt: deps.watch.now(),
+				status: 'suspended',
+				tabs: [],
+			};
+		checkpoint.lastCycleError = {
+			observedAt: deps.watch.now(),
+			reason: (error instanceof Error ? error.message : 'Native census unavailable').slice(0, 4000),
+		};
+		persist();
+		throw error;
+	}
 	const firstActivation = !checkpoint;
 	const resume = checkpoint?.status !== 'armed';
 	if (!checkpoint) {
@@ -368,8 +417,6 @@ export async function runPianolaScopeCycle(
 	} else if (!validatePianolaScopeCheckpoint(checkpoint, scopeId)) {
 		throw new Error('Invalid Pianola scope checkpoint');
 	}
-	if (snapshot.capturedAt < (checkpoint.lastSnapshotAt ?? checkpoint.activatedAt))
-		throw new Error('Pianola host clock precedes activation; scope remains inert');
 	const configurationChanged = checkpoint.configurationFingerprint !== configurationFingerprint;
 	const decisions = deps.store.readDecisions();
 	for (const record of decisions) {
@@ -408,7 +455,17 @@ export async function runPianolaScopeCycle(
 	);
 	const liveKeys = new Set(snapshot.tabs.map((tab) => canonicalJson([tab.agentId, tab.tabId])));
 	for (const saved of checkpoint.tabs) {
-		if (!liveKeys.has(canonicalJson([saved.agentId, saved.tabId]))) saved.status = 'closed';
+		if (!liveKeys.has(canonicalJson([saved.agentId, saved.tabId]))) {
+			saved.status = 'closed';
+			saved.coverage = {
+				observedAt: snapshot.capturedAt,
+				status: 'closed',
+				ownerScopeId: null,
+				reason: 'Tab absent from the complete native census',
+				nextActor: 'none',
+				nextAction: 'Re-enroll with a fresh baseline if the tab returns',
+			};
+		}
 	}
 	const working: Array<{ tab: PianolaScopeSnapshotTab; saved: PianolaScopeCheckpointTab }> = [];
 	for (const tab of snapshot.tabs) {
@@ -422,13 +479,46 @@ export async function runPianolaScopeCycle(
 			targets.filter((target) => target.kind === 'watch')
 		);
 		if (ownership.kind !== 'scope' || ownership.scopeId !== scopeId) {
-			if (saved) saved.status = 'suspended';
+			if (saved) {
+				saved.status = 'suspended';
+				saved.coverage = {
+					observedAt: snapshot.capturedAt,
+					status: 'excluded',
+					ownerScopeId: ownership.kind === 'scope' ? ownership.scopeId : null,
+					reason: ownership.kind === 'excluded' ? ownership.reason : `Owned by ${ownership.kind}`,
+					nextActor: 'none',
+					nextAction: 'Coverage belongs to the current selection/owner',
+				};
+			}
 			continue;
 		}
 		if (!tab.cursorAvailable) {
-			// Isolate an unavailable cursor even during enrollment. When it
-			// becomes available, this tab receives its own fresh baseline.
-			if (saved) saved.status = 'suspended';
+			// Persist even first-enrollment failures: otherwise a missing cursor
+			// disappears from the status API entirely.
+			if (!saved) {
+				saved = {
+					agentId: tab.agentId,
+					tabId: tab.tabId,
+					baseline: null,
+					lastSeen: null,
+					state: initialWatchState(),
+					status: 'suspended',
+					unresolvedIntent: null,
+				};
+				checkpoint.tabs.push(saved);
+				savedByKey.set(key, saved);
+			}
+			saved.status = 'suspended';
+			saved.coverage = {
+				observedAt: snapshot.capturedAt,
+				status: tab.paused ? 'paused' : 'blocked',
+				ownerScopeId: scopeId,
+				reason: 'Transcript cursor unavailable',
+				nextActor: tab.paused ? 'none' : 'operator',
+				nextAction: tab.paused
+					? 'Resume the tab to enroll it'
+					: 'Restore native transcript cursor access; next census baselines this tab',
+			};
 			result.issues.push(`Transcript cursor unavailable: ${tab.agentId}/${tab.tabId}`);
 			continue;
 		}
@@ -476,6 +566,20 @@ export async function runPianolaScopeCycle(
 			saved.status = tab.paused ? 'suspended' : 'active';
 			// An unresolved intent survives loss of ownership, disable and close.
 		}
+		// A transcript failure persists until an actual successful retry. An
+		// unchanged cursor alone must never clear the previous failure.
+		if (tab.paused || saved.coverage?.status !== 'blocked' || needsBaseline) {
+			saved.coverage = {
+				observedAt: snapshot.capturedAt,
+				status: tab.paused ? 'paused' : 'covered',
+				ownerScopeId: scopeId,
+				reason: tab.paused ? 'Tab paused' : 'Enrolled in current native census',
+				nextActor: tab.paused ? 'none' : 'worker',
+				nextAction: tab.paused
+					? 'Resume the tab to continue monitoring'
+					: 'Continue bounded transcript monitoring',
+			};
+		}
 		const openDecision = decisions.some(
 			(record) =>
 				record.agentId === tab.agentId &&
@@ -486,7 +590,8 @@ export async function runPianolaScopeCycle(
 		if (
 			!tab.paused &&
 			(!tab.busy || openDecision) &&
-			(!sameCursor(saved.lastSeen, tab.cursor) ||
+			(saved.coverage?.status === 'blocked' ||
+				!sameCursor(saved.lastSeen, tab.cursor) ||
 				saved.baselineBusy ||
 				saved.state.pendingRetry ||
 				saved.state.pendingHandoff ||
@@ -497,7 +602,9 @@ export async function runPianolaScopeCycle(
 	if (checkpoint.tabs.length > 10000) throw new Error('Pianola scope checkpoint membership limit');
 	checkpoint.configurationFingerprint = configurationFingerprint;
 	checkpoint.lastSnapshotAt = snapshot.capturedAt;
+	checkpoint.coverageRegistryFingerprint = pianolaCoverageRegistryFingerprint(targets);
 	checkpoint.status = 'armed';
+	delete checkpoint.lastCycleError;
 	// Commit the entire membership/baseline before any rule, handoff or notice.
 	persist();
 	result.status = checkpoint.status;
@@ -598,6 +705,16 @@ export async function runPianolaScopeCycle(
 				)
 					saved.unresolvedIntent = null;
 			}
+			saved.coverage = {
+				observedAt: snapshot.capturedAt,
+				status: saved.unresolvedIntent ? 'blocked' : 'covered',
+				ownerScopeId: scopeId,
+				reason: saved.unresolvedIntent ? 'Delivery outcome unknown' : 'Transcript cursor verified',
+				nextActor: saved.unresolvedIntent ? 'operator' : 'worker',
+				nextAction: saved.unresolvedIntent
+					? 'Reconcile the native receipt or recipient transcript before any retry'
+					: 'Continue bounded transcript monitoring',
+			};
 			if (saved.unresolvedIntent || pending || tab.busy) {
 				saved.lastSeen = tab.cursor;
 				persist();
@@ -714,6 +831,17 @@ export async function runPianolaScopeCycle(
 				},
 				{ ...options, canActOnMessage: (messageId) => actionableIds.has(messageId) }
 			);
+			if (iteration.result.record?.error) {
+				saved.coverage = {
+					observedAt: snapshot.capturedAt,
+					status: 'blocked',
+					ownerScopeId: scopeId,
+					reason: iteration.result.record.error.slice(0, 4000),
+					nextActor: 'operator',
+					nextAction:
+						'Inspect native delivery refusal; bounded retry and explicit human escalation remain in force',
+				};
+			}
 			saved.state = iteration.state;
 			saved.baselineBusy = false;
 			saved.lastSeen = tab.cursor;
@@ -748,6 +876,17 @@ export async function runPianolaScopeCycle(
 				`${tab.agentId}/${tab.tabId}: ${error instanceof Error ? error.message : 'scope cycle failed'}`
 			);
 			if (persistenceFailed) throw error;
+			saved.coverage = {
+				observedAt: snapshot.capturedAt,
+				status: 'blocked',
+				ownerScopeId: scopeId,
+				reason: (error instanceof Error ? error.message : 'Scope cycle failed').slice(0, 4000),
+				nextActor: 'operator',
+				nextAction: saved.unresolvedIntent
+					? 'Reconcile the native receipt or recipient transcript before any retry'
+					: 'Restore transcript access/cursor consistency; worker retries this tab on the next cycle',
+			};
+			persist();
 			// Isolate an unavailable/stale tab, preserving any durable uncertain
 			// intent, so another healthy tab in this scope can still make progress.
 		}

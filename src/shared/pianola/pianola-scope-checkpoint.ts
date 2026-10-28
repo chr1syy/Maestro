@@ -10,11 +10,48 @@ export interface PianolaScopeCursor {
 	textLength: number;
 }
 
+/** Metadata coverage is an observation, never a delivery/acknowledgment receipt. */
+export interface PianolaScopeTabCoverage {
+	observedAt: number;
+	status: 'covered' | 'blocked' | 'paused' | 'excluded' | 'closed';
+	ownerScopeId: string | null;
+	reason: string;
+	nextActor: 'worker' | 'operator' | 'none';
+	nextAction: string;
+}
+
+/** Current status projection; historical checkpoints remain available separately. */
+export interface PianolaScopeCoverage {
+	configurationFingerprint: string | null;
+	checkpointFingerprint: string | null;
+	censusAt: number | null;
+	ageMs: number | null;
+	staleAfterMs: number;
+	fresh: boolean;
+	status: 'covered' | 'blocked' | 'stale' | 'paused';
+	reason: string;
+	nextActor: 'worker' | 'operator' | 'none';
+	nextAction: string;
+	tabs: Array<{
+		agentId: string;
+		tabId: string;
+		status: PianolaScopeTabCoverage['status'] | 'stale' | 'suspended';
+		ownerScopeId: string | null;
+		observedAt: number | null;
+		reason: string;
+		nextActor: PianolaScopeTabCoverage['nextActor'];
+		nextAction: string;
+		/** Original error remains visible even when scope freshness overrides status. */
+		error?: string;
+	}>;
+}
+
 export interface PianolaScopeCheckpointTab {
 	agentId: string;
 	tabId: string;
 	/** Effective owner/root binding. Missing on an older checkpoint forces a baseline. */
 	bindingFingerprint?: string;
+	coverage?: PianolaScopeTabCoverage;
 	baseline: PianolaScopeCursor | null;
 	/** Only a live stream at enrollment may complete within the baseline entry. */
 	baselineBusy?: boolean;
@@ -32,6 +69,9 @@ export interface PianolaScopeCheckpoint {
 	activatedAt: number;
 	/** Last complete metadata census; new membership alone is not new activity. */
 	lastSnapshotAt?: number;
+	/** Registry ownership inputs at census time, including overlapping/legacy watches. */
+	coverageRegistryFingerprint?: string;
+	lastCycleError?: { observedAt: number; reason: string };
 	/** Round-robin position in the current native tab census. */
 	nextTabIndex?: number;
 	status: 'baselining' | 'armed' | 'suspended';
@@ -100,9 +140,20 @@ export function validatePianolaScopeCheckpoint(
 		(raw.lastSnapshotAt !== undefined &&
 			(!nonnegativeInteger(raw.lastSnapshotAt) || raw.lastSnapshotAt < raw.activatedAt)) ||
 		(raw.status !== 'baselining' && raw.status !== 'armed' && raw.status !== 'suspended') ||
+		(raw.coverageRegistryFingerprint !== undefined &&
+			(typeof raw.coverageRegistryFingerprint !== 'string' ||
+				!FINGERPRINT.test(raw.coverageRegistryFingerprint))) ||
 		(raw.nextTabIndex !== undefined && !nonnegativeInteger(raw.nextTabIndex)) ||
 		!Array.isArray(raw.tabs) ||
 		raw.tabs.length > 10000
+	)
+		return null;
+	if (
+		raw.lastCycleError !== undefined &&
+		(!record(raw.lastCycleError) ||
+			!nonnegativeInteger(raw.lastCycleError.observedAt) ||
+			typeof raw.lastCycleError.reason !== 'string' ||
+			raw.lastCycleError.reason.length > 4000)
 	)
 		return null;
 	const members = new Set<string>();
@@ -130,6 +181,26 @@ export function validatePianolaScopeCheckpoint(
 					typeof tab.unresolvedIntent.admitted !== 'boolean'))
 		)
 			return null;
+		if (tab.coverage !== undefined) {
+			const coverage = tab.coverage;
+			if (
+				!record(coverage) ||
+				!nonnegativeInteger(coverage.observedAt) ||
+				!['covered', 'blocked', 'paused', 'excluded', 'closed'].includes(
+					coverage.status as string
+				) ||
+				!(
+					coverage.ownerScopeId === null ||
+					(typeof coverage.ownerScopeId === 'string' && isPianolaScopeId(coverage.ownerScopeId))
+				) ||
+				typeof coverage.reason !== 'string' ||
+				coverage.reason.length > 4000 ||
+				!['worker', 'operator', 'none'].includes(coverage.nextActor as string) ||
+				typeof coverage.nextAction !== 'string' ||
+				coverage.nextAction.length > 4000
+			)
+				return null;
+		}
 		const key = JSON.stringify([tab.agentId, tab.tabId]);
 		if (members.has(key)) return null;
 		members.add(key);

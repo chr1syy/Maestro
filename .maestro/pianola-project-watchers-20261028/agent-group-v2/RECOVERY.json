@@ -13,7 +13,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R01: current coverage/failure projection; see recovery-diagnosis.md",
+  "nextAction": "R02: renderer controls/current coverage and guarded human resolution; contract in recovery-coverage-contract.md",
   "tasks": [
     {
       "taskId": "R00",
@@ -51,6 +51,40 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R01; preserve fresh approval/correction dedup, fix missing status and durable review contracts in assigned later tasks",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R01",
+      "status": "complete",
+      "outcome": "Implemented current coverage contract/producers in production supervisor API; runtime/static verification intentionally deferred to R03/R04",
+      "files": [
+        "src/shared/pianola/pianola-scope-checkpoint.ts",
+        "src/shared/pianola/pianola-scope-cycle.ts",
+        "src/main/ipc/handlers/pianola.ts",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-coverage-contract.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": {
+        "subject": "MAESTRO: expose current Pianola scope coverage and failures",
+        "parent": "88ba5ff8f3b32dabe197b16f5ba3f197ce1579e0",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-coverage-contract.md"
+      },
+      "checks": {
+        "status": "tests_and_types_deferred; incidental_commit_hook_passed",
+        "evidence": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-coverage-contract.md",
+        "method": "source call-site inspection and formatter write; existing commit hook automatically ran prettier --write and eslint --fix successfully despite HUSKY=0",
+        "nextExecution": "R03 authors missing regressions; R04 runs affected checks",
+        "sourceSha256": {
+          "src/shared/pianola/pianola-scope-checkpoint.ts": "d0d6d76a0f339f2b82b227b91e5090728458fb28484c4108dfd5914d76083a08",
+          "src/shared/pianola/pianola-scope-cycle.ts": "3956792c72314cb5c86ebf3f81d523acc6e9a88f10f5bc4578f3299cecd2d24c",
+          "src/main/ipc/handlers/pianola.ts": "405650a37c7421a8198b0d31310d8d278930fe88e23b2500827ed004c21ce5f1"
+        }
+      },
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R02 consumes checkpoints[].coverage; R03/R04 verify; no PR before R10/R11",
       "imagesAnalyzed": 0
     }
   ]
