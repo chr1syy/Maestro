@@ -33,6 +33,12 @@ import {
 import type { PianolaDecisionRecord, PianolaSupervisedTarget } from './storage';
 import { decide } from './pianola-policy';
 import type { PianolaMessage } from './types';
+import {
+	startPianolaDecision,
+	updatePianolaDecision,
+	reconcilePianolaDecision,
+	pausePianolaScopeDecisions,
+} from './pianola-decision-lifecycle';
 
 export interface PianolaScopeSnapshotTab extends PianolaScopeTab {
 	/** Host creation time, never the provider session's creation time. */
@@ -323,6 +329,11 @@ export async function runPianolaScopeCycle(
 		}
 	};
 	if (!scope?.enabled) {
+		pausePianolaScopeDecisions(
+			scopeId,
+			{ readDecisions: deps.store.readDecisions, appendDecision: deps.watch.recordDecision },
+			deps.watch.now()
+		);
 		if (checkpoint) {
 			checkpoint.status = 'suspended';
 			persist();
@@ -361,6 +372,37 @@ export async function runPianolaScopeCycle(
 		throw new Error('Pianola host clock precedes activation; scope remains inert');
 	const configurationChanged = checkpoint.configurationFingerprint !== configurationFingerprint;
 	const decisions = deps.store.readDecisions();
+	for (const record of decisions) {
+		if (record.lifecycle?.guard.scopeId !== scopeId || record.lifecycle.status === 'done') continue;
+		const tab = snapshot.tabs.find(
+			(candidate) => candidate.agentId === record.agentId && candidate.tabId === record.tabId
+		);
+		const ownership = tab
+			? resolvePianolaScopeOwnership(
+					tab,
+					snapshot.owners,
+					scopes,
+					targets.filter((target) => target.kind === 'watch')
+				)
+			: null;
+		if (!tab || tab.paused || ownership?.kind !== 'scope' || ownership.scopeId !== scopeId) {
+			const status = !tab ? 'blocked' : 'paused';
+			if (record.lifecycle.status !== status)
+				deps.watch.recordDecision(
+					updatePianolaDecision(
+						record,
+						{
+							status,
+							nextActor: !tab ? 'operator' : 'none',
+							nextAction: !tab
+								? 'Restore the original requesting agent/tab; never redirect its answer'
+								: 'Resume the selected agent/scope, then revalidate the original ask',
+						},
+						deps.watch.now()
+					)
+				);
+		}
+	}
 	const savedByKey = new Map(
 		checkpoint.tabs.map((tab) => [canonicalJson([tab.agentId, tab.tabId]), tab])
 	);
@@ -434,17 +476,21 @@ export async function runPianolaScopeCycle(
 			saved.status = tab.paused ? 'suspended' : 'active';
 			// An unresolved intent survives loss of ownership, disable and close.
 		}
-		if (saved.unresolvedIntent) {
-			result.issues.push(`Delivery outcome unknown: ${tab.agentId}/${tab.tabId}`);
-			continue;
-		}
+		const openDecision = decisions.some(
+			(record) =>
+				record.agentId === tab.agentId &&
+				record.tabId === tab.tabId &&
+				record.lifecycle?.guard.scopeId === scopeId &&
+				record.lifecycle.status !== 'done'
+		);
 		if (
 			!tab.paused &&
-			!tab.busy &&
+			(!tab.busy || openDecision) &&
 			(!sameCursor(saved.lastSeen, tab.cursor) ||
 				saved.baselineBusy ||
 				saved.state.pendingRetry ||
-				saved.state.pendingHandoff)
+				saved.state.pendingHandoff ||
+				openDecision)
 		)
 			working.push({ tab, saved });
 	}
@@ -500,7 +546,67 @@ export async function runPianolaScopeCycle(
 				if (streamed?.id === saved.baseline.id && streamed.role === 'assistant')
 					actionableIds.add(streamed.id);
 			}
+			// Settle earlier decisions before classifying another ask. Authorship is
+			// established only by the controlled resolution path, never guessed.
+			const currentRecords = deps.store.readDecisions();
+			let pending = false;
+			for (const record of currentRecords) {
+				if (
+					record.agentId !== tab.agentId ||
+					record.tabId !== tab.tabId ||
+					record.lifecycle?.guard.scopeId !== scopeId ||
+					record.lifecycle.status === 'done'
+				)
+					continue;
+				const observed = reconcilePianolaDecision(record, tab, messages, deps.watch.now());
+				if (observed !== record) {
+					deps.watch.recordDecision(observed);
+					if (
+						!options.dryRun &&
+						observed.lifecycle!.status === 'waiting_human' &&
+						record.lifecycle.status !== 'waiting_human'
+					)
+						await deps.watch.notify?.({
+							kind: 'handoff_timeout',
+							target,
+							classification: record.classification,
+							highRisk: record.classification.risk === 'high',
+						});
+				}
+				if (observed.lifecycle!.acknowledgedAt)
+					saved.state = {
+						lastHandledMessageId: record.classification.evidence.messageId,
+						pendingHandoff: null,
+						pendingRetry: null,
+					};
+				if (observed.lifecycle!.status !== 'done' && !observed.lifecycle!.acknowledgedAt)
+					pending = true;
+				if (
+					saved.unresolvedIntent?.decisionId === record.id &&
+					(observed.lifecycle!.delivery === 'accepted' ||
+						observed.lifecycle!.delivery === 'rejected' ||
+						observed.lifecycle!.acknowledgedAt)
+				)
+					saved.unresolvedIntent = null;
+			}
+			if (saved.unresolvedIntent || pending || tab.busy) {
+				saved.lastSeen = tab.cursor;
+				persist();
+				if (saved.unresolvedIntent)
+					result.issues.push(`Delivery outcome unknown: ${tab.agentId}/${tab.tabId}`);
+				continue;
+			}
 			let latestRecord: PianolaDecisionRecord | undefined;
+			const deliveryGuard = (record: PianolaDecisionRecord): PianolaScopeDeliveryGuard => ({
+				scopeId,
+				configurationFingerprint,
+				bindingFingerprint: saved.bindingFingerprint!,
+				agentId: tab.agentId,
+				tabId: tab.tabId,
+				messageId: record.classification.evidence.messageId!,
+				decisionId: record.id,
+				cursor: tab.cursor!,
+			});
 			const guard = async (): Promise<PianolaScopeDeliveryGuard> => {
 				const messageId = latestRecord?.classification.evidence.messageId;
 				if (
@@ -561,8 +667,25 @@ export async function runPianolaScopeCycle(
 				{
 					...deps.watch,
 					recordDecision: (record) => {
-						deps.watch.recordDecision(record);
-						latestRecord = record;
+						const current = deps.store
+							.readDecisions()
+							.find((candidate) => candidate.id === record.id);
+						// Native admission owns receipt/actor changes. A worker outcome
+						// must not overwrite a manager response received during its await.
+						if (
+							current?.lifecycle &&
+							(current.deliveryStatus === 'admitted' || current.lifecycle.delivery !== 'intent')
+						) {
+							latestRecord = current;
+							return;
+						}
+						latestRecord = startPianolaDecision(
+							record,
+							deliveryGuard(record),
+							scope.managerAgentId,
+							snapshot.owners.find((owner) => owner.id === tab.agentId)?.groupId ?? null
+						);
+						deps.watch.recordDecision(latestRecord);
 					},
 					dispatch: async (destination, answer) =>
 						deliveryOutcome(await deps.dispatch(destination, answer, await guard())),
@@ -580,6 +703,27 @@ export async function runPianolaScopeCycle(
 			persist();
 			result.iterations.push({ agentId: tab.agentId, tabId: tab.tabId, result: iteration.result });
 		} catch (error) {
+			if (saved.unresolvedIntent) {
+				const record = deps.store
+					.readDecisions()
+					.find((candidate) => candidate.id === saved.unresolvedIntent!.decisionId);
+				if (
+					record?.lifecycle &&
+					(record.lifecycle.delivery === 'intent' || record.lifecycle.delivery === 'unknown')
+				)
+					deps.watch.recordDecision(
+						updatePianolaDecision(
+							record,
+							{
+								delivery: 'unknown',
+								status: 'blocked',
+								nextActor: 'operator',
+								nextAction: 'Reconcile the native receipt or recipient transcript before any retry',
+							},
+							deps.watch.now()
+						)
+					);
+			}
 			// Do not persist a cleared intent on failure: the durable copy is the
 			// recovery authority even if the send succeeded before an outcome failed.
 			result.issues.push(
@@ -598,9 +742,8 @@ export async function runPianolaScopeCycle(
  * Persist a claim first: duplicate admissions and unknown receipts stay blocked.
  * This is for rule answers; manager decisions use the decision lifecycle adapter.
  */
-export function admitPianolaScopeReply(
+export function validatePianolaScopeDelivery(
 	raw: unknown,
-	answer: string,
 	snapshot: PianolaScopeSnapshot,
 	store: Pick<
 		PianolaFsStore,
@@ -610,8 +753,9 @@ export function admitPianolaScopeReply(
 		| 'readDecisions'
 		| 'readRules'
 		| 'appendDecision'
-	>
-): PianolaScopeDeliveryGuard {
+	>,
+	requireIntent = true
+) {
 	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Missing scope guard');
 	const guard = raw as PianolaScopeDeliveryGuard;
 	if (
@@ -669,49 +813,80 @@ export function admitPianolaScopeReply(
 		!saved ||
 		saved.status !== 'active' ||
 		saved.bindingFingerprint !== guard.bindingFingerprint ||
-		saved.unresolvedIntent?.decisionId !== guard.decisionId ||
-		saved.unresolvedIntent.messageId !== guard.messageId ||
-		saved.unresolvedIntent.admitted
+		(requireIntent &&
+			(saved.unresolvedIntent?.decisionId !== guard.decisionId ||
+				saved.unresolvedIntent.messageId !== guard.messageId ||
+				saved.unresolvedIntent.admitted))
 	)
 		throw new Error('Scope intent missing or already admitted');
-	const decisions = store.readDecisions();
-	if (
-		decisions.some(
-			(candidate) =>
-				candidate.agentId === tab.agentId &&
-				candidate.tabId === tab.tabId &&
-				candidate.classification.evidence.messageId === guard.messageId &&
-				!candidate.dryRun &&
-				(candidate.dispatched || candidate.deliveryStatus === 'admitted')
-		)
-	)
-		throw new Error('Ask already admitted or answered');
-	const record = decisions.find((candidate) => candidate.id === guard.decisionId);
+	const record = store.readDecisions().find((candidate) => candidate.id === guard.decisionId);
 	if (
 		!record ||
 		record.dryRun ||
-		record.dispatched ||
 		record.agentId !== tab.agentId ||
 		record.tabId !== tab.tabId ||
-		record.classification.evidence.messageId !== guard.messageId ||
-		record.decision.action !== 'auto_answer' ||
-		record.decision.answer !== answer
+		record.classification.evidence.messageId !== guard.messageId
 	)
-		throw new Error('Missing rule answer intent');
-	const currentDecision = decide(record.classification, store.readRules(), {
-		tabId: tab.tabId,
-		projectPath: snapshot.owners.find((candidate) => candidate.id === tab.agentId)!.cwd,
-	});
+		throw new Error('Missing pending decision');
+	if (record.lifecycle && canonicalJson(record.lifecycle.guard) !== canonicalJson(guard))
+		throw new Error('Decision recipient binding changed');
+	return { guard, scope, tab, checkpoint, saved, record };
+}
+
+/** Claim synchronously on the desktop before its normal renderer send. */
+export function admitPianolaScopeReply(
+	raw: unknown,
+	answer: string,
+	snapshot: PianolaScopeSnapshot,
+	store: Parameters<typeof validatePianolaScopeDelivery>[2],
+	judgment = false
+): PianolaScopeDeliveryGuard {
+	const { guard, tab, checkpoint, saved, record } = validatePianolaScopeDelivery(
+		raw,
+		snapshot,
+		store
+	);
 	if (
-		currentDecision.action !== 'auto_answer' ||
-		currentDecision.matchedRuleId !== record.decision.matchedRuleId ||
-		currentDecision.answer !== answer
+		store
+			.readDecisions()
+			.some(
+				(candidate) =>
+					candidate.agentId === tab.agentId &&
+					candidate.tabId === tab.tabId &&
+					candidate.classification.evidence.messageId === guard.messageId &&
+					!candidate.dryRun &&
+					(candidate.dispatched || candidate.deliveryStatus === 'admitted')
+			)
 	)
-		throw new Error('Rule answer no longer authorized');
-	// Independent of checkpoint writes by the worker, this audit claim survives
-	// a crash between native admission and the recipient's receipt.
+		throw new Error('Ask already admitted or answered');
+	if (judgment) {
+		if (
+			!record.lifecycle ||
+			record.lifecycle.phase !== 'judgment' ||
+			record.lifecycle.delivery !== 'intent' ||
+			record.classification.risk === 'high'
+		)
+			throw new Error('Missing eligible judgment intent');
+	} else {
+		if (
+			record.dispatched ||
+			record.decision.action !== 'auto_answer' ||
+			record.decision.answer !== answer
+		)
+			throw new Error('Missing rule answer intent');
+		const currentDecision = decide(record.classification, store.readRules(), {
+			tabId: tab.tabId,
+			projectPath: snapshot.owners.find((candidate) => candidate.id === tab.agentId)!.cwd,
+		});
+		if (
+			currentDecision.action !== 'auto_answer' ||
+			currentDecision.matchedRuleId !== record.decision.matchedRuleId ||
+			currentDecision.answer !== answer
+		)
+			throw new Error('Rule answer no longer authorized');
+	}
 	store.appendDecision({ ...record, deliveryStatus: 'admitted' });
-	saved.unresolvedIntent.admitted = true;
+	saved.unresolvedIntent!.admitted = true;
 	store.writeScopeCheckpoint(checkpoint);
 	return guard;
 }

@@ -1,0 +1,196 @@
+{
+	"taskId": "V2-04",
+	"sourceFiles": [
+		"src/cli/commands/pianola-scope-watch.ts",
+		"src/cli/commands/pianola.ts",
+		"src/cli/index.ts",
+		"src/main/ipc/bootstrap/index.ts",
+		"src/main/ipc/handlers/pianola.ts",
+		"src/main/pianola/pianola-supervisor.ts",
+		"src/main/preload/pianola.ts",
+		"src/main/web-server/WebServer.ts",
+		"src/main/web-server/handlers/bridgeDenyList.ts",
+		"src/main/web-server/handlers/bridgeHandlers.ts",
+		"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+		"src/main/web-server/handlers/messageHandlers/commands.ts",
+		"src/shared/pianola/fs-store.ts",
+		"src/shared/pianola/pianola-scope-cycle.ts",
+		"src/shared/pianola/pianola-watcher.ts",
+		"src/shared/pianola/storage.ts",
+		"src/shared/pianola/pianola-decision-lifecycle.ts",
+		"src/main/pianola/pianola-decisions.ts"
+	],
+	"checks": [
+		{
+			"check": "format",
+			"command": [
+				"node_modules/.bin/prettier",
+				"--check",
+				"src/cli/commands/pianola-scope-watch.ts",
+				"src/cli/commands/pianola.ts",
+				"src/cli/index.ts",
+				"src/main/ipc/bootstrap/index.ts",
+				"src/main/ipc/handlers/pianola.ts",
+				"src/main/pianola/pianola-supervisor.ts",
+				"src/main/preload/pianola.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/handlers/bridgeDenyList.ts",
+				"src/main/web-server/handlers/bridgeHandlers.ts",
+				"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts",
+				"src/shared/pianola/fs-store.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/pianola-watcher.ts",
+				"src/shared/pianola/storage.ts",
+				"src/shared/pianola/pianola-decision-lifecycle.ts",
+				"src/main/pianola/pianola-decisions.ts"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-format.log"
+		},
+		{
+			"check": "lint",
+			"command": [
+				"node_modules/.bin/eslint",
+				"src/cli/commands/pianola-scope-watch.ts",
+				"src/cli/commands/pianola.ts",
+				"src/cli/index.ts",
+				"src/main/ipc/bootstrap/index.ts",
+				"src/main/ipc/handlers/pianola.ts",
+				"src/main/pianola/pianola-supervisor.ts",
+				"src/main/preload/pianola.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/handlers/bridgeDenyList.ts",
+				"src/main/web-server/handlers/bridgeHandlers.ts",
+				"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts",
+				"src/shared/pianola/fs-store.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/pianola-watcher.ts",
+				"src/shared/pianola/storage.ts",
+				"src/shared/pianola/pianola-decision-lifecycle.ts",
+				"src/main/pianola/pianola-decisions.ts"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-lint.log"
+		},
+		{
+			"check": "types",
+			"command": [
+				"node",
+				".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-typecheck.cjs"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-types.log",
+			"result": "Final rerun after removing the unreachable intent comparison: 13 source roots, zero diagnostics."
+		},
+		{
+			"check": "docs",
+			"command": [
+				"node",
+				"scripts/verify-docs-paths.mjs"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-docs.log"
+		},
+		{
+			"check": "diff",
+			"command": [
+				"git",
+				"diff",
+				"HEAD",
+				"--check"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-diff.log"
+		}
+	],
+	"followUpChecks": [
+		{
+			"check": "lint",
+			"command": [
+				"node_modules/.bin/eslint",
+				"src/shared/pianola/pianola-decision-lifecycle.ts"
+			],
+			"exitCode": 0
+		},
+		{
+			"check": "format",
+			"command": [
+				"node_modules/.bin/prettier",
+				"--check",
+				"src/shared/pianola/pianola-decision-lifecycle.ts"
+			],
+			"exitCode": 0
+		}
+	],
+	"initialFindings": "Scoped types found an unused binding and then an unreachable intent comparison; both were corrected. The final full scoped TypeScript invocation passed. No runtime tests were executed.",
+	"tests": {
+		"authored": false,
+		"executed": false,
+		"reason": "V2-04 implements source; V2-06 authors regressions and V2-07 executes them."
+	},
+	"imagesAnalyzed": 0,
+	"installedRuntimeVerified": false,
+	"productiveCoverageChanged": false,
+	"pushValidationSuite": "Skipped for this branch push as instructed. Hooks remain unchanged; per-invocation core.hooksPath=/dev/null handles the existing direct hooks.",
+	"finalChecks": [
+		{
+			"check": "format",
+			"command": [
+				"node_modules/.bin/prettier",
+				"--check",
+				"src/cli/commands/pianola-scope-watch.ts",
+				"src/cli/commands/pianola.ts",
+				"src/cli/index.ts",
+				"src/main/ipc/bootstrap/index.ts",
+				"src/main/ipc/handlers/pianola.ts",
+				"src/main/pianola/pianola-supervisor.ts",
+				"src/main/preload/pianola.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/handlers/bridgeDenyList.ts",
+				"src/main/web-server/handlers/bridgeHandlers.ts",
+				"src/main/web-server/handlers/messageHandlers/WebSocketMessageHandler.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts",
+				"src/shared/pianola/fs-store.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/shared/pianola/pianola-watcher.ts",
+				"src/shared/pianola/storage.ts",
+				"src/shared/pianola/pianola-decision-lifecycle.ts",
+				"src/main/pianola/pianola-decisions.ts"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-final-format.log"
+		},
+		{
+			"check": "lint",
+			"command": [
+				"node_modules/.bin/eslint",
+				"src/shared/pianola/pianola-decision-lifecycle.ts",
+				"src/main/web-server/handlers/messageHandlers/commands.ts"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-final-lint.log"
+		},
+		{
+			"check": "types",
+			"command": [
+				"node",
+				".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-typecheck.cjs"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-final-types.log"
+		},
+		{
+			"check": "diff",
+			"command": [
+				"git",
+				"diff",
+				"HEAD",
+				"--check"
+			],
+			"exitCode": 0,
+			"log": ".maestro/pianola-project-watchers-20261028/auto-run/Working/V2-04-final-diff.log"
+		}
+	]
+}

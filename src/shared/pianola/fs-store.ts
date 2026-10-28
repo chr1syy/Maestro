@@ -23,6 +23,7 @@ import {
 	PIANOLA_SUGGESTIONS_FILENAME,
 	PIANOLA_DECISIONS_MAX_RECORDS,
 	PIANOLA_DECISIONS_COMPACT_BYTES,
+	PIANOLA_DECISION_RECORD_MAX_BYTES,
 	validatePianolaRules,
 	validatePianolaDecisionRecord,
 	validatePianolaPlansFile,
@@ -171,10 +172,19 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 	}
 
 	function appendDecision(record: PianolaDecisionRecord): void {
+		const line = `${JSON.stringify(record)}\n`;
+		// Scope audit-before-send must fail closed rather than silently dropping
+		// an oversized or unreadable lifecycle and then losing its durable claim.
+		if (
+			record.lifecycle &&
+			(!validatePianolaDecisionRecord(record) ||
+				Buffer.byteLength(line, 'utf-8') > PIANOLA_DECISION_RECORD_MAX_BYTES)
+		)
+			throw new Error('Invalid or oversized Pianola decision lifecycle');
 		const dir = resolveDir();
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		const file = path.join(dir, PIANOLA_DECISIONS_FILENAME);
-		appendDecisionLine(file, `${JSON.stringify(record)}\n`);
+		appendDecisionLine(file, line);
 		compactDecisionLog(file, PIANOLA_DECISIONS_MAX_RECORDS, PIANOLA_DECISIONS_COMPACT_BYTES);
 	}
 

@@ -38,6 +38,8 @@ import {
 import type { PianolaRule } from '../../../shared/pianola/types';
 import type { PianolaSupervisor, PianolaSupervisorHealth } from '../../pianola/pianola-supervisor';
 import { generateUUID } from '../../../shared/uuid';
+import { getActingUser } from '../../web-server/auth/acting-user';
+import type { WebServer } from '../../web-server/WebServer';
 
 const LOG_CONTEXT = '[Pianola]';
 
@@ -66,6 +68,7 @@ export interface PianolaHandlerDependencies {
 	};
 	/** The desktop supervised daemon; supervisor channels drive its reconcile. */
 	supervisor: PianolaSupervisor;
+	getWebServer?: () => WebServer | null;
 }
 
 /**
@@ -212,6 +215,19 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 	ipcMain.handle('pianola:get-suggestions', async (event): Promise<PianolaSuggestionsFile> => {
 		if (!isPianolaEnabled(settingsStore)) throw new Error('PianolaDisabled');
 		return wrappedGetSuggestions(event);
+	});
+
+	// Only this explicit human UI action may create human provenance. The CLI
+	// manager endpoint cannot choose its actor kind or impersonate a human.
+	ipcMain.handle('pianola:resolve-decision', async (_event, payload: unknown) => {
+		if (!isPianolaEnabled(settingsStore)) throw new Error('PianolaDisabled');
+		const server = deps.getWebServer?.();
+		if (!server) throw new Error('Native decision transport unavailable');
+		return server.resolvePianolaHumanDecision(
+			payload,
+			getActingUser()?.id ??
+				((_event as unknown as { type?: string }).type === 'bridge' ? 'web-owner' : 'desktop')
+		);
 	});
 
 	ipcMain.handle(

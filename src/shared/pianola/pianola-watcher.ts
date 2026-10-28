@@ -64,6 +64,8 @@ export interface PianolaJudgmentRequest {
 	promptText?: string;
 	/** Discrete options the agent offered, if any. */
 	options?: string[];
+	/** Complete current turn, including earlier intent and tool context. */
+	turnContext?: readonly PianolaMessage[];
 }
 
 /** Injected side effects. */
@@ -149,6 +151,10 @@ export function rehydrateWatchState(
 	if (!lastRecord || !lastMid) {
 		return { lastHandledMessageId: null, pendingRetry: null, pendingHandoff: null };
 	}
+	// Scope lifecycles own their pending actor, delivery uncertainty and receipt
+	// reconciliation. Never replay one through the legacy heuristic handoff path.
+	if (lastRecord.lifecycle)
+		return { lastHandledMessageId: lastMid, pendingRetry: null, pendingHandoff: null };
 	// A successfully-delivered handoff (escalate decision, not dispatched, no
 	// error) means we were awaiting Pianola's reply when we stopped. Restore the
 	// pending-handoff so the timeout resumes rather than re-handing-off, and keep
@@ -483,6 +489,9 @@ export async function runWatchIteration(
 				profile,
 				promptText: relevant?.awaitingInput?.prompt ?? relevant?.content,
 				options: relevant?.awaitingInput?.options,
+				turnContext: messages.slice(
+					messages.map((message) => message.role).lastIndexOf('user') + 1
+				),
 			});
 
 			if (res.success) {

@@ -184,7 +184,13 @@ import {
 } from './commands/computer-history';
 import { setVerbosity } from './output/verbosity';
 import { pianolaWatchScope } from './commands/pianola-scope-watch';
-import { pianolaWatch, pianolaRules, pianolaAddRule, pianolaLog } from './commands/pianola';
+import {
+	pianolaWatch,
+	pianolaRules,
+	pianolaAddRule,
+	pianolaLog,
+	pianolaResolveDecision,
+} from './commands/pianola';
 import { pianolaLearn } from './commands/pianola-learn';
 import { pianolaProfile, pianolaSetProfile } from './commands/pianola-profile';
 import {
@@ -2150,6 +2156,15 @@ computerHistory
 const pianola = program
 	.command('pianola')
 	.description('Pianola manager agent: watch tabs, auto-answer or escalate per your rules');
+
+pianola
+	.command('resolve <decision-id>')
+	.description('Resolve a persisted manager handoff after recipient and pending-ask revalidation')
+	.option('--answer <text>', 'Answer the requesting agent exactly once')
+	.option('--escalation <text>', 'Ask the human to decide, with a concrete recommendation')
+	.option('--background', 'Preserve the active agent and tab')
+	.option('--json', 'Output as JSON')
+	.action((decisionId, options) => pianolaResolveDecision(decisionId, options));
 
 pianola
 	.command('watch-scope <scope-id>')

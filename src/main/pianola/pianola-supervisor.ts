@@ -32,7 +32,10 @@ import {
 	supervisorFilePath,
 	readScopeCheckpoint,
 	writeScopeCheckpoint,
+	readDecisions,
+	appendDecision,
 } from './pianola-store-main';
+import { pausePianolaScopeDecisions } from '../../shared/pianola/pianola-decision-lifecycle';
 import type { PianolaSupervisedTarget, PianolaSupervisedKind } from '../../shared/pianola/storage';
 import {
 	resolvePianolaScopeOwnership,
@@ -658,6 +661,7 @@ export class PianolaSupervisor {
 	/** Pause is durable even if the worker is stopped during an I/O wait. */
 	private suspendScopeCheckpoint(id: string): void {
 		try {
+			pausePianolaScopeDecisions(id, { readDecisions, appendDecision }, new Date().toISOString());
 			const checkpoint = readScopeCheckpoint(id);
 			if (checkpoint) {
 				checkpoint.status = 'suspended';

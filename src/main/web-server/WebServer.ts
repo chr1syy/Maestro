@@ -41,6 +41,7 @@ import { registerPairingRoutes } from '../lite/pairing/routes';
 
 import { registerLiteConnectionRoutes } from './routes/liteConnectionRoutes';
 import { logger } from '../utils/logger';
+import { resolvePianolaDecision } from '../pianola/pianola-decisions';
 import type { GroupAppearance, GroupUpdateRequest } from '../../shared/groupAppearance';
 import { getLocalIpAddress } from '../utils/networkUtils';
 import {
@@ -563,6 +564,11 @@ export class WebServer {
 
 	setExecuteCommandCallback(callback: ExecuteCommandCallback): void {
 		this.callbackRegistry.setExecuteCommandCallback(callback);
+	}
+
+	/** Explicit renderer action, sharing native admission with manager answers. */
+	resolvePianolaHumanDecision(payload: unknown, actorId: string) {
+		return resolvePianolaDecision(this.callbackRegistry, payload, { kind: 'human', actorId });
 	}
 
 	setInterruptSessionCallback(callback: InterruptSessionCallback): void {

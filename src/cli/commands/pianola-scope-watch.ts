@@ -7,6 +7,7 @@ import {
 	readPianolaDecisions,
 	readPianolaRules,
 	appendPianolaDecision,
+	getPianolaProfile,
 } from '../services/pianola-store';
 import { generateUUID } from '../../shared/uuid';
 import { isPianolaScopeId } from '../../shared/pianola/pianola-scope';
@@ -14,13 +15,17 @@ import {
 	runPianolaScopeCycle,
 	type PianolaScopeCycleDeps,
 	type PianolaScopeDeliveryResult,
+	type PianolaScopeDeliveryGuard,
 } from '../../shared/pianola/pianola-scope-cycle';
+import type { WatchTarget } from '../../shared/pianola/pianola-watcher';
+import { pausePianolaScopeDecisions } from '../../shared/pianola/pianola-decision-lifecycle';
 import type { PianolaMessage } from '../../shared/pianola/types';
 import {
 	ensurePianolaEnabled,
 	pianolaEnabledNow,
 	readPianolaScopeSnapshot,
 	buildNotifyToastCommand,
+	buildPianolaHandoffPrompt,
 } from './pianola';
 
 export interface PianolaScopeWatchOptions {
@@ -33,6 +38,40 @@ export interface PianolaScopeWatchOptions {
 export function createPianolaScopeWorkerDeps(
 	client: Pick<MaestroClient, 'sendCommand'>
 ): PianolaScopeCycleDeps {
+	const deliver = async (
+		target: WatchTarget,
+		answer: string,
+		guard: PianolaScopeDeliveryGuard,
+		judgment = false
+	): Promise<PianolaScopeDeliveryResult> => {
+		if (!pianolaEnabledNow()) return { status: 'rejected', error: 'Pianola disabled' };
+		try {
+			const result = await client.sendCommand<PianolaScopeDeliveryResult>(
+				{
+					type: 'pianola_scope_reply',
+					sessionId: target.agentId,
+					tabId: target.tabId,
+					answer,
+					guard,
+					judgment,
+				},
+				'pianola_scope_reply_result'
+			);
+			if (
+				result.status === 'accepted' ||
+				result.status === 'rejected' ||
+				result.status === 'unknown'
+			)
+				return result;
+			return { status: 'unknown', error: 'Missing native scope receipt' };
+		} catch (error) {
+			// Timeout/disconnect cannot establish that the recipient did not accept.
+			return {
+				status: 'unknown',
+				error: error instanceof Error ? error.message : 'Scope delivery failed',
+			};
+		}
+	};
 	return {
 		store: {
 			readSupervisorTargets: readPianolaSupervisorTargets,
@@ -60,6 +99,7 @@ export function createPianolaScopeWorkerDeps(
 			return { agentId: response.agentId, tabId: response.tabId, messages: response.messages };
 		},
 		watch: {
+			resolveProfile: (projectPath) => getPianolaProfile(projectPath).entry,
 			readRules: readPianolaRules,
 			recordDecision: appendPianolaDecision,
 			now: () => new Date().toISOString(),
@@ -70,34 +110,9 @@ export function createPianolaScopeWorkerDeps(
 				await client.sendCommand(buildNotifyToastCommand(event), 'notify_toast_result');
 			},
 		},
-		dispatch: async (target, answer, guard) => {
-			if (!pianolaEnabledNow()) return { status: 'rejected', error: 'Pianola disabled' };
-			try {
-				const result = await client.sendCommand<PianolaScopeDeliveryResult>(
-					{
-						type: 'pianola_scope_reply',
-						sessionId: target.agentId,
-						tabId: target.tabId,
-						answer,
-						guard,
-					},
-					'pianola_scope_reply_result'
-				);
-				if (
-					result.status === 'accepted' ||
-					result.status === 'rejected' ||
-					result.status === 'unknown'
-				)
-					return result;
-				return { status: 'unknown', error: 'Missing native scope receipt' };
-			} catch (error) {
-				// Timeout/disconnect cannot establish that the recipient did not accept.
-				return {
-					status: 'unknown',
-					error: error instanceof Error ? error.message : 'Scope delivery failed',
-				};
-			}
-		},
+		dispatch: (target, answer, guard) => deliver(target, answer, guard),
+		requestJudgment: (request, guard) =>
+			deliver(request.target, buildPianolaHandoffPrompt(request, guard.decisionId), guard, true),
 	};
 }
 
@@ -124,6 +139,11 @@ export async function pianolaWatchScope(
 				(candidate) => candidate.id === scopeId && candidate.kind === 'watch-scope'
 			);
 			if (!target?.enabled) {
+				pausePianolaScopeDecisions(
+					scopeId,
+					{ readDecisions: readPianolaDecisions, appendDecision: appendPianolaDecision },
+					new Date().toISOString()
+				);
 				// Disabling baselines on resume; an abrupt crash keeps its durable cursor.
 				const checkpoint = readPianolaScopeCheckpoint(scopeId);
 				if (checkpoint) {

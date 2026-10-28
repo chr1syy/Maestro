@@ -16,6 +16,8 @@ import type {
 	PianolaSuggestionsFile,
 } from '../../shared/pianola/storage';
 import type { PianolaSupervisorSnapshot } from '../ipc/handlers/pianola';
+import type { PianolaDecisionResolution } from '../../shared/pianola/pianola-decision-lifecycle';
+import type { PianolaScopeDeliveryResult } from '../../shared/pianola/pianola-scope-cycle';
 
 /**
  * Creates the Pianola API object for contextBridge exposure.
@@ -39,6 +41,10 @@ export function createPianolaApi() {
 		 */
 		getDecisions: (limit?: number): Promise<PianolaDecisionRecord[]> =>
 			ipcRenderer.invoke('pianola:get-decisions', limit),
+
+		/** An explicit human answer, guarded against stale asks and duplicate delivery. */
+		resolveDecision: (resolution: PianolaDecisionResolution): Promise<PianolaScopeDeliveryResult> =>
+			ipcRenderer.invoke('pianola:resolve-decision', resolution),
 
 		/** Read the staged learning suggestions (rule proposals + profile draft). */
 		getSuggestions: (): Promise<PianolaSuggestionsFile> =>

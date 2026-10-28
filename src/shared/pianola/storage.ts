@@ -145,10 +145,36 @@ export interface PianolaDecisionRecord {
 	dispatched: boolean;
 	/** Native admission happened; until an outcome arrives delivery is uncertain. */
 	deliveryStatus?: 'admitted';
+	/** Scope decisions retain their recipient binding and attributable resolution. */
+	lifecycle?: PianolaDecisionLifecycle;
 	/** True if running in dry-run mode (never dispatches). */
 	dryRun: boolean;
 	/** Populated when a dispatch attempt failed. */
 	error?: string;
+}
+
+export interface PianolaDecisionLifecycle {
+	version: 1;
+	guard: import('./pianola-scope-cycle').PianolaScopeDeliveryGuard;
+	managerAgentId: string;
+	managerTabId?: string;
+	groupId: string | null;
+	status: 'mira_processing' | 'waiting_human' | 'agent_running' | 'blocked' | 'paused' | 'done';
+	nextActor: 'manager' | 'human' | 'recipient' | 'operator' | 'none';
+	nextAction: string;
+	phase: 'judgment' | 'answer' | 'none';
+	delivery: 'not_sent' | 'intent' | 'accepted' | 'rejected' | 'unknown';
+	updatedAt: string;
+	deadlineAt?: number;
+	acknowledgedAt?: string;
+	/** Unknown transcript authors are never relabeled as human decisions. */
+	source: {
+		kind: 'rule' | 'manager' | 'human' | 'unknown';
+		actorId?: string;
+		tabId?: string;
+		timestamp?: string;
+	};
+	answerMessageId?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -275,9 +301,65 @@ export function validatePianolaDecisionRecord(raw: unknown): PianolaDecisionReco
 	if (raw.projectPath !== undefined && typeof raw.projectPath !== 'string') return null;
 	if (raw.error !== undefined && typeof raw.error !== 'string') return null;
 	if (raw.deliveryStatus !== undefined && raw.deliveryStatus !== 'admitted') return null;
+	if (raw.lifecycle !== undefined && !isValidLifecycle(raw.lifecycle)) return null;
 	if (!isValidClassification(raw.classification)) return null;
 	if (!isValidDecision(raw.decision)) return null;
+	if (raw.lifecycle !== undefined) {
+		const life = raw.lifecycle as PianolaDecisionLifecycle;
+		if (
+			life.guard.decisionId !== raw.id ||
+			life.guard.agentId !== raw.agentId ||
+			life.guard.tabId !== raw.tabId ||
+			life.guard.messageId !== raw.classification.evidence.messageId
+		)
+			return null;
+	}
 	return raw as unknown as PianolaDecisionRecord;
+}
+
+function isValidLifecycle(raw: unknown): raw is PianolaDecisionLifecycle {
+	if (!isRecord(raw) || raw.version !== 1 || !isRecord(raw.guard) || !isRecord(raw.source))
+		return false;
+	const guard = raw.guard;
+	return (
+		[
+			'scopeId',
+			'configurationFingerprint',
+			'bindingFingerprint',
+			'agentId',
+			'tabId',
+			'messageId',
+			'decisionId',
+		].every((key) => typeof guard[key] === 'string' && guard[key].length > 0) &&
+		isRecord(guard.cursor) &&
+		typeof guard.cursor.id === 'string' &&
+		Number.isSafeInteger(guard.cursor.count) &&
+		(guard.cursor.count as number) > 0 &&
+		Number.isSafeInteger(guard.cursor.textLength) &&
+		(guard.cursor.textLength as number) >= 0 &&
+		typeof raw.managerAgentId === 'string' &&
+		!!raw.managerAgentId &&
+		(raw.managerTabId === undefined || typeof raw.managerTabId === 'string') &&
+		(raw.groupId === null || typeof raw.groupId === 'string') &&
+		['mira_processing', 'waiting_human', 'agent_running', 'blocked', 'paused', 'done'].includes(
+			raw.status as string
+		) &&
+		['manager', 'human', 'recipient', 'operator', 'none'].includes(raw.nextActor as string) &&
+		typeof raw.nextAction === 'string' &&
+		['judgment', 'answer', 'none'].includes(raw.phase as string) &&
+		['not_sent', 'intent', 'accepted', 'rejected', 'unknown'].includes(raw.delivery as string) &&
+		typeof raw.updatedAt === 'string' &&
+		(raw.deadlineAt === undefined ||
+			(typeof raw.deadlineAt === 'number' && Number.isFinite(raw.deadlineAt))) &&
+		(raw.acknowledgedAt === undefined || typeof raw.acknowledgedAt === 'string') &&
+		(raw.answerMessageId === undefined || typeof raw.answerMessageId === 'string') &&
+		['rule', 'manager', 'human', 'unknown'].includes(raw.source.kind as string) &&
+		(raw.source.actorId === undefined || typeof raw.source.actorId === 'string') &&
+		(raw.source.timestamp === undefined || typeof raw.source.timestamp === 'string') &&
+		(!['manager', 'human'].includes(raw.source.kind as string) ||
+			(typeof raw.source.actorId === 'string' && !!raw.source.actorId)) &&
+		(raw.source.tabId === undefined || typeof raw.source.tabId === 'string')
+	);
 }
 
 /** Validate an untrusted rules payload, dropping any malformed entries. */

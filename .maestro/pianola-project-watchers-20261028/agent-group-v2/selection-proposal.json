@@ -1,0 +1,16 @@
+{
+  "type": "unapplied-selection-draft",
+  "active": false,
+  "managerAgentId": "bd4b5d0b-1ec3-4280-9549-b9584c0da261",
+  "selection": {
+    "label": "Agent and group monitoring",
+    "mode": "agents-and-groups",
+    "agentIds": [],
+    "groupIds": [],
+    "excludedAgentIds": [
+      "bd4b5d0b-1ec3-4280-9549-b9584c0da261"
+    ]
+  },
+  "requiresExplicitAgentOrGroupSelection": true,
+  "nextAction": "V2-05 must populate native agent/group IDs through the persisted controls. This draft is not a supervisor target and must not activate productive coverage."
+}
