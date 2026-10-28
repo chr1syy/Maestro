@@ -1,0 +1,25 @@
+25d8e81254 (HEAD -> fix/pianola-project-watchers-20261028) MAESTRO: preserve Pianola streaming asks and full-turn risk at enrollment
+85b28f93b1 MAESTRO: verify Pianola scope lifecycle and snapshot contracts
+c7f4ef3192 MAESTRO: add Pianola scope lifecycle and checkpoint regressions
+517b0f829c MAESTRO: add durable Pianola scope cycle and enrollment checkpoints
+9c1561e538 (origin/feat/lite-lan-connections, feat/lite-lan-connections) fix(lite): scope discovery to the selected network
+655d5d711b fix(lite): finish pairing errors and review documentation
+231a10926a docs(lite): complete connection flow docstrings
+93546d15e0 fix(lite): address LAN connection review findings
+a2e820f91b feat(lite): add LAN connection option alongside Tailscale
+6f6af56670 (rc) fix(extensions): drop the header Help button; stop calling Symphony Group Chat in docs
+8b26c7f6b0 Merge pull request #1811 from chr1syy/fix/rc-native-temp-cost-fixture
+1d4bcaa758 (origin/fix/rc-native-temp-cost-fixture) test(cli): use native temp directory for resumed cost fixture
+14a8b57908 Merge pull request #1810 from chr1syy/fix/cue-visible-background-tabs
+fae992203a (origin/fix/cue-visible-background-tabs) fix(cue): create visible background tabs for agent messages
+fe15d39284 Merge pull request #1808 from chr1syy/feat/cue-new-tab-slash-commands
+012b50d843 Merge origin/main into rc (provider effort-refusal recovery and Codex low floor, collapsed Left Bar initials, New Session Message on every first turn, folder-relative saved playbooks, Copilot WinGet shim, annotator crop exit)
+8a69c122b6 feat(cli): dispatch --new-tab creates hidden tabs; fix TUI tab auto-naming
+a10e4f33a7 fix(annotator): leave the crop tool once a crop is applied
+ef4bace095 test(agents): Codex effort fallback no longer lists minimal
+99fb73fa33 fix(models): recover when a provider refuses an effort level
+86390501b2 feat(composer): Send button menu with Queue, Force Send, Queue Held, and Steer
+1a9ede497c fix(models): Codex's effort floor is low, not minimal
+187b303ae5 feat(left-bar): label agents with two-letter initials in the collapsed rail
+909a2f09a9 fix(agents): prefer Copilot's WinGet shim over the npm wrapper
+271cf45461 fix(auto-run): store saved playbook documents folder-relative

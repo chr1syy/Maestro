@@ -1,0 +1,30 @@
+25d8e81254 MAESTRO: preserve Pianola streaming asks and full-turn risk at enrollment
+85b28f93b1 MAESTRO: verify Pianola scope lifecycle and snapshot contracts
+c7f4ef3192 MAESTRO: add Pianola scope lifecycle and checkpoint regressions
+517b0f829c MAESTRO: add durable Pianola scope cycle and enrollment checkpoints
+d476ecf311 Merge current rc into bounded original audio
+aed0df5ef6 Merge pull request #1847 from chr1syy/fix/relay-idle-watchdog-20261016
+c3a6e1b600 Merge origin/rc into fix/cli-cue-on-host
+edd4f1370d build(local): integrate final TTSR native steer pin with Relay writer lifecycle
+6b48081a9b build(local): preserve watchdog budgets across Auto routing and audio ownership
+bc3671f3e3 docs(ttsr): clarify provider-specific repeat and handoff scope
+2450d39c4a fix(cue): preserve acknowledged work on owner loss
+263ae4924e test(cue): align lifecycle tests with async refresh
+f1cf4ef1f6 fix(pianola): address memory and portfolio review findings
+50818cdd0f fix: address native control review findings
+294a040abc feat(pianola): add evidence-backed memory bank
+4119f1b61f test(pianola): isolate missing-profile escalation from the manager environment
+1f184f61a8 test(pianola): isolate missing-profile escalation from the manager environment
+4321ed6299 test(pianola): isolate missing-profile escalation from the manager environment
+09ee420c74 feat: add native harness control plane
+8ce14b9b99 MAESTRO: Sketch Book bot presence on sleep and quit (spec section 5, contract obligation 5): main sketch-presence.ts pushes sketch:presence to every window from the powerMonitor suspend/resume listeners and first thing in quit cleanup (new notifySketchRoomsQuitting quit-handler dep), nothing while Sketch Book is off or after quit; the renderer room registry follows it while it holds a room (setSketchRoomsAway, preload onPresence): SketchRoomClient.suspend() sends bot.presence {online:false} before closing the socket and retries nothing, resume() reconnects and welcome re-announces the bot (D4), a room joined while away waits; unused setBotOnline() removed; spec and MAIN-LIFECYCLE notes; tests
+6dc2d4b5b1 MAESTRO: Sketch Book T9 sketch_screenshot and T10 sketch_export: main plans the render scope, gates third-party elements and drops withheld ones (with bound text) and unapproved guest images, then hands the window the exact list over a renderForAgent hop that adds only the background and the named image files; T10 writes inside the agent's cwd through the new canonical resolveWriteTargetInRoot() (lexical plus real-path check, also used by Save to project) and atomicWriteFile, checked before the render and before the write
+1e0505f9b1 test(pianola): provide WSL oracle skip context
+c960a929a0 style(cli): format rebased agent launch lifecycle
+579b11527e fix(pianola): preserve automatic watches across async rc storage cutover
+b4ced35de5 fix(pianola): preserve launch cleanup and async Cue reload after rebase
+e49feec785 fix(pianola): bound stalled revision waits with owner heartbeats
+277d7a5da6 fix(pianola): resume revised plans and wait for validation
+4bdd2102c0 fix(pianola): apply founder corrections to reviewed tasks
+567f88cf86 fix(pianola): harden portfolio orchestration and sandbox validation
+c30f8ced64 fix(pianola): address Greptile re-review findings

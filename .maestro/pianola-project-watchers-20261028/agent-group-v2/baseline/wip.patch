@@ -1,0 +1,785 @@
+diff --git a/src/__tests__/cli/commands/pianola.test.ts b/src/__tests__/cli/commands/pianola.test.ts
+index 4a86cd86ab..0b9f67852c 100644
+--- a/src/__tests__/cli/commands/pianola.test.ts
++++ b/src/__tests__/cli/commands/pianola.test.ts
+@@ -30,7 +30,12 @@ vi.mock('../../../cli/services/maestro-client', () => ({
+ }));
+ vi.mock('../../../cli/commands/dispatch', () => ({ runDispatch: runDispatchMock }));
+ 
+-import { pianolaRules, pianolaLog, pianolaWatch } from '../../../cli/commands/pianola';
++import {
++	pianolaRules,
++	pianolaLog,
++	pianolaWatch,
++	readPianolaScopeSnapshot,
++} from '../../../cli/commands/pianola';
+ import { readSettingValue } from '../../../cli/services/storage';
+ import {
+ 	readPianolaRules,
+@@ -174,3 +179,31 @@ describe('pianola watch', () => {
+ 		expect(exitSpy).toHaveBeenCalledWith(1);
+ 	});
+ });
++
++describe('Pianola native scope discovery', () => {
++	it('reads the native versioned census through the existing CLI transport', async () => {
++		sendCommandMock.mockResolvedValue({
++			success: true,
++			supervisionVersion: 1,
++			complete: true,
++			capturedAt: 100,
++			owners: [
++				{ id: 'tabless', cwd: '/project', parentSessionId: null, isPianola: false, remote: false },
++			],
++			sessions: [],
++		});
++		const snapshot = await readPianolaScopeSnapshot({ sendCommand: sendCommandMock });
++		expect(snapshot).toMatchObject({ capturedAt: 100, owners: [{ id: 'tabless' }], tabs: [] });
++		expect(sendCommandMock).toHaveBeenCalledWith(
++			{ type: 'list_desktop_sessions' },
++			'desktop_sessions_list'
++		);
++	});
++
++	it('rejects a successful old host response instead of treating it as an empty scope', async () => {
++		sendCommandMock.mockResolvedValue({ success: true, sessions: [] });
++		await expect(readPianolaScopeSnapshot({ sendCommand: sendCommandMock })).rejects.toThrow(
++			'census'
++		);
++	});
++});
+diff --git a/src/__tests__/main/web-server/handlers/messageHandlers.test.ts b/src/__tests__/main/web-server/handlers/messageHandlers.test.ts
+index c7ab138fe0..1424f828cc 100644
+--- a/src/__tests__/main/web-server/handlers/messageHandlers.test.ts
++++ b/src/__tests__/main/web-server/handlers/messageHandlers.test.ts
+@@ -4492,6 +4492,28 @@ describe('WebSocketMessageHandler', () => {
+ 			expect(response.requestId).toBe('req-1');
+ 		});
+ 
++		it('preserves the versioned native owner census and its original host capture time', () => {
++			const snapshot = {
++				supervisionVersion: 1,
++				complete: true,
++				capturedAt: 123,
++				owners: [
++					{
++						id: 'tabless',
++						cwd: '/project',
++						parentSessionId: null,
++						isPianola: false,
++						remote: false,
++					},
++				],
++				sessions: [],
++			};
++			(callbacks.listDesktopSessions as any).mockReturnValue(snapshot);
++			handler.handleMessage(client, { type: 'list_desktop_sessions', requestId: 'req-scope' });
++			const response = JSON.parse((client.socket.send as any).mock.calls[0][0]);
++			expect(response).toMatchObject({ ...snapshot, success: true, requestId: 'req-scope' });
++		});
++
+ 		it('fails closed when the callback is unconfigured rather than retiring membership', () => {
+ 			// Preserve request/response pairing, but never treat missing metadata
+ 			// as evidence that every previously supervised tab has closed.
+diff --git a/src/__tests__/main/web-server/web-server-factory.test.ts b/src/__tests__/main/web-server/web-server-factory.test.ts
+index 1b7f5bc682..75dbc82f7b 100644
+--- a/src/__tests__/main/web-server/web-server-factory.test.ts
++++ b/src/__tests__/main/web-server/web-server-factory.test.ts
+@@ -234,6 +234,14 @@ import {
+ 	getConcertoHtmlDocumentRevision,
+ } from '../../../main/concerto-html';
+ import { getSessionIdsBusyWithCli } from '../../../shared/cli-activity';
++import {
++	getAutoRunStateTracker,
++	resetAutoRunStateTracker,
++} from '../../../main/autorun/autorun-state-tracker';
++import {
++	pianolaScopeSnapshotFromDesktop,
++	runPianolaScopeCycle,
++} from '../../../shared/pianola/pianola-scope-cycle';
+ 
+ describe('web-server/web-server-factory', () => {
+ 	let mockSettingsStore: WebServerFactoryDependencies['settingsStore'];
+@@ -250,6 +258,7 @@ describe('web-server/web-server-factory', () => {
+ 	beforeEach(() => {
+ 		vi.clearAllMocks();
+ 		clearConcertoHtmlDocumentsForTests();
++		resetAutoRunStateTracker();
+ 		vi.mocked(getSessionIdsBusyWithCli).mockReturnValue(new Set<string>());
+ 
+ 		mockSettingsStore = {
+@@ -664,7 +673,7 @@ describe('web-server/web-server-factory', () => {
+ 				},
+ 			]);
+ 
+-			expect(getCallback()()[0].state).toBe('busy');
++			expect(getCallback()().sessions[0].state).toBe('busy');
+ 		});
+ 
+ 		it('overrides stale idle when the tab has a live managed process', () => {
+@@ -681,7 +690,7 @@ describe('web-server/web-server-factory', () => {
+ 				id === 'agent-a-ai-tab-a' ? { pid: 123 } : undefined
+ 			);
+ 
+-			expect(getCallback()()[0].state).toBe('busy');
++			expect(getCallback()().sessions[0].state).toBe('busy');
+ 		});
+ 
+ 		it('keeps an inactive sibling idle when only the active tab is running', () => {
+@@ -701,7 +710,7 @@ describe('web-server/web-server-factory', () => {
+ 				id === 'agent-a-ai-tab-a' ? { pid: 123 } : undefined
+ 			);
+ 
+-			const entries = getCallback()();
++			const entries = getCallback()().sessions;
+ 			expect(entries.map((entry: { state: string }) => entry.state)).toEqual(['busy', 'idle']);
+ 		});
+ 
+@@ -717,11 +726,168 @@ describe('web-server/web-server-factory', () => {
+ 			]);
+ 			vi.mocked(getSessionIdsBusyWithCli).mockReturnValue(new Set(['agent-a']));
+ 
+-			const entries = getCallback()();
++			const entries = getCallback()().sessions;
+ 			expect(entries.map((entry: { state: string }) => entry.state)).toEqual(['busy', 'unknown']);
+ 		});
+ 	});
+ 
++	describe('native scope census', () => {
++		it('retains a tabless parent and enrolls background work through the real cycle', async () => {
++			const sessions = [
++				{ id: 'parent', cwd: '/project', aiTabs: [] },
++				{
++					id: 'child',
++					cwd: '/worktrees/child',
++					parentSessionId: 'parent',
++					activeTabId: 'active',
++					aiTabs: [
++						{
++							id: 'background',
++							state: 'idle',
++							createdAt: 10,
++							logs: [{ id: 'stream', source: 'ai', text: 'Working.', timestamp: 20 }],
++						},
++					],
++				},
++			];
++			vi.mocked(mockSessionsStore.get).mockReturnValue(sessions);
++			mockProcessManager.get.mockImplementation((id: string) =>
++				id === 'child-ai-background' ? { pid: 1 } : undefined
++			);
++			const server = createWebServerFactory(deps)();
++			const callback = (server.setListDesktopSessionsCallback as ReturnType<typeof vi.fn>).mock
++				.calls[0][0];
++			const readSnapshot = async () =>
++				pianolaScopeSnapshotFromDesktop({ success: true, ...callback() });
++			const snapshot = await readSnapshot();
++			expect(snapshot.owners.map((owner) => owner.id)).toEqual(['parent', 'child']);
++			expect(snapshot.tabs[0]).toMatchObject({ tabId: 'background', busy: true, paused: false });
++			const scopeId = '11111111-1111-4111-8111-111111111111';
++			let checkpoint: any = null;
++			const decisions: any[] = [];
++			const dispatch = vi.fn(async () => ({ status: 'accepted' as const }));
++			const cycleDeps = {
++				store: {
++					readSupervisorTargets: () => [
++						{
++							id: scopeId,
++							kind: 'watch-scope' as const,
++							enabled: true,
++							createdAt: 1,
++							managerAgentId: 'manager',
++							selection: {
++								label: 'project',
++								mode: 'project' as const,
++								projectRoots: ['/project'],
++								ownerRoots: { parent: '/project' },
++								includeWorktrees: true,
++								excludedAgentIds: [],
++							},
++						},
++					],
++					readScopeCheckpoint: () => structuredClone(checkpoint),
++					writeScopeCheckpoint: (value: any) => {
++						checkpoint = structuredClone(value);
++					},
++					readDecisions: () => decisions,
++				},
++				readSnapshot,
++				readTranscript: async () => ({
++					agentId: 'child',
++					tabId: 'background',
++					messages: sessions[1].aiTabs
++						.map((tab) =>
++							tab.logs!.map((log) => ({
++								id: log.id,
++								role: 'assistant' as const,
++								source: log.source,
++								content: log.text,
++								timestamp: new Date(log.timestamp).toISOString(),
++							}))
++						)
++						.flat(),
++				}),
++				watch: {
++					readRules: () => [
++						{
++							id: 'rule',
++							enabled: true,
++							scope: 'global' as const,
++							match: { kinds: ['question' as const], maxRisk: 'low' as const },
++							action: 'auto_answer' as const,
++							answer: 'Controlled reply.',
++							priority: 1,
++							createdAt: 1,
++							updatedAt: 1,
++						},
++					],
++					recordDecision: (record: any) => {
++						decisions.push(record);
++					},
++					now: () => new Date().toISOString(),
++					genId: () => String(decisions.length + 1),
++					log: () => {},
++				},
++				dispatch,
++			};
++			await runPianolaScopeCycle(scopeId, cycleDeps, { dryRun: false });
++			expect(dispatch).not.toHaveBeenCalled();
++			mockProcessManager.get.mockReturnValue(undefined);
++			sessions[1].aiTabs[0].logs![0].text = 'Should I run tests?';
++			await runPianolaScopeCycle(scopeId, cycleDeps, { dryRun: false });
++			await runPianolaScopeCycle(scopeId, cycleDeps, { dryRun: false });
++			expect(dispatch).toHaveBeenCalledTimes(1);
++			expect(dispatch.mock.calls[0]).toMatchObject([
++				{ agentId: 'child', tabId: 'background' },
++				'Controlled reply.',
++				{ scopeId, messageId: 'stream' },
++			]);
++		});
++
++		it.each([
++			{ isRunning: true },
++			{ isRunning: true, errorPaused: true },
++			{ isRunning: true, isStopping: true },
++		])('excludes Auto Run ownership between processes: %j', (state) => {
++			vi.mocked(mockSessionsStore.get).mockReturnValue([
++				{
++					id: 'owner',
++					cwd: '/project',
++					aiTabs: [{ id: 'tab', state: 'idle', createdAt: 1, logs: [] }],
++				},
++			]);
++			getAutoRunStateTracker().update('owner', state);
++			const server = createWebServerFactory(deps)();
++			const callback = (server.setListDesktopSessionsCallback as ReturnType<typeof vi.fn>).mock
++				.calls[0][0];
++			expect(
++				pianolaScopeSnapshotFromDesktop({ success: true, ...callback() }).tabs[0]
++			).toMatchObject({ paused: true, busy: false });
++		});
++
++		it('refuses unavailable liveness and never includes snoozed or closed tab payloads', () => {
++			vi.mocked(mockSessionsStore.get).mockReturnValue([
++				{
++					id: 'owner',
++					cwd: '/project',
++					aiTabs: [],
++					snoozedTabs: [{ type: 'ai', tab: { id: 'parked' } }],
++					closedTabHistory: [{ tab: { id: 'closed' } }],
++				},
++			]);
++			deps.getProcessManager = vi.fn().mockReturnValue(null);
++			const server = createWebServerFactory(deps)();
++			const callback = (server.setListDesktopSessionsCallback as ReturnType<typeof vi.fn>).mock
++				.calls[0][0];
++			const snapshot = callback();
++			expect(snapshot.sessions).toEqual([]);
++			expect(snapshot.owners).toHaveLength(1);
++			expect(() => pianolaScopeSnapshotFromDesktop({ success: true, ...snapshot })).toThrow(
++				'census'
++			);
++		});
++	});
++
+ 	// PR2 of the CLI surface refactor: read-only conversation-state inspection
+ 	// surfaced via `maestro-cli session show <tabId>`. The callback wired here
+ 	// is the desktop-side half of the contract; the CLI half is tested in
+diff --git a/src/__tests__/shared/pianola/pianola-scope-cycle.test.ts b/src/__tests__/shared/pianola/pianola-scope-cycle.test.ts
+index 281f83c1b4..05c6efea39 100644
+--- a/src/__tests__/shared/pianola/pianola-scope-cycle.test.ts
++++ b/src/__tests__/shared/pianola/pianola-scope-cycle.test.ts
+@@ -6,6 +6,7 @@ import * as path from 'path';
+ import { createPianolaFsStore } from '../../../shared/pianola/fs-store';
+ import {
+ 	runPianolaScopeCycle,
++	pianolaScopeSnapshotFromDesktop,
+ 	type PianolaScopeCycleDeps,
+ 	type PianolaScopeSnapshot,
+ 	type PianolaScopeSnapshotTab,
+@@ -698,3 +699,131 @@ describe('scope transcript and delivery safety', () => {
+ 		expect(f.deps.requestJudgment).not.toHaveBeenCalled();
+ 	});
+ });
++
++describe('native scope snapshot contract', () => {
++	const response = () => ({
++		success: true,
++		supervisionVersion: 1,
++		complete: true,
++		capturedAt: 100,
++		owners: [
++			{ id: 'owner', cwd: projectRoot, parentSessionId: null, isPianola: false, remote: false },
++		],
++		sessions: [
++			{
++				agentId: 'owner',
++				tabId: 'tab',
++				createdAt: 1,
++				supervision: {
++					cwd: projectRoot,
++					parentSessionId: null,
++					isPianola: false,
++					remote: false,
++					lineageComplete: true,
++					paused: false,
++					busy: false,
++					consult: false,
++					ephemeral: false,
++					cursorAvailable: true,
++					cursor: null,
++				},
++			},
++		],
++	});
++
++	it.each([
++		[
++			'old response',
++			(raw: any) => {
++				delete raw.supervisionVersion;
++			},
++		],
++		[
++			'failed response',
++			(raw: any) => {
++				raw.success = false;
++			},
++		],
++		[
++			'incomplete census',
++			(raw: any) => {
++				raw.complete = false;
++			},
++		],
++		[
++			'missing capture time',
++			(raw: any) => {
++				delete raw.capturedAt;
++			},
++		],
++		[
++			'duplicate owners',
++			(raw: any) => {
++				raw.owners.push(raw.owners[0]);
++			},
++		],
++		[
++			'missing owner',
++			(raw: any) => {
++				raw.owners = [];
++			},
++		],
++		[
++			'foreign owner metadata',
++			(raw: any) => {
++				raw.sessions[0].supervision.cwd = '/foreign';
++			},
++		],
++		[
++			'missing pause metadata',
++			(raw: any) => {
++				delete raw.sessions[0].supervision.paused;
++			},
++		],
++		[
++			'missing liveness metadata',
++			(raw: any) => {
++				delete raw.sessions[0].supervision.busy;
++			},
++		],
++		[
++			'incomplete lineage',
++			(raw: any) => {
++				raw.sessions[0].supervision.lineageComplete = false;
++			},
++		],
++		[
++			'invalid cursor',
++			(raw: any) => {
++				raw.sessions[0].supervision.cursor = { id: '', count: 0, textLength: 0 };
++			},
++		],
++		[
++			'missing creation time',
++			(raw: any) => {
++				raw.sessions[0].createdAt = 0;
++			},
++		],
++		[
++			'ambiguous history lookup',
++			(raw: any) => {
++				raw.sessions.push({ ...raw.sessions[0], agentId: 'other' });
++			},
++		],
++	])('rejects %s before scope baselines can advance', (_label, mutate) => {
++		const raw = response();
++		mutate(raw);
++		expect(() => pianolaScopeSnapshotFromDesktop(raw)).toThrow();
++	});
++
++	it('accepts a complete empty census, retaining tabless owners', () => {
++		const raw = response();
++		raw.sessions = [];
++		expect(pianolaScopeSnapshotFromDesktop(raw)).toEqual({
++			capturedAt: 100,
++			complete: true,
++			owners: raw.owners,
++			tabs: [],
++		});
++	});
++});
+diff --git a/src/cli/commands/pianola.ts b/src/cli/commands/pianola.ts
+index 69453ae933..97047b9b78 100644
+--- a/src/cli/commands/pianola.ts
++++ b/src/cli/commands/pianola.ts
+@@ -34,6 +34,7 @@ import {
+ 	type PianolaNotifyEvent,
+ } from '../../shared/pianola/pianola-watcher';
+ import { matchHasNarrowingPredicate } from '../../shared/pianola/pianola-policy';
++import { pianolaScopeSnapshotFromDesktop } from '../../shared/pianola/pianola-scope-cycle';
+ // Enum arrays are single-sourced from types.ts; alias to the CLI's local names.
+ import {
+ 	RULE_SCOPES,
+@@ -53,6 +54,15 @@ import type {
+ const DEFAULT_INTERVAL_SECONDS = 5;
+ const POLL_TAIL = 40;
+ 
++/** Scope discovery reuses the native session-list transport, with a strict contract. */
++export async function readPianolaScopeSnapshot(client: Pick<MaestroClient, 'sendCommand'>) {
++	const response = await client.sendCommand<unknown>(
++		{ type: 'list_desktop_sessions' },
++		'desktop_sessions_list'
++	);
++	return pianolaScopeSnapshotFromDesktop(response);
++}
++
+ export interface PianolaWatchOptions {
+ 	agent?: string;
+ 	interval?: string;
+diff --git a/src/main/web-server/callbacks/sessionCallbacks.ts b/src/main/web-server/callbacks/sessionCallbacks.ts
+index e5d7791624..7f256b1433 100644
+--- a/src/main/web-server/callbacks/sessionCallbacks.ts
++++ b/src/main/web-server/callbacks/sessionCallbacks.ts
+@@ -6,6 +6,8 @@ import { asThinkingMode } from '../../../shared/types';
+ import { getSessionIdsBusyWithCli } from '../../../shared/cli-activity';
+ import { isAiTabProcessActive } from '../../utils/agent-busy';
+ import { isImageRef, resolveToDataUrlSync } from '../../storage/session-image-store';
++import { getAutoRunStateTracker } from '../../autorun/autorun-state-tracker';
++import type { DesktopTabEntry, DesktopSessionsSnapshot } from '../../../shared/desktopTabs';
+ 
+ export function registerSessionCallbacks(
+ 	server: WebServer,
+@@ -107,16 +109,29 @@ export function registerSessionCallbacks(
+ 	// session store (same source the renderer pushes to via `sessions:save`),
+ 	// then reconciles it with live managed-process and CLI-activity evidence.
+ 	server.setListDesktopSessionsCallback(() => {
++		const capturedAt = Date.now();
+ 		const sessions = sessionsStore.get<StoredSession[]>('sessions', []);
+ 		const byId = new Map(sessions.map((session) => [session.id, session]));
+ 		const processManager = getProcessManager();
++		let complete = !!processManager;
+ 		// Resolved once: this used to be a per-agent call that re-read and
+ 		// re-parsed the CLI activity file on every iteration.
+ 		const cliBusySessionIds = getSessionIdsBusyWithCli();
+-		const entries = [];
++		const entries: DesktopTabEntry[] = [];
++		const owners = sessions.map((s) => ({
++			id: s.id,
++			cwd: s.cwd,
++			parentSessionId: typeof s.parentSessionId === 'string' ? s.parentSessionId : null,
++			isPianola: s.isPianola === true,
++			remote: !!s.sshRemoteId || !!s.sshRemote || s.sessionSshRemoteConfig?.enabled === true,
++		}));
+ 		for (const s of sessions) {
++			if (s.aiTabs != null && !Array.isArray(s.aiTabs)) complete = false;
+ 			const aiTabs = (s.aiTabs as Array<Record<string, any>> | undefined) ?? [];
+ 			const cliBusy = cliBusySessionIds.has(s.id);
++			// Auto Run owns its agent between process turns too. Never resume
++			// its parked/stopping work through a conversational scope reply.
++			const autoRun = getAutoRunStateTracker().getState(s.id);
+ 			const ancestors: NonNullable<
+ 				import('../../../shared/desktopTabs').DesktopTabEntry['supervision']
+ 			>['ancestors'] = [];
+@@ -144,7 +159,10 @@ export function registerSessionCallbacks(
+ 				parentId = typeof parent.parentSessionId === 'string' ? parent.parentSessionId : null;
+ 			}
+ 			for (const tab of aiTabs) {
+-				if (!tab || typeof tab.id !== 'string') continue;
++				if (!tab || typeof tab.id !== 'string') {
++					complete = false;
++					continue;
++				}
+ 				const logs = Array.isArray(tab.logs) ? tab.logs : [];
+ 				const lastLog = logs[logs.length - 1];
+ 				const isActiveTab = tab.id === s.activeTabId;
+@@ -191,6 +209,16 @@ export function registerSessionCallbacks(
+ 						isPianola: s.isPianola === true,
+ 						remote: !!s.sshRemoteId || !!s.sshRemote || s.sessionSshRemoteConfig?.enabled === true,
+ 						errorPaused: s.agentErrorPaused === true,
++						paused:
++							s.agentErrorPaused === true ||
++							!!tab.agentError ||
++							!!tab.wizardState?.isActive ||
++							autoRun?.isRunning === true ||
++							autoRun?.errorPaused === true ||
++							autoRun?.isStopping === true,
++						// CLI activity is agent-scoped; do not infer which sibling
++						// tab is safe to address from its selected-tab status.
++						busy: managedProcessActive || cliBusy,
+ 						consult: !!tab.consultOrigin,
+ 						ephemeral: tab.quickChat === true && tab.hidden === true,
+ 						cursorAvailable:
+@@ -208,7 +236,13 @@ export function registerSessionCallbacks(
+ 				});
+ 			}
+ 		}
+-		return entries;
++		return {
++			supervisionVersion: 1,
++			complete,
++			capturedAt,
++			owners,
++			sessions: entries,
++		} satisfies DesktopSessionsSnapshot;
+ 	});
+ 
+ 	// `maestro-cli session show <tabId>` - return the tab's conversation
+diff --git a/src/main/web-server/handlers/messageHandlers/sessions.ts b/src/main/web-server/handlers/messageHandlers/sessions.ts
+index 407730a913..b15db1809f 100644
+--- a/src/main/web-server/handlers/messageHandlers/sessions.ts
++++ b/src/main/web-server/handlers/messageHandlers/sessions.ts
+@@ -421,8 +421,8 @@ export function handleListDesktopSessions(
+ 	// A missing callback is distinct from a valid snapshot with no open tabs.
+ 	// Treating both as an empty list could retire a scoped watch's baselines.
+ 	const capturedAt = Date.now();
+-	const sessions = ctx.callbacks.listDesktopSessions?.();
+-	if (!sessions) {
++	const snapshot = ctx.callbacks.listDesktopSessions?.();
++	if (!snapshot) {
+ 		ctx.send(client, {
+ 			type: 'desktop_sessions_list',
+ 			success: false,
+@@ -436,8 +436,9 @@ export function handleListDesktopSessions(
+ 	ctx.send(client, {
+ 		type: 'desktop_sessions_list',
+ 		success: true,
+-		sessions,
+-		capturedAt,
++		// Old callbacks remain usable for ordinary tab-list clients, but must
++		// never masquerade as a complete supervision census.
++		...(Array.isArray(snapshot) ? { sessions: snapshot, capturedAt } : snapshot),
+ 		requestId: message.requestId,
+ 	});
+ }
+diff --git a/src/main/web-server/handlers/messageHandlers/types.ts b/src/main/web-server/handlers/messageHandlers/types.ts
+index c4e55f03a0..0562768b84 100644
+--- a/src/main/web-server/handlers/messageHandlers/types.ts
++++ b/src/main/web-server/handlers/messageHandlers/types.ts
+@@ -32,7 +32,6 @@ import type {
+ 	NotifyCenterFlashParams,
+ 	MarketplaceManifestResult,
+ 	MarketplaceImportResult,
+-	DesktopSessionEntry,
+ 	SessionHistoryResult,
+ 	GetSessionHistoryOptions,
+ 	EnqueueCommandResult,
+@@ -430,7 +429,7 @@ export interface MessageHandlerCallbacks {
+ 	/** External-pickup primitive used by `maestro-cli session list`. Surfaces every
+ 	 *  open AI tab across all desktop agents so consumers (Maestro-Discord, Cue)
+ 	 *  can address tabs by id without owning a persistent channel. */
+-	listDesktopSessions: () => DesktopSessionEntry[] | null;
++	listDesktopSessions: () => ReturnType<import('../../types').ListDesktopSessionsCallback> | null;
+ 	/** Read-only conversation history fetch used by `maestro-cli session show
+ 	 *  <tabId>`. Filters (`sinceMs`, `tail`) live alongside the read so we don't
+ 	 *  ship the full transcript over the wire on every poll. */
+diff --git a/src/main/web-server/managers/CallbackRegistry.ts b/src/main/web-server/managers/CallbackRegistry.ts
+index fbc9ba77fa..2823c0f9c5 100644
+--- a/src/main/web-server/managers/CallbackRegistry.ts
++++ b/src/main/web-server/managers/CallbackRegistry.ts
+@@ -152,7 +152,6 @@ import type {
+ 	ListDesktopSessionsCallback,
+ 	GetSessionHistoryCallback,
+ 	GetSessionHistoryOptions,
+-	DesktopSessionEntry,
+ 	SessionHistoryResult,
+ } from '../types';
+ import type { SnoozeCommandRequest, SnoozeCommandResult } from '../../../shared/snoozeCommands';
+@@ -1120,7 +1119,7 @@ export class CallbackRegistry {
+ 		return this.callbacks.importMarketplacePlaybook(sessionId, playbookId, targetFolderName);
+ 	}
+ 
+-	listDesktopSessions(): DesktopSessionEntry[] | null {
++	listDesktopSessions(): ReturnType<ListDesktopSessionsCallback> | null {
+ 		return this.callbacks.listDesktopSessions?.() ?? null;
+ 	}
+ 
+diff --git a/src/main/web-server/types.ts b/src/main/web-server/types.ts
+index a51fb9cef4..39844a2633 100644
+--- a/src/main/web-server/types.ts
++++ b/src/main/web-server/types.ts
+@@ -5,7 +5,7 @@
+ 
+ import type { AutoRunBroadcastState } from '../../shared/autoRunBroadcast';
+ import type { QueueSteerResult } from '../../shared/chatSteering';
+-import type { DesktopTabEntry } from '../../shared/desktopTabs';
++import type { DesktopTabEntry, DesktopSessionsSnapshot } from '../../shared/desktopTabs';
+ import type { SnoozeCommandRequest, SnoozeCommandResult } from '../../shared/snoozeCommands';
+ import type { WindowCommandRequest, WindowCommandResult } from '../../shared/windowCommands';
+ import type { UsageStats } from '../../shared/types';
+@@ -976,7 +976,7 @@ export interface GetSessionHistoryOptions {
+ }
+ 
+ /** Callback to enumerate all open AI tabs across all desktop agents. */
+-export type ListDesktopSessionsCallback = () => DesktopSessionEntry[];
++export type ListDesktopSessionsCallback = () => DesktopSessionEntry[] | DesktopSessionsSnapshot;
+ 
+ /** Callback to fetch a tab's full conversation history by tabId. */
+ export type GetSessionHistoryCallback = (
+diff --git a/src/shared/desktopTabs.ts b/src/shared/desktopTabs.ts
+index d8c3b65a6b..b0feccaae3 100644
+--- a/src/shared/desktopTabs.ts
++++ b/src/shared/desktopTabs.ts
+@@ -62,6 +62,10 @@ export interface DesktopTabEntry {
+ 		remote: boolean;
+ 		/** One pause signal only; other forms of parked work need separate checks. */
+ 		errorPaused: boolean;
++		/** Scope-only safety state. Absent on desktops predating scoped watches. */
++		paused?: boolean;
++		/** Live process/CLI evidence, independent of the persisted display state. */
++		busy?: boolean;
+ 		consult: boolean;
+ 		ephemeral: boolean;
+ 		/** False when the persisted tab has no available transcript snapshot. */
+@@ -69,3 +73,21 @@ export interface DesktopTabEntry {
+ 		cursor: { id: string; count: number; textLength: number } | null;
+ 	};
+ }
++
++/** Complete local owner census, including owners with no open AI tabs. */
++export interface DesktopAgentEntry {
++	id: string;
++	cwd: string;
++	parentSessionId: string | null;
++	isPianola: boolean;
++	remote: boolean;
++}
++
++/** Versioned supervision contract; legacy tab-list callers still consume sessions. */
++export interface DesktopSessionsSnapshot {
++	supervisionVersion: 1;
++	complete: boolean;
++	capturedAt: number;
++	owners: DesktopAgentEntry[];
++	sessions: DesktopTabEntry[];
++}
+diff --git a/src/shared/pianola/pianola-scope-cycle.ts b/src/shared/pianola/pianola-scope-cycle.ts
+index 428c1492ac..95c682ddfb 100644
+--- a/src/shared/pianola/pianola-scope-cycle.ts
++++ b/src/shared/pianola/pianola-scope-cycle.ts
+@@ -6,6 +6,7 @@
+  */
+ import { createHash } from 'crypto';
+ import { canonicalJson } from '../canonicalJson';
++import type { DesktopSessionsSnapshot } from '../desktopTabs';
+ import { isPathAtOrUnderRoot } from '../worktreePaths';
+ import type { PianolaFsStore } from './fs-store';
+ import {
+@@ -149,6 +150,77 @@ function assertSnapshot(snapshot: PianolaScopeSnapshot): void {
+ 		throw new Error('Incomplete or ambiguous Pianola scope snapshot');
+ }
+ 
++/** Adapt the native tab-list response without accepting a legacy/partial census. */
++export function pianolaScopeSnapshotFromDesktop(raw: unknown): PianolaScopeSnapshot {
++	if (!raw || typeof raw !== 'object' || Array.isArray(raw))
++		throw new Error('Missing native supervision snapshot');
++	const response = raw as Partial<DesktopSessionsSnapshot> & { success?: boolean };
++	if (
++		response.success !== true ||
++		response.supervisionVersion !== 1 ||
++		response.complete !== true ||
++		!Array.isArray(response.owners) ||
++		!Array.isArray(response.sessions) ||
++		response.owners.length > 10000 ||
++		response.sessions.length > 10000 ||
++		response.owners.some(
++			(owner) =>
++				!owner ||
++				typeof owner.id !== 'string' ||
++				!owner.id ||
++				typeof owner.cwd !== 'string' ||
++				!owner.cwd ||
++				!(owner.parentSessionId === null || typeof owner.parentSessionId === 'string') ||
++				typeof owner.isPianola !== 'boolean' ||
++				typeof owner.remote !== 'boolean'
++		)
++	)
++		throw new Error('Incomplete native supervision census');
++	const owners = response.owners;
++	if (new Set(response.sessions.map((tab) => tab?.tabId)).size !== response.sessions.length)
++		throw new Error('Ambiguous native supervision tab IDs');
++	const tabs = response.sessions.map((tab) => {
++		const info = tab?.supervision;
++		const owner = owners.find((candidate) => candidate.id === tab?.agentId);
++		if (
++			!tab ||
++			typeof tab.tabId !== 'string' ||
++			!tab.tabId ||
++			!Number.isSafeInteger(tab.createdAt) ||
++			tab.createdAt <= 0 ||
++			!info ||
++			info.lineageComplete !== true ||
++			!owner ||
++			info.cwd !== owner.cwd ||
++			info.parentSessionId !== owner.parentSessionId ||
++			info.isPianola !== owner.isPianola ||
++			info.remote !== owner.remote ||
++			typeof info.paused !== 'boolean' ||
++			typeof info.busy !== 'boolean'
++		)
++			throw new Error('Incomplete native supervision tab metadata');
++		return {
++			agentId: tab.agentId,
++			tabId: tab.tabId,
++			createdAt: tab.createdAt,
++			paused: info.paused,
++			busy: info.busy,
++			consult: info.consult,
++			ephemeral: info.ephemeral,
++			cursorAvailable: info.cursorAvailable,
++			cursor: info.cursor,
++		};
++	});
++	const snapshot = {
++		capturedAt: response.capturedAt!,
++		complete: true,
++		owners,
++		tabs,
++	};
++	assertSnapshot(snapshot);
++	return snapshot;
++}
++
+ /**
+  * Hash the effective binding, so adding an unrelated project root preserves
+  * existing cursors while changing an owner's root/lineage requires a baseline.

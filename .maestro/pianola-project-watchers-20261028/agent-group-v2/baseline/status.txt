@@ -1,0 +1,14 @@
+# branch.oid 25d8e81254d2dd7b6295857df65a0b303d1023fa
+# branch.head fix/pianola-project-watchers-20261028
+1 M. N... 100644 100644 100644 4a86cd86abd139cb776c6fd3174be3a947333c9b 0b9f67852c3a6ed3cc82d336b6168c6ba9b02b06 src/__tests__/cli/commands/pianola.test.ts
+1 M. N... 100644 100644 100644 c7ab138fe02965d419613c469ff9411734ebe80d 1424f828cc9cdbc1b7cdf85ce4871dafc3057b95 src/__tests__/main/web-server/handlers/messageHandlers.test.ts
+1 M. N... 100644 100644 100644 1b7f5bc6824c36941314f7020d0394bcd7b9aca9 75dbc82f7b458eedbe6b935d8dc6378c61955044 src/__tests__/main/web-server/web-server-factory.test.ts
+1 M. N... 100644 100644 100644 281f83c1b45c1afc10c3114e2bf8425c7d1824c5 05c6efea397807b3d94867677cdf885edd950a86 src/__tests__/shared/pianola/pianola-scope-cycle.test.ts
+1 M. N... 100644 100644 100644 69453ae933046171de0fed3134bad4e93e96ac11 97047b9b78de0f173f50062cfb9189dc7911e82b src/cli/commands/pianola.ts
+1 M. N... 100644 100644 100644 e5d77916243652affa076369a23ef8731dcedda1 7f256b1433414327dceb4329c25defc6d17f65f5 src/main/web-server/callbacks/sessionCallbacks.ts
+1 M. N... 100644 100644 100644 407730a913e2c3ba5ceee0e7d1319ec95caa1f67 b15db1809f075e2d76d051f9c3d67d63c890c84d src/main/web-server/handlers/messageHandlers/sessions.ts
+1 M. N... 100644 100644 100644 c4e55f03a070a024e4865050ebed91d4a144a0b7 0562768b84542bdfed80836d4dc58a7770eb03ad src/main/web-server/handlers/messageHandlers/types.ts
+1 M. N... 100644 100644 100644 fbc9ba77fab2b132a5c6dd4f90856b530bc0b2e4 2823c0f9c57da67b3eb1163fd640cbf8981d8ff7 src/main/web-server/managers/CallbackRegistry.ts
+1 M. N... 100644 100644 100644 a51fb9cef408fedb6feadc9bcade60c284c940b3 39844a2633580e368f3da28b0d37b022baa14ca3 src/main/web-server/types.ts
+1 M. N... 100644 100644 100644 d8c3b65a6b2b798eb20e8d58237910bc1b186c75 b0feccaae31742412abf130088daf02a2386d0fb src/shared/desktopTabs.ts
+1 M. N... 100644 100644 100644 428c1492ac5c3bbfa72b7bd9b7d72df894d2a51d 95c682ddfb5cf7e63678009b90fcb8ee65b4e7ad src/shared/pianola/pianola-scope-cycle.ts
