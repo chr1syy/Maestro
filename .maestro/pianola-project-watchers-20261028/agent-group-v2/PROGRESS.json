@@ -178,15 +178,17 @@
 				"src/renderer/components/PianolaDashboard/PianolaDashboard.tsx",
 				"src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx",
 				"src/renderer/components/PianolaDashboard/usePianolaDashboardData.ts",
-				"src/renderer/components/PianolaDashboard/usePianolaSupervisor.ts"
+				"src/renderer/components/PianolaDashboard/usePianolaSupervisor.ts",
+				"src/main/ipc/handlers/pianola.ts"
 			],
-			"commit": "Partial commits: MAESTRO: add paused Pianola scope CLI setup; MAESTRO: add Pianola selection and decision views",
+			"commit": "Partial commits: MAESTRO: add paused Pianola scope CLI setup; MAESTRO: add Pianola selection and decision views; MAESTRO: expose Pianola checkpoint coverage evidence",
 			"evidence": [
 				"CLI scope command creates or replaces validated identity-based selections; new selections start paused and edits preserve enabled state. Scoped ESLint, Prettier and git diff --check passed. No tests executed per V2-06/V2-07 separation.",
-				"Dashboard now edits persisted ID-based scopes, resumes or pauses them, displays scope worker health and lifecycle states. New selections default paused; legacy single-tab watches are preserved. Scoped Prettier, ESLint and diff checks passed. Changed-file TypeScript diagnostics: zero; nine dependency diagnostics remain under the isolated program. No tests executed per V2-06/V2-07."
+				"Dashboard now edits persisted ID-based scopes, resumes or pauses them, displays scope worker health and lifecycle states. New selections default paused; legacy single-tab watches are preserved. Scoped Prettier, ESLint and diff checks passed. Changed-file TypeScript diagnostics: zero; nine dependency diagnostics remain under the isolated program. No tests executed per V2-06/V2-07.",
+				"Checkpoint evidence is now returned by the native supervisor snapshot with per-scope read errors isolated; dashboard displays last census and per-agent active/suspended/closed checkpoint counts as historical evidence. Changed-file ESLint, Prettier and git diff --check passed. Tests remain reserved for V2-06/V2-07."
 			],
 			"responsibleActor": "V2-05 Auto Run agent",
-			"nextAction": "Finish V2-05: connect actual per-agent coverage/checkpoint and failure evidence to the dashboard, validate scope editing and human decision resolution UX and static checks. Worker running alone is not proof of agent/chat coverage. Keep task unchecked until all criteria are met; no productive activation."
+			"nextAction": "Finish V2-05: persist and display per-tab failures including unavailable cursors, account for selection changes and freshness in coverage, add and validate human decision resolution UX, and run applicable static checks. Historical checkpoints and a running worker do not prove current coverage. Keep task unchecked until criteria are met."
 		}
 	]
 }
