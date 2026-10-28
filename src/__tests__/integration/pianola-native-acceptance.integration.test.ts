@@ -183,7 +183,9 @@ const AGENT = 'fixture-agent',
 	MANAGER = 'fixture-mira',
 	GROUP = 'fixture-group',
 	TAB = 'fixture-old-tab';
-const ASK = 'May I run `git status`?',
+// Permission wording ("May I") is intentionally medium-risk in production.
+// Exercise the low-risk routine question path without weakening that guard.
+const ASK = 'Should I run `git status`?',
 	ANSWER = 'Yes, run git status.';
 const EVIDENCE = '.maestro/pianola-project-watchers-20261028/agent-group-v2';
 const WORKING = '.maestro/pianola-project-watchers-20261028/auto-run/Working';
@@ -221,7 +223,7 @@ class AcceptanceFixture {
 	spawnArgs: unknown[] = [];
 	callbacks: Partial<MessageHandlerCallbacks> = {};
 	lifecycle!: ReturnType<typeof createPianolaLifecycle>;
-	receipt: 'accepted' | 'unknown' = 'accepted';
+	receipt: 'accepted' | 'unknown' | 'rejected' = 'accepted';
 	beforeAdmission?: () => void;
 	sequence = 0;
 	settingsStore = { get: (key: string, fallback?: unknown) => boundary.settings[key] ?? fallback };
@@ -302,7 +304,7 @@ class AcceptanceFixture {
 			expect(saved?.unresolvedIntent).toMatchObject({ decisionId: record!.id, admitted: true });
 			this.sends.push({ agentId, tabId: tabId!, text, decisionId: record!.id });
 			if (this.receipt === 'unknown') throw new Error('Fixture receipt lost after admission');
-			return true;
+			return this.receipt !== 'rejected';
 		};
 		this.callbacks.notifyToast = async (notice) => {
 			this.notices.push(notice);
@@ -503,6 +505,35 @@ class AcceptanceFixture {
 			},
 		]);
 	}
+	async learnCandidate() {
+		await this.select();
+		await this.pump('baseline');
+		for (let index = 0; index < 3; index++) {
+			const ask = this.log(TAB, ASK);
+			await this.pump(`human sample ${index + 1}`);
+			const record = this.decision(ask.id);
+			expect(
+				await this.ipc('resolve-decision', { decisionId: record.id, answer: ANSWER })
+			).toMatchObject({ status: 'accepted' });
+			await this.continueRecipient(ask.id);
+			expect(this.decision(ask.id).humanEvidence).toMatchObject({
+				principal: 'chris',
+				actorId: 'desktop',
+				agentId: AGENT,
+				groupId: GROUP,
+				tabId: TAB,
+				questionMessageId: ask.id,
+				question: ASK,
+				answer: ANSWER,
+			});
+			const staged = await this.ipc<PianolaSuggestionsFile>('get-suggestions');
+			expect(staged.pairCount).toBe(index + 1);
+			expect(staged.proposals).toHaveLength(index === 2 ? 1 : 0);
+			expect(mainStore.readRules()).toEqual([]);
+		}
+		return (await this.ipc<PianolaSuggestionsFile>('get-suggestions')).proposals[0];
+	}
+
 	async resolveManager(decisionId: string, tabId = 'fixture-mira-tab', answer = ANSWER) {
 		return this.request(
 			{
@@ -829,32 +860,7 @@ describe('Pianola native candidate acceptance (isolated production composition)'
 		expect(fixture.sends).toEqual([]);
 	});
 	it('learns three Chris settlements via native events, stages then explicitly accepts a scoped rule', async () => {
-		await fixture.select();
-		await fixture.pump('baseline');
-		for (let index = 0; index < 3; index++) {
-			const ask = fixture.log(TAB, ASK);
-			await fixture.pump(`human sample ${index + 1}`);
-			const record = fixture.decision(ask.id);
-			expect(
-				await fixture.ipc('resolve-decision', { decisionId: record.id, answer: ANSWER })
-			).toMatchObject({ status: 'accepted' });
-			await fixture.continueRecipient(ask.id);
-			expect(fixture.decision(ask.id).humanEvidence).toMatchObject({
-				principal: 'chris',
-				actorId: 'desktop',
-				agentId: AGENT,
-				groupId: GROUP,
-				tabId: TAB,
-				questionMessageId: ask.id,
-				question: ASK,
-				answer: ANSWER,
-			});
-			const staged = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
-			expect(staged.pairCount).toBe(index + 1);
-			expect(staged.proposals).toHaveLength(index === 2 ? 1 : 0);
-			expect(mainStore.readRules()).toEqual([]);
-		}
-		const proposal = (await fixture.ipc<PianolaSuggestionsFile>('get-suggestions')).proposals[0];
+		const proposal = await fixture.learnCandidate();
 		expect(proposal).toMatchObject({
 			enabled: false,
 			scope: 'agent',
@@ -895,6 +901,55 @@ describe('Pianola native candidate acceptance (isolated production composition)'
 		expect(fixture.decision(outside.id).decision.action).toBe('escalate');
 		expect(fixture.decision(outside.id).lifecycle?.phase).toBe('judgment');
 	});
+
+	it.each(['forged', 'broadened', 'corrected'] as const)(
+		'rejects %s suggestion approval against current native evidence',
+		async (variant) => {
+			const proposal = await fixture.learnCandidate();
+			const payload = structuredClone(proposal);
+			const stagedAt = mainStore.readSuggestions().generatedAt;
+			if (variant === 'forged') payload.id = 'fixture-forged-rule';
+			if (variant === 'broadened') {
+				payload.scope = 'global';
+				delete payload.scopeId;
+				delete payload.match.exactQuestion;
+			}
+			if (variant === 'corrected') {
+				const record = mainStore.readDecisions().find((entry) => entry.humanEvidence)!;
+				const answer = 'No, stop the inspection.';
+				mainStore.appendDecision({
+					...record,
+					decision: { ...record.decision, action: 'auto_answer', answer },
+					humanEvidence: { ...record.humanEvidence!, answer },
+				});
+				// Do not advance the scheduler before approval: a staged candidate
+				// can be stale even while its source count still says three.
+			}
+			await expect(fixture.ipc('apply-suggestion', { rule: payload })).rejects.toThrow(
+				'StaleOrChangedSuggestion'
+			);
+			expect(mainStore.readRules()).toEqual([]);
+			if (variant === 'corrected') {
+				await fixture.pump('correction settlement invalidates pending proposal');
+				expect(mainStore.readSuggestions().proposals).toEqual([]);
+				expect(mainStore.readSuggestions().generatedAt).toBeGreaterThan(stagedAt);
+				expect(mainStore.readSuggestions().pairCount).toBe(3);
+			}
+		}
+	);
+	it('retains the medium-risk permission guard instead of learning approval wording', async () => {
+		await fixture.select();
+		await fixture.rule();
+		await fixture.pump('permission baseline');
+		const ask = fixture.log(TAB, 'May I run `git status`?');
+		await fixture.pump('permission wording requires judgment');
+		expect(fixture.decision(ask.id)).toMatchObject({
+			classification: { kind: 'blocked', risk: 'medium' },
+			dispatched: false,
+			lifecycle: { phase: 'judgment', nextActor: 'manager' },
+		});
+	});
+
 	it('excludes unbound desktop answers and does not count replayed settlements twice', async () => {
 		await fixture.select();
 		await fixture.pump('baseline');
@@ -921,6 +976,28 @@ describe('Pianola native candidate acceptance (isolated production composition)'
 		await vi.advanceTimersByTimeAsync(0);
 		expect(mainStore.readSuggestions()).toMatchObject({ pairCount: 1, generatedAt, proposals: [] });
 	});
+	it('retries only definitive native rejections up to the bounded attempt limit', async () => {
+		await fixture.select();
+		await fixture.rule();
+		await fixture.pump('rejection baseline');
+		fixture.receipt = 'rejected';
+		fixture.log(TAB, ASK);
+		for (let attempt = 0; attempt < 5; attempt++) await fixture.pump('definitive rejection');
+		expect(fixture.sends).toHaveLength(3);
+		expect(fixture.sends.every((send) => send.agentId === AGENT && send.tabId === TAB)).toBe(true);
+		expect(mainStore.readScopeCheckpoint(SCOPE)?.tabs[0].state.pendingRetry).toBeNull();
+		expect(fixture.notices).toHaveLength(1);
+		const escalation = mainStore
+			.readDecisions()
+			.find((record) => record.lifecycle?.status === 'waiting_human')!;
+		expect(escalation).toBeDefined();
+		fixture.receipt = 'accepted';
+		expect(
+			await fixture.ipc('resolve-decision', { decisionId: escalation.id, answer: ANSWER })
+		).toMatchObject({ status: 'accepted' });
+		expect(fixture.sends.at(-1)).toMatchObject({ agentId: AGENT, tabId: TAB, text: ANSWER });
+	});
+
 	it('preserves unknown admission across worker crash, app restart and pause without resending', async () => {
 		await fixture.rule();
 		await fixture.select();

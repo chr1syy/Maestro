@@ -42,6 +42,10 @@ import type { PianolaSupervisor, PianolaSupervisorHealth } from '../../pianola/p
 import { generateUUID } from '../../../shared/uuid';
 import { getActingUser } from '../../web-server/auth/acting-user';
 import type { WebServer } from '../../web-server/WebServer';
+import { synthesizeSuggestions } from '../../../shared/pianola/pianola-synthesis';
+import { settledDecisionPairs } from '../../../shared/pianola/transcript-mining';
+import { canonicalJson } from '../../../shared/canonicalJson';
+import { captureException } from '../../utils/sentry';
 
 const LOG_CONTEXT = '[Pianola]';
 
@@ -142,25 +146,51 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 		// auto-answers or bypasses the policy.
 		async (raw: unknown): Promise<{ rules: PianolaRule[] }> => {
 			if (!isRecord(raw)) throw new Error('InvalidSuggestionPayload');
-			let rules = readRulesResult().rules;
+			const loaded = readRulesResult();
+			if (loaded.malformed) throw new Error('MalformedRulesFile');
+			let rules = loaded.rules;
 			if (raw.rule !== undefined) {
 				const rule = validatePianolaRule(raw.rule);
 				if (!rule) throw new Error('InvalidSuggestionRule');
-				const idx = rules.findIndex((r) => r.id === rule.id);
-				const next = idx >= 0 ? rules.map((r, i) => (i === idx ? rule : r)) : [...rules, rule];
-				rules = writeRules(next);
-				// Best-effort: drop the now-applied proposal from staging so a
-				// refresh does not re-surface an already-approved suggestion. A
-				// staging-prune failure must never fail the apply (the rule is
-				// already persisted above).
+				const staged = readSuggestions();
+				// The scheduler may not have processed a just-settled correction.
+				// Recompute synchronously from current native evidence before approval;
+				// caller-supplied rules and stale drafts cannot grant wider consent.
+				const current = synthesizeSuggestions({
+					pairs: settledDecisionPairs(readDecisions()),
+					existingRules: rules,
+					minSamples: settingsStore.get('pianolaLearningMinSamples') as number | undefined,
+				}).proposals.find((proposal) => proposal.id === rule.id);
+				const draft = staged.proposals.find((proposal) => proposal.id === rule.id);
+				const policy = (value: PianolaRule): string =>
+					canonicalJson([
+						value.scope,
+						value.scopeId ?? null,
+						value.match,
+						value.action,
+						value.answer ?? null,
+					]);
+				if (
+					!current ||
+					!draft ||
+					policy(rule) !== policy(draft) ||
+					policy(rule) !== policy(current)
+				)
+					throw new Error('StaleOrChangedSuggestion');
+				rules = writeRules([...rules, { ...draft, enabled: true, updatedAt: Date.now() }]);
 				try {
-					const staged = readSuggestions();
 					writeSuggestions({
 						...staged,
-						proposals: staged.proposals.filter((p) => p.id !== rule.id),
+						proposals: staged.proposals.filter((proposal) => proposal.id !== rule.id),
 					});
-				} catch {
-					// Ignore: staging is advisory; the persisted rule is authoritative.
+				} catch (error) {
+					// The rule is already active. Report a staging failure without
+					// telling the user that the completed approval failed. Current
+					// evidence/rules still prevent a second approval of this draft.
+					void captureException(error, {
+						operation: 'prune approved Pianola suggestion',
+						ruleId: rule.id,
+					});
 				}
 			}
 			if (isRecord(raw.profile) && typeof raw.profile.text === 'string') {

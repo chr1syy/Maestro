@@ -1,0 +1,34 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (src/__tests__/integration/pianola-native-acceptance.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/chris/code/worktrees/fix/pianola-project-watchers-20261028
+
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > covers old/new tabs, group members and worktree ancestry by identity with one scope worker 92ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > keeps explicit coverage after group removal and baselines a changed worktree parent 31ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > distinguishes native rule receipt, exact receiver acknowledgement and completion 32ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > bounds each worker cycle to 20 histories and reaches later tabs without extra children 370ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > baselines questions added during pause and answers only subsequent activity on resume 25ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > routes Mira judgment through the bound manager tab back to the original receiver 27ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > escalates high-risk full-turn intent to Chris without a rule answer or Mira send 16ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > learns three Chris settlements via native events, stages then explicitly accepts a scoped rule 132ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > rejects forged suggestion approval against current native evidence 105ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > rejects broadened suggestion approval against current native evidence 134ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > rejects corrected suggestion approval against current native evidence 155ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > retains the medium-risk permission guard instead of learning approval wording 29ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > excludes unbound desktop answers and does not count replayed settlements twice 53ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > retries only definitive native rejections up to the bounded attempt limit 48ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > preserves unknown admission across worker crash, app restart and pause without resending 28ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > overlaps have one answer owner and a stream can finish on its enrollment message ID 21ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > revalidates paused at native admission after worker preparation 12ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > revalidates busy at native admission after worker preparation 13ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > revalidates removed at native admission after worker preparation 14ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > revalidates changed-ask at native admission after worker preparation 10ms
+ ✓ src/__tests__/integration/pianola-native-acceptance.integration.test.ts > Pianola native candidate acceptance (isolated production composition) > blocks productive stores, recipients and fallback transport before I/O 7ms
+
+ Test Files  1 passed (1)
+      Tests  21 passed (21)
+   Start at  17:28:49
+   Duration  2.97s (transform 1.05s, setup 0ms, import 1.24s, tests 1.39s, environment 0ms)
+
+JSON report written to /home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/V2-13-vitest.json

@@ -306,6 +306,47 @@
 			],
 			"responsibleActor": "V2-14 Auto Run agent",
 			"nextAction": "Execute only the checks-plan.md harness command, resolve unfinished prerequisite implementation and missing regression receipts, fix scoped defects and rerun affected checks. Require enabled native approval plus fourth-ask scoped match, source-linked candidate approval/rejection/conflict handling and all SPEC criteria before writing acceptance.json. Retain installed:false and no install/restart/live activation; V2-15 owns PR publication."
+		},
+		{
+			"taskId": "V2-14",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "complete",
+			"outcome": "acceptance review complete; full SPEC acceptance failed, candidate not ready, installed:false",
+			"parentCommit": "4309f852a0d6008f03f60303d7aff78a0e2e4002",
+			"commit": "MAESTRO: verify Pianola native acceptance and repair guarded approval and retries; exact push receipt in auto-run/Working/V2-14-delivery.json",
+			"changedFiles": [
+				"src/main/ipc/handlers/pianola.ts",
+				"src/main/pianola/pianola-store-main.ts",
+				"src/main/pianola/pianola-decisions.ts",
+				"src/shared/pianola/pianola-scope-cycle.ts",
+				"src/renderer/components/PianolaModal/RuleEditor.tsx",
+				"src/__tests__/helpers/pianola.ts",
+				"src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+				"src/__tests__/main/ipc/pianola-suggestions-handlers.test.ts",
+				"src/__tests__/main/pianola/pianola-relearn.test.ts",
+				"src/__tests__/main/web-server/web-server-factory.test.ts",
+				"src/__tests__/renderer/components/RuleEditor.test.tsx",
+				"src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
+				"src/__tests__/shared/pianola/pianola-synthesis.test.ts",
+				"src/__tests__/shared/pianola/transcript-mining.test.ts",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/acceptance.json",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-14-ACCEPTANCE.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks-plan.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-13-HARNESS.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-03.md"
+			],
+			"evidence": [
+				"21/21 isolated production integration cases and 622/622 targeted working-tree tests in 12 files pass. Initial failures, regression red receipts, final native traces and exact source evidence retained under checks/.",
+				"Native approval now enables only staged/current exact proposals, revalidates fresh Chris evidence, rejects forged/broadened/stale approval; changed settlement triggers relearn; editing preserves exact question/group filters.",
+				"Definitive native refusals retain bounded three-attempt retry and later explicit human response. Unknown/accepted delivery remains non-retryable across crash/restart/pause.",
+				"acceptance.json maps every SPEC area with 28 passes and 4 failures. Missing coverage UI/regression receipts, source-linked/rejected candidates and accepted-rule conflicts remain owned by V2-05/06/07/10/11/12; those checkboxes remain unchanged.",
+				"15-root scoped TypeScript, source/test ESLint, changed-file Prettier and diff checks recorded in checks/V2-14-checks.json. No full suite/validate:push, installation/restart/live activation, productive messages, Cue/peer changes, merge, agents/worktrees or delegation. Actual model/effort unknown; zero images.",
+				"Entry patches/index preserved in Working/V2-14-entry-*. Related scope/factory staged test WIP is retained and updated within this task; untouched staged CLI/message-handler/PROGRESS blobs remain for V2-15."
+			],
+			"responsibleActor": "V2-15 Auto Run agent / Mira for incomplete prerequisite tasks",
+			"nextAction": "V2-15: review exact partial candidate, WIP and upstream ancestry; publish only a focused diff if compatible and preserve acceptance failures. Resume V2-05/06/07/10/11/12 and rerun affected acceptance before V2-16 can claim full completion. No installed activation."
 		}
 	]
 }

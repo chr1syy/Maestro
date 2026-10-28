@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createMockNativeDecisionPair } from '../../helpers/pianola';
 import {
 	synthesizeSuggestions,
 	SUGGESTION_MIN_SAMPLES,
@@ -18,22 +19,13 @@ function pair(
 	polarity: ReplyPolarity,
 	i = 0
 ): DecisionPair {
-	return {
-		agent: 'claude-code',
-		sessionId: `s${i}`,
-		classification: {
-			kind,
-			risk,
-			topic: 'something',
-			confidence: 'medium',
-			evidence: { messageId: `m${i}`, reason: 'test', structured: false },
-		},
-		ask: 'May I proceed?',
-		reply: polarity === 'affirmative' ? 'yes' : 'no',
-		polarity,
-		askedAt: '2026-01-01T00:00:00.000Z',
-		repliedAt: '2026-01-01T00:00:01.000Z',
-	};
+	const value = createMockNativeDecisionPair(`${kind}-${risk}-${i}`);
+	value.classification.kind = kind;
+	value.classification.risk = risk;
+	value.polarity = polarity;
+	value.reply = polarity === 'affirmative' ? value.reply : 'No, stop.';
+	value.evidence!.answer = value.reply;
+	return value;
 }
 
 function manyPairs(
@@ -50,7 +42,7 @@ function manyPairs(
 }
 
 describe('synthesizeSuggestions', () => {
-	it('proposes a low-risk auto_answer rule for a consistently-approved kind', () => {
+	it('proposes a low-risk auto_answer rule for a consistently approved exact scoped question', () => {
 		const pairs = manyPairs('question', 'low', SUGGESTION_MIN_SAMPLES, SUGGESTION_MIN_SAMPLES);
 		const { proposals } = synthesizeSuggestions({ pairs, existingRules: [], now: 1 });
 		expect(proposals).toHaveLength(1);
@@ -60,7 +52,7 @@ describe('synthesizeSuggestions', () => {
 	});
 
 	it('every proposal is valid per validatePianolaRule', () => {
-		const pairs = [...manyPairs('question', 'low', 10, 10), ...manyPairs('blocked', 'low', 10, 9)];
+		const pairs = manyPairs('question', 'low', 10, 10);
 		const { proposals } = synthesizeSuggestions({ pairs, existingRules: [], now: 1 });
 		expect(proposals.length).toBeGreaterThan(0);
 		for (const p of proposals) {
@@ -95,14 +87,20 @@ describe('synthesizeSuggestions', () => {
 		expect(proposals).toHaveLength(0);
 	});
 
-	it('does not duplicate a kind already covered by an existing rule', () => {
+	it('does not duplicate an accepted rule for the same exact scoped answer', () => {
 		const existing: PianolaRule = {
 			id: 'r1',
 			enabled: true,
-			scope: 'global',
-			match: { kinds: ['question'], maxRisk: 'low' },
+			scope: 'agent',
+			scopeId: 'fixture-agent',
+			match: {
+				kinds: ['question'],
+				maxRisk: 'low',
+				exactQuestion: 'Should I run `git status`?',
+				groupId: 'fixture-group',
+			},
 			action: 'auto_answer',
-			answer: 'sure',
+			answer: 'Yes, run git status.',
 			priority: 1,
 			createdAt: 1,
 			updatedAt: 1,
@@ -143,7 +141,7 @@ describe('synthesizeSuggestions - safety scoping', () => {
 		expect(proposals).toHaveLength(0);
 	});
 
-	it('treats an existing kinds-only rule (no maxRisk) as already covering', () => {
+	it('does not let a global kinds-only rule erase a narrower proposal', () => {
 		const existing: PianolaRule = {
 			id: 'r-no-maxrisk',
 			enabled: true,
@@ -157,6 +155,6 @@ describe('synthesizeSuggestions - safety scoping', () => {
 		};
 		const pairs = manyPairs('question', 'low', 10, 10);
 		const { proposals } = synthesizeSuggestions({ pairs, existingRules: [existing], now: 1 });
-		expect(proposals).toHaveLength(0);
+		expect(proposals).toHaveLength(1);
 	});
 });

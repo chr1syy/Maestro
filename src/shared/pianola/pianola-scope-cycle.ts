@@ -580,7 +580,15 @@ export async function runPianolaScopeCycle(
 						pendingHandoff: null,
 						pendingRetry: null,
 					};
-				if (observed.lifecycle!.status !== 'done' && !observed.lifecycle!.acknowledgedAt)
+				const retryingRejectedAnswer =
+					observed.lifecycle!.phase === 'answer' &&
+					observed.lifecycle!.delivery === 'rejected' &&
+					saved.state.pendingRetry?.messageId === record.classification.evidence.messageId;
+				if (
+					observed.lifecycle!.status !== 'done' &&
+					!observed.lifecycle!.acknowledgedAt &&
+					!retryingRejectedAnswer
+				)
 					pending = true;
 				if (
 					saved.unresolvedIntent?.decisionId === record.id &&
@@ -686,6 +694,15 @@ export async function runPianolaScopeCycle(
 							scope.managerAgentId,
 							snapshot.owners.find((owner) => owner.id === tab.agentId)?.groupId ?? null
 						);
+						// A definitive refusal before native admission has no native
+						// outcome writer. Keep it retryable instead of inventing an
+						// interrupted/unknown delivery on the next poll.
+						if (record.error && !record.dispatched)
+							latestRecord = updatePianolaDecision(
+								latestRecord,
+								{ delivery: 'rejected' },
+								record.timestamp
+							);
 						deps.watch.recordDecision(latestRecord);
 					},
 					dispatch: async (destination, answer) =>
@@ -856,6 +873,7 @@ export function admitPianolaScopeReply(
 					candidate.tabId === tab.tabId &&
 					candidate.classification.evidence.messageId === guard.messageId &&
 					!candidate.dryRun &&
+					candidate.lifecycle?.delivery !== 'rejected' &&
 					(candidate.dispatched || candidate.deliveryStatus === 'admitted')
 			)
 	)

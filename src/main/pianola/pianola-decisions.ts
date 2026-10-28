@@ -202,6 +202,7 @@ export async function resolvePianolaDecision(
 					candidate.tabId === record.tabId &&
 					candidate.classification.evidence.messageId === life.guard.messageId &&
 					!candidate.dryRun &&
+					candidate.lifecycle?.delivery !== 'rejected' &&
 					(candidate.dispatched || candidate.deliveryStatus === 'admitted')
 			)
 	)

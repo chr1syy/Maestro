@@ -17,6 +17,7 @@ import type {
 	PianolaSupervisedTarget,
 } from '../../shared/pianola/storage';
 import { createPianolaFsStore } from '../../shared/pianola/fs-store';
+import { canonicalJson } from '../../shared/canonicalJson';
 
 export type { RulesLoadResult, PianolaPlan, PianolaSupervisedTarget };
 
@@ -51,11 +52,13 @@ export function appendDecision(record: PianolaDecisionRecord): void {
 		candidate &&
 		settledDecisionPairs(store.readDecisions()).some(
 			(pair) =>
-				(pair.evidence!.agentId === candidate.evidence!.agentId &&
+				((pair.evidence!.agentId === candidate.evidence!.agentId &&
 					pair.evidence!.tabId === candidate.evidence!.tabId &&
 					pair.evidence!.questionMessageId === candidate.evidence!.questionMessageId) ||
-				(pair.evidence!.actorId === candidate.evidence!.actorId &&
-					pair.evidence!.answerMessageId === candidate.evidence!.answerMessageId)
+					(pair.evidence!.actorId === candidate.evidence!.actorId &&
+						pair.evidence!.answerMessageId === candidate.evidence!.answerMessageId)) &&
+				canonicalJson([pair.evidence, pair.classification]) ===
+					canonicalJson([candidate.evidence, candidate.classification])
 		);
 	store.appendDecision(record);
 	if (candidate && !alreadySettled) {

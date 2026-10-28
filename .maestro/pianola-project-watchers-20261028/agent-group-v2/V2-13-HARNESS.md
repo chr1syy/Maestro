@@ -12,7 +12,10 @@ related:
   - '[[checks-plan]]'
 ---
 
-Authored for V2-13; execution belongs to V2-14. `installed: false`. No runtime
+Authored for V2-13; V2-14 execution now passes 21/21 isolated cases. See
+[[V2-14-ACCEPTANCE]] and `acceptance.json` for current repairs and remaining SPEC
+failures. The original 16-case expectations and source gaps below describe the
+authoring-time state. `installed: false`. No runtime
 acceptance, model execution, CI result or installed feature readiness is claimed.
 No associated images were supplied or analyzed.
 

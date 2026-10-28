@@ -1,0 +1,34 @@
+{
+  "status": "pass",
+  "checkKind": "scoped-typecheck",
+  "roots": [
+    "src/main/ipc/handlers/pianola.ts",
+    "src/main/pianola/pianola-store-main.ts",
+    "src/main/pianola/pianola-decisions.ts",
+    "src/shared/pianola/pianola-scope-cycle.ts",
+    "src/renderer/components/PianolaModal/RuleEditor.tsx",
+    "src/__tests__/helpers/pianola.ts",
+    "src/__tests__/main/ipc/pianola-suggestions-handlers.test.ts",
+    "src/__tests__/main/pianola/pianola-relearn.test.ts",
+    "src/__tests__/main/web-server/web-server-factory.test.ts",
+    "src/__tests__/renderer/components/RuleEditor.test.tsx",
+    "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
+    "src/__tests__/shared/pianola/pianola-synthesis.test.ts",
+    "src/__tests__/shared/pianola/transcript-mining.test.ts",
+    "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+    "src/__tests__/integration/pianola-native-acceptance.config.ts"
+  ],
+  "ambientRoots": [
+    "src/types/dns-packet.d.ts",
+    "src/renderer/global.d.ts"
+  ],
+  "compilerOptions": {
+    "config": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/tsconfig.main.json",
+    "nodeAmbientTypes": true,
+    "jsx": "react-jsx",
+    "jestDomMatchers": true,
+    "domLibrary": true
+  },
+  "changedRootDiagnostics": [],
+  "dependencyDiagnostics": []
+}

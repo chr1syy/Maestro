@@ -6,14 +6,13 @@ import * as path from 'path';
 import { createPianolaFsStore } from '../../../shared/pianola/fs-store';
 import {
 	runPianolaScopeCycle,
+	pianolaScopeSnapshotFromDesktop,
 	type PianolaScopeCycleDeps,
 	type PianolaScopeSnapshot,
 	type PianolaScopeSnapshotTab,
 } from '../../../shared/pianola/pianola-scope-cycle';
-import {
-	HANDOFF_TIMEOUT_POLLS,
-	MAX_DISPATCH_ATTEMPTS,
-} from '../../../shared/pianola/pianola-watcher';
+import { MAX_DISPATCH_ATTEMPTS } from '../../../shared/pianola/pianola-watcher';
+import { updatePianolaDecision } from '../../../shared/pianola/pianola-decision-lifecycle';
 import type { PianolaMessage, PianolaRule } from '../../../shared/pianola/types';
 import type { PianolaSupervisedTarget } from '../../../shared/pianola/storage';
 
@@ -42,21 +41,20 @@ function fixture() {
 		indent: 2,
 		trailingNewline: true,
 	});
-	const scope: PianolaSupervisedTarget = {
+	const scope = {
 		id: scopeId,
 		kind: 'watch-scope',
-		enabled: true,
+		enabled: true as boolean,
 		createdAt: 1,
 		managerAgentId: 'manager',
 		selection: {
-			label: 'Selected project',
-			mode: 'project',
-			projectRoots: [projectRoot],
-			ownerRoots: { owner: projectRoot },
-			includeWorktrees: true,
+			label: 'Selected agents',
+			mode: 'agents-and-groups',
+			agentIds: ['owner'],
+			groupIds: [],
 			excludedAgentIds: [],
 		},
-	};
+	} satisfies PianolaSupervisedTarget;
 	store.writeSupervisorTargets([scope]);
 	const snapshot: PianolaScopeSnapshot = {
 		capturedAt: 100,
@@ -204,12 +202,12 @@ describe('scope activation and working-tab discovery', () => {
 		}
 	);
 
-	it.each(['busy-ended', 'tool-appended', 'idle-grew'] as const)(
+	it.each(['idle-unchanged', 'tool-appended', 'idle-grew'] as const)(
 		'does not revive a historical ask when %s',
 		async (change) => {
 			const f = fixture();
 			const tab = f.tab();
-			tab.busy = change !== 'idle-grew';
+			tab.busy = false;
 			f.history(tab, [message('old')]);
 			await f.cycle();
 			tab.busy = false;
@@ -300,17 +298,18 @@ describe('scope activation and working-tab discovery', () => {
 		expect(f.deps.dispatch).not.toHaveBeenCalled();
 	});
 
-	it('keeps activation inert until every selected transcript cursor is available', async () => {
+	it('isolates an unavailable enrollment cursor and baselines it when restored', async () => {
 		const f = fixture();
 		const healthy = f.tab();
 		const missing = f.tab('missing');
 		missing.cursorAvailable = false;
-		expect((await f.cycle()).status).toBe('baselining');
+		expect((await f.cycle()).status).toBe('armed');
 		f.history(healthy, [message('during-incomplete-baseline')]);
 		missing.cursorAvailable = true;
 		expect((await f.cycle()).status).toBe('armed');
-		expect(f.checkpoint().tabs[0].baseline?.id).toBe('during-incomplete-baseline');
-		expect(f.deps.dispatch).not.toHaveBeenCalled();
+		expect(f.checkpoint().tabs.find((tab) => tab.tabId === 'missing')?.baseline).toBeNull();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.dispatch).mock.calls[0][0].tabId).toBe(healthy.tabId);
 	});
 
 	it('processes the first ask in a genuinely new tab but baselines a newly discovered old tab', async () => {
@@ -351,7 +350,7 @@ describe('scope activation and working-tab discovery', () => {
 		await f.cycle();
 		f.history(tab, [message('still-pending')]);
 		const newRoot = path.resolve('pianola-added-project');
-		f.scope.selection!.projectRoots.push(newRoot);
+		f.scope.selection.agentIds.push('added');
 		f.saveScopes(f.scope);
 		f.snapshot.owners.push({ id: 'added', cwd: newRoot, isPianola: false, remote: false });
 		f.history(f.tab('added', 'added', 115), [message('old-new-member')]);
@@ -384,14 +383,14 @@ describe('scope ownership and lifecycle', () => {
 				f.scope.enabled = false;
 				f.saveScopes(f.scope);
 			}
-			if (transition === 'binding') f.snapshot.owners[0].cwd = path.resolve('elsewhere');
+			if (transition === 'binding') f.snapshot.owners[0].parentSessionId = 'missing-parent';
 			await f.cycle();
 			f.history(tab, [message('while-suspended')]);
 			tab.paused = false;
 			f.snapshot.tabs = [tab];
 			f.scope.enabled = true;
 			f.saveScopes(f.scope);
-			f.snapshot.owners[0].cwd = projectRoot;
+			f.snapshot.owners[0].parentSessionId = null;
 			await f.cycle();
 			expect(f.deps.dispatch).not.toHaveBeenCalled();
 			f.history(tab, [message('while-suspended'), message('after-resume')]);
@@ -436,7 +435,7 @@ describe('scope ownership and lifecycle', () => {
 		expect(f.deps.dispatch).not.toHaveBeenCalled();
 	});
 
-	it('gives a selected-owner scope precedence over a project scope for worktree tabs', async () => {
+	it('gives the oldest overlapping identity scope ownership of worktree tabs', async () => {
 		const f = fixture();
 		f.snapshot.owners.push({
 			id: 'worktree',
@@ -449,8 +448,8 @@ describe('scope ownership and lifecycle', () => {
 		const selected = {
 			...f.scope,
 			id: otherScopeId,
-			createdAt: 20,
-			selection: { ...f.scope.selection!, mode: 'agents' as const },
+			createdAt: 0,
+			selection: { ...f.scope.selection! },
 		};
 		f.saveScopes(f.scope, selected);
 		await f.cycle();
@@ -494,7 +493,7 @@ describe('scope ownership and lifecycle', () => {
 					f.saveScopes(f.scope);
 				}
 				if (change === 'answered') tab.cursor = { id: 'human-answer', count: 2, textLength: 10 };
-				if (change === 'owner-changed') f.snapshot.owners[0].cwd = path.resolve('elsewhere');
+				if (change === 'owner-changed') f.snapshot.owners[0].parentSessionId = 'missing-parent';
 				return history;
 			};
 			expect((await f.cycle()).issues).toHaveLength(1);
@@ -576,8 +575,13 @@ describe('scope transcript and delivery safety', () => {
 					? { status: 'unknown', error: 'no receipt' }
 					: { status: 'accepted' };
 			});
-			const result = await f.cycle();
-			expect(result.issues).toHaveLength(1);
+			const recordDecision = f.deps.watch.recordDecision;
+			if (failure === 'outcome-write') {
+				await expect(f.cycle()).rejects.toThrow('audit disk full');
+				f.deps.watch.recordDecision = recordDecision;
+			} else {
+				expect((await f.cycle()).issues).toHaveLength(1);
+			}
 			expect(f.checkpoint().tabs[0].unresolvedIntent?.messageId).toBe('fresh');
 			f.scope.enabled = false;
 			f.saveScopes(f.scope);
@@ -616,7 +620,8 @@ describe('scope transcript and delivery safety', () => {
 		const selected: PianolaSupervisedTarget = {
 			...f.scope,
 			id: otherScopeId,
-			selection: { ...f.scope.selection!, mode: 'agents' },
+			createdAt: 0,
+			selection: { ...f.scope.selection! },
 		};
 		f.saveScopes(f.scope, selected);
 		await f.cycle();
@@ -652,10 +657,24 @@ describe('scope transcript and delivery safety', () => {
 		const f = fixture();
 		const tab = f.tab();
 		f.rules.splice(0);
-		f.deps.watch.resolveProfile = () => ({
-			profile: 'Use the original task authority.',
-			updatedAt: 1,
-			pairCount: 1,
+
+		let time = Date.parse('2026-10-28T00:00:00.000Z');
+		f.deps.watch.now = () => new Date(time).toISOString();
+		f.deps.watch.resolveProfile = () => ({ profile: 'Use task authority.', updatedAt: 1 });
+		vi.mocked(f.deps.requestJudgment!).mockImplementation(async (_request, guard) => {
+			const record = f.store.readDecisions().find((entry) => entry.id === guard.decisionId)!;
+			f.store.appendDecision(
+				updatePianolaDecision(
+					record,
+					{
+						delivery: 'accepted',
+						managerTabId: 'manager-tab',
+						deadlineAt: time + 60_000,
+					},
+					f.deps.watch.now()
+				)
+			);
+			return { status: 'accepted' };
 		});
 		await f.cycle();
 		f.history(tab, [message('uncovered')]);
@@ -666,8 +685,10 @@ describe('scope transcript and delivery safety', () => {
 			messageId: 'uncovered',
 		});
 		await f.cycle();
-		expect(f.checkpoint().tabs[0].state.pendingHandoff?.polls).toBe(1);
-		for (let poll = 1; poll < HANDOFF_TIMEOUT_POLLS; poll++) await f.cycle();
+		expect(f.store.readDecisions()[0].lifecycle?.status).toBe('mira_processing');
+		time += 60_001;
+		await f.cycle();
+		expect(f.store.readDecisions()[0].lifecycle?.status).toBe('waiting_human');
 		expect(f.deps.requestJudgment).toHaveBeenCalledTimes(1);
 		expect(f.deps.watch.notify).toHaveBeenCalledWith(
 			expect.objectContaining({ kind: 'handoff_timeout' })
@@ -696,5 +717,133 @@ describe('scope transcript and delivery safety', () => {
 		);
 		expect(f.deps.dispatch).not.toHaveBeenCalled();
 		expect(f.deps.requestJudgment).not.toHaveBeenCalled();
+	});
+});
+
+describe('native scope snapshot contract', () => {
+	const response = () => ({
+		success: true,
+		supervisionVersion: 1,
+		complete: true,
+		capturedAt: 100,
+		owners: [
+			{ id: 'owner', cwd: projectRoot, parentSessionId: null, isPianola: false, remote: false },
+		],
+		sessions: [
+			{
+				agentId: 'owner',
+				tabId: 'tab',
+				createdAt: 1,
+				supervision: {
+					cwd: projectRoot,
+					parentSessionId: null,
+					isPianola: false,
+					remote: false,
+					lineageComplete: true,
+					paused: false,
+					busy: false,
+					consult: false,
+					ephemeral: false,
+					cursorAvailable: true,
+					cursor: null,
+				},
+			},
+		],
+	});
+
+	it.each([
+		[
+			'old response',
+			(raw: any) => {
+				delete raw.supervisionVersion;
+			},
+		],
+		[
+			'failed response',
+			(raw: any) => {
+				raw.success = false;
+			},
+		],
+		[
+			'incomplete census',
+			(raw: any) => {
+				raw.complete = false;
+			},
+		],
+		[
+			'missing capture time',
+			(raw: any) => {
+				delete raw.capturedAt;
+			},
+		],
+		[
+			'duplicate owners',
+			(raw: any) => {
+				raw.owners.push(raw.owners[0]);
+			},
+		],
+		[
+			'missing owner',
+			(raw: any) => {
+				raw.owners = [];
+			},
+		],
+		[
+			'foreign owner metadata',
+			(raw: any) => {
+				raw.sessions[0].supervision.cwd = '/foreign';
+			},
+		],
+		[
+			'missing pause metadata',
+			(raw: any) => {
+				delete raw.sessions[0].supervision.paused;
+			},
+		],
+		[
+			'missing liveness metadata',
+			(raw: any) => {
+				delete raw.sessions[0].supervision.busy;
+			},
+		],
+		[
+			'missing lineage metadata',
+			(raw: any) => {
+				delete raw.sessions[0].supervision.lineageComplete;
+			},
+		],
+		[
+			'invalid cursor',
+			(raw: any) => {
+				raw.sessions[0].supervision.cursor = { id: '', count: 0, textLength: 0 };
+			},
+		],
+		[
+			'missing creation time',
+			(raw: any) => {
+				delete raw.sessions[0].createdAt;
+			},
+		],
+		[
+			'ambiguous history lookup',
+			(raw: any) => {
+				raw.sessions.push({ ...raw.sessions[0], agentId: 'other' });
+			},
+		],
+	])('rejects %s before scope baselines can advance', (_label, mutate) => {
+		const raw = response();
+		mutate(raw);
+		expect(() => pianolaScopeSnapshotFromDesktop(raw)).toThrow();
+	});
+
+	it('accepts a complete empty census, retaining tabless owners', () => {
+		const raw = response();
+		raw.sessions = [];
+		expect(pianolaScopeSnapshotFromDesktop(raw)).toEqual({
+			capturedAt: 100,
+			complete: true,
+			owners: raw.owners,
+			tabs: [],
+		});
 	});
 });

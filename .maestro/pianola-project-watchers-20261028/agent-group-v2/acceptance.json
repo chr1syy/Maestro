@@ -1,0 +1,720 @@
+{
+  "type": "acceptance",
+  "title": "Pianola agent/group V2 source acceptance",
+  "taskId": "V2-14",
+  "created": "2026-10-28T16:30:42.474180+00:00",
+  "status": "fail",
+  "reviewComplete": true,
+  "candidateReady": false,
+  "candidateSource": {
+    "status": "partial",
+    "parentCommit": "4309f852a0d6008f03f60303d7aff78a0e2e4002",
+    "includedInTaskCommit": "MAESTRO: verify Pianola native acceptance and repair guarded approval and retries",
+    "sourceSha256": {
+      "src/main/ipc/handlers/pianola.ts": "f14983e17bd1d25331527d21481f3e2084ea493962cdd47fad15051849e390b1",
+      "src/main/pianola/pianola-store-main.ts": "1d94a00a02b0f1c25e90a3b6e52ba8b12dbcd4feda8c163a868df8ab16e5d4d3",
+      "src/main/pianola/pianola-decisions.ts": "2ecc3b98d58d7037cd7aa572a946b5461e177bf7eb24558bd03be74e746f65d3",
+      "src/shared/pianola/pianola-scope-cycle.ts": "4bbfa14c1d43c2ff871dbd51f1b1f584b099737e6a693e9f14c993bb751426cd",
+      "src/renderer/components/PianolaModal/RuleEditor.tsx": "95ef918b39af5b0c80bc4e16e1b0284630f5d5d28d7c7a187118ae04c5eb4544"
+    }
+  },
+  "candidateIntegration": {
+    "status": "pass-for-listed-cases",
+    "passed": 21,
+    "failed": 0,
+    "receipt": "checks/V2-13-vitest.json",
+    "traces": "checks/V2-13-traces.json",
+    "limits": "Electron/OS processes/renderer execution/transport framing are fixtures; the live WebServer, actual manager reasoning and installed candidate are not exercised."
+  },
+  "targetedRegressions": {
+    "status": "pass",
+    "files": 12,
+    "passed": 622,
+    "failed": 0,
+    "receipt": "checks/V2-14-targeted.json",
+    "workingTreeIncludesPreservedStagedTests": true
+  },
+  "staticChecks": {
+    "receipt": "checks/V2-14-static.json",
+    "scope": "15 source/test roots and dependencies; main config with Node/DOM/JSX/jest-dom ambient types",
+    "status": "pass"
+  },
+  "installedRuntime": {
+    "installed": false,
+    "candidateVerified": false,
+    "historicalSingleTabReceipt": "/home/chris/.maestro/pianola-setup-20261028/live-autoanswer-acceptance.json",
+    "historicalReceiptStatus": "PASSED for existing single-tab path only",
+    "installedCompositionAsStatedBySpec": "782733d3; not revalidated or replaced in this task"
+  },
+  "model": {
+    "effectiveModel": "unknown",
+    "effectiveEffort": "unknown",
+    "configuredHint": {
+      "tier": "high",
+      "effort": "high",
+      "specMapping": "Sol6.1"
+    },
+    "evidence": "No actual provider/model/effort telemetry is exposed to this task; hints and agent type are not execution evidence."
+  },
+  "initialExecution": {
+    "passed": 10,
+    "failed": 6,
+    "receipt": "checks/V2-14-initial-vitest.json",
+    "finding": "Five failures were caused by permission-worded fixture input inconsistent with the low-risk test; native permission guard retained. One was actual disabled-rule approval defect."
+  },
+  "repairs": [
+    "Native approval enables only an unchanged staged/current exact scoped proposal; rejects arbitrary, broadened and corrected/stale drafts synchronously.",
+    "Changed human evidence/classification triggers the native settlement event instead of being mistaken for a replay.",
+    "Rule editor preserves full exact question and native group filter.",
+    "Definitive refusal retains up to three retries and explicit-human resolution after exhaustion; admitted unknown/accepted outcomes still block automatic resend.",
+    "Monitoring and learning regression fixtures now use the approved native identity and human-provenance contracts, with one shared test factory."
+  ],
+  "requirements": [
+    {
+      "id": "S01",
+      "requirement": "Whole-agent selection includes current and future chats.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope.ts:190",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/0",
+          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "S02",
+      "requirement": "Actual native group IDs include current/future members and related worktree agents through ancestry.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope.ts:191",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/0",
+          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/1",
+          "test": "keeps explicit coverage after group removal and baselines a changed worktree parent",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "S03",
+      "requirement": "Directory equality/prefix and invented project objects never establish new selection consent; legacy path scopes remain suspended.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:350",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/0",
+          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "S04",
+      "requirement": "Exclusions, configured manager, paused legacy watches and disabled overlapping scopes veto automatic coverage; one owner answers.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope.ts:223",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/0",
+          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/15",
+          "test": "overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "S05",
+      "requirement": "Explicit agent consent survives group removal; changing worktree ancestry baselines existing asks.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:436",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/1",
+          "test": "keeps explicit coverage after group removal and baselines a changed worktree parent",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R01",
+      "requirement": "Supervisor/lifecycle, CLI watch-scope registration, desktop census, native admission, human settlement event and Suggestions are connected.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/main/pianola/pianola-lifecycle.ts:133",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/7",
+          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/5",
+          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R02",
+      "requirement": "Technical bounded scheduling uses one child per scope, at most 20 changed histories per cycle and rotation; polling invokes no model.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:508",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/3",
+          "test": "bounds each worker cycle to 20 histories and reaches later tabs without extra children",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R03",
+      "requirement": "Old enrollment/pause/restart activity is baselined without replay; busy streams finishing on the same ID remain actionable.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:545",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/4",
+          "test": "baselines questions added during pause and answers only subsequent activity on resume",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/15",
+          "test": "overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R04",
+      "requirement": "A failed/unavailable tab cursor does not prevent another tab from progressing.",
+      "status": "pass",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:432",
+        {
+          "receipt": "checks/V2-14-targeted.json",
+          "file": "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
+          "tests": [
+            "isolates an unavailable enrollment cursor and baselines it when restored",
+            "rejects gap transcript evidence and leaves another tab able to progress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R05",
+      "requirement": "Known authorized routines use the real evaluator; prior full-turn high risk and permission wording retain their risk gates.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-policy.ts:145",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/2",
+          "test": "distinguishes native rule receipt, exact receiver acknowledgement and completion",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/6",
+          "test": "escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/11",
+          "test": "retains the medium-risk permission guard instead of learning approval wording",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R06",
+      "requirement": "Other eligible asks reach configured Mira; only the bound manager tab can resolve the original receiver; no peer grants inferred.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/main/pianola/pianola-decisions.ts:220",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/5",
+          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R07",
+      "requirement": "Sensitive/high-risk decisions wait for an explicit human; no automatic answer or manager response bypass.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/main/pianola/pianola-decisions.ts:151",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/6",
+          "test": "escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R08",
+      "requirement": "Native send revalidates membership/paused/busy/configuration/binding/recipient/current ask and requires a receipt.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:763",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/16",
+          "test": "revalidates paused at native admission after worker preparation",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/17",
+          "test": "revalidates busy at native admission after worker preparation",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/18",
+          "test": "revalidates removed at native admission after worker preparation",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/19",
+          "test": "revalidates changed-ask at native admission after worker preparation",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R09",
+      "requirement": "Durable intent and admission precede delivery; overlap/restart/unknown outcomes never trigger a blind resend.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:855",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/14",
+          "test": "preserves unknown admission across worker crash, app restart and pause without resending",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/15",
+          "test": "overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R10",
+      "requirement": "Explicit renderer refusals retain bounded retries, then allow explicit human resolution; uncertainty remains blocked.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-scope-cycle.ts:583",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/13",
+          "test": "retries only definitive native rejections up to the bounded attempt limit",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "R11",
+      "requirement": "A send receipt is distinct from receiver acknowledgement and completed work; six states carry actor/next action.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-decision-lifecycle.ts:92",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/2",
+          "test": "distinguishes native rule receipt, exact receiver acknowledgement and completion",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/5",
+          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/14",
+          "test": "preserves unknown admission across worker crash, app restart and pause without resending",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "U01",
+      "requirement": "Agent/group/exclusion/pause controls call persisted native supervisor APIs; CLI accepts native selection identities.",
+      "status": "pass",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx:192",
+        "src/cli/commands/pianola-supervise.ts:95"
+      ]
+    },
+    {
+      "id": "U02",
+      "requirement": "Registered versus current per-agent running/failed coverage and rendered lifecycle/control behavior are fully verified.",
+      "status": "fail",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx:114"
+      ],
+      "owner": "V2-05 / V2-06 / V2-07 Auto Run agent",
+      "cause": "Current UI lists worker health and historical per-agent active/suspended/closed census counts. It does not expose all per-tab cycle issues as current per-agent failures, and the new scope controls/six lifecycle states have no complete rendered acceptance receipt. V2-05 remains unchecked.",
+      "nextAction": "Finish truthful per-agent coverage/failure display and rendered control/status regressions; record V2-05/06/07 outcomes without inferring them from this transport-level harness."
+    },
+    {
+      "id": "L01",
+      "requirement": "Only explicit transport-attributed Chris settlements create samples; unknown desktop origin and rule/Mira answers never inflate them.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/main/ipc/handlers/pianola.ts:285",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/7",
+          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "excludes unbound desktop answers and does not count replayed settlements twice",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/5",
+          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "L02",
+      "requirement": "Identity includes actor, agent/tab/question/answer IDs, timestamps and exact question/answer; replay counts once.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/transcript-mining.ts:91",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "excludes unbound desktop answers and does not count replayed settlements twice",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/7",
+          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "L03",
+      "requirement": "Synthesis clusters only equivalent closed-grammar concrete actions, full exact conditions and native scope; no generic yes ratio.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-synthesis.ts:115",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/7",
+          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "L04",
+      "requirement": "Three consistent independent samples is configurable and insufficient/contradictory evidence yields no proposal; never a permanent user policy.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-synthesis.ts:104",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/7",
+          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "rejects corrected suggestion approval against current native evidence",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-14-targeted.json",
+          "file": "src/__tests__/shared/pianola/pianola-synthesis.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "L05",
+      "requirement": "Source-linked candidates remain disabled until explicit acceptance; native approval rechecks fresh evidence before enabling the exact scoped rule.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/main/ipc/handlers/pianola.ts:159",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/7",
+          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/8",
+          "test": "rejects forged suggestion approval against current native evidence",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/9",
+          "test": "rejects broadened suggestion approval against current native evidence",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "rejects corrected suggestion approval against current native evidence",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "L06",
+      "requirement": "Reprocessing identical settlement is quiet; a changed answer/classification triggers relearning and invalidates a pending proposal.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/main/pianola/pianola-store-main.ts:60",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "excludes unbound desktop answers and does not count replayed settlements twice",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "rejects corrected suggestion approval against current native evidence",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "L07",
+      "requirement": "Rules retain exact question/group conditions during description/answer editing.",
+      "status": "pass",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/renderer/components/PianolaModal/RuleEditor.tsx:79",
+        {
+          "receipt": "checks/V2-14-targeted.json",
+          "file": "src/__tests__/renderer/components/RuleEditor.test.tsx",
+          "test": "preserves exact question and native group conditions when editing a learned rule"
+        }
+      ]
+    },
+    {
+      "id": "L08",
+      "requirement": "Suggestions persist exact source examples/count, scope/exclusions and offer linked evidence, accept/edit/reject with durable rejection suppression.",
+      "status": "fail",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/shared/pianola/storage.ts:653",
+        "src/main/pianola/pianola-relearn.ts:83",
+        "src/renderer/components/PianolaModal/SuggestionsView.tsx:81"
+      ],
+      "owner": "V2-10 Auto Run agent",
+      "cause": "Synthesis returns candidates/evidence but runRelearnJob persists only proposals and profile text. Storage has no candidate/rejection records; SuggestionsView has only Approve and profile apply, with no linked source examples or edit/reject path. The V2-14 approval fix does not implement those missing features.",
+      "nextAction": "Finish V2-10 storage/API/UI using source-linked candidate identity and durable rejection evidence fingerprints; add V2-11/12 integration and UI regressions, including restart suppression."
+    },
+    {
+      "id": "L09",
+      "requirement": "Later contradictory evidence flags an accepted learned rule for review without silently rewriting user policy.",
+      "status": "fail",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/shared/pianola/pianola-synthesis.ts:145"
+      ],
+      "owner": "V2-10 Auto Run agent",
+      "cause": "Current relearning only stages new proposals. No durable learned-rule provenance/conflict state or active-rule conflict UI exists. Pending correction invalidation and fresh approval rejection now pass; active-rule conflict handling does not.",
+      "nextAction": "Persist accepted provenance; compare new attributable evidence against accepted conditions, surface conflict/owner/next action without changing live rule/profile; add contradiction and correction tests through restart."
+    },
+    {
+      "id": "L10",
+      "requirement": "High-risk/per-action approvals cannot become global permission; user profiles are never silently overwritten; legacy rules still evaluate.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/shared/pianola/pianola-policy.ts:51",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/6",
+          "test": "escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/11",
+          "test": "retains the medium-risk permission guard instead of learning approval wording",
+          "status": "passed"
+        },
+        "src/main/pianola/pianola-relearn.ts:83"
+      ]
+    },
+    {
+      "id": "B01",
+      "requirement": "Controlled fixtures cannot reach productive stores/transports/agents; real production entrypoints used instead of disconnected helper-only integration.",
+      "status": "pass",
+      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidence": [
+        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts:39",
+        {
+          "receipt": "checks/V2-13-vitest.json",
+          "jsonPointer": "/testResults/0/assertionResults/20",
+          "test": "blocks productive stores, recipients and fallback transport before I/O",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/V2-13-traces.json",
+          "cases": 21,
+          "boundaryViolations": 0
+        }
+      ]
+    },
+    {
+      "id": "B02",
+      "requirement": "No installation/restart/live coverage/Cue/peer grant/system package/merge action; installed single-tab evidence is not candidate installation proof.",
+      "status": "pass",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts:637",
+        {
+          "receipt": "/home/chris/.maestro/pianola-setup-20261028/live-autoanswer-acceptance.json",
+          "use": "read-only historical single-tab installed path only; not candidate installation",
+          "sha256": "86fbd5661ffcf813681b30574f308d0945814151d8cdfb8ff985628751693557"
+        }
+      ]
+    },
+    {
+      "id": "P01",
+      "requirement": "All prerequisite implementation/regression task completion receipts exist and support full handoff readiness.",
+      "status": "fail",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json:171"
+      ],
+      "owner": "Mira / prerequisite Auto Run agents",
+      "cause": "V2-05 and V2-10 are in_progress/unchecked; V2-06/07/11/12 are unchecked and absent from the progress ledger. This task executes useful existing tests but cannot retroactively certify all their authoring/acceptance criteria.",
+      "nextAction": "Resume the incomplete prerequisite tasks and reconcile their actual commits/checks; rerun affected V2-14 criteria before any V2-16 full-completion claim. V2-15 may review the exact partial candidate/publication boundary."
+    },
+    {
+      "id": "P02",
+      "requirement": "Use only scoped local checks; distinguish actual effective model evidence from configured hints and leave PR/CI assessment to V2-15.",
+      "status": "pass",
+      "evidenceLevel": "source-inspection",
+      "evidence": [
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks-plan.md:14"
+      ]
+    }
+  ],
+  "requirementCounts": {
+    "pass": 28,
+    "fail": 4
+  },
+  "unfulfilled": [
+    {
+      "id": "U02",
+      "owner": "V2-05 / V2-06 / V2-07 Auto Run agent",
+      "cause": "Current UI lists worker health and historical per-agent active/suspended/closed census counts. It does not expose all per-tab cycle issues as current per-agent failures, and the new scope controls/six lifecycle states have no complete rendered acceptance receipt. V2-05 remains unchecked.",
+      "nextAction": "Finish truthful per-agent coverage/failure display and rendered control/status regressions; record V2-05/06/07 outcomes without inferring them from this transport-level harness."
+    },
+    {
+      "id": "L08",
+      "owner": "V2-10 Auto Run agent",
+      "cause": "Synthesis returns candidates/evidence but runRelearnJob persists only proposals and profile text. Storage has no candidate/rejection records; SuggestionsView has only Approve and profile apply, with no linked source examples or edit/reject path. The V2-14 approval fix does not implement those missing features.",
+      "nextAction": "Finish V2-10 storage/API/UI using source-linked candidate identity and durable rejection evidence fingerprints; add V2-11/12 integration and UI regressions, including restart suppression."
+    },
+    {
+      "id": "L09",
+      "owner": "V2-10 Auto Run agent",
+      "cause": "Current relearning only stages new proposals. No durable learned-rule provenance/conflict state or active-rule conflict UI exists. Pending correction invalidation and fresh approval rejection now pass; active-rule conflict handling does not.",
+      "nextAction": "Persist accepted provenance; compare new attributable evidence against accepted conditions, surface conflict/owner/next action without changing live rule/profile; add contradiction and correction tests through restart."
+    },
+    {
+      "id": "P01",
+      "owner": "Mira / prerequisite Auto Run agents",
+      "cause": "V2-05 and V2-10 are in_progress/unchecked; V2-06/07/11/12 are unchecked and absent from the progress ledger. This task executes useful existing tests but cannot retroactively certify all their authoring/acceptance criteria.",
+      "nextAction": "Resume the incomplete prerequisite tasks and reconcile their actual commits/checks; rerun affected V2-14 criteria before any V2-16 full-completion claim. V2-15 may review the exact partial candidate/publication boundary."
+    }
+  ],
+  "externalBoundaries": [
+    {
+      "boundary": "Candidate installation, desktop restart and productive coverage activation",
+      "actor": "Chris",
+      "status": "not authorized or executed in this Playbook",
+      "nextTrigger": "After remaining source requirements pass and independent review, explicit authorization of installation/restart/activation; never build a replacement installer from the older worktree base."
+    }
+  ],
+  "publication": {
+    "status": "V2-15 pending; not assessed by this task",
+    "mergeAuthorized": false,
+    "ciResult": "unknown"
+  },
+  "imagesAnalyzed": 0,
+  "preservation": {
+    "entryPatches": [
+      "auto-run/Working/V2-14-entry-staged.patch",
+      "auto-run/Working/V2-14-entry-unstaged.patch"
+    ],
+    "stagedTestWork": "The related factory and scope-cycle test WIP is retained and adapted for the approved contracts. Untouched CLI/message-handler staged test blobs and staged PROGRESS blob remain preserved; V2-15 owns final WIP/diff packaging."
+  }
+}

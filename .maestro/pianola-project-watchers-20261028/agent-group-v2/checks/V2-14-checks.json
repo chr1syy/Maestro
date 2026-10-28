@@ -1,0 +1,63 @@
+{
+  "type": "scoped-checks",
+  "taskId": "V2-14",
+  "created": "2026-10-28T16:33:54.884Z",
+  "status": "pass",
+  "commands": [
+    {
+      "name": "format",
+      "command": "node_modules/.bin/prettier --check src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-store-main.ts src/main/pianola/pianola-decisions.ts src/shared/pianola/pianola-scope-cycle.ts src/renderer/components/PianolaModal/RuleEditor.tsx src/__tests__/helpers/pianola.ts src/__tests__/integration/pianola-native-acceptance.integration.test.ts src/__tests__/main/ipc/pianola-suggestions-handlers.test.ts src/__tests__/main/pianola/pianola-relearn.test.ts src/__tests__/main/web-server/web-server-factory.test.ts src/__tests__/renderer/components/RuleEditor.test.tsx src/__tests__/shared/pianola/pianola-scope-cycle.test.ts src/__tests__/shared/pianola/pianola-synthesis.test.ts src/__tests__/shared/pianola/transcript-mining.test.ts",
+      "exitCode": 0,
+      "log": "checks/V2-14-final-format.log"
+    },
+    {
+      "name": "eslint-source",
+      "command": "node_modules/.bin/eslint src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-store-main.ts src/main/pianola/pianola-decisions.ts src/shared/pianola/pianola-scope-cycle.ts src/renderer/components/PianolaModal/RuleEditor.tsx",
+      "exitCode": 0,
+      "log": "checks/V2-14-final-eslint-source.log"
+    },
+    {
+      "name": "eslint-tests",
+      "command": "node_modules/.bin/eslint -c eslint.dashes.config.mjs src/__tests__/helpers/pianola.ts src/__tests__/integration/pianola-native-acceptance.integration.test.ts src/__tests__/main/ipc/pianola-suggestions-handlers.test.ts src/__tests__/main/pianola/pianola-relearn.test.ts src/__tests__/main/web-server/web-server-factory.test.ts src/__tests__/renderer/components/RuleEditor.test.tsx src/__tests__/shared/pianola/pianola-scope-cycle.test.ts src/__tests__/shared/pianola/pianola-synthesis.test.ts src/__tests__/shared/pianola/transcript-mining.test.ts",
+      "exitCode": 0,
+      "log": "checks/V2-14-final-eslint-tests.log"
+    },
+    {
+      "name": "types",
+      "command": "node --max-old-space-size=8192 .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/V2-14-static.cjs",
+      "exitCode": 0,
+      "log": "checks/V2-14-final-types.log"
+    },
+    {
+      "name": "diff",
+      "command": "git diff --check HEAD",
+      "exitCode": 0,
+      "log": "checks/V2-14-final-diff.log"
+    }
+  ],
+  "tests": [
+    {
+      "command": "TMPDIR=\"$PWD/.maestro/pianola-project-watchers-20261028/auto-run/Working\" node_modules/.bin/vitest run --config src/__tests__/integration/pianola-native-acceptance.config.ts --reporter=verbose --reporter=json --outputFile=.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/V2-13-vitest.json",
+      "receipt": "checks/V2-13-vitest.json",
+      "log": "checks/V2-14-integration.log",
+      "files": 1,
+      "passed": 21,
+      "failed": 0
+    },
+    {
+      "command": "Exact 12-file command in checks-plan.md (V2-14 observed execution)",
+      "receipt": "checks/V2-14-targeted.json",
+      "log": "checks/V2-14-targeted.log",
+      "files": 12,
+      "passed": 622,
+      "failed": 0,
+      "includesPreservedStagedTests": true
+    }
+  ],
+  "fullSuiteRun": false,
+  "validatePushRun": false,
+  "hookPolicy": "Command-local hook bypass only for this task commit/push; changed-file checks run directly. No hook/CI configuration changes. No lint-staged stash of preserved work.",
+  "candidateSpecAcceptance": "fail; acceptance.json contains missing prerequisite features/receipts",
+  "installed": false,
+  "imagesAnalyzed": 0
+}
