@@ -271,10 +271,11 @@
 			"evidence": [
 				"Suggestions storage currently discards candidate evidence and overwrites all staged data on each relearn; IPC approval persists the supplied rule unchanged, so the disabled V2-09 proposal stays disabled. Existing approval also accepts a supplied rule without verifying that it is still a current candidate.",
 				"The V2-09 synthesis suppresses existing-rule candidates, so conflict detection for accepted rules requires separately evaluating evidence against learned rule provenance. No implementation or tests completed in this attempt.",
-				"Additional investigation: native human settlement schedules relearning asynchronously, so validating approval solely against the last staged file can accept a candidate after contradictory evidence was settled but before staging catches up. Acceptance must revalidate current evidence or serialize against settlement; active learned-rule conflict detection also needs persisted provenance. No implementation or tests completed in this attempt."
+				"Additional investigation: native human settlement schedules relearning asynchronously, so validating approval solely against the last staged file can accept a candidate after contradictory evidence was settled but before staging catches up. Acceptance must revalidate current evidence or serialize against settlement; active learned-rule conflict detection also needs persisted provenance. No implementation or tests completed in this attempt.",
+				"Further source review: pianola-store-main.appendDecision suppresses the settled event for an already-seen question or answer message ID. A correction sharing that identity is still appended but does not trigger incremental relearning; conflict invalidation must explicitly handle changed evidence as well as duplicate suppression. SuggestionsView only exposes approve, and approval IPC currently permits arbitrary validated rules."
 			],
 			"responsibleActor": "Next V2-10 Auto Run agent",
-			"nextAction": "Implement durable candidate/rejection and learned-rule provenance, serialize or revalidate approval against current settled evidence, flag active-rule conflicts, expose accept/edit/reject and linked examples, and run scoped static checks. Preserve staged predecessor tests; keep V2-10 unchecked until all criteria are met."
+			"nextAction": "Implement correction-aware settlement notification and durable candidate/rejection and learned-rule provenance; revalidate approval against current settled evidence, flag active conflicts, expose accept/edit/reject and source examples, then run scoped static checks. Preserve predecessor staged tests; keep V2-10 unchecked until all criteria are met."
 		}
 	]
 }
