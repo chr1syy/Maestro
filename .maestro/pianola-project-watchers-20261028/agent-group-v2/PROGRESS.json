@@ -270,10 +270,11 @@
 			"commit": "Investigation recorded in this task attempt",
 			"evidence": [
 				"Suggestions storage currently discards candidate evidence and overwrites all staged data on each relearn; IPC approval persists the supplied rule unchanged, so the disabled V2-09 proposal stays disabled. Existing approval also accepts a supplied rule without verifying that it is still a current candidate.",
-				"The V2-09 synthesis suppresses existing-rule candidates, so conflict detection for accepted rules requires separately evaluating evidence against learned rule provenance. No implementation or tests completed in this attempt."
+				"The V2-09 synthesis suppresses existing-rule candidates, so conflict detection for accepted rules requires separately evaluating evidence against learned rule provenance. No implementation or tests completed in this attempt.",
+				"Additional investigation: native human settlement schedules relearning asynchronously, so validating approval solely against the last staged file can accept a candidate after contradictory evidence was settled but before staging catches up. Acceptance must revalidate current evidence or serialize against settlement; active learned-rule conflict detection also needs persisted provenance. No implementation or tests completed in this attempt."
 			],
 			"responsibleActor": "Next V2-10 Auto Run agent",
-			"nextAction": "Implement persistent candidate and rejection identities, evidence and conflict review; validate acceptance against current staging and activate the exact reviewed rule, then complete edit/reject UI and scoped static checks. Keep existing staged test work intact."
+			"nextAction": "Implement durable candidate/rejection and learned-rule provenance, serialize or revalidate approval against current settled evidence, flag active-rule conflicts, expose accept/edit/reject and linked examples, and run scoped static checks. Preserve staged predecessor tests; keep V2-10 unchecked until all criteria are met."
 		}
 	]
 }
