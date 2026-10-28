@@ -263,7 +263,7 @@
       "taskId": "V2-10",
       "effectiveModel": "unknown",
       "effectiveEffort": "unknown",
-      "status": "in_progress",
+      "status": "complete",
       "changedFiles": [
         ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json"
       ],
@@ -274,8 +274,9 @@
         "Additional investigation: native human settlement schedules relearning asynchronously, so validating approval solely against the last staged file can accept a candidate after contradictory evidence was settled but before staging catches up. Acceptance must revalidate current evidence or serialize against settlement; active learned-rule conflict detection also needs persisted provenance. No implementation or tests completed in this attempt.",
         "Further source review: pianola-store-main.appendDecision suppresses the settled event for an already-seen question or answer message ID. A correction sharing that identity is still appended but does not trigger incremental relearning; conflict invalidation must explicitly handle changed evidence as well as duplicate suppression. SuggestionsView only exposes approve, and approval IPC currently permits arbitrary validated rules."
       ],
-      "responsibleActor": "Next V2-10 Auto Run agent",
-      "nextAction": "Implement correction-aware settlement notification and durable candidate/rejection and learned-rule provenance; revalidate approval against current settled evidence, flag active conflicts, expose accept/edit/reject and source examples, then run scoped static checks. Preserve predecessor staged tests; keep V2-10 unchecked until all criteria are met."
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R10 independent acceptance",
+      "recoveryEvidence": "checks/recovery-learning.json; R05-R07 contracts and source receipts; native and rendered learning regressions pass"
     },
     {
       "taskId": "V2-13",
@@ -411,6 +412,30 @@
       "evidence": "R03 authored regressions; R04 verified production seams and static checks in checks/recovery-monitoring.json",
       "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R10 revalidates full acceptance"
+    },
+    {
+      "taskId": "V2-11",
+      "status": "complete",
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "evidence": [
+        "recovery-checks.md R08 matrix",
+        "checks/recovery-learning.json"
+      ],
+      "nextAction": "R10 independent acceptance"
+    },
+    {
+      "taskId": "V2-12",
+      "status": "complete",
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "evidence": [
+        "recovery-checks.md R08 matrix",
+        "checks/recovery-learning.json"
+      ],
+      "nextAction": "R10 independent acceptance"
     }
   ]
 }

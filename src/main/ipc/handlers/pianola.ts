@@ -350,7 +350,7 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 			// Answer, description and priority can be edited by Chris. Scope, the
 			// exact condition and risk guard retain the evidenced authorization.
 			const boundary = (value: PianolaRule): string =>
-				canonicalJson([value.scope, value.scopeId, value.match, value.action]);
+				canonicalJson([value.scope, value.scopeId ?? null, value.match, value.action]);
 			if (boundary(edited) !== boundary(candidate.rule)) throw new Error('BroadenedSuggestionEdit');
 			rule = {
 				...candidate.rule,

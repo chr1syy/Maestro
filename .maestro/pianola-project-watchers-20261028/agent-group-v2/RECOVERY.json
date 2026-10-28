@@ -2,15 +2,11 @@
   "status": "in_progress",
   "sourceHead": "5edef58da8",
   "previousOutcome": "partial;28pass4fail",
-  "unfinishedOriginalTasks": [
-    "V2-10",
-    "V2-11",
-    "V2-12"
-  ],
+  "unfinishedOriginalTasks": [],
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R09: execute focused learning/API/storage/rendered regressions and static checks from recovery-checks.md; fix bounded failures; L08/L09 remain unaccepted",
+  "nextAction": "R10: independently rerun production composition acceptance and reconcile all SPEC criteria; candidateReady remains false",
   "tasks": [
     {
       "taskId": "R00",
@@ -301,6 +297,27 @@
       "nextAction": "R09: execute listed focused commands and capture checks/recovery-learning.json; retain candidateReady false until R10",
       "imagesAnalyzed": 0,
       "boundaries": "No productive store/transport use, tests/check execution, live activation, installation, restart, upstream publication or merge. Commit/push hooks suppressed for these commands only to preserve authoring/execution split."
+    },
+    {
+      "taskId": "R09",
+      "status": "complete",
+      "outcome": "67 unit/rendered and 26 selected native learning tests passed; scoped types, formatting and lint passed after bounded repairs",
+      "files": [
+        "src/main/ipc/handlers/pianola.ts",
+        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json"
+      ],
+      "commit": {
+        "subject": "MAESTRO: verify durable Pianola learning recovery",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning.json"
+      },
+      "checks": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning.json",
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R10: independently rerun production composition acceptance and reconcile all SPEC criteria; candidateReady remains false",
+      "imagesAnalyzed": 0
     }
   ]
 }

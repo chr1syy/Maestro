@@ -1,0 +1,34 @@
+{
+  "taskId": "R09",
+  "status": "pass",
+  "unit": {
+    "receipt": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-unit.json",
+    "log": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-unit.log",
+    "passed": 67,
+    "failed": 0
+  },
+  "native": {
+    "receipt": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-native.json",
+    "log": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-native.log",
+    "trace": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-traces.json",
+    "passed": 26,
+    "failed": 0,
+    "skipped": 32
+  },
+  "static": {
+    "receipt": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-static.json",
+    "status": "pass"
+  },
+  "format": "pass",
+  "eslint": "pass (production and test configurations)",
+  "diffCheck": "pass",
+  "repairs": [
+    "Normalize optional scopeId before canonical boundary comparison.",
+    "Keep lifecycle guard IDs consistent for correction replay fixtures and narrow decision types."
+  ],
+  "initialFailures": "3 native assertions and 3 type errors, repaired and rerun",
+  "effectiveModel": "unknown",
+  "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+  "nextAction": "R10 independently reruns production composition and reconciles acceptance; installed runtime remains unverified",
+  "fullSuite": "not run per playbook"
+}

@@ -1484,6 +1484,7 @@ describe('R08 durable learning through native review and filesystem APIs', () =>
 		if (['corrected source', 'changed risk', 'changed conditions'].includes(variant)) {
 			const original = mainStore.readDecisions().find((record) => record.humanEvidence)!;
 			const corrected = structuredClone(original);
+			if (corrected.decision.action !== 'auto_answer') throw new Error('Expected human answer');
 			if (variant === 'corrected source') {
 				corrected.decision.answer = corrected.humanEvidence!.answer = 'No, stop.';
 			}
@@ -1531,7 +1532,11 @@ describe('R08 durable learning through native review and filesystem APIs', () =>
 			const active = mainStore.readRules();
 			const original = mainStore.readDecisions().find((record) => record.humanEvidence)!;
 			const corrected = structuredClone(original);
-			if (newRecordId) corrected.id = 'fixture-correction';
+			if (corrected.decision.action !== 'auto_answer') throw new Error('Expected human answer');
+			if (newRecordId) {
+				corrected.id = 'fixture-correction';
+				corrected.lifecycle!.guard.decisionId = corrected.id;
+			}
 			corrected.decision.answer = corrected.humanEvidence!.answer = 'No, stop the inspection.';
 			const listener = vi.fn(() => {
 				// Notification must follow durable append, not precede it.
@@ -1547,7 +1552,14 @@ describe('R08 durable learning through native review and filesystem APIs', () =>
 				expect(listener).not.toHaveBeenCalled();
 				mainStore.appendDecision(corrected);
 				expect(listener).toHaveBeenCalledTimes(1);
-				mainStore.appendDecision({ ...corrected, id: 'fixture-correction-replay' });
+				mainStore.appendDecision({
+					...corrected,
+					id: 'fixture-correction-replay',
+					lifecycle: {
+						...corrected.lifecycle!,
+						guard: { ...corrected.lifecycle!.guard, decisionId: 'fixture-correction-replay' },
+					},
+				});
 				expect(listener).toHaveBeenCalledTimes(1);
 			} finally {
 				unsubscribe();
@@ -1609,6 +1621,7 @@ describe('R08 durable learning through native review and filesystem APIs', () =>
 			evidenceFingerprint: candidate.evidenceFingerprint,
 		});
 		const original = mainStore.readDecisions().find((record) => record.humanEvidence)!;
+		if (original.decision.action !== 'auto_answer') throw new Error('Expected human answer');
 		const answer = 'No, stop.';
 		mainStore.appendDecision({
 			...original,

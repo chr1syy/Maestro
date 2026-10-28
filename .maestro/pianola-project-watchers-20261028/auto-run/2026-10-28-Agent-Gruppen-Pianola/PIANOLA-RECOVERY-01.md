@@ -48,7 +48,7 @@ R07 evidence: native candidate review and conflict UI connected; targeted modal 
 
 <!-- MAESTRO:MODEL tier="medium" effort="medium" reason="Execute affected learning checks and capture precise results." -->
 
-- [ ] R09 Finish V2-12: execute affected learning/API/storage/rendered regressions and changed-file static checks from E/recovery-checks.md, fix bounded failures and record E/checks/recovery-learning.json. Success: actual passing evidence for L08/L09 and original V2-10/11/12 status/checkboxes reconciled; automatic activation, source-count or contradiction failures stop acceptance. No broad unrelated reruns.
+- [x] R09 Finish V2-12: execute affected learning/API/storage/rendered regressions and changed-file static checks from E/recovery-checks.md, fix bounded failures and record E/checks/recovery-learning.json. Success: actual passing evidence for L08/L09 and original V2-10/11/12 status/checkboxes reconciled; automatic activation, source-count or contradiction failures stop acceptance. No broad unrelated reruns.
 
 <!-- MAESTRO:MODEL tier="high" effort="high" reason="Review the completed production composition and requirement evidence independently of earlier partial reports." -->
 
