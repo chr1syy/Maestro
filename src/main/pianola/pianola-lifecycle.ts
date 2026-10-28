@@ -14,8 +14,14 @@ import { resolveMaestroCliScriptPath } from '../cue/cue-cli-executor';
 import { PianolaSupervisor } from './pianola-supervisor';
 import { PianolaRelearnScheduler } from './pianola-relearn-scheduler';
 import { runRelearnJob } from './pianola-relearn';
-import { readRules, writeSuggestions, getProfile } from './pianola-store-main';
-import type { DecisionPair } from '../../shared/pianola/transcript-mining';
+import {
+	readRules,
+	writeSuggestions,
+	getProfile,
+	readDecisions,
+	onHumanDecisionSettled,
+} from './pianola-store-main';
+import { settledDecisionPairs, type DecisionPair } from '../../shared/pianola/transcript-mining';
 import type { PianolaRule } from '../../shared/pianola/types';
 import type { getSettingsStore, getSessionsStore } from '../stores';
 
@@ -122,9 +128,10 @@ export function createPianolaLifecycle(deps: PianolaLifecycleDependencies): Pian
 	// Pianola scheduled re-learn: keeps the learned profile fresh as a PROPOSAL
 	// (stages suggestions; never overwrites the live profile/rules) and
 	// relaunches stale supervised targets, on a fixed cadence. Self-gates per
-	// tick on encoreFeatures.pianola. Mining reuses the existing `pianola learn`
-	// crawler via the bundled CLI; the composition is pure with injected deps.
+	// tick on encoreFeatures.pianola and immediately on a new native human decision.
+	// The audit corpus has transport identity; raw CLI role=user text does not.
 	const relearnScheduler = new PianolaRelearnScheduler({
+		onHumanDecisionSettled,
 		isEnabled: () => {
 			const ef = deps.settingsStore.get('encoreFeatures', {}) as Record<string, boolean>;
 			return ef.pianola === true;
@@ -135,7 +142,9 @@ export function createPianolaLifecycle(deps: PianolaLifecycleDependencies): Pian
 					const ef = deps.settingsStore.get('encoreFeatures', {}) as Record<string, boolean>;
 					return ef.pianola === true;
 				},
-				mine: mineDecisionPairsViaCli,
+				// Raw CLI transcripts do not authenticate their user-role author.
+				// Only settled, transport-attributed owner answers enter native learning.
+				mine: async () => settledDecisionPairs(readDecisions()),
 				readExisting: readExistingForRelearn,
 				writeSuggestions,
 				relaunchStale: () => supervisor?.relaunchStale() ?? 0,

@@ -8,6 +8,8 @@
  */
 
 import { app } from 'electron';
+import { settledDecisionPairs } from '../../shared/pianola/transcript-mining';
+import type { PianolaDecisionRecord } from '../../shared/pianola/storage';
 import * as path from 'path';
 import type {
 	RulesLoadResult,
@@ -33,7 +35,33 @@ const store = createPianolaFsStore({
 export const readRulesResult = store.readRulesResult;
 export const readRules = store.readRules;
 export const writeRules = store.writeRules;
-export const appendDecision = store.appendDecision;
+const humanDecisionListeners = new Set<() => void>();
+
+/** Native settled-decision event. The durable log remains the restart/replay authority. */
+export function onHumanDecisionSettled(listener: () => void): () => void {
+	humanDecisionListeners.add(listener);
+	return () => {
+		humanDecisionListeners.delete(listener);
+	};
+}
+
+export function appendDecision(record: PianolaDecisionRecord): void {
+	const candidate = settledDecisionPairs([record])[0];
+	const alreadySettled =
+		candidate &&
+		settledDecisionPairs(store.readDecisions()).some(
+			(pair) =>
+				(pair.evidence!.agentId === candidate.evidence!.agentId &&
+					pair.evidence!.tabId === candidate.evidence!.tabId &&
+					pair.evidence!.questionMessageId === candidate.evidence!.questionMessageId) ||
+				(pair.evidence!.actorId === candidate.evidence!.actorId &&
+					pair.evidence!.answerMessageId === candidate.evidence!.answerMessageId)
+		);
+	store.appendDecision(record);
+	if (candidate && !alreadySettled) {
+		for (const listener of humanDecisionListeners) listener();
+	}
+}
 export const readDecisions = store.readDecisions;
 export const readPlans = store.readPlans;
 export const writePlans = store.writePlans;

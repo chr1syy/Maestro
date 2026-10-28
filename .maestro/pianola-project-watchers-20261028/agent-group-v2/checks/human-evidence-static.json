@@ -1,0 +1,44 @@
+{
+	"taskId": "V2-08",
+	"kind": "source-static-only",
+	"changedSourceFiles": [
+		"src/main/ipc/handlers/pianola.ts",
+		"src/main/pianola/pianola-decisions.ts",
+		"src/main/pianola/pianola-lifecycle.ts",
+		"src/main/pianola/pianola-relearn-scheduler.ts",
+		"src/main/pianola/pianola-relearn.ts",
+		"src/main/pianola/pianola-store-main.ts",
+		"src/main/stores/types.ts",
+		"src/main/web-server/WebServer.ts",
+		"src/main/web-server/handlers/bridgeDenyList.ts",
+		"src/shared/pianola/pianola-decision-lifecycle.ts",
+		"src/shared/pianola/pianola-synthesis.ts",
+		"src/shared/pianola/storage.ts",
+		"src/shared/pianola/transcript-mining.ts"
+	],
+	"checks": [
+		{
+			"command": "node_modules/.bin/eslint src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-decisions.ts src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn-scheduler.ts src/main/pianola/pianola-relearn.ts src/main/pianola/pianola-store-main.ts src/main/stores/types.ts src/main/web-server/WebServer.ts src/main/web-server/handlers/bridgeDenyList.ts src/shared/pianola/pianola-decision-lifecycle.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/storage.ts src/shared/pianola/transcript-mining.ts",
+			"exitCode": 0
+		},
+		{
+			"command": "node_modules/.bin/prettier --check src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-decisions.ts src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn-scheduler.ts src/main/pianola/pianola-relearn.ts src/main/pianola/pianola-store-main.ts src/main/stores/types.ts src/main/web-server/WebServer.ts src/main/web-server/handlers/bridgeDenyList.ts src/shared/pianola/pianola-decision-lifecycle.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/storage.ts src/shared/pianola/transcript-mining.ts",
+			"exitCode": 0
+		},
+		{
+			"command": "node .maestro/pianola-project-watchers-20261028/auto-run/Working/V2-08-typecheck.cjs",
+			"exitCode": 0,
+			"result": "13 changed source roots plus ambient declarations; zero diagnostics using tsconfig.main.json options with Node ambient types."
+		},
+		{
+			"command": "git diff --check",
+			"exitCode": 0
+		}
+	],
+	"tests": {
+		"authored": false,
+		"executed": false,
+		"reason": "Explicit playbook separation: V2-11 regression authoring, V2-12 execution."
+	},
+	"installedRuntimeVerified": false
+}

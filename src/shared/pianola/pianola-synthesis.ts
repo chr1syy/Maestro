@@ -19,7 +19,7 @@
 
 import type { PianolaRule, PianolaSignalKind } from './types';
 import type { DecisionAggregates, DecisionPair } from './transcript-mining';
-import { aggregateDecisionPairs } from './transcript-mining';
+import { aggregateDecisionPairs, confirmedHumanDecisionPairs } from './transcript-mining';
 
 /** Minimum observed decisions in a (kind) cluster before it can become a rule. */
 export const SUGGESTION_MIN_SAMPLES = 5;
@@ -67,6 +67,8 @@ function lowRiskKindStats(
 	let total = 0;
 	let affirmative = 0;
 	for (const pair of pairs) {
+		// Unknown action/conditions are audit evidence, never a rule candidate.
+		if (!pair.evidence?.action || !pair.evidence.conditions) continue;
 		if (pair.classification.risk !== 'low') continue;
 		if (pair.classification.kind !== kind) continue;
 		total += 1;
@@ -134,12 +136,13 @@ function renderProfile(aggregates: DecisionAggregates): string {
  */
 export function synthesizeSuggestions(input: SynthesisInput): SynthesisResult {
 	const now = input.now ?? Date.now();
-	const aggregates = aggregateDecisionPairs(input.pairs);
+	const pairs = confirmedHumanDecisionPairs(input.pairs);
+	const aggregates = aggregateDecisionPairs(pairs);
 
 	const proposals: PianolaRule[] = [];
 	for (const kind of RULEABLE_KINDS) {
 		if (ruleAlreadyCovers(input.existingRules, kind)) continue;
-		const { total, affirmative } = lowRiskKindStats(input.pairs, kind);
+		const { total, affirmative } = lowRiskKindStats(pairs, kind);
 		if (total < SUGGESTION_MIN_SAMPLES) continue;
 		if (affirmative / total < SUGGESTION_MIN_AFFIRM_RATIO) continue;
 		proposals.push(proposalForKind(kind, total, now));

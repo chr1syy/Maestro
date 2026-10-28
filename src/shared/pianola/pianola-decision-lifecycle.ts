@@ -6,7 +6,7 @@ import { canonicalJson } from '../canonicalJson';
 
 export type PianolaDecisionActor =
 	| { kind: 'manager'; agentId: string; tabId: string }
-	| { kind: 'human'; actorId: string };
+	| { kind: 'human'; actorId: string; principal?: 'chris' };
 
 export interface PianolaDecisionResolution {
 	decisionId: string;

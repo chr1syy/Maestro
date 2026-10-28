@@ -189,6 +189,42 @@
 			],
 			"responsibleActor": "V2-05 Auto Run agent",
 			"nextAction": "Finish V2-05: persist and display per-tab failures including unavailable cursors, account for selection changes and freshness in coverage, add and validate human decision resolution UX, and run applicable static checks. Historical checkpoints and a running worker do not prove current coverage. Keep task unchecked until criteria are met."
+		},
+		{
+			"taskId": "V2-08",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "complete",
+			"changedFiles": [
+				"src/main/ipc/handlers/pianola.ts",
+				"src/main/pianola/pianola-decisions.ts",
+				"src/main/pianola/pianola-lifecycle.ts",
+				"src/main/pianola/pianola-relearn-scheduler.ts",
+				"src/main/pianola/pianola-relearn.ts",
+				"src/main/pianola/pianola-store-main.ts",
+				"src/main/stores/types.ts",
+				"src/main/web-server/WebServer.ts",
+				"src/main/web-server/handlers/bridgeDenyList.ts",
+				"src/shared/pianola/pianola-decision-lifecycle.ts",
+				"src/shared/pianola/pianola-synthesis.ts",
+				"src/shared/pianola/storage.ts",
+				"src/shared/pianola/transcript-mining.ts",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-08-human-evidence.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/human-evidence-static.json",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-02.md"
+			],
+			"commit": "Included in MAESTRO: capture attributable Pianola human decision evidence; exact commit/push receipt in auto-run/Working/V2-08-delivery.json",
+			"parentCommit": "2342c465be35ba1310cb8f3604b0dc07b49b605f",
+			"contract": "See V2-08-human-evidence.md for explicit optional identity binding (unconfigured means excluded), immutable source/recipient/group/message/time evidence, unknown semantic fields, durable ask/answer dedup and native settlement event/scheduler wiring. Decision commitment is distinct from recipient delivery or continuation.",
+			"evidence": [
+				"Changed-source Prettier, ESLint and whitespace checks passed. Scoped TypeScript receipt in checks/human-evidence-static.json.",
+				"No tests authored/executed, no live identity binding or productive messages/rules/watch changes, no restart/install/extra agents/worktrees. Four preexisting staged test blobs excluded from this task commit.",
+				"Actual executed model/effort telemetry unavailable; configured high/medium hints are not execution evidence.",
+				"Predecessor progress still lists V2-05 in progress and no V2-06/V2-07 receipts; no dependent coverage/fixture acceptance claimed."
+			],
+			"responsibleActor": "V2-09 Auto Run agent",
+			"nextAction": "V2-09: consume verified deduplicated DecisionPair.evidence, establish concrete action/condition equivalence and explicit agent/group scope, three configurable independent samples, contradictions and per-action approval limits. Preserve unknown-semantics exclusion. V2-11/12 author/run production regressions and verify predecessor completion before acceptance."
 		}
 	]
 }

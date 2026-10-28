@@ -246,11 +246,20 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 		if (!isPianolaEnabled(settingsStore)) throw new Error('PianolaDisabled');
 		const server = deps.getWebServer?.();
 		if (!server) throw new Error('Native decision transport unavailable');
-		return server.resolvePianolaHumanDecision(
-			payload,
-			getActingUser()?.id ??
-				((_event as unknown as { type?: string }).type === 'bridge' ? 'web-owner' : 'desktop')
-		);
+		const user = getActingUser();
+		const bridge = (_event as unknown as { type?: string }).type === 'bridge';
+		const identity = settingsStore.get('pianolaLearningIdentity');
+		const actorId = user?.id ?? (bridge ? 'web-owner' : 'desktop');
+		// Binding is explicit configuration, never a display-name or user-role guess.
+		// Anonymous web-owner and unconfigured desktop answers remain audit-only.
+		const confirmed =
+			isRecord(identity) &&
+			((user &&
+				typeof identity.chrisWebUserId === 'string' &&
+				!!identity.chrisWebUserId &&
+				user.id === identity.chrisWebUserId) ||
+				(!user && !bridge && !!_event.sender && identity.desktopOwnerIsChris === true));
+		return server.resolvePianolaHumanDecision(payload, actorId, confirmed ? 'chris' : undefined);
 	});
 
 	ipcMain.handle(

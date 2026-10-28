@@ -147,10 +147,34 @@ export interface PianolaDecisionRecord {
 	deliveryStatus?: 'admitted';
 	/** Scope decisions retain their recipient binding and attributable resolution. */
 	lifecycle?: PianolaDecisionLifecycle;
+	/** Immutable evidence of a transport-attributed owner decision; absent on legacy logs. */
+	humanEvidence?: PianolaHumanDecisionEvidence;
 	/** True if running in dry-run mode (never dispatches). */
 	dryRun: boolean;
 	/** Populated when a dispatch attempt failed. */
 	error?: string;
+}
+
+/** Native owner resolution, never inferred from a transcript's user role or answer text. */
+export interface PianolaHumanDecisionEvidence {
+	version: 1;
+	sourceKind: 'native-human-resolution';
+	principal: 'chris';
+	actorId: string;
+	agentId: string;
+	/** Group membership at decision time; undefined metadata excludes the sample. */
+	groupId: string | null;
+	tabId: string;
+	questionMessageId: string;
+	/** ID of the native answer event, independent of the eventual transcript echo. */
+	answerMessageId: string;
+	askedAt: string;
+	answeredAt: string;
+	question: string;
+	answer: string;
+	/** Semantic interpretation is deliberately unknown until equivalence is established. */
+	action: string | null;
+	conditions: string[] | null;
 }
 
 export interface PianolaDecisionLifecycle {
@@ -304,6 +328,8 @@ export function validatePianolaDecisionRecord(raw: unknown): PianolaDecisionReco
 	if (raw.lifecycle !== undefined && !isValidLifecycle(raw.lifecycle)) return null;
 	if (!isValidClassification(raw.classification)) return null;
 	if (!isValidDecision(raw.decision)) return null;
+	if (raw.humanEvidence !== undefined && !isValidHumanDecisionEvidence(raw.humanEvidence))
+		return null;
 	if (raw.lifecycle !== undefined) {
 		const life = raw.lifecycle as PianolaDecisionLifecycle;
 		if (
@@ -314,7 +340,41 @@ export function validatePianolaDecisionRecord(raw: unknown): PianolaDecisionReco
 		)
 			return null;
 	}
+	if (raw.humanEvidence !== undefined) {
+		const evidence = raw.humanEvidence as PianolaHumanDecisionEvidence;
+		if (
+			evidence.agentId !== raw.agentId ||
+			evidence.tabId !== raw.tabId ||
+			evidence.questionMessageId !==
+				(raw.classification as PianolaClassification).evidence.messageId
+		)
+			return null;
+	}
 	return raw as unknown as PianolaDecisionRecord;
+}
+
+export function isValidHumanDecisionEvidence(raw: unknown): raw is PianolaHumanDecisionEvidence {
+	if (!isRecord(raw)) return false;
+	return (
+		raw.version === 1 &&
+		raw.sourceKind === 'native-human-resolution' &&
+		raw.principal === 'chris' &&
+		[
+			'actorId',
+			'agentId',
+			'tabId',
+			'questionMessageId',
+			'answerMessageId',
+			'question',
+			'answer',
+		].every((key) => typeof raw[key] === 'string' && !!(raw[key] as string).trim()) &&
+		['askedAt', 'answeredAt'].every(
+			(key) => typeof raw[key] === 'string' && Number.isFinite(Date.parse(raw[key] as string))
+		) &&
+		(raw.groupId === null || (typeof raw.groupId === 'string' && !!raw.groupId)) &&
+		(raw.action === null || (typeof raw.action === 'string' && !!raw.action.trim())) &&
+		(raw.conditions === null || isStringArray(raw.conditions))
+	);
 }
 
 function isValidLifecycle(raw: unknown): raw is PianolaDecisionLifecycle {

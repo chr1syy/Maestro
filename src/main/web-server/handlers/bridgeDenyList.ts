@@ -156,7 +156,7 @@ export function isRemoteSettingReadable(key: unknown): key is string {
 export function isRemoteSettingWritable(key: unknown): key is string {
 	return (
 		isRemoteSettingReadable(key) &&
-		!/^(?:webAuth|webInterface|persistentWebLink|encoreFeatures|installationId|globalShowHotkey|customSyncPath|iCloudSyncEnabled|sshRemotes|leaderboardRegistration)/.test(
+		!/^(?:pianolaLearningIdentity|webAuth|webInterface|persistentWebLink|encoreFeatures|installationId|globalShowHotkey|customSyncPath|iCloudSyncEnabled|sshRemotes|leaderboardRegistration)/.test(
 			key
 		)
 	);

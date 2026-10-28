@@ -567,8 +567,12 @@ export class WebServer {
 	}
 
 	/** Explicit renderer action, sharing native admission with manager answers. */
-	resolvePianolaHumanDecision(payload: unknown, actorId: string) {
-		return resolvePianolaDecision(this.callbackRegistry, payload, { kind: 'human', actorId });
+	resolvePianolaHumanDecision(payload: unknown, actorId: string, principal?: 'chris') {
+		return resolvePianolaDecision(this.callbackRegistry, payload, {
+			kind: 'human',
+			actorId,
+			principal,
+		});
 	}
 
 	setInterruptSessionCallback(callback: InterruptSessionCallback): void {

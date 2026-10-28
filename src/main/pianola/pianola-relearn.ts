@@ -15,14 +15,17 @@
  */
 
 import { synthesizeSuggestions } from '../../shared/pianola/pianola-synthesis';
-import type { DecisionPair } from '../../shared/pianola/transcript-mining';
+import {
+	confirmedHumanDecisionPairs,
+	type DecisionPair,
+} from '../../shared/pianola/transcript-mining';
 import type { PianolaRule } from '../../shared/pianola/types';
 import type { PianolaSuggestionsFile } from '../../shared/pianola/storage';
 
 export interface RelearnDeps {
 	/** Whether the `pianola` Encore flag is on. Re-read on every run. */
 	isEnabled: () => boolean;
-	/** Mine the installed CLIs' transcripts into a labeled decision corpus. */
+	/** Read attributable settled decisions; unknown-origin imports are filtered again. */
 	mine: () => Promise<DecisionPair[]>;
 	/** Read the user's current rules + global decision-profile markdown (live state). */
 	readExisting: () => { rules: PianolaRule[]; profile: string };
@@ -68,7 +71,7 @@ export async function runRelearnJob(deps: RelearnDeps): Promise<RelearnResult> {
 	}
 
 	try {
-		const pairs = await deps.mine();
+		const pairs = confirmedHumanDecisionPairs(await deps.mine());
 		const { rules, profile } = deps.readExisting();
 		const { proposals, profileDiff } = synthesizeSuggestions({
 			pairs,

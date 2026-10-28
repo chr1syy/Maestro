@@ -14,7 +14,11 @@ import {
 import { classifyMessages } from '../../shared/pianola/pianola-classifier';
 import { enrichWithAwaitingInput } from '../../shared/pianola/pianola-awaiting-detector';
 import { rateRisk } from '../../shared/pianola/pianola-risk';
-import type { PianolaDecisionRecord } from '../../shared/pianola/storage';
+import {
+	PIANOLA_DECISION_RECORD_MAX_BYTES,
+	type PianolaDecisionRecord,
+} from '../../shared/pianola/storage';
+import { generateUUID } from '../../shared/uuid';
 import { canonicalJson } from '../../shared/canonicalJson';
 
 type NativeCallbacks = Partial<
@@ -282,10 +286,40 @@ export async function resolvePianolaDecision(
 		return { status: 'accepted' };
 	}
 	if (!callbacks.executeCommand) throw new Error('Native send callback unavailable');
+	const history = callbacks.getSessionHistory?.(record.tabId);
+	const question = history?.messages.find((message) => message.id === life.guard.messageId);
+	const owner = snapshot.owners.find((candidate) => candidate.id === record.agentId);
+	const humanEvidence =
+		actor.kind === 'human' &&
+		actor.principal === 'chris' &&
+		question &&
+		question.content.trim() &&
+		question.content.length <= 8000 &&
+		Number.isFinite(Date.parse(question.timestamp)) &&
+		owner?.groupId !== undefined
+			? {
+					version: 1 as const,
+					sourceKind: 'native-human-resolution' as const,
+					principal: 'chris' as const,
+					actorId: actor.actorId,
+					agentId: record.agentId,
+					groupId: owner.groupId,
+					tabId: record.tabId,
+					questionMessageId: question.id,
+					answerMessageId: generateUUID(),
+					askedAt: question.timestamp,
+					answeredAt: now,
+					question: question.content,
+					answer: text,
+					action: null,
+					conditions: null,
+				}
+			: undefined;
 	const intent = updatePianolaDecision(
 		{
 			...record,
 			classification,
+			humanEvidence,
 			decision: {
 				action: 'auto_answer',
 				answer: text,
@@ -306,6 +340,9 @@ export async function resolvePianolaDecision(
 		},
 		now
 	);
+	// Evidence must never make an otherwise valid answer exceed the audit budget.
+	if (Buffer.byteLength(JSON.stringify(intent), 'utf-8') > PIANOLA_DECISION_RECORD_MAX_BYTES)
+		delete intent.humanEvidence;
 	// No await between revalidation and the durable claim. Duplicate callbacks
 	// see this claim before they can reach the renderer.
 	store.appendDecision(intent);
