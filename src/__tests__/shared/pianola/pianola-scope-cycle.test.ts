@@ -364,9 +364,23 @@ describe('scope ownership and lifecycle', () => {
 		await f.cycle();
 		await f.cycle(otherScopeId);
 		f.history(tab, [message('worktree-ask')]);
-		await f.cycle();
-		await f.cycle(otherScopeId);
+		expect((await f.cycle()).iterations).toEqual([]);
+		// Coverage inheritance does not widen a parent's exact project rule.
+		expect((await f.cycle(otherScopeId)).iterations[0].result.decision).toMatchObject({
+			action: 'escalate',
+			matchedRuleId: null,
+		});
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+		f.rules[0].scopeId = path.resolve('worktree');
+		f.history(tab, [message('worktree-ask'), message('worktree-scoped-ask')]);
+		expect((await f.cycle()).iterations).toEqual([]);
+		expect((await f.cycle(otherScopeId)).issues).toEqual([]);
 		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.dispatch).mock.calls[0][0]).toEqual({
+			agentId: 'worktree',
+			tabId: 'worktree-tab',
+			projectPath: path.resolve('worktree'),
+		});
 		expect(vi.mocked(f.deps.dispatch).mock.calls[0][2].scopeId).toBe(otherScopeId);
 	});
 
