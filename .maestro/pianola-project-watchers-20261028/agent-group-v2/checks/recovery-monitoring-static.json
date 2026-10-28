@@ -1,0 +1,31 @@
+{
+  "status": "pass",
+  "checkKind": "scoped-typecheck",
+  "roots": [
+    "src/main/ipc/handlers/pianola.ts",
+    "src/shared/pianola/pianola-scope-checkpoint.ts",
+    "src/shared/pianola/pianola-scope-cycle.ts",
+    "src/renderer/components/PianolaDashboard/PianolaDashboard.tsx",
+    "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx",
+    "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
+    "src/__tests__/shared/pianola/pianola-scope-checkpoint.test.ts",
+    "src/__tests__/renderer/components/PianolaDashboard/PianolaDashboard.test.tsx",
+    "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx",
+    "src/__tests__/integration/pianola-native-acceptance.integration.test.ts"
+  ],
+  "ambientRoots": [
+    "src/types/dns-packet.d.ts",
+    "src/types/css.d.ts",
+    "src/renderer/global.d.ts",
+    "src/renderer/assets.d.ts"
+  ],
+  "compilerOptions": {
+    "config": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/tsconfig.main.json",
+    "nodeAmbientTypes": true,
+    "jsx": "react-jsx",
+    "jestDomMatchers": true,
+    "domLibrary": true
+  },
+  "changedRootDiagnostics": [],
+  "dependencyDiagnostics": []
+}

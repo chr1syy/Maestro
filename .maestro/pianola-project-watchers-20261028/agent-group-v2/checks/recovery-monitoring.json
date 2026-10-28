@@ -1,0 +1,36 @@
+{
+  "taskId": "R04",
+  "status": "pass",
+  "unit": {
+    "passed": 161,
+    "failed": 0,
+    "receipt": "checks/recovery-monitoring-unit.json",
+    "log": "checks/r04-unit-last.log"
+  },
+  "native": {
+    "passed": 34,
+    "failed": 0,
+    "skipped": 6,
+    "receipt": "checks/recovery-monitoring-native.json",
+    "trace": "checks/recovery-monitoring-traces.json",
+    "log": "checks/r04-final-1.log"
+  },
+  "types": {
+    "status": "pass",
+    "receipt": "checks/recovery-monitoring-static.json",
+    "log": "checks/r04-static-last.log"
+  },
+  "format_lint": "pass; original R04 commands and rerun for changed files",
+  "logs": [
+    "checks/r04-3.log",
+    "checks/r04-4.log",
+    "checks/r04-5.log",
+    "checks/r04-lint-last.log"
+  ],
+  "diffCheck": "pass",
+  "initialFailures": "Invalid census timestamp; outdated UI assertion; incomplete test mock; missing renderer IPC type; inaccessible exclusion label; static driver missing renderer ambient declarations and ES module option. Repaired and rerun.",
+  "installed": false,
+  "fullSuite": "not run by scope",
+  "effectiveModel": "unknown",
+  "effectiveEffort": "unknown"
+}

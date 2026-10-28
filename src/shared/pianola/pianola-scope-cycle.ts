@@ -386,17 +386,18 @@ export async function runPianolaScopeCycle(
 	} catch (error) {
 		// Keep the last successful census as historical evidence, while exposing
 		// the most recent failure immediately (even within its freshness window).
+		const observedAt = Date.parse(deps.watch.now());
 		if (!checkpoint)
 			checkpoint = {
 				version: 1,
 				scopeId,
 				configurationFingerprint,
-				activatedAt: deps.watch.now(),
+				activatedAt: observedAt,
 				status: 'suspended',
 				tabs: [],
 			};
 		checkpoint.lastCycleError = {
-			observedAt: deps.watch.now(),
+			observedAt,
 			reason: (error instanceof Error ? error.message : 'Native census unavailable').slice(0, 4000),
 		};
 		persist();

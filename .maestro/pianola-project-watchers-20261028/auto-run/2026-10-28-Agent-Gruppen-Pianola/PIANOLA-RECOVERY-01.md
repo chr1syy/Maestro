@@ -22,7 +22,9 @@ Each current checkbox is an actual bounded implementation/check task. Before tic
 
 <!-- MAESTRO:MODEL tier="medium" effort="medium" reason="Run focused checks and resolve limited failures without repeating broad passing suites." -->
 
-- [ ] R04 Finish V2-07: run affected monitoring and rendered regression commands from E/recovery-checks.md plus changed-file lint/format/types. Reuse unaffected receipts. Fix bounded defects and rerun justified checks. Success: applicable checks pass with logs in E/checks/recovery-monitoring.json and original V2-05/06/07 ledger/checkboxes reconciled from actual criteria, not assumptions. A genuine blocker halts before later dependent tasks. No full suite/validate:push.
+- [x] R04 Finish V2-07: run affected monitoring and rendered regression commands from E/recovery-checks.md plus changed-file lint/format/types. Reuse unaffected receipts. Fix bounded defects and rerun justified checks. Success: applicable checks pass with logs in E/checks/recovery-monitoring.json and original V2-05/06/07 ledger/checkboxes reconciled from actual criteria, not assumptions. A genuine blocker halts before later dependent tasks. No full suite/validate:push.
+
+R04 evidence: 161 monitoring/rendered tests and 34 native cases passed; scoped types, formatting and lint passed. See E/checks/recovery-monitoring.json. V2-05/06/07 ledger reconciled; original document checkboxes remain unchanged under the current-task-only rule. Installed runtime remains unverified.
 
 <!-- MAESTRO:MODEL tier="high" effort="high" reason="Candidate identity and explicit approval must survive restart without stale approval or self-reinforcement." -->
 

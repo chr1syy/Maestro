@@ -121,7 +121,7 @@ describe('PianolaDashboard data mapping', () => {
 		render(<PianolaDashboard theme={theme} onJumpToAgent={vi.fn()} />);
 		expect(screen.getByText('Watched by Pianola')).toBeInTheDocument();
 		expect(screen.queryByText('Agent 0')).not.toBeInTheDocument();
-		expect(screen.getByText('Watch an agent')).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: '+ Add selection' })).toBeInTheDocument();
 		fireEvent.click(screen.getByRole('button', { name: 'Show agents' }));
 		expect(screen.getByText('Agent 0')).toBeInTheDocument();
 		fireEvent.click(screen.getByRole('button', { name: 'Hide agents' }));
@@ -230,9 +230,9 @@ const pendingRecord = startPianolaDecision(
 		bindingFingerprint: 'b'.repeat(64),
 		agentId: pair.evidence!.agentId,
 		tabId: pair.sessionId,
-		messageId: pair.classification.evidence.messageId,
+		messageId: pair.classification.evidence.messageId!,
 		decisionId: 'dashboard-decision',
-		cursor: { id: pair.classification.evidence.messageId, count: 1, textLength: pair.ask.length },
+		cursor: { id: pair.classification.evidence.messageId!, count: 1, textLength: pair.ask.length },
 	},
 	'fixture-manager',
 	'fixture-group'

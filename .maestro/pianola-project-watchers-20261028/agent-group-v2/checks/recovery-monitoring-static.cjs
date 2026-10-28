@@ -13,7 +13,7 @@ const roots = [
   "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx",
   "src/__tests__/integration/pianola-native-acceptance.integration.test.ts"
 ];
-const ambientRoots = ['src/types/dns-packet.d.ts', 'src/renderer/global.d.ts'];
+const ambientRoots = ['src/types/dns-packet.d.ts', 'src/types/css.d.ts', 'src/renderer/global.d.ts', 'src/renderer/assets.d.ts'];
 const configPath = ts.findConfigFile(process.cwd(), ts.sys.fileExists, 'tsconfig.main.json');
 const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
 const config = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path.dirname(configPath));
@@ -23,6 +23,7 @@ const options = {
 	rootDir: undefined,
 	types: ['node', '@testing-library/jest-dom/vitest'],
 	jsx: ts.JsxEmit.ReactJSX,
+	module: ts.ModuleKind.ESNext,
 	incremental: false,
 	composite: false,
 	lib: [...config.options.lib, 'lib.dom.d.ts'],

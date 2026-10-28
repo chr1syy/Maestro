@@ -1,5 +1,4 @@
 /** Rendered native selections use the real hook; only IPC transport is a fixture. */
-import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { PianolaScopeControls } from '../../../../renderer/components/PianolaDashboard/PianolaScopeControls';
@@ -10,7 +9,10 @@ import { mockTheme } from '../../../helpers/mockTheme';
 import type { PianolaSupervisorSnapshot } from '../../../../main/ipc/handlers/pianola';
 import type { PianolaSupervisedTarget } from '../../../../shared/pianola/storage';
 
-vi.mock('../../../../renderer/stores/notificationStore', () => ({ notifyToast: vi.fn() }));
+vi.mock('../../../../renderer/stores/notificationStore', async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	notifyToast: vi.fn(),
+}));
 vi.mock('../../../../renderer/utils/sentry', () => ({ captureException: vi.fn() }));
 
 const scope: PianolaSupervisedTarget = {
@@ -85,10 +87,8 @@ describe('PianolaScopeControls production hook composition', () => {
 		fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
 		expect(screen.getByRole('combobox', { name: 'Manager' })).toHaveValue('manager');
 		expect(screen.getByRole('checkbox', { name: 'Native group' })).toBeChecked();
-		// Each existing row labels its selection and exclusion checkbox together.
-		const owner = screen.getAllByRole('checkbox', { name: /Owner/ });
-		expect(owner[0]).toBeChecked();
-		fireEvent.click(owner[1]);
+		expect(screen.getByRole('checkbox', { name: 'Select Owner' })).toBeChecked();
+		fireEvent.click(screen.getByRole('checkbox', { name: 'Exclude Owner' }));
 		fireEvent.click(screen.getByRole('checkbox', { name: 'Native group' }));
 		fireEvent.change(screen.getByRole('textbox', { name: 'Label' }), {
 			target: { value: 'Updated selection' },

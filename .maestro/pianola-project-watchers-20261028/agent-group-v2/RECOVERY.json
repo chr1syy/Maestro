@@ -3,9 +3,6 @@
   "sourceHead": "5edef58da8",
   "previousOutcome": "partial;28pass4fail",
   "unfinishedOriginalTasks": [
-    "V2-05",
-    "V2-06",
-    "V2-07",
     "V2-10",
     "V2-11",
     "V2-12"
@@ -13,7 +10,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R04: execute the focused monitoring commands in recovery-checks.md, repair bounded defects and record actual receipts",
+  "nextAction": "R05: implement durable source-linked candidate and rejection storage",
   "tasks": [
     {
       "taskId": "R00",
@@ -142,6 +139,27 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R04: execute the focused monitoring commands in recovery-checks.md, repair bounded defects and record actual receipts",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R04",
+      "status": "complete",
+      "files": [
+        "checks/recovery-monitoring.json",
+        "checks/recovery-monitoring-unit.json",
+        "checks/recovery-monitoring-native.json",
+        "checks/recovery-monitoring-static.json",
+        "checks/recovery-monitoring-traces.json"
+      ],
+      "commit": {
+        "subject": "MAESTRO: validate and repair Pianola monitoring coverage",
+        "resolve": "git log -1 --format=%H -- src/shared/pianola/pianola-scope-cycle.ts"
+      },
+      "checks": "checks/recovery-monitoring.json",
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R05; R10 rechecks complete acceptance",
       "imagesAnalyzed": 0
     }
   ]

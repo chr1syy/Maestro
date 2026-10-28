@@ -180,6 +180,7 @@ export function PianolaScopeControls({
 							<label key={session.id}>
 								<input
 									type="checkbox"
+									aria-label={`Select ${session.name}`}
 									checked={selection.agentIds.includes(session.id)}
 									onChange={() => toggle('agentIds', session.id)}
 								/>{' '}
@@ -187,6 +188,7 @@ export function PianolaScopeControls({
 								<input
 									className="ml-3"
 									type="checkbox"
+									aria-label={`Exclude ${session.name}`}
 									checked={selection.excludedAgentIds.includes(session.id)}
 									onChange={() => toggle('excludedAgentIds', session.id)}
 								/>{' '}
