@@ -287,7 +287,11 @@ export async function runWatchIteration(
 	target: WatchTarget,
 	state: WatchState,
 	deps: WatchDeps,
-	options: { dryRun: boolean }
+	options: {
+		dryRun: boolean;
+		/** Enrollment eligibility must not remove messages needed for risk context. */
+		canActOnMessage?: (messageId: string) => boolean;
+	}
 ): Promise<{ state: WatchState; result: IterationResult }> {
 	const enriched = enrichWithAwaitingInput(messages);
 	const classification = classifyMessages(enriched);
@@ -341,6 +345,18 @@ export async function runWatchIteration(
 	}
 
 	const messageId = classification.evidence.messageId;
+	if (options.canActOnMessage && (!messageId || !options.canActOnMessage(messageId))) {
+		const result: IterationResult = {
+			classification,
+			decision: null,
+			record: null,
+			acted: false,
+			dispatched: false,
+			skipped: 'prompt precedes enrollment baseline',
+		};
+		deps.log(describe(result));
+		return { state, result };
+	}
 	if (messageId && messageId === state.lastHandledMessageId) {
 		const result: IterationResult = {
 			classification,

@@ -149,6 +149,98 @@ function fixture() {
 }
 
 describe('scope activation and working-tab discovery', () => {
+	it('answers a same-ID busy stream completed after enrollment once, including after restart', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		tab.busy = true;
+		f.history(tab, [message('stream', 'Working.')]);
+		await f.cycle();
+		const directory = path.dirname(f.store.supervisorFilePath());
+		f.deps.store = createPianolaFsStore({
+			resolveDir: () => directory,
+			indent: 2,
+			trailingNewline: true,
+		});
+		tab.busy = false;
+		f.history(tab, [message('stream')]);
+		const result = await f.cycle();
+		expect(result.issues).toEqual([]);
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.dispatch).mock.calls[0][2].messageId).toBe('stream');
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([false, true])(
+		'retains full current-turn risk for a fresh ask (same stream: %s)',
+		async (sameStream) => {
+			const f = fixture();
+			const tab = f.tab();
+			tab.busy = true;
+			const task: PianolaMessage = {
+				...message('task', 'Investigate only.'),
+				role: 'user',
+				source: 'user',
+			};
+			const intent = message('intent', 'I will run DROP DATABASE demo.');
+			f.history(tab, [task, intent, message('stream', 'Working.')]);
+			await f.cycle();
+			tab.busy = false;
+			f.history(
+				tab,
+				sameStream
+					? [task, intent, message('stream')]
+					: [task, intent, message('stream', 'Working.'), message('fresh')]
+			);
+			const result = await f.cycle();
+			expect(result.issues).toEqual([]);
+			expect(result.iterations[0].result).toMatchObject({
+				classification: { kind: 'question', risk: 'high' },
+				decision: { action: 'escalate' },
+			});
+			expect(f.deps.dispatch).not.toHaveBeenCalled();
+			expect(f.deps.requestJudgment).not.toHaveBeenCalled();
+			expect(f.deps.watch.notify).toHaveBeenCalledWith(expect.objectContaining({ highRisk: true }));
+		}
+	);
+
+	it.each(['busy-ended', 'tool-appended', 'idle-grew'] as const)(
+		'does not revive a historical ask when %s',
+		async (change) => {
+			const f = fixture();
+			const tab = f.tab();
+			tab.busy = change !== 'idle-grew';
+			f.history(tab, [message('old')]);
+			await f.cycle();
+			tab.busy = false;
+			if (change === 'tool-appended')
+				f.history(tab, [
+					message('old'),
+					{ ...message('tool', 'Finished.'), role: 'tool', source: 'tool' },
+				]);
+			if (change === 'idle-grew')
+				f.history(tab, [message('old', 'Should I name it count or total? Please choose.')]);
+			await f.cycle();
+			expect(f.store.readDecisions()).toEqual([]);
+			expect(f.deps.dispatch).not.toHaveBeenCalled();
+			expect(f.deps.requestJudgment).not.toHaveBeenCalled();
+		}
+	);
+
+	it('ends prior risk context at a new user task while retaining a fresh question', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		f.history(tab, [message('old', 'I will run DROP DATABASE demo.')]);
+		await f.cycle();
+		f.history(tab, [
+			message('old', 'I will run DROP DATABASE demo.'),
+			{ ...message('task', 'Only choose a variable name.'), role: 'user', source: 'user' },
+			message('fresh'),
+		]);
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+	});
+
 	it('baselines every existing tab without reading or acting on historical asks', async () => {
 		const f = fixture();
 		f.history(f.tab('first'), [message('old-1')]);

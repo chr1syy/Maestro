@@ -16,6 +16,8 @@ export interface PianolaScopeCheckpointTab {
 	/** Effective owner/root binding. Missing on an older checkpoint forces a baseline. */
 	bindingFingerprint?: string;
 	baseline: PianolaScopeCursor | null;
+	/** Only a live stream at enrollment may complete within the baseline entry. */
+	baselineBusy?: boolean;
 	lastSeen: PianolaScopeCursor | null;
 	state: WatchState;
 	status: 'active' | 'suspended' | 'closed';
@@ -110,6 +112,7 @@ export function validatePianolaScopeCheckpoint(
 				(typeof tab.bindingFingerprint !== 'string' ||
 					!FINGERPRINT.test(tab.bindingFingerprint))) ||
 			!isPianolaScopeCursor(tab.baseline) ||
+			(tab.baselineBusy !== undefined && typeof tab.baselineBusy !== 'boolean') ||
 			!isPianolaScopeCursor(tab.lastSeen) ||
 			!state(tab.state) ||
 			(tab.status !== 'active' && tab.status !== 'suspended' && tab.status !== 'closed')

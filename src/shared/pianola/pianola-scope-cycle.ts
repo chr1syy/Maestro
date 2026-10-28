@@ -307,6 +307,7 @@ export async function runPianolaScopeCycle(
 				tabId: tab.tabId,
 				bindingFingerprint: binding,
 				baseline: createdAfterActivation && !tab.paused ? null : tab.cursor,
+				baselineBusy: tab.busy && !tab.paused,
 				lastSeen: createdAfterActivation && !tab.paused ? null : tab.cursor,
 				state:
 					createdAfterActivation && !tab.paused
@@ -322,6 +323,7 @@ export async function runPianolaScopeCycle(
 			savedByKey.set(key, saved);
 		} else if (needsBaseline || tab.paused) {
 			saved.baseline = tab.cursor;
+			saved.baselineBusy = tab.busy && !tab.paused;
 			saved.lastSeen = tab.cursor;
 			saved.bindingFingerprint = binding;
 			saved.state = initialWatchState();
@@ -370,21 +372,22 @@ export async function runPianolaScopeCycle(
 				(tab.cursor && messages[messages.length - 1]?.content.length !== tab.cursor.textLength)
 			)
 				throw new Error('Transcript cursor gap or changed snapshot');
-			// Keep only post-baseline entries. The nearest prior user task supplies
-			// judgment context without making any historical assistant ask actionable.
+			// Classify the full transcript so earlier assistant intent in the current
+			// turn still raises risk. Eligibility is separate: unchanged history must
+			// never become actionable just because a tool/system entry was appended.
 			const offset = saved.baseline?.count ?? 0;
-			const fresh = messages.slice(offset);
-			const context = messages
-				.slice(0, offset)
-				.reverse()
-				.find((message) => message.role === 'user');
-			if (context) fresh.unshift(context);
+			const actionableIds = new Set(messages.slice(offset).map((message) => message.id));
+			if (saved.baselineBusy && saved.baseline) {
+				const streamed = messages[offset - 1];
+				if (streamed?.content.length > saved.baseline.textLength) actionableIds.add(streamed.id);
+			}
 			let latestRecord: PianolaDecisionRecord | undefined;
 			const guard = async (): Promise<PianolaScopeDeliveryGuard> => {
 				const messageId = latestRecord?.classification.evidence.messageId;
 				if (
 					!messageId ||
-					!fresh.some((message) => message.id === messageId && message.role === 'assistant') ||
+					!actionableIds.has(messageId) ||
+					!messages.some((message) => message.id === messageId && message.role === 'assistant') ||
 					!tab.cursor
 				)
 					throw new Error('Missing post-baseline delivery evidence');
@@ -432,7 +435,7 @@ export async function runPianolaScopeCycle(
 				};
 			};
 			const iteration = await runWatchIteration(
-				fresh,
+				messages,
 				target,
 				saved.state,
 				{
@@ -448,7 +451,7 @@ export async function runPianolaScopeCycle(
 								deliveryOutcome(await deps.requestJudgment!(request, await guard()))
 						: undefined,
 				},
-				options
+				{ ...options, canActOnMessage: (messageId) => actionableIds.has(messageId) }
 			);
 			saved.state = iteration.state;
 			saved.lastSeen = tab.cursor;

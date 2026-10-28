@@ -91,6 +91,7 @@ describe('scope checkpoint validation', () => {
 		['empty owner', { agentId: '' }],
 		['missing tab', { tabId: undefined }],
 		['bad binding', { bindingFingerprint: 'x' }],
+		['invalid busy baseline', { baselineBusy: 'true' }],
 		['zero cursor count', { baseline: { id: 'old', count: 0, textLength: 1 } }],
 		['negative cursor length', { lastSeen: { id: 'old', count: 1, textLength: -1 } }],
 		[
@@ -142,6 +143,7 @@ describe('scope checkpoint filesystem storage', () => {
 		const value = checkpoint();
 		value.status = 'suspended';
 		value.tabs[0].status = 'closed';
+		value.tabs[0].baselineBusy = true;
 		value.tabs[0].state.pendingRetry = { messageId: 'ask', attempts: 2 };
 		value.tabs[0].unresolvedIntent = { decisionId: 'decision', messageId: 'ask' };
 		store.writeScopeCheckpoint(value);
