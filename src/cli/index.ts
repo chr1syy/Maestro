@@ -201,6 +201,7 @@ import {
 } from './commands/pianola-orchestrate';
 import {
 	pianolaSuperviseWatch,
+	pianolaSuperviseScope,
 	pianolaSuperviseOrchestrate,
 	pianolaSuperviseList,
 	pianolaSuperviseRemove,
@@ -2293,6 +2294,18 @@ const pianolaSupervise = pianola
 	.description(
 		'Register desktop-supervised watchers and orchestrations (survive crashes/restarts)'
 	);
+
+pianolaSupervise
+	.command('scope')
+	.description('Create or replace an agent/group watch selection (new selections start paused)')
+	.requiredOption('--manager <agent-id>', 'Manager agent id')
+	.requiredOption('--label <label>', 'Selection label')
+	.option('--id <scope-id>', 'Replace an existing selection')
+	.option('--agents <ids>', 'Comma-separated agent IDs')
+	.option('--groups <ids>', 'Comma-separated group IDs')
+	.option('--exclude <ids>', 'Comma-separated excluded agent IDs')
+	.option('--json', 'Output as JSON')
+	.action((options) => pianolaSuperviseScope(options));
 
 pianolaSupervise
 	.command('watch <tabId>')

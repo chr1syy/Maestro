@@ -166,6 +166,22 @@
 			],
 			"responsibleActor": "V2-05 Auto Run agent",
 			"nextAction": "V2-05: compose native agent/group selection and truthful coverage/decision controls using lifecycle.status, nextActor, nextAction and pianola.resolveDecision. Read the unapplied selection draft for manager setup. V2-06 must cover native admission/duplicate resolution, manager identity and full-turn risk, human-versus-CLI provenance, timeout-once, pause/restart/unknown receipts and observed continuation with isolated production transports; V2-07 executes those tests."
+		},
+		{
+			"taskId": "V2-05",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "in_progress",
+			"changedFiles": [
+				"src/cli/commands/pianola-supervise.ts",
+				"src/cli/index.ts"
+			],
+			"commit": "MAESTRO: add paused Pianola scope CLI setup",
+			"evidence": [
+				"CLI scope command creates or replaces validated identity-based selections; new selections start paused and edits preserve enabled state. Scoped ESLint, Prettier and git diff --check passed. No tests executed per V2-06/V2-07 separation."
+			],
+			"responsibleActor": "V2-05 Auto Run agent",
+			"nextAction": "Complete native dashboard selection/exclusion/pause controls, truthful coverage and six lifecycle states with actor and next action; validate before checking V2-05. No productive activation."
 		}
 	]
 }
