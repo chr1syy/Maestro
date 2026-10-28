@@ -50,7 +50,7 @@ export function appendDecision(record: PianolaDecisionRecord): void {
 	const candidate = settledDecisionPairs([record])[0];
 	const alreadySettled =
 		candidate &&
-		settledDecisionPairs(store.readDecisions()).some(
+		settledDecisionPairs(store.readDecisions(), { snapshots: true }).some(
 			(pair) =>
 				((pair.evidence!.agentId === candidate.evidence!.agentId &&
 					pair.evidence!.tabId === candidate.evidence!.tabId &&

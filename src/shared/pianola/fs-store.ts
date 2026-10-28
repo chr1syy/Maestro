@@ -14,6 +14,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { reconcileSuggestionEvidence } from './pianola-synthesis';
+import { settledDecisionPairs } from './transcript-mining';
 import {
 	PIANOLA_RULES_FILENAME,
 	PIANOLA_DECISIONS_FILENAME,
@@ -231,7 +233,7 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 	}
 
 	function writeSuggestions(file: PianolaSuggestionsFile): PianolaSuggestionsFile {
-		const validated = validatePianolaSuggestionsFile(file);
+		let validated = validatePianolaSuggestionsFile(file);
 		const current = readSuggestions();
 		// Re-read at the atomic write boundary: asynchronous mining must never
 		// overwrite a review that was committed while it was in flight.
@@ -253,6 +255,28 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 			);
 			validated.approvals = [...approvals.values()];
 		}
+		// Conflicts are durable review requests. Empty/legacy/stale writers cannot
+		// erase one or its source examples, including after log compaction.
+		if (current.conflicts || validated.conflicts) {
+			const conflicts = new Map<string, NonNullable<PianolaSuggestionsFile['conflicts']>[number]>();
+			for (const item of [...(current.conflicts ?? []), ...(validated.conflicts ?? [])]) {
+				const key = canonicalJson([item.ruleId, item.evidenceFingerprint, item.approvedAt]);
+				const previous = conflicts.get(key);
+				const evidence = new Map(
+					[...(previous?.evidence ?? []), ...item.evidence].map((source) => [
+						canonicalJson(source),
+						source,
+					])
+				);
+				conflicts.set(key, {
+					...item,
+					detectedAt: Math.min(previous?.detectedAt ?? item.detectedAt, item.detectedAt),
+					reason: previous?.reason === 'source_corrected' ? previous.reason : item.reason,
+					evidence: [...evidence.values()],
+				});
+			}
+			validated.conflicts = [...conflicts.values()];
+		}
 		if (validated.candidates) {
 			validated.candidates = validated.candidates.filter(
 				(candidate) =>
@@ -269,7 +293,16 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 				(proposal) => !validated.rejections?.some((item) => item.candidateId === proposal.id)
 			);
 		}
-		writeJsonAtomic(PIANOLA_SUGGESTIONS_FILENAME, validated);
+		// Re-read native evidence at the final write boundary. A correction or
+		// approval committed during asynchronous mining must win over old staging.
+		validated = reconcileSuggestionEvidence(
+			validated,
+			settledDecisionPairs(readDecisions(), { snapshots: true }),
+			readRulesResult().rules,
+			Date.now()
+		);
+		if (canonicalJson(validated) !== canonicalJson(current))
+			writeJsonAtomic(PIANOLA_SUGGESTIONS_FILENAME, validated);
 		return validated;
 	}
 

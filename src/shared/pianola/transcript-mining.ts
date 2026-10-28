@@ -53,7 +53,10 @@ export interface DecisionPair {
 /** Convert committed explicit human resolutions. Recipient delivery is a separate outcome.
  * Legacy/rule/manager records are not evidence, even when their send was accepted.
  */
-export function settledDecisionPairs(records: readonly PianolaDecisionRecord[]): DecisionPair[] {
+export function settledDecisionPairs(
+	records: readonly PianolaDecisionRecord[],
+	options: { snapshots?: boolean } = {}
+): DecisionPair[] {
 	const pairs: DecisionPair[] = [];
 	for (const record of records) {
 		const evidence = record.humanEvidence;
@@ -61,9 +64,9 @@ export function settledDecisionPairs(records: readonly PianolaDecisionRecord[]):
 			!isValidHumanDecisionEvidence(evidence) ||
 			record.dryRun ||
 			record.lifecycle?.phase !== 'answer' ||
-			['manager', 'rule'].includes(record.lifecycle.source.kind) ||
-			(record.lifecycle.source.kind === 'human' &&
-				record.lifecycle.source.actorId !== evidence.actorId) ||
+			record.lifecycle.source.kind !== 'human' ||
+			record.lifecycle.source.actorId !== evidence.actorId ||
+			record.lifecycle.groupId !== evidence.groupId ||
 			record.decision.action !== 'auto_answer' ||
 			record.decision.answer !== evidence.answer ||
 			record.agentId !== evidence.agentId ||
@@ -84,7 +87,9 @@ export function settledDecisionPairs(records: readonly PianolaDecisionRecord[]):
 			evidence,
 		});
 	}
-	return confirmedHumanDecisionPairs(pairs);
+	// Conflict review needs the actual corrected source, not only the first
+	// independent sample plus a veto flag. Counting callers keep the folded view.
+	return options.snapshots ? pairs : confirmedHumanDecisionPairs(pairs);
 }
 
 /** Dedup by recipient ask AND answer event, never by a generic yes or risk label. */
@@ -108,7 +113,11 @@ export function confirmedHumanDecisionPairs(pairs: readonly DecisionPair[]): Dec
 		const answerKey = canonicalJson([evidence.actorId, evidence.answerMessageId]);
 		const previous = asks.get(askKey);
 		if (previous) {
-			if (previous.reply !== pair.reply || pair.conflictingEvidence)
+			if (
+				canonicalJson([previous.evidence, previous.classification]) !==
+					canonicalJson([pair.evidence, pair.classification]) ||
+				pair.conflictingEvidence
+			)
 				previous.conflictingEvidence = true;
 			continue;
 		}

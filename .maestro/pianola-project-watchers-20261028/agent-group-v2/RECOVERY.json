@@ -10,7 +10,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R06: add correction-aware settled-decision and accepted-rule conflict handling using R05 durable approvals",
+  "nextAction": "R07: finish Suggestions source-linked review UI and active-rule conflict display using R05/R06 persisted contracts",
   "tasks": [
     {
       "taskId": "R00",
@@ -197,6 +197,43 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R06: add correction-aware settled-decision and accepted-rule conflict handling using R05 durable approvals",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R06",
+      "status": "complete",
+      "outcome": "Implemented correction-aware native settlement, stale-candidate invalidation and durable accepted-rule human conflict review; runtime/static validation belongs to R08/R09",
+      "files": [
+        "src/main/ipc/handlers/pianola.ts",
+        "src/main/pianola/pianola-lifecycle.ts",
+        "src/main/pianola/pianola-relearn.ts",
+        "src/main/pianola/pianola-store-main.ts",
+        "src/main/preload/pianola.ts",
+        "src/shared/pianola/fs-store.ts",
+        "src/shared/pianola/pianola-synthesis.ts",
+        "src/shared/pianola/storage.ts",
+        "src/shared/pianola/transcript-mining.ts",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-conflict-contract.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-conflicts-source.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": {
+        "subject": "MAESTRO: retain Pianola correction conflicts and accepted provenance",
+        "parent": "b23e2070df3bbb6fe18191f191ba21164bcf047b",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-conflict-contract.md"
+      },
+      "checks": {
+        "status": "source-implementation-reviewed; runtime-and-static-execution-deferred",
+        "evidence": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-conflicts-source.json",
+        "contract": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-conflict-contract.md",
+        "executed": "formatter write, source/call-site inspection and git diff --check only; no tests/lint/types",
+        "nextExecution": "R08/R09"
+      },
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R07: finish Suggestions source-linked review UI and active-rule conflict display using R05/R06 persisted contracts",
       "imagesAnalyzed": 0
     }
   ]

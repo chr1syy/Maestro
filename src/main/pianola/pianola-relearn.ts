@@ -14,7 +14,10 @@
  * background watcher that died is brought back on the same cadence.
  */
 
-import { synthesizeSuggestions } from '../../shared/pianola/pianola-synthesis';
+import {
+	reconcileSuggestionEvidence,
+	synthesizeSuggestions,
+} from '../../shared/pianola/pianola-synthesis';
 import {
 	confirmedHumanDecisionPairs,
 	type DecisionPair,
@@ -76,7 +79,8 @@ export async function runRelearnJob(deps: RelearnDeps): Promise<RelearnResult> {
 	}
 
 	try {
-		const pairs = confirmedHumanDecisionPairs(await deps.mine());
+		const snapshots = await deps.mine();
+		const pairs = confirmedHumanDecisionPairs(snapshots);
 		const { rules, profile, minSamples, suggestions } = deps.readExisting();
 		const synthesis = synthesizeSuggestions({
 			pairs,
@@ -94,16 +98,24 @@ export async function runRelearnJob(deps: RelearnDeps): Promise<RelearnResult> {
 				)
 		);
 		const proposals = candidates.map((candidate) => candidate.rule);
-		deps.writeSuggestions({
-			generatedAt: deps.now(),
-			pairCount: pairs.length,
-			proposals,
-			candidates,
-			rejections: suggestions?.rejections ?? [],
-			approvals: suggestions?.approvals ?? [],
-			proposedProfile: synthesis.profileDiff.after,
-			previousProfile: synthesis.profileDiff.before,
-		});
+		deps.writeSuggestions(
+			reconcileSuggestionEvidence(
+				{
+					generatedAt: deps.now(),
+					pairCount: pairs.length,
+					proposals,
+					candidates,
+					rejections: suggestions?.rejections ?? [],
+					approvals: suggestions?.approvals ?? [],
+					conflicts: suggestions?.conflicts ?? [],
+					proposedProfile: synthesis.profileDiff.after,
+					previousProfile: synthesis.profileDiff.before,
+				},
+				snapshots,
+				rules,
+				deps.now()
+			)
+		);
 		const relaunched = deps.relaunchStale();
 		deps.log(
 			`staged ${proposals.length} proposal(s) from ${pairs.length} pair(s); relaunched ${relaunched} stale target(s)`

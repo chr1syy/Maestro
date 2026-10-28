@@ -1,0 +1,59 @@
+{
+  "taskId": "R06",
+  "status": "source-implementation-reviewed; runtime-and-static-execution-deferred",
+  "sourceParent": "b23e2070df3bbb6fe18191f191ba21164bcf047b",
+  "contract": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-conflict-contract.md",
+  "sourceSha256": {
+    "src/main/ipc/handlers/pianola.ts": "666ef7bea3963f9a1c6a696cfa13867f820b0f989087b52aedfda7e4f5bb2437",
+    "src/main/pianola/pianola-lifecycle.ts": "bb4eac3dba38997cbcc3346308b8922b9184d44f9280b920584f92df29d96252",
+    "src/main/pianola/pianola-relearn.ts": "4ca4009bb497e1c5b45457e08e69d2da563269973581b715548b8648812f9331",
+    "src/main/pianola/pianola-store-main.ts": "24d0d699d6c0178f3d1ee099902ac5f834a9e7c3db0d662022cdf7184919dba2",
+    "src/main/preload/pianola.ts": "33e3d0cf0e500dee31b77be739c53ccee602bdf7125c0830201c7d21905ada5a",
+    "src/shared/pianola/fs-store.ts": "2018b1505023453ce3b3dc41dabc4dde17e8ece4fa0eae29eea40e4d53cb4ad9",
+    "src/shared/pianola/pianola-synthesis.ts": "2060b7c87bbebe0466f65aad994f162dde7307af4741ab73f20109be600df926",
+    "src/shared/pianola/storage.ts": "6759b7dfd341504c3b58fe91c7557c126260181d0be2a7819299cf5d4de41bd3",
+    "src/shared/pianola/transcript-mining.ts": "a39790850f1f191d2e669959d7b424d2ad56e89bd2aadfc869686ad0b3dfcffb"
+  },
+  "inspection": [
+    "Native raw human snapshots retain corrected examples before independent-sample folding; unknown/manager/rule/dry-run origins and mismatched actor/group are excluded.",
+    "Settlement notification compares raw persisted snapshots, so a correction stored under another audit record ID does not hide its exact replay behind the original vetoed sample.",
+    "Pending candidate fingerprints are revalidated; changed sources/conditions/risk or contradictions invalidate stale proposals without activating another rule.",
+    "Accepted candidate and edited approved policy remain immutable approval receipts; matching active policy plus later changed source/equivalent contradiction creates durable human review metadata.",
+    "Original examples differing from an intentionally edited approved answer are not later corrections; later agreement is compared to that explicitly approved answer.",
+    "Shared filesystem staging merges conflict identity/examples and first detection time, rereads current native source/rule state, and never erases conflicts on empty/legacy/stale writes.",
+    "Native get-suggestions catches up after restart and exposes original approvals and actionable conflicts through the existing preload type; identical state is not rewritten.",
+    "Source and call-site inspection only. No permanent tests or runtime/static execution in this production increment; R08/R09 own their receipts.",
+    "No GLOSSARY.md or ADR files found; applicable CLAUDE/IPC and reuse guides inspected."
+  ],
+  "commands": [
+    {
+      "command": "./node_modules/.bin/prettier --write src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn.ts src/main/pianola/pianola-store-main.ts src/main/preload/pianola.ts src/shared/pianola/fs-store.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/storage.ts src/shared/pianola/transcript-mining.ts",
+      "status": "applied",
+      "exitCode": 0
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "exitCode": 0
+    }
+  ],
+  "deferred": {
+    "R07": "Suggestions source evidence and active/disabled/replaced conflict review display",
+    "R08": "Permanent correction/replay/provenance/storage/API/rendered regression authoring using recovery-conflict-contract.md matrix",
+    "R09": "Affected tests, changed-file lint/format/types and runtime receipts",
+    "R10": "Complete source/integration acceptance including original R00 repros",
+    "R11": "Focused current-upstream PR after acceptance"
+  },
+  "testsAuthored": false,
+  "testsExecuted": false,
+  "lintExecuted": false,
+  "typesExecuted": false,
+  "fullPushSuite": "skipped by command-local hook suppression; source/check execution split and scoped-push mandate",
+  "effectiveModel": "unknown",
+  "effectiveEffort": "unknown",
+  "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+  "imagesAnalyzed": 0,
+  "installed": false,
+  "productiveConfigurationChanged": false,
+  "acceptanceStatus": "unchanged; L08/L09 pending"
+}

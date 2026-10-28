@@ -21,7 +21,12 @@ import { learnableDecisionAction } from './pianola-policy';
 import { canonicalJson } from '../canonicalJson';
 import type { DecisionAggregates, DecisionPair } from './transcript-mining';
 import { aggregateDecisionPairs, confirmedHumanDecisionPairs } from './transcript-mining';
-import { pianolaCandidateEvidenceFingerprint, type PianolaSuggestionCandidate } from './storage';
+import {
+	pianolaCandidateEvidenceFingerprint,
+	type PianolaSuggestionCandidate,
+	type PianolaSuggestionsFile,
+	type PianolaLearnedRuleConflict,
+} from './storage';
 
 /** Configurable heuristic; never an authorization threshold. */
 export const SUGGESTION_MIN_SAMPLES = 3;
@@ -193,4 +198,134 @@ export function synthesizeSuggestions(input: SynthesisInput): SynthesisResult {
 	const profileDiff: ProfileDiff = { before, after, changed: after.length > 0 && after !== before };
 
 	return { proposals, candidates, profileDiff, aggregates };
+}
+
+/**
+ * Revalidate staged/accepted evidence without changing rules or approval receipts.
+ * Pass native snapshots so a correction under an existing ask retains its actual
+ * source example. The folded corpus still supplies the independent sample count.
+ */
+export function reconcileSuggestionEvidence(
+	file: PianolaSuggestionsFile,
+	snapshots: readonly DecisionPair[],
+	rules: readonly PianolaRule[],
+	now: number
+): PianolaSuggestionsFile {
+	const pairs = confirmedHumanDecisionPairs(snapshots);
+	const fresh = new Map<string, PianolaSuggestionCandidate>();
+	for (const scope of ['agent', 'group'] as const) {
+		if (!file.candidates?.some((candidate) => candidate.rule.scope === scope)) continue;
+		for (const candidate of synthesizeSuggestions({
+			pairs,
+			existingRules: rules,
+			learningScope: scope,
+			// Revalidation cannot create a proposal; the original threshold and
+			// current configured threshold remain enforced by synthesis/review.
+			minSamples: 1,
+			now,
+		}).candidates)
+			fresh.set(candidate.id, candidate);
+	}
+	const conflicts = (file.conflicts ?? []).map((item) => ({
+		...item,
+		evidence: [...item.evidence],
+	}));
+	// Validate each snapshot individually, preserving later corrections that
+	// counting deliberately folds into a single vetoed sample.
+	const sources = snapshots.flatMap((pair) => confirmedHumanDecisionPairs([pair]));
+	for (const approval of file.approvals ?? []) {
+		const { candidate, rule, approvedAt } = approval;
+		// A pre-activation receipt (or a subsequently replaced policy) alone
+		// cannot establish an active learned rule. Retain any earlier conflict.
+		if (
+			!rules.some(
+				(live) =>
+					live.id === rule.id &&
+					canonicalJson([live.scope, live.scopeId, live.match, live.action, live.answer]) ===
+						canonicalJson([rule.scope, rule.scopeId, rule.match, rule.action, rule.answer])
+			)
+		)
+			continue;
+		let conflict = conflicts.find(
+			(item) =>
+				item.ruleId === rule.id &&
+				item.evidenceFingerprint === candidate.evidenceFingerprint &&
+				item.approvedAt === approvedAt
+		);
+		for (const pair of sources) {
+			const evidence = pair.evidence!;
+			const original = candidate.evidence.find(
+				(source) =>
+					(source.agentId === evidence.agentId &&
+						source.tabId === evidence.tabId &&
+						source.questionMessageId === evidence.questionMessageId) ||
+					(source.actorId === evidence.actorId &&
+						source.answerMessageId === evidence.answerMessageId)
+			);
+			let reason: PianolaLearnedRuleConflict['reason'];
+			if (original) {
+				if (
+					canonicalJson(original) === canonicalJson(evidence) &&
+					!pair.conflictingEvidence &&
+					pair.classification.kind === 'question' &&
+					pair.classification.risk === 'low' &&
+					pair.classification.confidence !== 'low'
+				)
+					continue;
+				reason = 'source_corrected';
+			} else {
+				if (
+					Date.parse(evidence.answeredAt) < approvedAt ||
+					evidence.question !== rule.match.exactQuestion ||
+					evidence.groupId !== rule.match.groupId ||
+					(rule.scope === 'agent' ? evidence.agentId : evidence.groupId) !== rule.scopeId ||
+					(evidence.action !== null && evidence.action !== candidate.action) ||
+					(evidence.conditions !== null &&
+						canonicalJson(evidence.conditions) !== canonicalJson(candidate.conditions))
+				)
+					continue;
+				if (
+					evidence.answer === rule.answer &&
+					pair.classification.kind === 'question' &&
+					pair.classification.risk === 'low' &&
+					pair.classification.confidence !== 'low' &&
+					!pair.conflictingEvidence
+				)
+					continue;
+				reason = 'contradictory_decision';
+			}
+			if (!conflict) {
+				conflict = {
+					ruleId: rule.id,
+					evidenceFingerprint: candidate.evidenceFingerprint,
+					approvedAt,
+					detectedAt: now,
+					reason,
+					status: 'needs_review',
+					nextActor: 'human',
+					nextAction:
+						'Chris: review the accepted examples and later evidence, then explicitly edit or disable the rule in Rules. Live policy remains unchanged.',
+					evidence: [],
+				};
+				conflicts.push(conflict);
+			}
+			if (reason === 'source_corrected') conflict.reason = reason;
+			if (!conflict.evidence.some((source) => canonicalJson(source) === canonicalJson(evidence)))
+				conflict.evidence.push(evidence);
+		}
+	}
+	const candidates = file.candidates?.filter(
+		(candidate) =>
+			fresh.get(candidate.id)?.evidenceFingerprint === candidate.evidenceFingerprint &&
+			!file.rejections?.some(
+				(item) =>
+					item.candidateId === candidate.id &&
+					item.evidenceFingerprint === candidate.evidenceFingerprint
+			)
+	);
+	return {
+		...file,
+		...(candidates ? { candidates, proposals: candidates.map((candidate) => candidate.rule) } : {}),
+		conflicts,
+	};
 }

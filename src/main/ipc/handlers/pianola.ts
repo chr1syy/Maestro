@@ -258,7 +258,9 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 	);
 	const wrappedGetSuggestions = withIpcErrorLogging(
 		handlerOpts('getSuggestions'),
-		async (): Promise<PianolaSuggestionsFile> => readSuggestions()
+		// Catch up after restart or before the incremental job finishes. The
+		// shared store only persists changed review metadata, never live policy.
+		async (): Promise<PianolaSuggestionsFile> => writeSuggestions(readSuggestions())
 	);
 	/** Shared by legacy approval and source-linked accept/edit/reject. No await
 	 * occurs between fresh evidence validation and the durable writes. */

@@ -687,6 +687,21 @@ export interface PianolaSuggestionApproval {
 	edited: boolean;
 }
 
+/** Durable review request; neither its creation nor replay changes live policy. */
+export interface PianolaLearnedRuleConflict {
+	ruleId: string;
+	/** Bind to the exact accepted source version, including an intentional edit. */
+	evidenceFingerprint: string;
+	approvedAt: number;
+	detectedAt: number;
+	reason: 'source_corrected' | 'contradictory_decision';
+	status: 'needs_review';
+	nextActor: 'human';
+	nextAction: string;
+	/** Attributable new/corrected sources; the approval retains the original examples. */
+	evidence: PianolaHumanDecisionEvidence[];
+}
+
 export type PianolaSuggestionReview = {
 	candidateId: string;
 	evidenceFingerprint: string;
@@ -789,6 +804,7 @@ export interface PianolaSuggestionsFile {
 	/** Review records survive regeneration, empty corpora and process restarts. */
 	rejections?: PianolaSuggestionRejection[];
 	approvals?: PianolaSuggestionApproval[];
+	conflicts?: PianolaLearnedRuleConflict[];
 }
 
 /**
@@ -910,6 +926,42 @@ export function validatePianolaSuggestionsFile(raw: unknown): PianolaSuggestions
 				approvedAt: item.approvedAt,
 				actorId: item.actorId,
 				edited: item.edited,
+			};
+		});
+	}
+	if (raw.conflicts !== undefined) {
+		if (!Array.isArray(raw.conflicts)) throw new Error('InvalidLearnedRuleConflicts');
+		result.conflicts = raw.conflicts.map((item) => {
+			if (
+				!isRecord(item) ||
+				!result.approvals?.some(
+					(approval) =>
+						approval.rule.id === item.ruleId &&
+						approval.candidate.evidenceFingerprint === item.evidenceFingerprint &&
+						approval.approvedAt === item.approvedAt
+				) ||
+				typeof item.detectedAt !== 'number' ||
+				!Number.isFinite(item.detectedAt) ||
+				!['source_corrected', 'contradictory_decision'].includes(String(item.reason)) ||
+				item.status !== 'needs_review' ||
+				item.nextActor !== 'human' ||
+				typeof item.nextAction !== 'string' ||
+				!item.nextAction.trim() ||
+				!Array.isArray(item.evidence) ||
+				!item.evidence.length ||
+				!item.evidence.every(isValidHumanDecisionEvidence)
+			)
+				throw new Error('InvalidLearnedRuleConflict');
+			return {
+				ruleId: item.ruleId as string,
+				evidenceFingerprint: item.evidenceFingerprint as string,
+				approvedAt: item.approvedAt as number,
+				detectedAt: item.detectedAt,
+				reason: item.reason as PianolaLearnedRuleConflict['reason'],
+				status: 'needs_review',
+				nextActor: 'human',
+				nextAction: item.nextAction,
+				evidence: item.evidence as PianolaHumanDecisionEvidence[],
 			};
 		});
 	}

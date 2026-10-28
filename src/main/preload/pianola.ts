@@ -47,7 +47,7 @@ export function createPianolaApi() {
 		resolveDecision: (resolution: PianolaDecisionResolution): Promise<PianolaScopeDeliveryResult> =>
 			ipcRenderer.invoke('pianola:resolve-decision', resolution),
 
-		/** Read the staged learning suggestions (rule proposals + profile draft). */
+		/** Read revalidated proposals, accepted provenance and durable rule conflicts. */
 		getSuggestions: (): Promise<PianolaSuggestionsFile> =>
 			ipcRenderer.invoke('pianola:get-suggestions'),
 

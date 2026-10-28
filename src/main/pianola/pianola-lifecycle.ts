@@ -145,7 +145,7 @@ export function createPianolaLifecycle(deps: PianolaLifecycleDependencies): Pian
 				},
 				// Raw CLI transcripts do not authenticate their user-role author.
 				// Only settled, transport-attributed owner answers enter native learning.
-				mine: async () => settledDecisionPairs(readDecisions()),
+				mine: async () => settledDecisionPairs(readDecisions(), { snapshots: true }),
 				readExisting: () => ({
 					...readExistingForRelearn(),
 					minSamples: deps.settingsStore.get('pianolaLearningMinSamples'),
