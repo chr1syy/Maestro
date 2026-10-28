@@ -44,7 +44,7 @@ R07 evidence: native candidate review and conflict UI connected; targeted modal 
 
 <!-- MAESTRO:MODEL tier="high" effort="medium" reason="Learning tests must catch provenance, contradiction and restart leaks at real API and UI seams." -->
 
-- [ ] R08 Finish V2-11 permanent learning/storage/API/rendered regressions from E/SPEC.md and R05-R07. Cover three independent equivalent human decisions vs two/duplicates/unknown/rule/Mira samples; unrelated yes answers and cross-scope leaks; exact persisted source links/count/exclusions; approve/edit/reject, stale approval, rejection restart suppression, accepted provenance, later correction invalidation and active conflict after restart; explicit single-action approvals remain protected. Reuse existing tests. Success: missing criteria have red-capable assertions at actual production seams and narrow commands in E/recovery-checks.md. Do not run tests here.
+- [x] R08 Finish V2-11 permanent learning/storage/API/rendered regressions from E/SPEC.md and R05-R07. Cover three independent equivalent human decisions vs two/duplicates/unknown/rule/Mira samples; unrelated yes answers and cross-scope leaks; exact persisted source links/count/exclusions; approve/edit/reject, stale approval, rejection restart suppression, accepted provenance, later correction invalidation and active conflict after restart; explicit single-action approvals remain protected. Reuse existing tests. Success: missing criteria have red-capable assertions at actual production seams and narrow commands in E/recovery-checks.md. Do not run tests here.
 
 <!-- MAESTRO:MODEL tier="medium" effort="medium" reason="Execute affected learning checks and capture precise results." -->
 

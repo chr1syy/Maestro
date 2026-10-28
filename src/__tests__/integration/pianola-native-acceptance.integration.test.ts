@@ -176,6 +176,11 @@ import {
 import { handleNotifyToast } from '../../main/web-server/handlers/messageHandlers/notifications';
 import { pianolaWatchScope } from '../../cli/commands/pianola-scope-watch';
 import * as mainStore from '../../main/pianola/pianola-store-main';
+import { createPianolaFsStore } from '../../shared/pianola/fs-store';
+import {
+	PIANOLA_DECISIONS_FILENAME,
+	PIANOLA_SUGGESTIONS_FILENAME,
+} from '../../shared/pianola/storage';
 import * as cliStore from '../../cli/services/pianola-store';
 
 const SCOPE = '11111111-1111-4111-8111-111111111111';
@@ -1321,5 +1326,311 @@ describe('R03 explicit desktop resolution admission', () => {
 		await expect(fixture.ipc('resolve-decision', payload)).rejects.toThrow(/claimed|pending/);
 		expect(fixture.sends).toHaveLength(1);
 		expect(fixture.decision(ask.id).lifecycle!.status).not.toBe('agent_running');
+	});
+});
+
+describe('R08 durable learning through native review and filesystem APIs', () => {
+	it('records consent before activation but never activates a failed rule write on restart', async () => {
+		await fixture.learnCandidate();
+		const candidate = mainStore.readSuggestions().candidates![0];
+		const review = {
+			operation: 'accept',
+			candidateId: candidate.id,
+			evidenceFingerprint: candidate.evidenceFingerprint,
+		};
+		const failWrite = vi.spyOn(mainStore, 'writeRules').mockImplementationOnce(() => {
+			expect(mainStore.readSuggestions().approvals).toEqual([
+				expect.objectContaining({ candidate, principal: 'chris', actorId: 'desktop' }),
+			]);
+			throw new Error('Fixture activation write failed');
+		});
+		await expect(fixture.ipc('review-suggestion', review)).rejects.toThrow(
+			'Fixture activation write failed'
+		);
+		failWrite.mockRestore();
+		fixture.restart();
+		const reloaded = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
+		expect(mainStore.readRules()).toEqual([]);
+		expect(reloaded.candidates).toEqual([candidate]);
+		expect(reloaded.conflicts ?? []).toEqual([]);
+		await fixture.ipc('review-suggestion', review);
+		expect(mainStore.readRules()).toEqual([
+			expect.objectContaining({ id: candidate.id, enabled: true }),
+		]);
+	});
+
+	it.each(['accept', 'edit', 'reject'] as const)(
+		'persists %s with source identity and transport-bound human provenance across restart',
+		async (operation) => {
+			await fixture.learnCandidate();
+			const staged = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
+			const candidate = staged.candidates![0];
+			const profile = mainStore.getProfile();
+			expect(candidate.sampleCount).toBe(3);
+			expect(new Set(candidate.evidence.map((source) => source.questionMessageId)).size).toBe(3);
+			expect(candidate.evidence).toEqual(
+				mainStore
+					.readDecisions()
+					.filter((record) => record.humanEvidence)
+					.map((record) => record.humanEvidence)
+			);
+			expect(candidate.conditions).toEqual([ASK]);
+			expect(candidate.exclusions.length).toBeGreaterThan(0);
+			expect(candidate.rule).toMatchObject({
+				enabled: false,
+				scope: 'agent',
+				scopeId: AGENT,
+				match: { exactQuestion: ASK, groupId: GROUP },
+			});
+			const edited = {
+				...candidate.rule,
+				answer: 'No, wait for review.',
+				description: 'Human edited',
+				priority: 17,
+			};
+			const result = await fixture.ipc<{
+				rules: PianolaRule[];
+				suggestions: PianolaSuggestionsFile;
+			}>('review-suggestion', {
+				operation,
+				candidateId: candidate.id,
+				evidenceFingerprint: candidate.evidenceFingerprint,
+				...(operation === 'edit' ? { rule: edited } : {}),
+				...(operation === 'reject' ? { reason: 'Keep this manual' } : {}),
+				actorId: 'forged-Mira',
+				principal: 'Mira',
+			});
+			expect(result.suggestions.candidates).toEqual([]);
+			fixture.restart();
+			await fixture.pump('review restart and relearn');
+			const reloaded = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
+			expect(reloaded.candidates).toEqual([]);
+			const reopened = createPianolaFsStore({
+				resolveDir: () => boundary.root,
+				indent: 2,
+				trailingNewline: true,
+			});
+			expect(reopened.readSuggestions()).toEqual(reloaded);
+			if (operation === 'reject') {
+				expect(reloaded.rejections).toEqual([
+					expect.objectContaining({
+						candidateId: candidate.id,
+						evidenceFingerprint: candidate.evidenceFingerprint,
+						candidate,
+						actorId: 'desktop',
+						principal: 'chris',
+						sourceKind: 'native-human-review',
+						reason: 'Keep this manual',
+					}),
+				]);
+				expect(reopened.readRules()).toEqual([]);
+				// A mining job holding the old snapshot cannot resurrect rejected evidence.
+				expect(reopened.writeSuggestions(staged).candidates).toEqual([]);
+			} else {
+				expect(reloaded.approvals).toHaveLength(1);
+				expect(reloaded.approvals![0]).toMatchObject({
+					candidate,
+					actorId: 'desktop',
+					principal: 'chris',
+					sourceKind: 'native-human-review',
+					edited: operation === 'edit',
+					rule: { enabled: true, answer: operation === 'edit' ? edited.answer : ANSWER },
+				});
+				expect(reopened.readRules()).toEqual([reloaded.approvals![0].rule]);
+				expect(reloaded.conflicts ?? []).toEqual([]);
+			}
+			expect(mainStore.getProfile()).toEqual(profile);
+		}
+	);
+
+	it('allows visibly changed evidence after rejection while retaining the rejected version', async () => {
+		await fixture.learnCandidate();
+		const candidate = mainStore.readSuggestions().candidates![0];
+		await fixture.ipc('review-suggestion', {
+			operation: 'reject',
+			candidateId: candidate.id,
+			evidenceFingerprint: candidate.evidenceFingerprint,
+		});
+		fixture.restart();
+		await fixture.pump('rejected restart');
+		const ask = fixture.log(TAB, ASK);
+		await fixture.pump('new independent evidence');
+		await fixture.ipc('resolve-decision', {
+			decisionId: fixture.decision(ask.id).id,
+			answer: ANSWER,
+		});
+		await fixture.continueRecipient(ask.id);
+		const changed = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
+		expect(changed.candidates).toHaveLength(1);
+		expect(changed.candidates![0]).toMatchObject({ id: candidate.id, sampleCount: 4 });
+		expect(changed.candidates![0].evidenceFingerprint).not.toBe(candidate.evidenceFingerprint);
+		expect(changed.rejections![0].candidate).toEqual(candidate);
+		expect(mainStore.readRules()).toEqual([]);
+	});
+
+	it.each([
+		'unbound owner',
+		'CLI bridge',
+		'broadened edit',
+		'stale fingerprint',
+		'corrected source',
+		'changed risk',
+		'changed conditions',
+	])('refuses %s at the actual native review boundary without writing policy', async (variant) => {
+		await fixture.learnCandidate();
+		const candidate = mainStore.readSuggestions().candidates![0];
+		fixture.lifecycle.relearnScheduler.stop();
+		if (variant === 'unbound owner') boundary.settings.pianolaLearningIdentity = {};
+		if (['corrected source', 'changed risk', 'changed conditions'].includes(variant)) {
+			const original = mainStore.readDecisions().find((record) => record.humanEvidence)!;
+			const corrected = structuredClone(original);
+			if (variant === 'corrected source') {
+				corrected.decision.answer = corrected.humanEvidence!.answer = 'No, stop.';
+			}
+			if (variant === 'changed risk') corrected.classification.risk = 'high';
+			if (variant === 'changed conditions')
+				corrected.humanEvidence!.conditions = ['only after review'];
+			mainStore.appendDecision(corrected);
+		}
+		const payload = {
+			operation: variant === 'broadened edit' ? 'edit' : 'accept',
+			candidateId: candidate.id,
+			evidenceFingerprint:
+				variant === 'stale fingerprint' ? 'old-fingerprint' : candidate.evidenceFingerprint,
+			rule: { ...candidate.rule, scope: 'global', scopeId: undefined },
+			actorId: 'desktop',
+			principal: 'chris',
+			sourceKind: 'native-human-review',
+		};
+		const handler = boundary.handlers.get('pianola:review-suggestion')!;
+		await expect(
+			handler(variant === 'CLI bridge' ? { type: 'bridge' } : { sender: { id: 1 } }, payload)
+		).rejects.toThrow(
+			variant === 'CLI bridge' || variant === 'unbound owner'
+				? 'HumanSuggestionReviewRequired'
+				: variant === 'broadened edit'
+					? 'BroadenedSuggestionEdit'
+					: 'StaleOrChangedSuggestion'
+		);
+		expect(mainStore.readRules()).toEqual([]);
+		expect(mainStore.readSuggestions().approvals ?? []).toEqual([]);
+		if (variant.startsWith('changed') || variant === 'corrected source')
+			expect((await fixture.ipc<PianolaSuggestionsFile>('get-suggestions')).candidates).toEqual([]);
+	});
+
+	it.each([false, true])(
+		'emits one correction event and preserves conflict after restart (new record ID: %s)',
+		async (newRecordId) => {
+			await fixture.learnCandidate();
+			const candidate = mainStore.readSuggestions().candidates![0];
+			await fixture.ipc('review-suggestion', {
+				operation: 'accept',
+				candidateId: candidate.id,
+				evidenceFingerprint: candidate.evidenceFingerprint,
+			});
+			const active = mainStore.readRules();
+			const original = mainStore.readDecisions().find((record) => record.humanEvidence)!;
+			const corrected = structuredClone(original);
+			if (newRecordId) corrected.id = 'fixture-correction';
+			corrected.decision.answer = corrected.humanEvidence!.answer = 'No, stop the inspection.';
+			const listener = vi.fn(() => {
+				// Notification must follow durable append, not precede it.
+				expect(
+					mainStore
+						.readDecisions()
+						.some((record) => record.humanEvidence?.answer === corrected.humanEvidence!.answer)
+				).toBe(true);
+			});
+			const unsubscribe = mainStore.onHumanDecisionSettled(listener);
+			try {
+				mainStore.appendDecision(original);
+				expect(listener).not.toHaveBeenCalled();
+				mainStore.appendDecision(corrected);
+				expect(listener).toHaveBeenCalledTimes(1);
+				mainStore.appendDecision({ ...corrected, id: 'fixture-correction-replay' });
+				expect(listener).toHaveBeenCalledTimes(1);
+			} finally {
+				unsubscribe();
+			}
+			fixture.restart();
+			const saved = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
+			expect(saved.candidates).toEqual([]);
+			expect(saved.approvals![0].candidate).toEqual(candidate);
+			expect(saved.conflicts).toEqual([
+				expect.objectContaining({
+					ruleId: candidate.id,
+					reason: 'source_corrected',
+					status: 'needs_review',
+					nextActor: 'human',
+					evidence: [corrected.humanEvidence],
+				}),
+			]);
+			const conflict = saved.conflicts![0];
+			expect(conflict.nextAction).toContain('Chris');
+			const reopened = createPianolaFsStore({
+				resolveDir: () => boundary.root,
+				indent: 2,
+				trailingNewline: true,
+			});
+			// Empty/legacy/stale writes and log compaction cannot erase accepted provenance.
+			fs.writeFileSync(path.join(boundary.root, PIANOLA_DECISIONS_FILENAME), '');
+			for (const incoming of [
+				saved,
+				{ generatedAt: 0, pairCount: 0, proposals: [], proposedProfile: '', previousProfile: '' },
+				{ ...saved, conflicts: [], candidates: [] },
+			]) {
+				const retained = reopened.writeSuggestions(incoming);
+				expect(retained.conflicts).toEqual([conflict]);
+				expect(retained.approvals).toEqual(saved.approvals);
+			}
+			const writes = boundary.writes.length;
+			await fixture.ipc('get-suggestions');
+			await fixture.ipc('get-suggestions');
+			expect(boundary.writes.length).toBe(writes);
+			expect(mainStore.readRules()).toEqual(active);
+			fixture.restart();
+			expect((await fixture.ipc<PianolaSuggestionsFile>('get-suggestions')).conflicts).toEqual([
+				conflict,
+			]);
+		}
+	);
+
+	it.each([
+		'invalid candidate count',
+		'invalid conflict actor',
+		'unmatched approval',
+		'corrupt JSON',
+	])('fails closed for %s without overwriting review storage', async (variant) => {
+		await fixture.learnCandidate();
+		const candidate = mainStore.readSuggestions().candidates![0];
+		await fixture.ipc('review-suggestion', {
+			operation: 'accept',
+			candidateId: candidate.id,
+			evidenceFingerprint: candidate.evidenceFingerprint,
+		});
+		const original = mainStore.readDecisions().find((record) => record.humanEvidence)!;
+		const answer = 'No, stop.';
+		mainStore.appendDecision({
+			...original,
+			decision: { ...original.decision, answer },
+			humanEvidence: { ...original.humanEvidence!, answer },
+		});
+		const file = await fixture.ipc<PianolaSuggestionsFile>('get-suggestions');
+		const target = path.join(boundary.root, PIANOLA_SUGGESTIONS_FILENAME);
+		const before = fs.readFileSync(target, 'utf8');
+		if (variant === 'corrupt JSON') {
+			fs.writeFileSync(target, '{broken');
+			expect(() => mainStore.writeSuggestions(file)).toThrow();
+			expect(fs.readFileSync(target, 'utf8')).toBe('{broken');
+			fs.writeFileSync(target, before);
+		} else {
+			const invalid = structuredClone(file);
+			if (variant === 'invalid candidate count') invalid.approvals![0].candidate.sampleCount = 999;
+			if (variant === 'invalid conflict actor')
+				Object.assign(invalid.conflicts![0], { nextActor: 'manager' });
+			if (variant === 'unmatched approval') invalid.conflicts![0].approvedAt += 1;
+			expect(() => mainStore.writeSuggestions(invalid)).toThrow();
+			expect(fs.readFileSync(target, 'utf8')).toBe(before);
+		}
 	});
 });

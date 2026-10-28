@@ -80,3 +80,67 @@ its authorized bounded-defect scope; do not weaken schema assertions to obtain g
 
 R03 completion means missing cases are authored and mapped. Original V2-05/06/07 and U02
 remain pending R04 checks. Publication remains R11 after R10; no PR from this authoring task.
+
+
+## R08 learning regression matrix (authored, not executed)
+
+R08 extends existing fixtures and real components; R09 owns execution and repairs.
+No tests, lint or type checks ran in R08. No installed runtime claims. No images.
+
+| Criterion | Production seam / permanent regression |
+| --- | --- |
+| Three equivalent humans; two plus duplicate ask/answer, unknown, rule or Mira are insufficient | `pianola-synthesis.test.ts`, R08 independent evidence table; existing threshold and inconsistent-answer tests reused |
+| Unrelated yes, agent/group/condition boundaries, per-action permissions | R08 synthesis boundary and merge/permission/external action table; existing native medium-risk permission and full-turn escalation tests reused |
+| Exact links/count/conditions/exclusions, stable identity vs changed sources | R08 synthesis fingerprint test and native accept/edit/reject table; real persisted native human log, not supplied snapshots |
+| Durable accept/edit/reject; rejection suppression across restart and stale writes | R08 native review table, second shared filesystem-store instance; native lifecycle restart and relearn; new independent fourth source can return visibly changed candidate |
+| Explicit human transport authority; CLI/unknown reviewer/forged actor; scope edit protection | R08 native review refusal table invokes registered `pianola:review-suggestion`, not a mocked review implementation |
+| Fresh evidence checked before approval; unchanged answer with changed risk/conditions | R08 native refusal table stops scheduler before append and invokes review without refresh; get-suggestions must also invalidate the pending candidate |
+| Authorization-before-write failure; no automatic activation after restart | R08 native injected rule-write failure; checks durable consent inside write, pending retry, no live policy or conflict from receipt alone |
+| Correction same/different record ID; quiet replay, one new event after durable append | R08 native event table subscribes to real settlement event, asserts persisted correction in listener, restarts lifecycle |
+| Accepted source correction, changed risk/conditions; later independent contradiction vs earlier/other scope/conditions/unknown | R08 synthesis conflict projection table; native correction table checks full source, actor/action, accepted provenance and unchanged active rule after restart |
+| Edited approval is intentional, no duplicate candidate or false conflict | Native edit/restart row plus synthesis edited-approval control |
+| Conflict survives empty/legacy/stale writes, compaction, repeat reads and restart | R08 native correction table empties isolated decision log, creates second store, asserts first detection/examples/approval retained and no repeated write on API reads |
+| Invalid count, invalid conflict actor, mismatched approval and corrupt JSON | R08 native storage failure table asserts throw and exact file preservation |
+| Rendered links/examples, concrete boundaries and owner/next action | R08 modal source-link test drives actual SuggestionsView via PianolaModal and conversation navigation seam |
+| Native UI edit/reject, returned persisted state and remount; failure/cancel | R08 modal review table mocks only transport with reloadable state; API/storage semantics are separately asserted above; stale failure requires error notice and retained proposal |
+| Active/disabled/changed/removed conflict display, original and corrected examples | R08 modal conflict table renders persisted approval/conflict state with current rules; no implicit apply/review |
+
+Existing native `learns three Chris settlements`, `rejects .* suggestion approval`,
+`excludes unbound desktop answers`, `retains the medium-risk permission guard`, and
+`escalates high-risk full-turn` remain the selected composition controls. Existing
+relearn and scheduler suites retain feature gating, serialized incremental work and
+no live profile/rule mutation checks. Do not replace them with duplicate smoke tests.
+
+## R09 exact narrow commands
+
+Run from this registered worktree; record exit codes/logs and summary in
+`checks/recovery-learning.json`. Authoring is not a pass receipt. No full suite.
+
+```bash
+npx vitest run src/__tests__/shared/pianola/pianola-synthesis.test.ts src/__tests__/main/pianola/pianola-relearn.test.ts src/__tests__/main/pianola/pianola-relearn-scheduler.test.ts src/__tests__/renderer/components/PianolaModal.test.tsx src/__tests__/renderer/components/RuleEditor.test.tsx --maxWorkers=1 --reporter=json --outputFile=.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-unit.json
+
+npx vitest run --config src/__tests__/integration/pianola-native-acceptance.config.ts -t 'R08|learns three Chris settlements|rejects .* suggestion approval|excludes unbound desktop answers|retains the medium-risk permission guard|escalates high-risk full-turn|blocks productive stores' --reporter=json --outputFile=.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-native.json
+
+cp .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/V2-13-traces.json .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-traces.json
+
+node .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-learning-static.cjs
+
+npx prettier --check src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn.ts src/main/pianola/pianola-store-main.ts src/main/preload/pianola.ts src/main/web-server/handlers/bridgeDenyList.ts src/main/web-server/handlers/bridgeHandlers.ts src/shared/pianola/fs-store.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/storage.ts src/renderer/components/PianolaModal/PianolaModal.tsx src/renderer/components/PianolaModal/SuggestionsView.tsx src/__tests__/shared/pianola/pianola-synthesis.test.ts src/__tests__/renderer/components/PianolaModal.test.tsx src/__tests__/integration/pianola-native-acceptance.integration.test.ts
+
+npx eslint src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn.ts src/main/pianola/pianola-store-main.ts src/main/preload/pianola.ts src/main/web-server/handlers/bridgeDenyList.ts src/main/web-server/handlers/bridgeHandlers.ts src/shared/pianola/fs-store.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/storage.ts src/renderer/components/PianolaModal/PianolaModal.tsx src/renderer/components/PianolaModal/SuggestionsView.tsx
+
+npx eslint -c eslint.dashes.config.mjs src/__tests__/shared/pianola/pianola-synthesis.test.ts src/__tests__/renderer/components/PianolaModal.test.tsx src/__tests__/integration/pianola-native-acceptance.integration.test.ts
+
+git diff --check
+```
+
+The scoped static driver copies R04 compiler/ambient options with learning roots;
+execute only in R09. Preserve the integration trace immediately after the native
+run before another invocation overwrites its historical default path.
+
+Source-inspection lead for R09: inspect `wrappedReviewSuggestion` invocation in
+`pianola:review-suggestion`: registered handler currently forwards event twice to
+a wrapper whose callback accepts event and payload. New review tests intentionally
+invoke the registered handler and expect actual review effects; do not bypass it
+to make tests pass. This is unexecuted source evidence, not a reproduced failure.
+L08/L09 and V2-10/11/12 stay unaccepted until R09/R10 receipts pass.
