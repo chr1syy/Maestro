@@ -1,0 +1,58 @@
+{
+  "taskId": "V2-16",
+  "status": "partial",
+  "sourceCommit": "d020c15d4b",
+  "candidateReadiness": "partial; not ready for full acceptance or publication",
+  "installed": false,
+  "modelEvidence": {
+    "effectiveModel": "unknown",
+    "effectiveEffort": "unknown",
+    "configuredHintsAreExecutionEvidence": false
+  },
+  "verification": {
+    "nativeAcceptance": {"passed": 21, "total": 21, "receipt": "checks/"},
+    "targetedRegressions": {"passed": 622, "total": 622, "files": 12, "receipt": "checks/"},
+    "censusTests": {"passed": 339, "files": 2, "receipt": "V2-15-PUBLICATION.md"},
+    "specAcceptance": {"passed": 28, "failed": 4, "receipt": "acceptance.json"},
+    "fullSuite": "not run",
+    "ci": "not checked"
+  },
+  "publication": {
+    "pr": "none",
+    "reason": "candidate branch is not a focused current-base composition; recorded upstream rc merge simulation has 16 conflicts",
+    "upstreamMerge": "not performed"
+  },
+  "unfulfilled": [
+    {
+      "criterion": "U02",
+      "status": "failed",
+      "owner": "V2-05/06/07 owners",
+      "nextAction": "Complete current per-agent/per-tab failure and freshness reporting plus rendered controls/status regressions; record task receipts."
+    },
+    {
+      "criterion": "L08",
+      "status": "failed",
+      "owner": "V2-10 owner",
+      "nextAction": "Persist source-linked candidate/rejection evidence and implement linked examples with accept/edit/reject; add restart regressions in V2-11/12."
+    },
+    {
+      "criterion": "L09",
+      "status": "failed",
+      "owner": "V2-10 owner",
+      "nextAction": "Persist accepted provenance and surface contradictions for review without policy mutation; test correction/restart."
+    },
+    {
+      "criterion": "P01",
+      "status": "failed",
+      "owner": "Mira / prerequisite Auto Run owners",
+      "nextAction": "Complete V2-05/06/07/10/11/12, reconcile commits and receipts, then rerun affected acceptance."
+    }
+  ],
+  "activation": {
+    "performed": false,
+    "setupCommands": null,
+    "rollbackCommands": null,
+    "reason": "Native roster/group IDs are not evidenced and candidate acceptance is incomplete; obtain current IDs and prepare commands after prerequisites pass."
+  },
+  "nextAction": "Complete missing prerequisite work, rerun affected acceptance, then prepare a focused current-upstream branch and publish only after scoped checks."
+}

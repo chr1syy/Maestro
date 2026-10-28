@@ -370,6 +370,29 @@
 			],
 			"responsibleActor": "Subsequent implementation and branch-preparation owner",
 			"nextAction": "Complete V2-05/06/07/10/11/12, revalidate SPEC, port focused candidate onto current upstream rc resolving conflicts and excluding internal receipts, rerun scoped checks, then publish PR. Do not activate installed runtime."
+		},
+		{
+			"taskId": "V2-16",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "partial",
+			"outcome": "partial handoff; candidate not ready; installed:false",
+			"changedFiles": [
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-03.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/REPORT.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/results.json"
+			],
+			"commit": "This task commit; see git log -1",
+			"evidence": [
+				"Acceptance ledger has 28 passes and 4 failures: U02, L08, L09, P01; exact causes/owners/next actions are in acceptance.json.",
+				"V2-05/V2-10 remain in_progress; V2-06/07/11/12 have no completion receipts. Per V2-16 instruction, this report is partial and halts rather than claiming completion.",
+				"V2-14 evidence: isolated production integration 21/21 and targeted working-tree regressions 622/622; these do not satisfy missing coverage, candidate provenance/rejection, active conflict, or prerequisite receipts.",
+				"V2-15 evidence: no PR, no CI result, candidate branch has 16 merge conflicts against recorded upstream rc and needs focused port. installed:false.",
+				"Actual effective model/effort telemetry unavailable; task model hints are not actual model evidence. No roster IDs/setup commands asserted without current roster evidence; no activation/install/restart/Cue changes."
+			],
+			"responsibleActor": "Mira / prerequisite Auto Run agents",
+			"nextAction": "Resume V2-05/06/07/10/11/12, reconcile commits and receipts, rerun the affected SPEC acceptance, then prepare a focused branch from current upstream rc and publish only after checks."
 		}
 	]
 }
