@@ -102,6 +102,9 @@ export function deriveWatchState(
 const POLL_MS = 4000;
 
 export interface PianolaSupervisorState {
+	targets: PianolaSupervisedTarget[];
+	health: PianolaSupervisorHealth[];
+	saveScope: (target: Partial<PianolaSupervisedTarget>) => Promise<void>;
 	watched: WatchedAgentRow[];
 	watchable: WatchableAgent[];
 	autoWatchNewAgents: boolean;
@@ -246,6 +249,9 @@ export function usePianolaSupervisor(): PianolaSupervisorState {
 	const refresh = useCallback(() => void load(), [load]);
 
 	return {
+		targets,
+		health,
+		saveScope: (target) => mutate(window.maestro.pianola.supervisor.add(target), 'save selection'),
 		watched,
 		watchable,
 		autoWatchNewAgents,

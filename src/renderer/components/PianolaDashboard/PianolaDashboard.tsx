@@ -20,7 +20,6 @@ import {
 	EyeOff,
 	GitBranch,
 	Eye,
-	Plus,
 	X,
 	ChevronDown,
 	ChevronRight,
@@ -33,7 +32,26 @@ import {
 	type DashboardActivityRow,
 } from './usePianolaDashboardData';
 import { usePianolaSupervisor, type PianolaSupervisorState } from './usePianolaSupervisor';
+import { PianolaScopeControls } from './PianolaScopeControls';
 import type { PianolaSupervisedState } from '../../../main/pianola/pianola-supervisor';
+import type { PianolaDecisionLifecycle } from '../../../shared/pianola/storage';
+
+const DECISION_STATUS: Record<PianolaDecisionLifecycle['status'], string> = {
+	mira_processing: 'Mira bearbeitet',
+	waiting_human: 'Wartet auf Chris',
+	agent_running: 'Agent arbeitet weiter',
+	blocked: 'Technisch blockiert',
+	paused: 'Pausiert',
+	done: 'Erledigt',
+};
+
+const DECISION_ACTOR: Record<PianolaDecisionLifecycle['nextActor'], string> = {
+	manager: 'Mira',
+	human: 'Chris',
+	recipient: 'Agent',
+	operator: 'Betreiber',
+	none: 'Niemand',
+};
 
 interface PianolaDashboardProps {
 	theme: Theme;
@@ -251,16 +269,7 @@ function WatchedSection({
 	onJumpToAgent: (sessionId: string) => void;
 	supervisor: PianolaSupervisorState;
 }): React.ReactElement {
-	const {
-		watched,
-		watchable,
-		watch,
-		unwatch,
-		setEnabled,
-		autoWatchNewAgents,
-		setAutoWatchNewAgents,
-	} = supervisor;
-	const [pickerOpen, setPickerOpen] = React.useState(false);
+	const { watched, unwatch, setEnabled, autoWatchNewAgents, setAutoWatchNewAgents } = supervisor;
 	const [expanded, setExpanded] = React.useState(false);
 	const canCollapse = watched.length > 5;
 	const collapsed = canCollapse && !expanded;
@@ -268,66 +277,13 @@ function WatchedSection({
 		(row) => row.enabled && (row.state === 'failed' || row.state === 'backing-off')
 	).length;
 
-	const addButton = (
-		<div className="relative">
-			<button
-				type="button"
-				disabled={watchable.length === 0}
-				onClick={() => setPickerOpen((o) => !o)}
-				className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-white/5 transition-colors disabled:opacity-40 disabled:cursor-default normal-case"
-				style={{ color: theme.colors.textDim }}
-				title={watchable.length === 0 ? 'No unwatched agents' : 'Watch an agent with Pianola'}
-			>
-				<Plus className="w-3.5 h-3.5" />
-				Watch an agent
-			</button>
-			{pickerOpen && watchable.length > 0 && (
-				<>
-					<button
-						type="button"
-						aria-hidden
-						tabIndex={-1}
-						className="fixed inset-0 z-40 cursor-default"
-						onClick={() => setPickerOpen(false)}
-					/>
-					<div
-						className="absolute right-0 mt-1 z-50 rounded shadow-lg overflow-y-auto scrollbar-thin whitespace-nowrap normal-case py-1"
-						style={{
-							minWidth: '12rem',
-							maxWidth: '20rem',
-							maxHeight: '15rem',
-							backgroundColor: theme.colors.bgSidebar,
-							border: `1px solid ${theme.colors.border}`,
-						}}
-					>
-						{watchable.map((a) => (
-							<button
-								key={a.agentId}
-								type="button"
-								onClick={() => {
-									setPickerOpen(false);
-									void watch(a.agentId, a.tabId);
-								}}
-								className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-white/5 transition-colors"
-								style={{ color: theme.colors.textMain }}
-							>
-								<Eye className="w-3.5 h-3.5 shrink-0" style={{ color: theme.colors.textDim }} />
-								<span className="truncate">{a.agentName}</span>
-							</button>
-						))}
-					</div>
-				</>
-			)}
-		</div>
-	);
-
 	return (
 		<Section
 			theme={theme}
 			icon={<Eye className="w-3.5 h-3.5" style={{ color: theme.colors.accent }} />}
 			title="Watched by Pianola"
 			count={watched.length}
-			emptyLabel="No agents watched yet. Add one and Pianola babysits its questions."
+			emptyLabel="No legacy watches registered."
 			collapsed={collapsed}
 			headerAction={
 				<div className="flex items-center gap-1">
@@ -356,7 +312,6 @@ function WatchedSection({
 							{collapsed ? 'Show agents' : 'Hide agents'}
 						</button>
 					)}
-					{addButton}
 				</div>
 			}
 			controlRow={
@@ -432,8 +387,9 @@ export function PianolaDashboard({
 	theme,
 	onJumpToAgent,
 }: PianolaDashboardProps): React.ReactElement {
-	const { data, refresh } = usePianolaDashboardData();
+	const { data, decisions, refresh } = usePianolaDashboardData();
 	const supervisor = usePianolaSupervisor();
+	const lifecycleDecisions = decisions.filter((record) => record.lifecycle);
 
 	return (
 		<div
@@ -459,7 +415,34 @@ export function PianolaDashboard({
 				</button>
 			</div>
 
+			<PianolaScopeControls theme={theme} supervisor={supervisor} />
 			<WatchedSection theme={theme} onJumpToAgent={onJumpToAgent} supervisor={supervisor} />
+
+			<Section
+				theme={theme}
+				icon={<ShieldQuestion className="w-3.5 h-3.5" />}
+				title="Pianola decisions"
+				count={lifecycleDecisions.length}
+				emptyLabel="No scope decisions recorded yet."
+			>
+				{lifecycleDecisions.map((record) => {
+					const life = record.lifecycle!;
+					return (
+						<div
+							key={record.id}
+							className="rounded px-3 py-2"
+							style={{ backgroundColor: theme.colors.bgSidebar }}
+						>
+							<div className="text-sm font-medium" style={{ color: theme.colors.textMain }}>
+								{DECISION_STATUS[life.status]} · {record.classification.topic}
+							</div>
+							<div className="text-xs" style={{ color: theme.colors.textDim }}>
+								{DECISION_ACTOR[life.nextActor]}: {life.nextAction}
+							</div>
+						</div>
+					);
+				})}
+			</Section>
 
 			<Section
 				theme={theme}
