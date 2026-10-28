@@ -347,6 +347,29 @@
 			],
 			"responsibleActor": "V2-15 Auto Run agent / Mira for incomplete prerequisite tasks",
 			"nextAction": "V2-15: review exact partial candidate, WIP and upstream ancestry; publish only a focused diff if compatible and preserve acceptance failures. Resume V2-05/06/07/10/11/12 and rerun affected acceptance before V2-16 can claim full completion. No installed activation."
+		},
+		{
+			"taskId": "V2-15",
+			"effectiveModel": "unknown",
+			"effectiveEffort": "unknown",
+			"status": "complete",
+			"outcome": "publication boundary documented; partial candidate preserved, no PR",
+			"parentCommit": "550b3b79b5d44b92b5b4a774a0e54f05f0f1b7ca",
+			"commit": "MAESTRO: preserve Pianola census tests and document publication boundary",
+			"changedFiles": [
+				"src/__tests__/cli/commands/pianola.test.ts",
+				"src/__tests__/main/web-server/handlers/messageHandlers.test.ts",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-15-PUBLICATION.md",
+				".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+				".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-03.md"
+			],
+			"evidence": [
+				"Fetched upstream rc be54af44351895e630efccac07d51564cd12e9b9 and fork head 550b3b79b5d44b92b5b4a774a0e54f05f0f1b7ca; 960 upstream-only and 19 candidate-only commits. LAN commits are in the common ancestor.",
+				"Merge simulation found 16 content conflicts; candidate diff includes large internal receipts. No PR for branch; full SPEC acceptance failed.",
+				"Focused preserved census tests: 339 passed in 2 files; full local push suite skipped. No CI claim."
+			],
+			"responsibleActor": "Subsequent implementation and branch-preparation owner",
+			"nextAction": "Complete V2-05/06/07/10/11/12, revalidate SPEC, port focused candidate onto current upstream rc resolving conflicts and excluding internal receipts, rerun scoped checks, then publish PR. Do not activate installed runtime."
 		}
 	]
 }

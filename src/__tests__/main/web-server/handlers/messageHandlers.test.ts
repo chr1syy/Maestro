@@ -4492,6 +4492,28 @@ describe('WebSocketMessageHandler', () => {
 			expect(response.requestId).toBe('req-1');
 		});
 
+		it('preserves the versioned native owner census and its original host capture time', () => {
+			const snapshot = {
+				supervisionVersion: 1,
+				complete: true,
+				capturedAt: 123,
+				owners: [
+					{
+						id: 'tabless',
+						cwd: '/project',
+						parentSessionId: null,
+						isPianola: false,
+						remote: false,
+					},
+				],
+				sessions: [],
+			};
+			(callbacks.listDesktopSessions as any).mockReturnValue(snapshot);
+			handler.handleMessage(client, { type: 'list_desktop_sessions', requestId: 'req-scope' });
+			const response = JSON.parse((client.socket.send as any).mock.calls[0][0]);
+			expect(response).toMatchObject({ ...snapshot, success: true, requestId: 'req-scope' });
+		});
+
 		it('fails closed when the callback is unconfigured rather than retiring membership', () => {
 			// Preserve request/response pairing, but never treat missing metadata
 			// as evidence that every previously supervised tab has closed.
