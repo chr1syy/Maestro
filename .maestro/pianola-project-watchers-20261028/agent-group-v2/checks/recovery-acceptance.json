@@ -1,0 +1,143 @@
+{
+  "type": "report",
+  "taskId": "R10",
+  "status": "pass",
+  "created": "2026-10-28T17:42:39.328487+00:00",
+  "sourceHeadBeforeTask": "9bfacb1aeb03dd7ac9512e17cc4f372adcce02d9",
+  "native": {
+    "passed": 58,
+    "failed": 0,
+    "skipped": 0,
+    "receipt": "checks/recovery-acceptance-native.json",
+    "log": "checks/recovery-acceptance-native.log",
+    "traces": "checks/recovery-acceptance-traces.json.gz",
+    "traceFormat": "gzip-compressed JSON",
+    "traceSha256": "8611d93dbd89347eb0a2ca02a1280409adb7c100fcd8854c785406da385f61d5",
+    "boundaryViolations": 0,
+    "allFilesystemPathsWithinPerCaseFixture": true,
+    "allSendRecipientsFixtureOnly": true
+  },
+  "originalRepros": {
+    "passed": 11,
+    "failed": 0,
+    "formerlyRed": 7,
+    "preservedControls": 4,
+    "receipt": "checks/recovery-original-repro.json",
+    "trace": "checks/recovery-original-repro-traces.json",
+    "log": "checks/recovery-original-repro.log",
+    "boundaryViolations": 0,
+    "contractAdaptations": [
+      "Use current coverage projection instead of historical checkpoint tabs.",
+      "Use review-suggestion with displayed candidate ID/fingerprint for reject and edit.",
+      "Use current Suggestions props and Accept label; isolate navigation interaction for server render."
+    ],
+    "initialHarnessLoadFailure": "checks/recovery-original-repro-load-failure.log; renderer navigation imported desktop stores without window; isolated navigation boundary, all actual component/native/store logic retained."
+  },
+  "static": {
+    "status": "pass",
+    "receipt": "checks/recovery-acceptance-static.json",
+    "log": "checks/recovery-acceptance-static.log",
+    "rootCount": 23,
+    "diagnostics": 0
+  },
+  "format": {
+    "status": "pass",
+    "scope": [
+      "src/__tests__/integration/pianola-native-acceptance.integration.test.ts"
+    ]
+  },
+  "lint": {
+    "status": "pass",
+    "config": "eslint.dashes.config.mjs",
+    "scope": [
+      "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+      ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-static.mjs"
+    ]
+  },
+  "commands": [
+    {
+      "command": "PIANOLA_ACCEPTANCE_TRACE_FILE=checks/recovery-acceptance-traces.json node_modules/.bin/vitest run --config src/__tests__/integration/pianola-native-acceptance.config.ts --reporter=json --outputFile=.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-native.json",
+      "exitCode": 0
+    },
+    {
+      "command": "python3 .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-repro.py",
+      "exitCode": 0,
+      "note": "Disposable diagnostic adapted to final contracts and then removed; permanent equivalent cases live in the native acceptance and rendered suites."
+    },
+    {
+      "command": "node .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-static.mjs",
+      "exitCode": 0
+    },
+    {
+      "command": "node_modules/.bin/prettier --check src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+      "exitCode": 0
+    },
+    {
+      "command": "node_modules/.bin/eslint -c eslint.dashes.config.mjs src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+      "exitCode": 0
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0
+    }
+  ],
+  "reusedChecks": [
+    {
+      "area": "monitoring",
+      "receipt": "checks/recovery-monitoring-unit.json",
+      "sourceReceiptCommit": "35d45dfbaf82c086d73ebbaadb515ad8dd1c4956",
+      "passed": 161,
+      "failed": 0,
+      "testFilesUnchangedSinceReceipt": [
+        "src/__tests__/renderer/components/PianolaDashboard/PianolaDashboard.test.tsx",
+        "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx",
+        "src/__tests__/renderer/components/PianolaDashboard/usePianolaSupervisor.test.ts",
+        "src/__tests__/shared/pianola/pianola-scope-checkpoint.test.ts",
+        "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts"
+      ],
+      "reason": "No source/test change invalidates the rendered/helper assertions. Current changed main/storage composition is rerun by all 58 native cases and scoped union typecheck."
+    },
+    {
+      "area": "learning",
+      "receipt": "checks/recovery-learning-unit.json",
+      "sourceReceiptCommit": "9bfacb1aeb03dd7ac9512e17cc4f372adcce02d9",
+      "passed": 67,
+      "failed": 0,
+      "testFilesUnchangedSinceReceipt": [
+        "src/__tests__/renderer/components/PianolaModal.test.tsx",
+        "src/__tests__/renderer/components/RuleEditor.test.tsx",
+        "src/__tests__/main/pianola/pianola-relearn-scheduler.test.ts",
+        "src/__tests__/main/pianola/pianola-relearn.test.ts",
+        "src/__tests__/shared/pianola/pianola-synthesis.test.ts"
+      ],
+      "reason": "No source/test change invalidates the rendered/helper assertions. Current changed main/storage composition is rerun by all 58 native cases and scoped union typecheck."
+    }
+  ],
+  "removedDebugInstrumentation": [
+    {
+      "file": ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-repro.py",
+      "sha256AtExecution": "9bbe4e086fb1def2873b4cd674ed8cce97fcd993445c3a16523057dd72b5b34a",
+      "status": "removed after 11 passing reproductions; original red inputs retained in git commit 88ba5ff8f3"
+    },
+    {
+      "file": ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-cases.debug.txt",
+      "sha256AtExecution": "f55df64dcc6eccba124bb2a578f809f671d85ec07258b516874e2d5aa6dcc8e8",
+      "status": "removed after 11 passing reproductions; original red inputs retained in git commit 88ba5ff8f3"
+    }
+  ],
+  "imagesAnalyzed": 0,
+  "installed": false,
+  "effectiveModel": "unknown",
+  "effectiveEffort": "unknown",
+  "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+  "fullSuite": "not run per approved scope; no validate:push",
+  "publication": "R11 owns current upstream rc composition and PR; no branch composition, merge or installation in R10",
+  "nextAction": "R11: preserve source/WIP, resolve current-base composition and publish focused PR",
+  "requirementCounts": {
+    "pass": 32,
+    "fail": 0
+  },
+  "diffCheck": "pass",
+  "installedRuntime": "unverified; installed false; no install/restart/activation",
+  "commitHookRepair": "Copied CommonJS typecheck driver failed ordinary ESLint; converted to ES modules with explicit Node process/console imports and reran scoped lint/typecheck. No hook or CI changes."
+}

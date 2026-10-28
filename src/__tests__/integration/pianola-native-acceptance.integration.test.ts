@@ -633,7 +633,10 @@ afterEach(async (context) => {
 	}
 });
 afterAll(() => {
-	const target = path.resolve(EVIDENCE, 'checks/V2-13-traces.json');
+	const target = path.resolve(
+		EVIDENCE,
+		process.env.PIANOLA_ACCEPTANCE_TRACE_FILE ?? 'checks/V2-13-traces.json'
+	);
 	nativeFs.mkdirSync(path.dirname(target), { recursive: true });
 	nativeFs.writeFileSync(
 		target,

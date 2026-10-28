@@ -1,6 +1,6 @@
 {
   "plan": "pianola-agent-group-v2-20261028",
-  "status": "in_progress",
+  "status": "source_accepted_publication_pending",
   "tasks": [
     {
       "taskId": "V2-01",
@@ -181,14 +181,25 @@
         "src/renderer/components/PianolaDashboard/usePianolaSupervisor.ts",
         "src/main/ipc/handlers/pianola.ts"
       ],
-      "commit": "Partial commits: MAESTRO: add paused Pianola scope CLI setup; MAESTRO: add Pianola selection and decision views; MAESTRO: expose Pianola checkpoint coverage evidence",
+      "commit": "See exact recovery commits in RECOVERY.json; source baseline 9bfacb1aeb",
       "evidence": [
+        "checks/recovery-monitoring.json",
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
+      ],
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "Prerequisite accepted by R10; R11 owns current-base publication",
+      "historicalEvidence": [
         "CLI scope command creates or replaces validated identity-based selections; new selections start paused and edits preserve enabled state. Scoped ESLint, Prettier and git diff --check passed. No tests executed per V2-06/V2-07 separation.",
         "Dashboard now edits persisted ID-based scopes, resumes or pauses them, displays scope worker health and lifecycle states. New selections default paused; legacy single-tab watches are preserved. Scoped Prettier, ESLint and diff checks passed. Changed-file TypeScript diagnostics: zero; nine dependency diagnostics remain under the isolated program. No tests executed per V2-06/V2-07.",
         "Checkpoint evidence is now returned by the native supervisor snapshot with per-scope read errors isolated; dashboard displays last census and per-agent active/suspended/closed checkpoint counts as historical evidence. Changed-file ESLint, Prettier and git diff --check passed. Tests remain reserved for V2-06/V2-07."
       ],
-      "responsibleActor": "V2-05 Auto Run agent",
-      "nextAction": "R10 revalidates full acceptance; monitoring checks: checks/recovery-monitoring.json"
+      "historicalCommit": "Partial commits: MAESTRO: add paused Pianola scope CLI setup; MAESTRO: add Pianola selection and decision views; MAESTRO: expose Pianola checkpoint coverage evidence",
+      "recoveredBy": [
+        "R01",
+        "R02",
+        "R04"
+      ]
     },
     {
       "taskId": "V2-08",
@@ -267,16 +278,28 @@
       "changedFiles": [
         ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json"
       ],
-      "commit": "Investigation recorded in this task attempt",
+      "commit": "See exact recovery commits in RECOVERY.json; source baseline 9bfacb1aeb",
       "evidence": [
+        "checks/recovery-learning.json",
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
+      ],
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "Prerequisite accepted by R10; R11 owns current-base publication",
+      "recoveryEvidence": "checks/recovery-learning.json; R05-R07 contracts and source receipts; native and rendered learning regressions pass",
+      "historicalEvidence": [
         "Suggestions storage currently discards candidate evidence and overwrites all staged data on each relearn; IPC approval persists the supplied rule unchanged, so the disabled V2-09 proposal stays disabled. Existing approval also accepts a supplied rule without verifying that it is still a current candidate.",
         "The V2-09 synthesis suppresses existing-rule candidates, so conflict detection for accepted rules requires separately evaluating evidence against learned rule provenance. No implementation or tests completed in this attempt.",
         "Additional investigation: native human settlement schedules relearning asynchronously, so validating approval solely against the last staged file can accept a candidate after contradictory evidence was settled but before staging catches up. Acceptance must revalidate current evidence or serialize against settlement; active learned-rule conflict detection also needs persisted provenance. No implementation or tests completed in this attempt.",
         "Further source review: pianola-store-main.appendDecision suppresses the settled event for an already-seen question or answer message ID. A correction sharing that identity is still appended but does not trigger incremental relearning; conflict invalidation must explicitly handle changed evidence as well as duplicate suppression. SuggestionsView only exposes approve, and approval IPC currently permits arbitrary validated rules."
       ],
-      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
-      "nextAction": "R10 independent acceptance",
-      "recoveryEvidence": "checks/recovery-learning.json; R05-R07 contracts and source receipts; native and rendered learning regressions pass"
+      "historicalCommit": "Investigation recorded in this task attempt",
+      "recoveredBy": [
+        "R05",
+        "R06",
+        "R07",
+        "R09"
+      ]
     },
     {
       "taskId": "V2-13",
@@ -313,7 +336,7 @@
       "effectiveModel": "unknown",
       "effectiveEffort": "unknown",
       "status": "complete",
-      "outcome": "acceptance review complete; full SPEC acceptance failed, candidate not ready, installed:false",
+      "outcome": "R10 reacceptance: all 32 SPEC criteria pass; candidateReady for source/isolated integration; installed:false",
       "parentCommit": "4309f852a0d6008f03f60303d7aff78a0e2e4002",
       "commit": "MAESTRO: verify Pianola native acceptance and repair guarded approval and retries; exact push receipt in auto-run/Working/V2-14-delivery.json",
       "changedFiles": [
@@ -346,8 +369,13 @@
         "15-root scoped TypeScript, source/test ESLint, changed-file Prettier and diff checks recorded in checks/V2-14-checks.json. No full suite/validate:push, installation/restart/live activation, productive messages, Cue/peer changes, merge, agents/worktrees or delegation. Actual model/effort unknown; zero images.",
         "Entry patches/index preserved in Working/V2-14-entry-*. Related scope/factory staged test WIP is retained and updated within this task; untouched staged CLI/message-handler/PROGRESS blobs remain for V2-15."
       ],
-      "responsibleActor": "V2-15 Auto Run agent / Mira for incomplete prerequisite tasks",
-      "nextAction": "V2-15: review exact partial candidate, WIP and upstream ancestry; publish only a focused diff if compatible and preserve acceptance failures. Resume V2-05/06/07/10/11/12 and rerun affected acceptance before V2-16 can claim full completion. No installed activation."
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R11 scoped current-base composition/PR; no installation",
+      "historicalOutcome": "acceptance review complete; full SPEC acceptance failed, candidate not ready, installed:false",
+      "recoveryEvidence": [
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
+      ]
     },
     {
       "taskId": "V2-15",
@@ -377,7 +405,7 @@
       "effectiveModel": "unknown",
       "effectiveEffort": "unknown",
       "status": "partial",
-      "outcome": "partial handoff; candidate not ready; installed:false",
+      "outcome": "Source acceptance now passes 32/32; final publication/handoff remains pending; installed:false",
       "changedFiles": [
         ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-AGENTS-03.md",
         ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
@@ -392,26 +420,48 @@
         "V2-15 evidence: no PR, no CI result, candidate branch has 16 merge conflicts against recorded upstream rc and needs focused port. installed:false.",
         "Actual effective model/effort telemetry unavailable; task model hints are not actual model evidence. No roster IDs/setup commands asserted without current roster evidence; no activation/install/restart/Cue changes."
       ],
-      "responsibleActor": "Mira / prerequisite Auto Run agents",
-      "nextAction": "Resume V2-05/06/07/10/11/12, reconcile commits and receipts, rerun the affected SPEC acceptance, then prepare a focused branch from current upstream rc and publish only after checks."
+      "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R11 resolves current-base composition and publication; R12 refreshes REPORT/results/final handoff. Original checkbox is historical, not completion proof.",
+      "historicalOutcome": "partial handoff; candidate not ready; installed:false",
+      "recoveryEvidence": [
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
+      ]
     },
     {
       "taskId": "V2-06",
       "status": "complete",
       "effectiveModel": "unknown",
       "effectiveEffort": "unknown",
-      "evidence": "R03 authored regressions; R04 verified production seams and static checks in checks/recovery-monitoring.json",
+      "evidence": [
+        "checks/recovery-monitoring.json",
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
+      ],
       "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
-      "nextAction": "R10 revalidates full acceptance"
+      "nextAction": "Prerequisite accepted by R10; R11 owns current-base publication",
+      "recoveredBy": [
+        "R03",
+        "R04"
+      ],
+      "commit": "See exact recovery commits in RECOVERY.json; source baseline 9bfacb1aeb"
     },
     {
       "taskId": "V2-07",
       "status": "complete",
       "effectiveModel": "unknown",
       "effectiveEffort": "unknown",
-      "evidence": "R03 authored regressions; R04 verified production seams and static checks in checks/recovery-monitoring.json",
+      "evidence": [
+        "checks/recovery-monitoring.json",
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
+      ],
       "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
-      "nextAction": "R10 revalidates full acceptance"
+      "nextAction": "Prerequisite accepted by R10; R11 owns current-base publication",
+      "recoveredBy": [
+        "R04"
+      ],
+      "commit": "See exact recovery commits in RECOVERY.json; source baseline 9bfacb1aeb"
     },
     {
       "taskId": "V2-11",
@@ -420,10 +470,16 @@
       "effectiveEffort": "unknown",
       "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "evidence": [
-        "recovery-checks.md R08 matrix",
-        "checks/recovery-learning.json"
+        "checks/recovery-learning.json",
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
       ],
-      "nextAction": "R10 independent acceptance"
+      "nextAction": "Prerequisite accepted by R10; R11 owns current-base publication",
+      "recoveredBy": [
+        "R08",
+        "R09"
+      ],
+      "commit": "See exact recovery commits in RECOVERY.json; source baseline 9bfacb1aeb"
     },
     {
       "taskId": "V2-12",
@@ -432,10 +488,15 @@
       "effectiveEffort": "unknown",
       "responsibleActor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "evidence": [
-        "recovery-checks.md R08 matrix",
-        "checks/recovery-learning.json"
+        "checks/recovery-learning.json",
+        "checks/recovery-acceptance.json",
+        "acceptance.json"
       ],
-      "nextAction": "R10 independent acceptance"
+      "nextAction": "Prerequisite accepted by R10; R11 owns current-base publication",
+      "recoveredBy": [
+        "R09"
+      ],
+      "commit": "See exact recovery commits in RECOVERY.json; source baseline 9bfacb1aeb"
     }
   ]
 }

@@ -12,6 +12,16 @@ related:
   - '[[V2-13-HARNESS]]'
 ---
 
+Current acceptance is recorded in [[recovery-acceptance]] and `acceptance.json`:
+R10 passes all 32 SPEC criteria, 58 current native cases and 11 original R00
+reproductions. Source/isolated integration is accepted; publication remains R11
+and `installed: false`. V2-16 remains partial pending R11/R12.
+
+## Historical V2-14 review before recovery
+
+The following findings describe the pre-recovery source. R01-R09 resolved its
+four failed criteria; R10 independently verified the complete composition.
+
 V2-14 executed the isolated production composition and repaired the defects it
 exposed. The final harness passes **21/21** cases and the targeted regressions
 pass **622/622** tests in 12 files. Full SPEC acceptance **fails**: the candidate

@@ -6,7 +6,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R10: independently rerun production composition acceptance and reconcile all SPEC criteria; candidateReady remains false",
+  "nextAction": "R11: source accepted 32/32; preserve source/WIP, resolve current-upstream rc composition and publish focused PR",
   "tasks": [
     {
       "taskId": "R00",
@@ -318,6 +318,49 @@
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R10: independently rerun production composition acceptance and reconcile all SPEC criteria; candidateReady remains false",
       "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R10",
+      "status": "complete",
+      "outcome": "58/58 current native production-composition and 11/11 original diagnostic cases pass; all 32 SPEC criteria accepted; source ready, publication pending, installed:false",
+      "files": [
+        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/acceptance.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-acceptance.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-14-ACCEPTANCE.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/V2-13-HARNESS.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-native.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-traces.json.gz",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro-traces.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-static.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-native.log",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-static.mjs",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-acceptance-static.log",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro-load-failure.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro-load-failure.log",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro.log",
+        ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-repro.py (removed)",
+        ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-cases.debug.txt (removed)",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": {
+        "subject": "MAESTRO: accept Pianola recovery source composition",
+        "parent": "9bfacb1aeb03dd7ac9512e17cc4f372adcce02d9",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-acceptance.md"
+      },
+      "checks": "checks/recovery-acceptance.json",
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "imagesAnalyzed": 0,
+      "nextAction": "R11; V2-16 remains partial until focused publication and final R12 handoff; no merge/install/restart/activation"
     }
-  ]
+  ],
+  "sourceAcceptance": "pass;32pass0fail",
+  "candidateReady": true,
+  "installed": false
 }

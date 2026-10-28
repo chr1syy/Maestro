@@ -1,0 +1,35 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (.maestro/pianola-project-watchers-20261028/auto-run/Working/R00-debug.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+Both esbuild and oxc options were set. oxc options will be used and esbuild options will be ignored. The following esbuild options were set: `{ jsx: 'automatic' }`
+
+ RUN  v4.1.11 /home/chris/code/worktrees/fix/pianola-project-watchers-20261028
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts [ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts ]
+ReferenceError: window is not defined
+ ❯ getPlatform src/renderer/utils/platformUtils.ts:18:2
+     16|
+     17| function getPlatform(): string {
+     18|  return (window as any).maestro?.platform ?? '';
+       |  ^
+     19| }
+     20|
+ ❯ isWindowsPlatform src/renderer/utils/platformUtils.ts:33:9
+ ❯ src/renderer/stores/settingsStore.ts:757:17
+ ❯ createStoreImpl node_modules/zustand/esm/vanilla.mjs:19:32
+ ❯ createStore node_modules/zustand/esm/vanilla.mjs:22:53
+ ❯ createImpl node_modules/zustand/esm/react.mjs:15:15
+ ❯ src/renderer/stores/settingsStore.ts:745:56
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  18:39:17
+   Duration  1.86s (transform 1.15s, setup 0ms, import 0ms, tests 0ms, environment 0ms)
+
+JSON report written to /home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro.json

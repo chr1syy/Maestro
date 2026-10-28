@@ -1,0 +1,25 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (.maestro/pianola-project-watchers-20261028/auto-run/Working/R00-debug.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+Both esbuild and oxc options were set. oxc options will be used and esbuild options will be ignored. The following esbuild options were set: `{ jsx: 'automatic' }`
+
+ RUN  v4.1.11 /home/chris/code/worktrees/fix/pianola-project-watchers-20261028
+
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > U02 exposes missing-cursor failure through real supervisor status 30ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > U02 invalidates historical coverage immediately after selection change 11ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 persists source-linked candidate after native settlement and restart 117ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 exposes native rejection and suppresses unchanged candidate after restart 76ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 permits explicit bounded human edit of staged answer 83ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L09 exposes durable accepted-rule conflict after attributable correction 106ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 already-fixed controls > rejects forged suggestion approval against current native evidence 98ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 already-fixed controls > rejects broadened suggestion approval against current native evidence 78ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 already-fixed controls > rejects corrected suggestion approval against current native evidence 93ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 real Suggestions render > L08 renders linked evidence and edit/reject controls 101ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 correction notification diagnosis > L09 notifies one time for a replayed correction to learned evidence 113ms
+
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+   Start at  18:40:05
+   Duration  2.14s (transform 682ms, setup 0ms, import 927ms, tests 910ms, environment 0ms)
+
+JSON report written to /home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-original-repro.json

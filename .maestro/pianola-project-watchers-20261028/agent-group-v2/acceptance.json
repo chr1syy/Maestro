@@ -1,43 +1,97 @@
 {
   "type": "acceptance",
   "title": "Pianola agent/group V2 source acceptance",
-  "taskId": "V2-14",
+  "taskId": "R10",
   "created": "2026-10-28T16:30:42.474180+00:00",
-  "status": "fail",
+  "status": "pass",
   "reviewComplete": true,
-  "candidateReady": false,
+  "candidateReady": true,
   "candidateSource": {
-    "status": "partial",
-    "parentCommit": "4309f852a0d6008f03f60303d7aff78a0e2e4002",
-    "includedInTaskCommit": "MAESTRO: verify Pianola native acceptance and repair guarded approval and retries",
+    "status": "accepted-source",
+    "parentCommit": "9bfacb1aeb03dd7ac9512e17cc4f372adcce02d9",
+    "includedInTaskCommit": "MAESTRO: accept Pianola recovery source composition",
     "sourceSha256": {
-      "src/main/ipc/handlers/pianola.ts": "f14983e17bd1d25331527d21481f3e2084ea493962cdd47fad15051849e390b1",
-      "src/main/pianola/pianola-store-main.ts": "1d94a00a02b0f1c25e90a3b6e52ba8b12dbcd4feda8c163a868df8ab16e5d4d3",
+      "src/main/ipc/handlers/pianola.ts": "1d1a3bdd1cebf5f06c892b4db5dd62c1223460d442d654060d0ee1d586da8df1",
+      "src/main/pianola/pianola-lifecycle.ts": "bb4eac3dba38997cbcc3346308b8922b9184d44f9280b920584f92df29d96252",
+      "src/main/pianola/pianola-relearn.ts": "4ca4009bb497e1c5b45457e08e69d2da563269973581b715548b8648812f9331",
+      "src/main/pianola/pianola-store-main.ts": "24d0d699d6c0178f3d1ee099902ac5f834a9e7c3db0d662022cdf7184919dba2",
+      "src/main/preload/pianola.ts": "33e3d0cf0e500dee31b77be739c53ccee602bdf7125c0830201c7d21905ada5a",
+      "src/main/web-server/handlers/bridgeDenyList.ts": "2a3dbfec929d382b64a5003c0a73f2d391f333eb7898593be012bdb215df64f5",
+      "src/main/web-server/handlers/bridgeHandlers.ts": "71b9aee0ccc53b5e0f7645a6ca5a99b63b0960fe69cf8f58a8985baf46d2fe7b",
+      "src/shared/pianola/fs-store.ts": "2018b1505023453ce3b3dc41dabc4dde17e8ece4fa0eae29eea40e4d53cb4ad9",
+      "src/shared/pianola/pianola-synthesis.ts": "2060b7c87bbebe0466f65aad994f162dde7307af4741ab73f20109be600df926",
+      "src/shared/pianola/storage.ts": "6759b7dfd341504c3b58fe91c7557c126260181d0be2a7819299cf5d4de41bd3",
+      "src/renderer/components/PianolaModal/PianolaModal.tsx": "5b57c4d15e3a3a5817dd6717d20b9eb5e54869cf67144b47ee4f7c88c7d80af0",
+      "src/renderer/components/PianolaModal/SuggestionsView.tsx": "b03a30e860f0237125e3076204561f9491ddf9fd75aab9ec5f0f9faff3a8aaff",
+      "src/__tests__/shared/pianola/pianola-synthesis.test.ts": "ce47feb7d979d82e7c16fb1a4ca0161e1956d8b0969ea98aecb7953b9d852845",
+      "src/__tests__/renderer/components/PianolaModal.test.tsx": "3d39702258ccabc7aabb07c2c61b156866dd44ffa1b099ddeb787dd08714629b",
+      "src/__tests__/integration/pianola-native-acceptance.integration.test.ts": "9e91bd755fc7afc93d112ae24eccd898c82a7624cbbb51f7595d9e3d32902372",
+      "src/shared/pianola/pianola-scope-checkpoint.ts": "d0d6d76a0f339f2b82b227b91e5090728458fb28484c4108dfd5914d76083a08",
+      "src/shared/pianola/pianola-scope-cycle.ts": "023bbee6b3cbd1f2d6ab25b214fab6031fb2d67060be2dc8028d0ab602e51e24",
+      "src/renderer/components/PianolaDashboard/PianolaDashboard.tsx": "8fc24517df7fefd56948bbfd11c3203c75799bd19fffa72ecf8c984691a816b7",
+      "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx": "ecb0bf88ece09f94c758536768d2eb3660c7374cbd312957654b746959c098c4",
+      "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts": "fd05c5f7b4ca56cf07f22525ec09f12e1c3e611c9da9cd3433ad40022ef23a16",
+      "src/__tests__/shared/pianola/pianola-scope-checkpoint.test.ts": "3fff0550a39f5c9bcb34753357f5c01420c5251c9e8b967b957fc9fc29270385",
+      "src/__tests__/renderer/components/PianolaDashboard/PianolaDashboard.test.tsx": "f48b29a0bf64edf9a7bc81e5d190bc28ae02aa110b00875cdcb5f554bccf93ef",
+      "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx": "d7575a1b86195d2b4b3b8f57b5e8602e3e49f7418661e72f1f16b3baf5f1bb68",
+      "src/shared/pianola/pianola-scope.ts": "cf67f1a871c39386e3d0812bacfedff3bb265895c49153f52f941bee290a1bca",
+      "src/shared/pianola/pianola-policy.ts": "675ec3b08a2b5563a28975f59c37e8c28d55a9ac1e7d02dabaabddea9ee7b4d0",
+      "src/shared/pianola/transcript-mining.ts": "a39790850f1f191d2e669959d7b424d2ad56e89bd2aadfc869686ad0b3dfcffb",
       "src/main/pianola/pianola-decisions.ts": "2ecc3b98d58d7037cd7aa572a946b5461e177bf7eb24558bd03be74e746f65d3",
-      "src/shared/pianola/pianola-scope-cycle.ts": "4bbfa14c1d43c2ff871dbd51f1b1f584b099737e6a693e9f14c993bb751426cd",
-      "src/renderer/components/PianolaModal/RuleEditor.tsx": "95ef918b39af5b0c80bc4e16e1b0284630f5d5d28d7c7a187118ae04c5eb4544"
+      "src/cli/commands/pianola-supervise.ts": "b89639e13e97331467286b37b4dce0567ab3a34ed6c2e9f38f5d58b5e276083d",
+      "src/cli/commands/pianola-scope-watch.ts": "c89906001d61a1ffac60b12b45271f4f23a91aa159c9256137a77b67df2cf317",
+      "src/cli/services/pianola-store.ts": "34fd2a2fee8afd7ff212b2b4b19f0e5e7ce5c86fac58a6921da47af073394ec7",
+      "src/main/web-server/callbacks/sessionCallbacks.ts": "bdb7de5d909deaf0b24641287dc6c1bf4063a3da7cc47147d5c6457662630e53",
+      "src/main/web-server/handlers/messageHandlers/commands.ts": "4ceff7f10f5f015da59bb92de3b49aa3ad08ebac9c1d6f6e1918a69945cf3896"
     }
   },
   "candidateIntegration": {
-    "status": "pass-for-listed-cases",
-    "passed": 21,
+    "status": "pass",
+    "passed": 58,
     "failed": 0,
-    "receipt": "checks/V2-13-vitest.json",
-    "traces": "checks/V2-13-traces.json",
-    "limits": "Electron/OS processes/renderer execution/transport framing are fixtures; the live WebServer, actual manager reasoning and installed candidate are not exercised."
+    "receipt": "checks/recovery-acceptance-native.json",
+    "traces": "checks/recovery-acceptance-traces.json.gz",
+    "traceFormat": "gzip-compressed JSON; gunzip -c <path>",
+    "limits": "Electron/OS processes, desktop stores and transport framing are fixtures; live listener, actual Mira reasoning and installed candidate are not exercised."
   },
   "targetedRegressions": {
-    "status": "pass",
-    "files": 12,
-    "passed": 622,
-    "failed": 0,
-    "receipt": "checks/V2-14-targeted.json",
-    "workingTreeIncludesPreservedStagedTests": true
+    "status": "pass-reused-uninvalidated-receipts",
+    "monitoring": {
+      "area": "monitoring",
+      "receipt": "checks/recovery-monitoring-unit.json",
+      "sourceReceiptCommit": "35d45dfbaf82c086d73ebbaadb515ad8dd1c4956",
+      "passed": 161,
+      "failed": 0,
+      "testFilesUnchangedSinceReceipt": [
+        "src/__tests__/renderer/components/PianolaDashboard/PianolaDashboard.test.tsx",
+        "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx",
+        "src/__tests__/renderer/components/PianolaDashboard/usePianolaSupervisor.test.ts",
+        "src/__tests__/shared/pianola/pianola-scope-checkpoint.test.ts",
+        "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts"
+      ],
+      "reason": "No source/test change invalidates the rendered/helper assertions. Current changed main/storage composition is rerun by all 58 native cases and scoped union typecheck."
+    },
+    "learning": {
+      "area": "learning",
+      "receipt": "checks/recovery-learning-unit.json",
+      "sourceReceiptCommit": "9bfacb1aeb03dd7ac9512e17cc4f372adcce02d9",
+      "passed": 67,
+      "failed": 0,
+      "testFilesUnchangedSinceReceipt": [
+        "src/__tests__/renderer/components/PianolaModal.test.tsx",
+        "src/__tests__/renderer/components/RuleEditor.test.tsx",
+        "src/__tests__/main/pianola/pianola-relearn-scheduler.test.ts",
+        "src/__tests__/main/pianola/pianola-relearn.test.ts",
+        "src/__tests__/shared/pianola/pianola-synthesis.test.ts"
+      ],
+      "reason": "No source/test change invalidates the rendered/helper assertions. Current changed main/storage composition is rerun by all 58 native cases and scoped union typecheck."
+    },
+    "noFullSuite": true
   },
   "staticChecks": {
-    "receipt": "checks/V2-14-static.json",
-    "scope": "15 source/test roots and dependencies; main config with Node/DOM/JSX/jest-dom ambient types",
-    "status": "pass"
+    "status": "pass",
+    "receipt": "checks/recovery-acceptance-static.json",
+    "scope": "Union of R04/R09 roots/dependencies; 23 roots; Node/DOM/JSX/jest-dom; zero diagnostics"
   },
   "installedRuntime": {
     "installed": false,
@@ -54,7 +108,7 @@
       "effort": "high",
       "specMapping": "Sol6.1"
     },
-    "evidence": "No actual provider/model/effort telemetry is exposed to this task; hints and agent type are not execution evidence."
+    "evidence": "No actual provider/model/effort telemetry exposed; hints are not execution evidence."
   },
   "initialExecution": {
     "passed": 10,
@@ -76,11 +130,10 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope.ts:190",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/0",
-          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "test": "Pianola native candidate acceptance (isolated production composition) covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
           "status": "passed"
         }
       ]
@@ -91,17 +144,16 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope.ts:191",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/0",
-          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "test": "Pianola native candidate acceptance (isolated production composition) covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/1",
-          "test": "keeps explicit coverage after group removal and baselines a changed worktree parent",
+          "test": "Pianola native candidate acceptance (isolated production composition) keeps explicit coverage after group removal and baselines a changed worktree parent",
           "status": "passed"
         }
       ]
@@ -112,11 +164,10 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:350",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/0",
-          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "test": "Pianola native candidate acceptance (isolated production composition) covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
           "status": "passed"
         }
       ]
@@ -127,17 +178,22 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope.ts:223",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/0",
-          "test": "covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
+          "test": "Pianola native candidate acceptance (isolated production composition) covers old/new tabs, group members and worktree ancestry by identity with one scope worker",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/15",
-          "test": "overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "test": "Pianola native candidate acceptance (isolated production composition) overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/24",
+          "test": "R03 current native coverage status invalidates historical ownership immediately on legacy-pause registry change",
           "status": "passed"
         }
       ]
@@ -148,11 +204,10 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:436",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/1",
-          "test": "keeps explicit coverage after group removal and baselines a changed worktree parent",
+          "test": "Pianola native candidate acceptance (isolated production composition) keeps explicit coverage after group removal and baselines a changed worktree parent",
           "status": "passed"
         }
       ]
@@ -163,17 +218,16 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/main/pianola/pianola-lifecycle.ts:133",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/7",
-          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "test": "Pianola native candidate acceptance (isolated production composition) learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/5",
-          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "test": "Pianola native candidate acceptance (isolated production composition) routes Mira judgment through the bound manager tab back to the original receiver",
           "status": "passed"
         }
       ]
@@ -184,11 +238,10 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:508",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/3",
-          "test": "bounds each worker cycle to 20 histories and reaches later tabs without extra children",
+          "test": "Pianola native candidate acceptance (isolated production composition) bounds each worker cycle to 20 histories and reaches later tabs without extra children",
           "status": "passed"
         }
       ]
@@ -199,17 +252,16 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:545",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/4",
-          "test": "baselines questions added during pause and answers only subsequent activity on resume",
+          "test": "Pianola native candidate acceptance (isolated production composition) baselines questions added during pause and answers only subsequent activity on resume",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/15",
-          "test": "overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "test": "Pianola native candidate acceptance (isolated production composition) overlaps have one answer owner and a stream can finish on its enrollment message ID",
           "status": "passed"
         }
       ]
@@ -218,16 +270,13 @@
       "id": "R04",
       "requirement": "A failed/unavailable tab cursor does not prevent another tab from progressing.",
       "status": "pass",
-      "evidenceLevel": "source-inspection",
+      "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:432",
         {
-          "receipt": "checks/V2-14-targeted.json",
-          "file": "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
-          "tests": [
-            "isolates an unavailable enrollment cursor and baselines it when restored",
-            "rejects gap transcript evidence and leaves another tab able to progress"
-          ]
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/21",
+          "test": "R03 current native coverage status exposes first-enrollment missing cursor alongside a healthy chat and restores with a baseline",
+          "status": "passed"
         }
       ]
     },
@@ -237,23 +286,22 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-policy.ts:145",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/2",
-          "test": "distinguishes native rule receipt, exact receiver acknowledgement and completion",
+          "test": "Pianola native candidate acceptance (isolated production composition) distinguishes native rule receipt, exact receiver acknowledgement and completion",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/6",
-          "test": "escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
+          "test": "Pianola native candidate acceptance (isolated production composition) escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/11",
-          "test": "retains the medium-risk permission guard instead of learning approval wording",
+          "test": "Pianola native candidate acceptance (isolated production composition) retains the medium-risk permission guard instead of learning approval wording",
           "status": "passed"
         }
       ]
@@ -264,11 +312,10 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/main/pianola/pianola-decisions.ts:220",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/5",
-          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "test": "Pianola native candidate acceptance (isolated production composition) routes Mira judgment through the bound manager tab back to the original receiver",
           "status": "passed"
         }
       ]
@@ -279,11 +326,16 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/main/pianola/pianola-decisions.ts:151",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/6",
-          "test": "escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
+          "test": "Pianola native candidate acceptance (isolated production composition) escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/39",
+          "test": "R03 explicit desktop resolution admission binds explicit human provenance at native IPC and prevents a duplicate desktop send",
           "status": "passed"
         }
       ]
@@ -294,29 +346,58 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:763",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/16",
-          "test": "revalidates paused at native admission after worker preparation",
+          "test": "Pianola native candidate acceptance (isolated production composition) revalidates paused at native admission after worker preparation",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/17",
-          "test": "revalidates busy at native admission after worker preparation",
+          "test": "Pianola native candidate acceptance (isolated production composition) revalidates busy at native admission after worker preparation",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/18",
-          "test": "revalidates removed at native admission after worker preparation",
+          "test": "Pianola native candidate acceptance (isolated production composition) revalidates removed at native admission after worker preparation",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/19",
-          "test": "revalidates changed-ask at native admission after worker preparation",
+          "test": "Pianola native candidate acceptance (isolated production composition) revalidates changed-ask at native admission after worker preparation",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/34",
+          "test": "R03 explicit desktop resolution admission revalidates paused before accepting a desktop human answer",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/35",
+          "test": "R03 explicit desktop resolution admission revalidates busy before accepting a desktop human answer",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/36",
+          "test": "R03 explicit desktop resolution admission revalidates removed before accepting a desktop human answer",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/37",
+          "test": "R03 explicit desktop resolution admission revalidates changed-ask before accepting a desktop human answer",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/38",
+          "test": "R03 explicit desktop resolution admission revalidates selection-changed before accepting a desktop human answer",
           "status": "passed"
         }
       ]
@@ -327,17 +408,16 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:855",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/14",
-          "test": "preserves unknown admission across worker crash, app restart and pause without resending",
+          "test": "Pianola native candidate acceptance (isolated production composition) preserves unknown admission across worker crash, app restart and pause without resending",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/15",
-          "test": "overlaps have one answer owner and a stream can finish on its enrollment message ID",
+          "test": "Pianola native candidate acceptance (isolated production composition) overlaps have one answer owner and a stream can finish on its enrollment message ID",
           "status": "passed"
         }
       ]
@@ -348,11 +428,10 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-scope-cycle.ts:583",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/13",
-          "test": "retries only definitive native rejections up to the bounded attempt limit",
+          "test": "Pianola native candidate acceptance (isolated production composition) retries only definitive native rejections up to the bounded attempt limit",
           "status": "passed"
         }
       ]
@@ -361,25 +440,54 @@
       "id": "R11",
       "requirement": "A send receipt is distinct from receiver acknowledgement and completed work; six states carry actor/next action.",
       "status": "pass",
-      "evidenceLevel": "source-and-isolated-production-integration",
+      "evidenceLevel": "source-isolated-production-and-rendered-regressions",
       "evidence": [
-        "src/shared/pianola/pianola-decision-lifecycle.ts:92",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/2",
-          "test": "distinguishes native rule receipt, exact receiver acknowledgement and completion",
+          "test": "Pianola native candidate acceptance (isolated production composition) distinguishes native rule receipt, exact receiver acknowledgement and completion",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/5",
-          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
-          "status": "passed"
-        },
-        {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/14",
-          "test": "preserves unknown admission across worker crash, app restart and pause without resending",
+          "test": "Pianola native candidate acceptance (isolated production composition) preserves unknown admission across worker crash, app restart and pause without resending",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/9",
+          "test": "scope decision rendered lifecycle and guarded human controls renders mira_processing with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "scope decision rendered lifecycle and guarded human controls renders waiting_human with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/11",
+          "test": "scope decision rendered lifecycle and guarded human controls renders agent_running with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "scope decision rendered lifecycle and guarded human controls renders blocked with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/13",
+          "test": "scope decision rendered lifecycle and guarded human controls renders paused with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/14",
+          "test": "scope decision rendered lifecycle and guarded human controls renders done with its responsible actor and concrete next action",
           "status": "passed"
         }
       ]
@@ -388,23 +496,177 @@
       "id": "U01",
       "requirement": "Agent/group/exclusion/pause controls call persisted native supervisor APIs; CLI accepts native selection identities.",
       "status": "pass",
-      "evidenceLevel": "source-inspection",
+      "evidenceLevel": "source-isolated-production-and-rendered-regressions",
       "evidence": [
-        "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx:192",
-        "src/cli/commands/pianola-supervise.ts:95"
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/1/assertionResults/0",
+          "test": "PianolaScopeControls production hook composition saves native group/whole-agent/exclusion identities and reloads the persisted edit",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/1/assertionResults/1",
+          "test": "PianolaScopeControls production hook composition pauses/resumes through the persisted native API and creates selections disabled",
+          "status": "passed"
+        },
+        {
+          "file": "src/cli/commands/pianola-supervise.ts",
+          "use": "Current production call-site inspection in R10"
+        }
       ]
     },
     {
       "id": "U02",
       "requirement": "Registered versus current per-agent running/failed coverage and rendered lifecycle/control behavior are fully verified.",
-      "status": "fail",
-      "evidenceLevel": "source-inspection",
+      "status": "pass",
+      "evidenceLevel": "source-isolated-production-and-rendered-regressions",
       "evidence": [
-        "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx:114"
-      ],
-      "owner": "V2-05 / V2-06 / V2-07 Auto Run agent",
-      "cause": "Current UI lists worker health and historical per-agent active/suspended/closed census counts. It does not expose all per-tab cycle issues as current per-agent failures, and the new scope controls/six lifecycle states have no complete rendered acceptance receipt. V2-05 remains unchecked.",
-      "nextAction": "Finish truthful per-agent coverage/failure display and rendered control/status regressions; record V2-05/06/07 outcomes without inferring them from this transport-level harness."
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/21",
+          "test": "R03 current native coverage status exposes first-enrollment missing cursor alongside a healthy chat and restores with a baseline",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/22",
+          "test": "R03 current native coverage status invalidates historical ownership immediately on selection registry change",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/23",
+          "test": "R03 current native coverage status invalidates historical ownership immediately on overlap registry change",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/24",
+          "test": "R03 current native coverage status invalidates historical ownership immediately on legacy-pause registry change",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/25",
+          "test": "R03 current native coverage status never projects aged historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/26",
+          "test": "R03 current native coverage status never projects future historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/27",
+          "test": "R03 current native coverage status never projects old-schema historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/28",
+          "test": "R03 current native coverage status never projects restarted historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/29",
+          "test": "R03 current native coverage status never projects stopped historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/30",
+          "test": "R03 current native coverage status never projects corrupt historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/31",
+          "test": "R03 current native coverage status never projects unarmed historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/32",
+          "test": "R03 current native coverage status never projects census-error historical evidence as healthy coverage",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/9",
+          "test": "scope decision rendered lifecycle and guarded human controls renders mira_processing with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "scope decision rendered lifecycle and guarded human controls renders waiting_human with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/11",
+          "test": "scope decision rendered lifecycle and guarded human controls renders agent_running with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "scope decision rendered lifecycle and guarded human controls renders blocked with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/13",
+          "test": "scope decision rendered lifecycle and guarded human controls renders paused with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/14",
+          "test": "scope decision rendered lifecycle and guarded human controls renders done with its responsible actor and concrete next action",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/21",
+          "test": "scope decision rendered lifecycle and guarded human controls sends one trimmed explicit answer without actor spoofing and distinguishes acceptance from acknowledgment",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/1/assertionResults/2",
+          "test": "PianolaScopeControls production hook composition shows blocked current coverage and per-tab errors despite a running worker",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/1/assertionResults/3",
+          "test": "PianolaScopeControls production hook composition shows stale current coverage and per-tab errors despite a running worker",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-monitoring-unit.json",
+          "jsonPointer": "/testResults/1/assertionResults/4",
+          "test": "PianolaScopeControls production hook composition shows paused current coverage and per-tab errors despite a running worker",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/0",
+          "test": "R00 disposable recovery diagnosis U02 exposes missing-cursor failure through real supervisor status",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/1",
+          "test": "R00 disposable recovery diagnosis U02 invalidates historical coverage immediately after selection change",
+          "status": "passed"
+        }
+      ]
     },
     {
       "id": "L01",
@@ -412,23 +674,46 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/main/ipc/handlers/pianola.ts:285",
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/7",
-          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
-          "status": "passed"
-        },
-        {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/12",
-          "test": "excludes unbound desktop answers and does not count replayed settlements twice",
+          "test": "Pianola native candidate acceptance (isolated production composition) excludes unbound desktop answers and does not count replayed settlements twice",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/5",
-          "test": "routes Mira judgment through the bound manager tab back to the original receiver",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/39",
+          "test": "R03 explicit desktop resolution admission binds explicit human provenance at native IPC and prevents a duplicate desktop send",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/14",
+          "test": "R08 independent human evidence and durable conflict projection does not promote two humans plus duplicate ask to three independent decisions",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/15",
+          "test": "R08 independent human evidence and durable conflict projection does not promote two humans plus duplicate answer to three independent decisions",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/16",
+          "test": "R08 independent human evidence and durable conflict projection does not promote two humans plus unknown to three independent decisions",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/17",
+          "test": "R08 independent human evidence and durable conflict projection does not promote two humans plus rule to three independent decisions",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/18",
+          "test": "R08 independent human evidence and durable conflict projection does not promote two humans plus Mira to three independent decisions",
           "status": "passed"
         }
       ]
@@ -439,17 +724,22 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/transcript-mining.ts:91",
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/12",
-          "test": "excludes unbound desktop answers and does not count replayed settlements twice",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/41",
+          "test": "R08 durable learning through native review and filesystem APIs persists accept with source identity and transport-bound human provenance across restart",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/7",
-          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "Pianola native candidate acceptance (isolated production composition) excludes unbound desktop answers and does not count replayed settlements twice",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/23",
+          "test": "R08 independent human evidence and durable conflict projection retains exact independent links and boundaries with an order/time stable fingerprint",
           "status": "passed"
         }
       ]
@@ -460,11 +750,34 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-synthesis.ts:115",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/7",
-          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "test": "Pianola native candidate acceptance (isolated production composition) learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/19",
+          "test": "R08 independent human evidence and durable conflict projection does not pool unrelated yes answers across agent boundaries",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/20",
+          "test": "R08 independent human evidence and durable conflict projection does not pool unrelated yes answers across group boundaries",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/21",
+          "test": "R08 independent human evidence and durable conflict projection does not pool unrelated yes answers across question boundaries",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/22",
+          "test": "R08 independent human evidence and durable conflict projection does not pool unrelated yes answers across conditions boundaries",
           "status": "passed"
         }
       ]
@@ -475,22 +788,35 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-synthesis.ts:104",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/7",
-          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "test": "Pianola native candidate acceptance (isolated production composition) learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/10",
-          "test": "rejects corrected suggestion approval against current native evidence",
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/2",
+          "test": "synthesizeSuggestions does not propose below the sample threshold",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-14-targeted.json",
-          "file": "src/__tests__/shared/pianola/pianola-synthesis.test.ts"
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/3",
+          "test": "synthesizeSuggestions does not propose when approvals are inconsistent",
+          "status": "passed"
+        },
+        {
+          "file": "src/shared/pianola/pianola-synthesis.ts",
+          "use": "Current production call-site inspection in R10"
+        },
+        {
+          "file": "src/main/pianola/pianola-lifecycle.ts",
+          "use": "Current production call-site inspection in R10"
+        },
+        {
+          "file": "src/main/ipc/handlers/pianola.ts",
+          "use": "Current production call-site inspection in R10"
         }
       ]
     },
@@ -500,29 +826,58 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/main/ipc/handlers/pianola.ts:159",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/7",
-          "test": "learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
+          "test": "Pianola native candidate acceptance (isolated production composition) learns three Chris settlements via native events, stages then explicitly accepts a scoped rule",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/8",
-          "test": "rejects forged suggestion approval against current native evidence",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/40",
+          "test": "R08 durable learning through native review and filesystem APIs records consent before activation but never activates a failed rule write on restart",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/9",
-          "test": "rejects broadened suggestion approval against current native evidence",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/45",
+          "test": "R08 durable learning through native review and filesystem APIs refuses unbound owner at the actual native review boundary without writing policy",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/10",
-          "test": "rejects corrected suggestion approval against current native evidence",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/46",
+          "test": "R08 durable learning through native review and filesystem APIs refuses CLI bridge at the actual native review boundary without writing policy",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/47",
+          "test": "R08 durable learning through native review and filesystem APIs refuses broadened edit at the actual native review boundary without writing policy",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/48",
+          "test": "R08 durable learning through native review and filesystem APIs refuses stale fingerprint at the actual native review boundary without writing policy",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/49",
+          "test": "R08 durable learning through native review and filesystem APIs refuses corrected source at the actual native review boundary without writing policy",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/50",
+          "test": "R08 durable learning through native review and filesystem APIs refuses changed risk at the actual native review boundary without writing policy",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/51",
+          "test": "R08 durable learning through native review and filesystem APIs refuses changed conditions at the actual native review boundary without writing policy",
           "status": "passed"
         }
       ]
@@ -533,17 +888,28 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/main/pianola/pianola-store-main.ts:60",
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/12",
-          "test": "excludes unbound desktop answers and does not count replayed settlements twice",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "Pianola native candidate acceptance (isolated production composition) rejects corrected suggestion approval against current native evidence",
           "status": "passed"
         },
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/52",
+          "test": "R08 durable learning through native review and filesystem APIs emits one correction event and preserves conflict after restart (new record ID: false)",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/53",
+          "test": "R08 durable learning through native review and filesystem APIs emits one correction event and preserves conflict after restart (new record ID: true)",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
           "jsonPointer": "/testResults/0/assertionResults/10",
-          "test": "rejects corrected suggestion approval against current native evidence",
+          "test": "R00 correction notification diagnosis L09 notifies one time for a replayed correction to learned evidence",
           "status": "passed"
         }
       ]
@@ -552,41 +918,205 @@
       "id": "L07",
       "requirement": "Rules retain exact question/group conditions during description/answer editing.",
       "status": "pass",
-      "evidenceLevel": "source-inspection",
+      "evidenceLevel": "source-isolated-production-and-rendered-regressions",
       "evidence": [
-        "src/renderer/components/PianolaModal/RuleEditor.tsx:79",
         {
-          "receipt": "checks/V2-14-targeted.json",
-          "file": "src/__tests__/renderer/components/RuleEditor.test.tsx",
-          "test": "preserves exact question and native group conditions when editing a learned rule"
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/1/assertionResults/2",
+          "test": "RuleEditor save round-trip preserves exact question and native group conditions when editing a learned rule",
+          "status": "passed"
         }
       ]
     },
     {
       "id": "L08",
       "requirement": "Suggestions persist exact source examples/count, scope/exclusions and offer linked evidence, accept/edit/reject with durable rejection suppression.",
-      "status": "fail",
-      "evidenceLevel": "source-inspection",
+      "status": "pass",
+      "evidenceLevel": "source-isolated-production-and-rendered-regressions",
       "evidence": [
-        "src/shared/pianola/storage.ts:653",
-        "src/main/pianola/pianola-relearn.ts:83",
-        "src/renderer/components/PianolaModal/SuggestionsView.tsx:81"
-      ],
-      "owner": "V2-10 Auto Run agent",
-      "cause": "Synthesis returns candidates/evidence but runRelearnJob persists only proposals and profile text. Storage has no candidate/rejection records; SuggestionsView has only Approve and profile apply, with no linked source examples or edit/reject path. The V2-14 approval fix does not implement those missing features.",
-      "nextAction": "Finish V2-10 storage/API/UI using source-linked candidate identity and durable rejection evidence fingerprints; add V2-11/12 integration and UI regressions, including restart suppression."
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/41",
+          "test": "R08 durable learning through native review and filesystem APIs persists accept with source identity and transport-bound human provenance across restart",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/42",
+          "test": "R08 durable learning through native review and filesystem APIs persists edit with source identity and transport-bound human provenance across restart",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/43",
+          "test": "R08 durable learning through native review and filesystem APIs persists reject with source identity and transport-bound human provenance across restart",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/44",
+          "test": "R08 durable learning through native review and filesystem APIs allows visibly changed evidence after rejection while retaining the rejected version",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/10",
+          "test": "R08 rendered Suggestions review and persisted reload shows concrete scope, count, conditions, exclusions and navigable message examples",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/11",
+          "test": "R08 rendered Suggestions review and persisted reload uses native reject and replaces the proposal with returned persisted state through remount",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/12",
+          "test": "R08 rendered Suggestions review and persisted reload uses native edit and replaces the proposal with returned persisted state through remount",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/2",
+          "test": "R00 disposable recovery diagnosis L08 persists source-linked candidate after native settlement and restart",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/3",
+          "test": "R00 disposable recovery diagnosis L08 exposes native rejection and suppresses unchanged candidate after restart",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/4",
+          "test": "R00 disposable recovery diagnosis L08 permits explicit bounded human edit of staged answer",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/9",
+          "test": "R00 real Suggestions render L08 renders linked evidence and edit/reject controls",
+          "status": "passed"
+        }
+      ]
     },
     {
       "id": "L09",
       "requirement": "Later contradictory evidence flags an accepted learned rule for review without silently rewriting user policy.",
-      "status": "fail",
-      "evidenceLevel": "source-inspection",
+      "status": "pass",
+      "evidenceLevel": "source-isolated-production-and-rendered-regressions",
       "evidence": [
-        "src/shared/pianola/pianola-synthesis.ts:145"
-      ],
-      "owner": "V2-10 Auto Run agent",
-      "cause": "Current relearning only stages new proposals. No durable learned-rule provenance/conflict state or active-rule conflict UI exists. Pending correction invalidation and fresh approval rejection now pass; active-rule conflict handling does not.",
-      "nextAction": "Persist accepted provenance; compare new attributable evidence against accepted conditions, surface conflict/owner/next action without changing live rule/profile; add contradiction and correction tests through restart."
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/52",
+          "test": "R08 durable learning through native review and filesystem APIs emits one correction event and preserves conflict after restart (new record ID: false)",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/53",
+          "test": "R08 durable learning through native review and filesystem APIs emits one correction event and preserves conflict after restart (new record ID: true)",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/15",
+          "test": "R08 rendered Suggestions review and persisted reload shows durable conflict sources, responsible human and truthful active policy state",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/16",
+          "test": "R08 rendered Suggestions review and persisted reload shows durable conflict sources, responsible human and truthful disabled policy state",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/17",
+          "test": "R08 rendered Suggestions review and persisted reload shows durable conflict sources, responsible human and truthful changed policy state",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/0/assertionResults/18",
+          "test": "R08 rendered Suggestions review and persisted reload shows durable conflict sources, responsible human and truthful removed policy state",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/24",
+          "test": "R08 independent human evidence and durable conflict projection projects review for source answer only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/25",
+          "test": "R08 independent human evidence and durable conflict projection projects review for source risk only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/26",
+          "test": "R08 independent human evidence and durable conflict projection projects review for source conditions only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/27",
+          "test": "R08 independent human evidence and durable conflict projection projects review for later contradiction only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/28",
+          "test": "R08 independent human evidence and durable conflict projection projects review for other agent only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/29",
+          "test": "R08 independent human evidence and durable conflict projection projects review for other group only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/30",
+          "test": "R08 independent human evidence and durable conflict projection projects review for other conditions only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/31",
+          "test": "R08 independent human evidence and durable conflict projection projects review for earlier contradiction only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/32",
+          "test": "R08 independent human evidence and durable conflict projection projects review for unknown only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/33",
+          "test": "R08 independent human evidence and durable conflict projection projects review for unchanged edited approval only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/34",
+          "test": "R08 independent human evidence and durable conflict projection projects review for failed activation only when accepted evidence is affected",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-original-repro.json",
+          "jsonPointer": "/testResults/0/assertionResults/5",
+          "test": "R00 disposable recovery diagnosis L09 exposes durable accepted-rule conflict after attributable correction",
+          "status": "passed"
+        }
+      ]
     },
     {
       "id": "L10",
@@ -594,20 +1124,50 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/shared/pianola/pianola-policy.ts:51",
         {
-          "receipt": "checks/V2-13-vitest.json",
-          "jsonPointer": "/testResults/0/assertionResults/6",
-          "test": "escalates high-risk full-turn intent to Chris without a rule answer or Mira send",
-          "status": "passed"
-        },
-        {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/11",
-          "test": "retains the medium-risk permission guard instead of learning approval wording",
+          "test": "Pianola native candidate acceptance (isolated production composition) retains the medium-risk permission guard instead of learning approval wording",
           "status": "passed"
         },
-        "src/main/pianola/pianola-relearn.ts:83"
+        {
+          "receipt": "checks/recovery-acceptance-native.json",
+          "jsonPointer": "/testResults/0/assertionResults/42",
+          "test": "R08 durable learning through native review and filesystem APIs persists edit with source identity and transport-bound human provenance across restart",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/10",
+          "test": "R08 independent human evidence and durable conflict projection never turns repeated single-action permission for May I merge this PR? into a learned rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/11",
+          "test": "R08 independent human evidence and durable conflict projection never turns repeated single-action permission for May I grant write access? into a learned rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/12",
+          "test": "R08 independent human evidence and durable conflict projection never turns repeated single-action permission for Should I send this email? into a learned rule",
+          "status": "passed"
+        },
+        {
+          "receipt": "checks/recovery-learning-unit.json",
+          "jsonPointer": "/testResults/4/assertionResults/13",
+          "test": "R08 independent human evidence and durable conflict projection never turns repeated single-action permission for Should I deploy to production? into a learned rule",
+          "status": "passed"
+        },
+        {
+          "file": "src/shared/pianola/pianola-policy.ts",
+          "use": "Current production call-site inspection in R10"
+        },
+        {
+          "file": "src/main/pianola/pianola-relearn.ts",
+          "use": "Current production call-site inspection in R10"
+        }
       ]
     },
     {
@@ -616,17 +1176,11 @@
       "status": "pass",
       "evidenceLevel": "source-and-isolated-production-integration",
       "evidence": [
-        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts:39",
         {
-          "receipt": "checks/V2-13-vitest.json",
+          "receipt": "checks/recovery-acceptance-native.json",
           "jsonPointer": "/testResults/0/assertionResults/20",
-          "test": "blocks productive stores, recipients and fallback transport before I/O",
+          "test": "Pianola native candidate acceptance (isolated production composition) blocks productive stores, recipients and fallback transport before I/O",
           "status": "passed"
-        },
-        {
-          "receipt": "checks/V2-13-traces.json",
-          "cases": 21,
-          "boundaryViolations": 0
         }
       ]
     },
@@ -634,68 +1188,44 @@
       "id": "B02",
       "requirement": "No installation/restart/live coverage/Cue/peer grant/system package/merge action; installed single-tab evidence is not candidate installation proof.",
       "status": "pass",
-      "evidenceLevel": "source-inspection",
+      "evidenceLevel": "execution-and-ledger-audit",
       "evidence": [
-        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts:637",
         {
-          "receipt": "/home/chris/.maestro/pianola-setup-20261028/live-autoanswer-acceptance.json",
-          "use": "read-only historical single-tab installed path only; not candidate installation",
-          "sha256": "86fbd5661ffcf813681b30574f308d0945814151d8cdfb8ff985628751693557"
+          "receipt": "checks/recovery-acceptance.json",
+          "use": "Fixture-only stores, processes and transport; installed false, no live actions."
         }
       ]
     },
     {
       "id": "P01",
       "requirement": "All prerequisite implementation/regression task completion receipts exist and support full handoff readiness.",
-      "status": "fail",
-      "evidenceLevel": "source-inspection",
+      "status": "pass",
+      "evidenceLevel": "execution-and-ledger-audit",
       "evidence": [
-        ".maestro/pianola-project-watchers-20261028/agent-group-v2/PROGRESS.json:171"
-      ],
-      "owner": "Mira / prerequisite Auto Run agents",
-      "cause": "V2-05 and V2-10 are in_progress/unchecked; V2-06/07/11/12 are unchecked and absent from the progress ledger. This task executes useful existing tests but cannot retroactively certify all their authoring/acceptance criteria.",
-      "nextAction": "Resume the incomplete prerequisite tasks and reconcile their actual commits/checks; rerun affected V2-14 criteria before any V2-16 full-completion claim. V2-15 may review the exact partial candidate/publication boundary."
+        {
+          "receipt": "checks/recovery-acceptance.json",
+          "use": "Completed prerequisite authoring/execution commits in PROGRESS.json and RECOVERY.json, recovery-monitoring.json and recovery-learning.json."
+        }
+      ]
     },
     {
       "id": "P02",
       "requirement": "Use only scoped local checks; distinguish actual effective model evidence from configured hints and leave PR/CI assessment to V2-15.",
       "status": "pass",
-      "evidenceLevel": "source-inspection",
+      "evidenceLevel": "execution-and-ledger-audit",
       "evidence": [
-        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks-plan.md:14"
+        {
+          "receipt": "checks/recovery-acceptance.json",
+          "use": "Exact bounded commands, reused receipts, unknown effective model, R11 publication boundary."
+        }
       ]
     }
   ],
   "requirementCounts": {
-    "pass": 28,
-    "fail": 4
+    "pass": 32,
+    "fail": 0
   },
-  "unfulfilled": [
-    {
-      "id": "U02",
-      "owner": "V2-05 / V2-06 / V2-07 Auto Run agent",
-      "cause": "Current UI lists worker health and historical per-agent active/suspended/closed census counts. It does not expose all per-tab cycle issues as current per-agent failures, and the new scope controls/six lifecycle states have no complete rendered acceptance receipt. V2-05 remains unchecked.",
-      "nextAction": "Finish truthful per-agent coverage/failure display and rendered control/status regressions; record V2-05/06/07 outcomes without inferring them from this transport-level harness."
-    },
-    {
-      "id": "L08",
-      "owner": "V2-10 Auto Run agent",
-      "cause": "Synthesis returns candidates/evidence but runRelearnJob persists only proposals and profile text. Storage has no candidate/rejection records; SuggestionsView has only Approve and profile apply, with no linked source examples or edit/reject path. The V2-14 approval fix does not implement those missing features.",
-      "nextAction": "Finish V2-10 storage/API/UI using source-linked candidate identity and durable rejection evidence fingerprints; add V2-11/12 integration and UI regressions, including restart suppression."
-    },
-    {
-      "id": "L09",
-      "owner": "V2-10 Auto Run agent",
-      "cause": "Current relearning only stages new proposals. No durable learned-rule provenance/conflict state or active-rule conflict UI exists. Pending correction invalidation and fresh approval rejection now pass; active-rule conflict handling does not.",
-      "nextAction": "Persist accepted provenance; compare new attributable evidence against accepted conditions, surface conflict/owner/next action without changing live rule/profile; add contradiction and correction tests through restart."
-    },
-    {
-      "id": "P01",
-      "owner": "Mira / prerequisite Auto Run agents",
-      "cause": "V2-05 and V2-10 are in_progress/unchecked; V2-06/07/11/12 are unchecked and absent from the progress ledger. This task executes useful existing tests but cannot retroactively certify all their authoring/acceptance criteria.",
-      "nextAction": "Resume the incomplete prerequisite tasks and reconcile their actual commits/checks; rerun affected V2-14 criteria before any V2-16 full-completion claim. V2-15 may review the exact partial candidate/publication boundary."
-    }
-  ],
+  "unfulfilled": [],
   "externalBoundaries": [
     {
       "boundary": "Candidate installation, desktop restart and productive coverage activation",
@@ -705,16 +1235,60 @@
     }
   ],
   "publication": {
-    "status": "V2-15 pending; not assessed by this task",
+    "status": "R11 pending: focused current-upstream rc composition and PR not executed in R10",
+    "currentBaseCandidateReady": false,
     "mergeAuthorized": false,
     "ciResult": "unknown"
   },
   "imagesAnalyzed": 0,
   "preservation": {
-    "entryPatches": [
-      "auto-run/Working/V2-14-entry-staged.patch",
-      "auto-run/Working/V2-14-entry-unstaged.patch"
+    "sourceHistory": "Existing source commits/WIP preserved; no branch composition changes in R10. R11 owns verified backup/current-base candidate.",
+    "debugCleanup": [
+      {
+        "file": ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-repro.py",
+        "sha256AtExecution": "9bbe4e086fb1def2873b4cd674ed8cce97fcd993445c3a16523057dd72b5b34a",
+        "status": "removed after 11 passing reproductions; original red inputs retained in git commit 88ba5ff8f3"
+      },
+      {
+        "file": ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-cases.debug.txt",
+        "sha256AtExecution": "f55df64dcc6eccba124bb2a578f809f671d85ec07258b516874e2d5aa6dcc8e8",
+        "status": "removed after 11 passing reproductions; original red inputs retained in git commit 88ba5ff8f3"
+      }
     ],
-    "stagedTestWork": "The related factory and scope-cycle test WIP is retained and adapted for the approved contracts. Untouched CLI/message-handler staged test blobs and staged PROGRESS blob remain preserved; V2-15 owns final WIP/diff packaging."
+    "historicalReceipts": "Original R00/V2-14 and R04/R09 receipts retained; R10 uses separate output paths."
+  },
+  "previousReview": {
+    "taskId": "V2-14",
+    "created": "2026-10-28T16:30:42.474180+00:00",
+    "status": "fail",
+    "requirementCounts": {
+      "pass": 28,
+      "fail": 4
+    },
+    "unfulfilledIds": [
+      "U02",
+      "L08",
+      "L09",
+      "P01"
+    ],
+    "preservedInCommit": "550b3b79b5; historical findings retained in V2-14-ACCEPTANCE.md and git"
+  },
+  "reviewedAt": "2026-10-28T17:45:02.429504+00:00",
+  "readinessScope": "source-and-isolated-integration; current-upstream composition/publication remain R11",
+  "originalRepros": {
+    "passed": 11,
+    "failed": 0,
+    "formerlyRed": 7,
+    "preservedControls": 4,
+    "receipt": "checks/recovery-original-repro.json",
+    "trace": "checks/recovery-original-repro-traces.json",
+    "log": "checks/recovery-original-repro.log",
+    "boundaryViolations": 0,
+    "contractAdaptations": [
+      "Use current coverage projection instead of historical checkpoint tabs.",
+      "Use review-suggestion with displayed candidate ID/fingerprint for reject and edit.",
+      "Use current Suggestions props and Accept label; isolate navigation interaction for server render."
+    ],
+    "initialHarnessLoadFailure": "checks/recovery-original-repro-load-failure.log; renderer navigation imported desktop stores without window; isolated navigation boundary, all actual component/native/store logic retained."
   }
 }
