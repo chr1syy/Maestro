@@ -1,0 +1,159 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (.maestro/pianola-project-watchers-20261028/auto-run/Working/R00-debug.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+Both esbuild and oxc options were set. oxc options will be used and esbuild options will be ignored. The following esbuild options were set: `{ jsx: 'automatic' }`
+
+ RUN  v4.1.11 /home/chris/code/worktrees/fix/pianola-project-watchers-20261028
+
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > U02 exposes missing-cursor failure through real supervisor status 38ms
+   → expected '{"targets":[{"id":"11111111-1111-4111…' to contain 'Transcript cursor unavailable'
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > U02 invalidates historical coverage immediately after selection change 13ms
+   → expected [ { agentId: 'fixture-agent', …(8) } ] to have a length of +0 but got 1
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 persists source-linked candidate after native settlement and restart 102ms
+   → persist exact source message IDs: expected '{"generatedAt":1793188800080,"pairCou…' to contain 'fixture-message-1'
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 exposes native rejection and suppresses unchanged candidate after restart 71ms
+   → production IPC reject-suggestion must exist: expected undefined to be defined
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 permits explicit bounded human edit of staged answer 64ms
+   → StaleOrChangedSuggestion
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L09 exposes durable accepted-rule conflict after attributable correction 64ms
+   → expected undefined to be defined
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 already-fixed controls > rejects forged suggestion approval against current native evidence 62ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 already-fixed controls > rejects broadened suggestion approval against current native evidence 57ms
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 already-fixed controls > rejects corrected suggestion approval against current native evidence 60ms
+ × .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 real Suggestions render > L08 renders linked evidence and edit/reject controls 64ms
+   → expected '<div class="p-4 space-y-5"><div class…' to match />Reject</
+ ✓ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 correction notification diagnosis > L09 notifies one time for a replayed correction to learned evidence 61ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > U02 exposes missing-cursor failure through real supervisor status
+AssertionError: expected '{"targets":[{"id":"11111111-1111-4111…' to contain 'Transcript cursor unavailable'
+
+Expected: "Transcript cursor unavailable"
+Received: "{"targets":[{"id":"11111111-1111-4111-8111-111111111111","kind":"watch-scope","enabled":true,"createdAt":1,"intervalSeconds":5,"selection":{"label":"Fixture selection","mode":"agents-and-groups","agentIds":["fixture-agent"],"groupIds":[],"excludedAgentIds":[]},"managerAgentId":"fixture-mira"}],"health":[{"id":"11111111-1111-4111-8111-111111111111","kind":"watch-scope","state":"running","restarts":0,"recentLogs":[],"pid":1,"startedAt":1793188800000}],"checkpoints":[{"scopeId":"11111111-1111-4111-8111-111111111111","checkpoint":{"version":1,"scopeId":"11111111-1111-4111-8111-111111111111","configurationFingerprint":"6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77","activatedAt":1793188800010,"status":"armed","tabs":[{"agentId":"fixture-agent","tabId":"fixture-old-tab","bindingFingerprint":"dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89","baseline":null,"baselineBusy":false,"lastSeen":null,"state":{"lastHandledMessageId":null,"pendingRetry":null,"pendingHandoff":null},"status":"suspended","unresolvedIntent":null}],"lastSnapshotAt":1793188800020}}]}"
+
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:654:34
+    652|   await fixture.pump('native census cursor unavailable');
+    653|   const status = await fixture.ipc('supervisor-list');
+    654|   expect(JSON.stringify(status)).toContain('Transcript cursor unavaila…
+       |                                  ^
+    655|  });
+    656|  it('U02 invalidates historical coverage immediately after selection c…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > U02 invalidates historical coverage immediately after selection change
+AssertionError: expected [ { agentId: 'fixture-agent', …(8) } ] to have a length of +0 but got 1
+
+- Expected
++ Received
+
+- 0
++ 1
+
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:661:86
+    659|   await fixture.select({ selection: {mode:'agents-and-groups', label:'…
+    660|   const status = await fixture.ipc<any>('supervisor-list');
+    661|   expect(status.checkpoints[0].checkpoint.tabs.filter((t:any)=>t.statu…
+       |                                                                                      ^
+    662|  });
+    663|  it('L08 persists source-linked candidate after native settlement and …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 persists source-linked candidate after native settlement and restart
+AssertionError: persist exact source message IDs: expected '{"generatedAt":1793188800080,"pairCou…' to contain 'fixture-message-1'
+
+Expected: "fixture-message-1"
+Received: "{"generatedAt":1793188800080,"pairCount":3,"proposals":[{"id":"suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]","enabled":false,"scope":"agent","match":{"maxRisk":"low","kinds":["question"],"groupId":"fixture-group","exactQuestion":"Should I run `git status`?"},"action":"auto_answer","priority":100,"createdAt":1793188800080,"updatedAt":1793188800080,"scopeId":"fixture-agent","answer":"Yes, run git status.","description":"3 independent Chris decisions for this exact action and condition; explicit acceptance required."}],"proposedProfile":"# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n","previousProfile":"Prefer local inspection. Ask Chris for sensitive actions."}"
+
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:668:71
+    666|   const staged = await fixture.ipc<any>('get-suggestions');
+    667|   for (const record of mainStore.readDecisions().filter(r=>r.humanEvid…
+    668|    expect(JSON.stringify(staged), 'persist exact source message IDs').…
+       |                                                                       ^
+    669|   }
+    670|  });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 exposes native rejection and suppresses unchanged candidate after restart
+AssertionError: production IPC reject-suggestion must exist: expected undefined to be defined
+ ❯ AcceptanceFixture.ipc .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:413:56
+    411|  async ipc<T = unknown>(name: string, ...args: unknown[]): Promise<T> {
+    412|   const handler = boundary.handlers.get(`pianola:${name}`);
+    413|   expect(handler, `production IPC ${name} must exist`).toBeDefined();
+       |                                                        ^
+    414|   return (await handler!({ sender: { id: 1 } }, ...args)) as T;
+    415|  }
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:673:17
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/7]⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L08 permits explicit bounded human edit of staged answer
+Error: StaleOrChangedSuggestion
+ ❯ src/main/ipc/handlers/pianola.ts:179:12
+    177|      policy(rule) !== policy(current)
+    178|     )
+    179|      throw new Error('StaleOrChangedSuggestion');
+       |            ^
+    180|     rules = writeRules([...rules, { ...draft, enabled: true, updatedAt…
+    181|     try {
+ ❯ src/main/utils/ipcHandler.ts:221:17
+ ❯ src/main/ipc/handlers/pianola.ts:299:11
+ ❯ AcceptanceFixture.ipc .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:414:17
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:680:17
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/7]⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 disposable recovery diagnosis > L09 exposes durable accepted-rule conflict after attributable correction
+AssertionError: expected undefined to be defined
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:693:67
+    691|   const staged = await fixture.ipc<any>('get-suggestions');
+    692|   expect(mainStore.readRules().find(r=>r.id===proposal.id)?.enabled).t…
+    693|   expect(staged.conflicts?.find((c:any)=>c.ruleId===proposal.id)).toBe…
+       |                                                                   ^
+    694|  });
+    695| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/7]⎯
+
+ FAIL  .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts > R00 real Suggestions render > L08 renders linked evidence and edit/reject controls
+AssertionError: expected '<div class="p-4 space-y-5"><div class…' to match />Reject</
+
+- Expected:
+/>Reject</
+
++ Received:
+"<div class=\"p-4 space-y-5\"><div class=\"space-y-2\"><div class=\"flex items-center gap-2\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"lucide lucide-lightbulb w-4 h-4\"><path d=\"M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5\"></path><path d=\"M9 18h6\"></path><path d=\"M10 22h4\"></path></svg><h3 class=\"text-sm font-semibold\">Proposed rules</h3></div><div class=\"rounded-lg border p-3 flex items-start justify-between gap-3\"><div class=\"min-w-0\"><div class=\"text-sm\">3 independent Chris decisions for this exact action and condition; explicit acceptance required.</div><div class=\"text-xs mt-0.5\">risk &lt;= low  -  kind: question -&gt; auto-answer &quot;Yes, run git status.&quot;</div></div><button class=\"shrink-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors\">Approve</button></div></div><div class=\"space-y-2\"><h3 class=\"text-sm font-semibold\">Proposed profile</h3><pre class=\"text-xs whitespace-pre-wrap rounded-lg border p-3 select-text\"># Decision profile (synthesized)
+
+Synthesized from 3 observed decisions.
+
+How you tend to respond, by risk:
+- low risk: 3 approved, 0 declined, 0 other.
+- medium risk: no observed decisions.
+- high risk: no observed decisions.
+
+Guidance for Pianola:
+- High-risk asks ALWAYS escalate to me, regardless of any rule.
+- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.
+- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.
+</pre><button class=\"px-3 py-1.5 text-xs font-medium rounded-md transition-colors\">Apply profile</button></div></div>"
+
+ ❯ .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-native.debug.test.ts:748:16
+    746|   }));
+    747|   expect(html).toContain('Approve');
+    748|   expect(html).toMatch(/>Reject</);
+       |                ^
+    749|   expect(html).toMatch(/>Edit</);
+    750|   expect(html).toContain('fixture-message-');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed | 4 passed (11)
+   Start at  17:44:27
+   Duration  1.84s (transform 640ms, setup 0ms, import 880ms, tests 662ms, environment 0ms)
+
+JSON report written to /home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-native.json

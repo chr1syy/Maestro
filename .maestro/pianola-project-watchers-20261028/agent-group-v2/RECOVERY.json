@@ -1,0 +1,57 @@
+{
+  "status": "in_progress",
+  "sourceHead": "5edef58da8",
+  "previousOutcome": "partial;28pass4fail",
+  "unfinishedOriginalTasks": [
+    "V2-05",
+    "V2-06",
+    "V2-07",
+    "V2-10",
+    "V2-11",
+    "V2-12"
+  ],
+  "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
+  "taskCount": 13,
+  "responsibleActor": "same worktree agent",
+  "nextAction": "R01: current coverage/failure projection; see recovery-diagnosis.md",
+  "tasks": [
+    {
+      "taskId": "R00",
+      "status": "complete",
+      "outcome": "Reproduced 7 missing criteria with 4 passing already-fixed controls; no implementation in diagnosis task",
+      "files": [
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-diagnosis.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
+        ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-repro.py",
+        ".maestro/pianola-project-watchers-20261028/auto-run/Working/R00-cases.debug.txt",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-native.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-native.log",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-traces.json"
+      ],
+      "commit": {
+        "subject": "MAESTRO: diagnose remaining Pianola recovery criteria",
+        "parent": "5edef58da8e72bbb13a779628fbf22da4101582e",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-diagnosis.md"
+      },
+      "checks": [
+        {
+          "command": "python3 .maestro/pianola-project-watchers-20261028/auto-run/Working/R00-repro.py",
+          "receipt": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-native.json",
+          "trace": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-traces.json",
+          "log": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/R00-native.log",
+          "exitCode": 1,
+          "expectedRed": 7,
+          "passedControls": 4,
+          "boundaryViolations": 0,
+          "verdictRepeated": true
+        }
+      ],
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R01; preserve fresh approval/correction dedup, fix missing status and durable review contracts in assigned later tasks",
+      "imagesAnalyzed": 0
+    }
+  ]
+}

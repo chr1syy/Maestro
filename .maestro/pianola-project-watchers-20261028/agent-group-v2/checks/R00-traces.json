@@ -1,0 +1,2073 @@
+{
+  "type": "candidate-fixture-execution",
+  "installed": false,
+  "generatedAt": "2026-10-28T16:44:29.451Z",
+  "cases": [
+    {
+      "name": "U02 exposes missing-cursor failure through real supervisor status",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-AXBTs8",
+      "trace": [
+        {
+          "label": "native census cursor unavailable",
+          "time": 1793188800020,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": null,
+                  "state": {
+                    "lastHandledMessageId": null,
+                    "pendingRetry": null,
+                    "pendingHandoff": null
+                  },
+                  "status": "suspended",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800020
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 0,
+            "pairCount": 0,
+            "proposals": [],
+            "proposedProfile": "",
+            "previousProfile": ""
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800020,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": null,
+                  "state": {
+                    "lastHandledMessageId": null,
+                    "pendingRetry": null,
+                    "pendingHandoff": null
+                  },
+                  "status": "suspended",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800020
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 0,
+            "pairCount": 0,
+            "proposals": [],
+            "proposedProfile": "",
+            "previousProfile": ""
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": [
+            "Transcript cursor unavailable: fixture-agent/fixture-old-tab"
+          ]
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-AXBTs8/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "U02 invalidates historical coverage immediately after selection change",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-nLIIwo",
+      "trace": [
+        {
+          "label": "covered baseline",
+          "time": 1793188800010,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": null,
+                  "state": {
+                    "lastHandledMessageId": null,
+                    "pendingRetry": null,
+                    "pendingHandoff": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800010
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 0,
+            "pairCount": 0,
+            "proposals": [],
+            "proposedProfile": "",
+            "previousProfile": ""
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800010,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": null,
+                  "state": {
+                    "lastHandledMessageId": null,
+                    "pendingRetry": null,
+                    "pendingHandoff": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800010
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 0,
+            "pairCount": 0,
+            "proposals": [],
+            "proposedProfile": "",
+            "previousProfile": ""
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-nLIIwo/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "L08 persists source-linked candidate after native settlement and restart",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-h7t4dQ",
+      "trace": [
+        {
+          "label": "recipient finished",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-h7t4dQ/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        },
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-h7t4dQ/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "L08 exposes native rejection and suppresses unchanged candidate after restart",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-X960SY",
+      "trace": [
+        {
+          "label": "recipient finished",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-X960SY/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "L08 permits explicit bounded human edit of staged answer",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-i13eHn",
+      "trace": [
+        {
+          "label": "recipient finished",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-i13eHn/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "L09 exposes durable accepted-rule conflict after attributable correction",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-aNyjFz",
+      "trace": [
+        {
+          "label": "accepted source corrected",
+          "time": 1793188800110,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800110,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800110,
+            "pairCount": 3,
+            "proposals": [],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 2 approved, 1 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": [
+            {
+              "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+              "enabled": true,
+              "scope": "agent",
+              "match": {
+                "maxRisk": "low",
+                "kinds": [
+                  "question"
+                ],
+                "groupId": "fixture-group",
+                "exactQuestion": "Should I run `git status`?"
+              },
+              "action": "auto_answer",
+              "priority": 100,
+              "createdAt": 1793188800080,
+              "updatedAt": 1793188800100,
+              "scopeId": "fixture-agent",
+              "answer": "Yes, run git status.",
+              "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+            }
+          ]
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800110,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800110,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800110,
+            "pairCount": 3,
+            "proposals": [],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 2 approved, 1 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": [
+            {
+              "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+              "enabled": true,
+              "scope": "agent",
+              "match": {
+                "maxRisk": "low",
+                "kinds": [
+                  "question"
+                ],
+                "groupId": "fixture-group",
+                "exactQuestion": "Should I run `git status`?"
+              },
+              "action": "auto_answer",
+              "priority": 100,
+              "createdAt": 1793188800080,
+              "updatedAt": 1793188800100,
+              "scopeId": "fixture-agent",
+              "answer": "Yes, run git status.",
+              "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+            }
+          ]
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-aNyjFz/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        },
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-aNyjFz/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "rejects forged suggestion approval against current native evidence",
+      "state": "pass",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-2TWffL",
+      "trace": [
+        {
+          "label": "recipient finished",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-2TWffL/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "rejects broadened suggestion approval against current native evidence",
+      "state": "pass",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-9nfE78",
+      "trace": [
+        {
+          "label": "recipient finished",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-9nfE78/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "rejects corrected suggestion approval against current native evidence",
+      "state": "pass",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-EfjKB9",
+      "trace": [
+        {
+          "label": "correction settlement invalidates pending proposal",
+          "time": 1793188800110,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800110,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800100,
+            "pairCount": 3,
+            "proposals": [],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 2 approved, 1 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800110,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800110,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800100,
+            "pairCount": 3,
+            "proposals": [],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 2 approved, 1 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-EfjKB9/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "L08 renders linked evidence and edit/reject controls",
+      "state": "fail",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-oGPyRm",
+      "trace": [
+        {
+          "label": "recipient finished",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800100,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800100,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800080,
+            "pairCount": 3,
+            "proposals": [
+              {
+                "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+                "enabled": false,
+                "scope": "agent",
+                "match": {
+                  "maxRisk": "low",
+                  "kinds": [
+                    "question"
+                  ],
+                  "groupId": "fixture-group",
+                  "exactQuestion": "Should I run `git status`?"
+                },
+                "action": "auto_answer",
+                "priority": 100,
+                "createdAt": 1793188800080,
+                "updatedAt": 1793188800080,
+                "scopeId": "fixture-agent",
+                "answer": "Yes, run git status.",
+                "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+              }
+            ],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 3 approved, 0 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": []
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-oGPyRm/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    },
+    {
+      "name": "L09 notifies one time for a replayed correction to learned evidence",
+      "state": "pass",
+      "root": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-5zPBsO",
+      "trace": [
+        {
+          "label": "replayed correction notification",
+          "time": 1793188800120,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800120,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800110,
+            "pairCount": 3,
+            "proposals": [],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 2 approved, 1 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": [
+            {
+              "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+              "enabled": true,
+              "scope": "agent",
+              "match": {
+                "maxRisk": "low",
+                "kinds": [
+                  "question"
+                ],
+                "groupId": "fixture-group",
+                "exactQuestion": "Should I run `git status`?"
+              },
+              "action": "auto_answer",
+              "priority": 100,
+              "createdAt": 1793188800080,
+              "updatedAt": 1793188800100,
+              "scopeId": "fixture-agent",
+              "answer": "Yes, run git status.",
+              "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+            }
+          ]
+        },
+        {
+          "label": "final evidence",
+          "time": 1793188800120,
+          "checkpoints": [
+            {
+              "version": 1,
+              "scopeId": "11111111-1111-4111-8111-111111111111",
+              "configurationFingerprint": "6f547d70e6f606461846837457ba0bcca95db850346803b692038b00439b9a77",
+              "activatedAt": 1793188800010,
+              "status": "armed",
+              "tabs": [
+                {
+                  "agentId": "fixture-agent",
+                  "tabId": "fixture-old-tab",
+                  "bindingFingerprint": "dc0f778230ff88909ec883fbf1a37374d70f2643db36ab5c42ba62ac66691e89",
+                  "baseline": null,
+                  "baselineBusy": false,
+                  "lastSeen": {
+                    "id": "fixture-message-9",
+                    "count": 9,
+                    "textLength": 20
+                  },
+                  "state": {
+                    "lastHandledMessageId": "fixture-message-7",
+                    "pendingHandoff": null,
+                    "pendingRetry": null
+                  },
+                  "status": "active",
+                  "unresolvedIntent": null
+                }
+              ],
+              "lastSnapshotAt": 1793188800120,
+              "nextTabIndex": 1
+            }
+          ],
+          "suggestions": {
+            "generatedAt": 1793188800110,
+            "pairCount": 3,
+            "proposals": [],
+            "proposedProfile": "# Decision profile (synthesized)\n\nSynthesized from 3 observed decisions.\n\nHow you tend to respond, by risk:\n- low risk: 2 approved, 1 declined, 0 other.\n- medium risk: no observed decisions.\n- high risk: no observed decisions.\n\nGuidance for Pianola:\n- High-risk asks ALWAYS escalate to me, regardless of any rule.\n- Counts describe history only; they grant no permission. Require an explicitly accepted exact scoped rule.\n- For medium-risk asks, prefer to ask me unless a specific rule clearly applies.\n",
+            "previousProfile": "Prefer local inspection. Ask Chris for sensitive actions."
+          },
+          "rules": [
+            {
+              "id": "suggested:[\"agent\",\"fixture-agent\",\"fixture-group\",\"inspect:git status\",\"Should I run `git status`?\"]",
+              "enabled": true,
+              "scope": "agent",
+              "match": {
+                "maxRisk": "low",
+                "kinds": [
+                  "question"
+                ],
+                "groupId": "fixture-group",
+                "exactQuestion": "Should I run `git status`?"
+              },
+              "action": "auto_answer",
+              "priority": 100,
+              "createdAt": 1793188800080,
+              "updatedAt": 1793188800100,
+              "scopeId": "fixture-agent",
+              "answer": "Yes, run git status.",
+              "description": "3 independent Chris decisions for this exact action and condition; explicit acceptance required."
+            }
+          ]
+        }
+      ],
+      "cycleOutput": [
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        },
+        {
+          "scopeId": "11111111-1111-4111-8111-111111111111",
+          "status": "armed",
+          "issues": []
+        }
+      ],
+      "requests": [],
+      "spawns": [
+        {
+          "command": "/home/chris/.nvm/versions/node/v24.22.1/bin/node",
+          "args": [
+            "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/Working/V2-13-fixture-5zPBsO/fixture-cli.js",
+            "pianola",
+            "watch-scope",
+            "11111111-1111-4111-8111-111111111111"
+          ],
+          "manager": "fixture-mira"
+        }
+      ],
+      "reads": [],
+      "writes": [],
+      "violations": []
+    }
+  ]
+}
