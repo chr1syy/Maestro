@@ -108,6 +108,7 @@ export function registerSessionCallbacks(
 	// then reconciles it with live managed-process and CLI-activity evidence.
 	server.setListDesktopSessionsCallback(() => {
 		const sessions = sessionsStore.get<StoredSession[]>('sessions', []);
+		const byId = new Map(sessions.map((session) => [session.id, session]));
 		const processManager = getProcessManager();
 		// Resolved once: this used to be a per-agent call that re-read and
 		// re-parsed the CLI activity file on every iteration.
@@ -116,8 +117,36 @@ export function registerSessionCallbacks(
 		for (const s of sessions) {
 			const aiTabs = (s.aiTabs as Array<Record<string, any>> | undefined) ?? [];
 			const cliBusy = cliBusySessionIds.has(s.id);
+			const ancestors: NonNullable<
+				import('../../../shared/desktopTabs').DesktopTabEntry['supervision']
+			>['ancestors'] = [];
+			const seen = new Set([s.id]);
+			let parentId = typeof s.parentSessionId === 'string' ? s.parentSessionId : null;
+			let lineageComplete = true;
+			while (parentId) {
+				const parent = byId.get(parentId);
+				if (!parent || seen.has(parentId) || ancestors.length >= 100) {
+					lineageComplete = false;
+					break;
+				}
+				seen.add(parentId);
+				ancestors.push({
+					id: parent.id,
+					cwd: parent.cwd,
+					parentSessionId:
+						typeof parent.parentSessionId === 'string' ? parent.parentSessionId : null,
+					isPianola: parent.isPianola === true,
+					remote:
+						!!parent.sshRemoteId ||
+						!!parent.sshRemote ||
+						parent.sessionSshRemoteConfig?.enabled === true,
+				});
+				parentId = typeof parent.parentSessionId === 'string' ? parent.parentSessionId : null;
+			}
 			for (const tab of aiTabs) {
 				if (!tab || typeof tab.id !== 'string') continue;
+				const logs = Array.isArray(tab.logs) ? tab.logs : [];
+				const lastLog = logs[logs.length - 1];
 				const isActiveTab = tab.id === s.activeTabId;
 				const managedProcessActive = isAiTabProcessActive(
 					processManager,
@@ -154,6 +183,28 @@ export function registerSessionCallbacks(
 					model: typeof tab.customModel === 'string' ? tab.customModel : null,
 					effort: typeof tab.customEffort === 'string' ? tab.customEffort : null,
 					enterToSend: typeof tab.enterToSend === 'boolean' ? tab.enterToSend : null,
+					supervision: {
+						cwd: s.cwd,
+						parentSessionId: typeof s.parentSessionId === 'string' ? s.parentSessionId : null,
+						ancestors,
+						lineageComplete,
+						isPianola: s.isPianola === true,
+						remote: !!s.sshRemoteId || !!s.sshRemote || s.sessionSshRemoteConfig?.enabled === true,
+						errorPaused: s.agentErrorPaused === true,
+						consult: !!tab.consultOrigin,
+						ephemeral: tab.quickChat === true && tab.hidden === true,
+						cursorAvailable:
+							Array.isArray(tab.logs) &&
+							(!lastLog || (typeof lastLog.id === 'string' && lastLog.id.length > 0)),
+						cursor:
+							lastLog && typeof lastLog.id === 'string' && lastLog.id.length > 0
+								? {
+										id: lastLog.id,
+										count: logs.length,
+										textLength: typeof lastLog.text === 'string' ? lastLog.text.length : 0,
+									}
+								: null,
+					},
 				});
 			}
 		}

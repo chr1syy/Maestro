@@ -416,6 +416,9 @@ export class PianolaSupervisor {
 				String(target.intervalSeconds ?? 5),
 			];
 		}
+		// A scoped watch must not fall through to orchestration. Until its
+		// baseline and guarded delivery are wired it cannot start a worker.
+		if (target.kind === 'watch-scope') return null;
 		if (!target.planId) return null;
 		return [
 			'pianola',

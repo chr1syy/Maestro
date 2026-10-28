@@ -129,6 +129,9 @@ export function pianolaSuperviseOrchestrate(
 
 /** Describe one target's spawn args in a human-readable form. */
 function describeTarget(target: PianolaSupervisedTarget): string {
+	if (target.kind === 'watch-scope') {
+		return `watch scope ${target.selection?.label ?? '?'} (not yet available)`;
+	}
 	if (target.kind === 'watch') {
 		return `watch tab ${target.tabId} (agent ${target.agentId}, interval ${
 			target.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS

@@ -18,6 +18,11 @@ import type {
 import { RULE_SCOPES, ACTION_KINDS, RISKS, SIGNAL_KINDS } from './types';
 import { validatePlan, type PianolaPlan, type PianolaTask } from './pianola-tasks';
 import { matchHasNarrowingPredicate } from './pianola-policy';
+import {
+	isPianolaScopeId,
+	validatePianolaScopeSelection,
+	type PianolaScopeSelection,
+} from './pianola-scope';
 
 /** Editable rules file (JSON array of PianolaRule), in the Maestro config dir. */
 export const PIANOLA_RULES_FILENAME = 'maestro-pianola-rules.json';
@@ -227,7 +232,7 @@ export function validatePianolaRule(raw: unknown): PianolaRule | null {
 
 const CONFIDENCES = ['low', 'medium', 'high'] as const;
 
-function isValidClassification(raw: unknown): raw is PianolaClassification {
+export function isValidClassification(raw: unknown): raw is PianolaClassification {
 	if (!isRecord(raw)) return false;
 	if (!SIGNAL_KINDS.includes(raw.kind as PianolaSignalKind)) return false;
 	if (!RISKS.includes(raw.risk as PianolaRisk)) return false;
@@ -358,8 +363,8 @@ export function validatePianolaPlansFile(raw: unknown): PianolaPlansFile {
 /** Filename for the persisted supervised-target registry, in the Maestro config dir. */
 export const PIANOLA_SUPERVISOR_FILENAME = 'maestro-pianola-supervisor.json';
 
-/** The two kinds of background process the desktop supervisor keeps alive. */
-export type PianolaSupervisedKind = 'watch' | 'orchestrate';
+/** Kinds of background process the desktop supervisor keeps alive. */
+export type PianolaSupervisedKind = 'watch' | 'watch-scope' | 'orchestrate';
 
 /**
  * One persisted background target the desktop supervisor manages. A 'watch'
@@ -377,6 +382,9 @@ export interface PianolaSupervisedTarget {
 	planId?: string;
 	intervalSeconds?: number;
 	concurrency?: number;
+	/** Explicit ownership and manager for a project-scoped watch. */
+	selection?: PianolaScopeSelection;
+	managerAgentId?: string;
 	/** Auto-watch targets are removed when their agent session is closed. */
 	autoCreated?: boolean;
 }
@@ -395,7 +403,7 @@ export interface PianolaSupervisorFile {
 export function validatePianolaSupervisedTarget(raw: unknown): PianolaSupervisedTarget | null {
 	if (!isRecord(raw)) return null;
 	if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
-	if (raw.kind !== 'watch' && raw.kind !== 'orchestrate') return null;
+	if (raw.kind !== 'watch' && raw.kind !== 'watch-scope' && raw.kind !== 'orchestrate') return null;
 	if (typeof raw.enabled !== 'boolean') return null;
 	if (typeof raw.createdAt !== 'number' || !Number.isFinite(raw.createdAt)) return null;
 
@@ -431,6 +439,20 @@ export function validatePianolaSupervisedTarget(raw: unknown): PianolaSupervised
 	if (raw.autoCreated !== undefined) {
 		if (typeof raw.autoCreated !== 'boolean') return null;
 		target.autoCreated = raw.autoCreated;
+	}
+	if (target.kind === 'watch-scope') {
+		const selection = validatePianolaScopeSelection(raw.selection);
+		if (
+			!isPianolaScopeId(target.id) ||
+			!selection ||
+			typeof raw.managerAgentId !== 'string' ||
+			!raw.managerAgentId.trim() ||
+			raw.managerAgentId.length > 200
+		)
+			return null;
+		if (target.tabId || target.agentId || target.planId || target.autoCreated) return null;
+		target.selection = selection;
+		target.managerAgentId = raw.managerAgentId;
 	}
 
 	// Drop targets that lack the fields their kind needs to spawn a valid command.

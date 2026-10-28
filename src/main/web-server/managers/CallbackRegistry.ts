@@ -1120,8 +1120,8 @@ export class CallbackRegistry {
 		return this.callbacks.importMarketplacePlaybook(sessionId, playbookId, targetFolderName);
 	}
 
-	listDesktopSessions(): DesktopSessionEntry[] {
-		return this.callbacks.listDesktopSessions?.() ?? [];
+	listDesktopSessions(): DesktopSessionEntry[] | null {
+		return this.callbacks.listDesktopSessions?.() ?? null;
 	}
 
 	getSessionHistory(

@@ -41,6 +41,11 @@ import {
 } from './storage';
 import { appendDecisionLine, compactDecisionLog } from './decision-log';
 import type { PianolaRule } from './types';
+import {
+	validatePianolaScopeCheckpoint,
+	type PianolaScopeCheckpoint,
+} from './pianola-scope-checkpoint';
+import { isPianolaScopeId } from './pianola-scope';
 
 export interface PianolaFsStoreConfig {
 	/** Resolve the data dir (Electron userData for main, config dir for CLI). Re-read per op. */
@@ -75,6 +80,9 @@ export interface PianolaFsStore {
 	writeSupervisorTargets(targets: PianolaSupervisedTarget[]): PianolaSupervisedTarget[];
 	upsertSupervisorTarget(target: PianolaSupervisedTarget): PianolaSupervisedTarget[];
 	removeSupervisorTarget(id: string): PianolaSupervisedTarget[];
+	/** A missing checkpoint is a first enrollment; a corrupt one throws. */
+	readScopeCheckpoint(scopeId: string): PianolaScopeCheckpoint | null;
+	writeScopeCheckpoint(checkpoint: PianolaScopeCheckpoint): void;
 	/** Absolute path to the supervised-target registry the desktop supervisor watches. */
 	supervisorFilePath(): string;
 }
@@ -270,6 +278,47 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 		return writeSupervisorTargets(next);
 	}
 
+	function checkpointName(scopeId: string): string {
+		if (!isPianolaScopeId(scopeId)) throw new Error('Invalid Pianola scope ID');
+		return `maestro-pianola-scope-${scopeId}.json`;
+	}
+
+	function readScopeCheckpoint(scopeId: string): PianolaScopeCheckpoint | null {
+		const file = filePath(checkpointName(scopeId));
+		let content: string;
+		try {
+			if (fs.statSync(file).size > 20 * 1024 * 1024)
+				throw new Error('Pianola checkpoint too large');
+			content = fs.readFileSync(file, 'utf-8');
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+			throw error;
+		}
+		let raw: unknown;
+		try {
+			raw = JSON.parse(content);
+		} catch {
+			throw new Error('Invalid Pianola scope checkpoint JSON');
+		}
+		const checkpoint = validatePianolaScopeCheckpoint(raw, scopeId);
+		if (!checkpoint) throw new Error('Invalid Pianola scope checkpoint');
+		return checkpoint;
+	}
+
+	function writeScopeCheckpoint(checkpoint: PianolaScopeCheckpoint): void {
+		const name = checkpointName(checkpoint.scopeId);
+		if (!validatePianolaScopeCheckpoint(checkpoint, checkpoint.scopeId)) {
+			throw new Error('Invalid Pianola scope checkpoint');
+		}
+		if (
+			Buffer.byteLength(JSON.stringify(checkpoint, null, indent), 'utf-8') + 1 >
+			20 * 1024 * 1024
+		) {
+			throw new Error('Pianola checkpoint too large');
+		}
+		writeJsonAtomic(name, checkpoint);
+	}
+
 	return {
 		readRulesResult,
 		readRules: () => readRulesResult().rules,
@@ -294,6 +343,8 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 		writeSupervisorTargets,
 		upsertSupervisorTarget,
 		removeSupervisorTarget,
+		readScopeCheckpoint,
+		writeScopeCheckpoint,
 		supervisorFilePath,
 	};
 }
