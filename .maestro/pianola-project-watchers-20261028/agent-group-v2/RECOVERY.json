@@ -10,7 +10,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R05: implement durable source-linked candidate and rejection storage",
+  "nextAction": "R06: add correction-aware settled-decision and accepted-rule conflict handling using R05 durable approvals",
   "tasks": [
     {
       "taskId": "R00",
@@ -160,6 +160,43 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R05; R10 rechecks complete acceptance",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R05",
+      "status": "complete",
+      "outcome": "Implemented durable source-linked candidates/rejections/approval receipts and fresh-evidence native accept/edit/reject; runtime/static validation deliberately belongs to R08/R09",
+      "files": [
+        "src/main/ipc/handlers/pianola.ts",
+        "src/main/pianola/pianola-lifecycle.ts",
+        "src/main/pianola/pianola-relearn.ts",
+        "src/main/preload/pianola.ts",
+        "src/main/web-server/handlers/bridgeDenyList.ts",
+        "src/main/web-server/handlers/bridgeHandlers.ts",
+        "src/shared/pianola/fs-store.ts",
+        "src/shared/pianola/pianola-synthesis.ts",
+        "src/shared/pianola/storage.ts",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-candidate-contract.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-candidates-source.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": {
+        "subject": "MAESTRO: persist source-linked Pianola candidate reviews",
+        "parent": "35d45dfbaf82c086d73ebbaadb515ad8dd1c4956",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-candidate-contract.md"
+      },
+      "checks": {
+        "status": "source-implementation-reviewed; runtime-and-static-execution-deferred",
+        "evidence": ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-candidates-source.json",
+        "contract": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-candidate-contract.md",
+        "executed": "formatter write and git diff --check only; no tests/lint/types",
+        "nextExecution": "R08/R09"
+      },
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R06: add correction-aware settled-decision and accepted-rule conflict handling using R05 durable approvals",
       "imagesAnalyzed": 0
     }
   ]

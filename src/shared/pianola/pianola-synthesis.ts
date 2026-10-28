@@ -21,6 +21,7 @@ import { learnableDecisionAction } from './pianola-policy';
 import { canonicalJson } from '../canonicalJson';
 import type { DecisionAggregates, DecisionPair } from './transcript-mining';
 import { aggregateDecisionPairs, confirmedHumanDecisionPairs } from './transcript-mining';
+import { pianolaCandidateEvidenceFingerprint, type PianolaSuggestionCandidate } from './storage';
 
 /** Configurable heuristic; never an authorization threshold. */
 export const SUGGESTION_MIN_SAMPLES = 3;
@@ -52,12 +53,7 @@ export interface SynthesisResult {
 	/** Hard-rule proposals, each valid per validatePianolaRule. Never auto-applied. */
 	proposals: PianolaRule[];
 	/** Source-linked candidates for Suggestions; no live policy mutation. */
-	candidates: Array<{
-		rule: PianolaRule;
-		action: string;
-		conditions: string[];
-		evidence: NonNullable<DecisionPair['evidence']>[];
-	}>;
+	candidates: PianolaSuggestionCandidate[];
 
 	/** Proposed profile draft vs the current one. */
 	profileDiff: ProfileDiff;
@@ -144,11 +140,12 @@ export function synthesizeSuggestions(input: SynthesisInput): SynthesisResult {
 		if (
 			input.existingRules.some(
 				(rule) =>
-					rule.scope === scope &&
-					rule.scopeId === scopeId &&
-					rule.match.exactQuestion === evidence.question &&
-					rule.match.groupId === evidence.groupId &&
-					rule.answer === first.reply
+					rule.id === `suggested:${key}` ||
+					(rule.scope === scope &&
+						rule.scopeId === scopeId &&
+						rule.match.exactQuestion === evidence.question &&
+						rule.match.groupId === evidence.groupId &&
+						rule.answer === first.reply)
 			)
 		)
 			continue;
@@ -170,11 +167,23 @@ export function synthesizeSuggestions(input: SynthesisInput): SynthesisResult {
 			updatedAt: now,
 			description: `${cluster.length} independent Chris decisions for this exact action and condition; explicit acceptance required.`,
 		};
-		candidates.push({
+		const candidate = {
+			id: rule.id,
 			rule,
 			action: learnableDecisionAction(evidence.question)!,
 			conditions: [evidence.question],
+			exclusions: [
+				'medium/high risk',
+				'low confidence',
+				'different question',
+				'outside native scope/group',
+			],
 			evidence: cluster.map((pair) => pair.evidence!),
+			sampleCount: cluster.length,
+		};
+		candidates.push({
+			...candidate,
+			evidenceFingerprint: pianolaCandidateEvidenceFingerprint(candidate),
 		});
 	}
 	const proposals = candidates.map((candidate) => candidate.rule);

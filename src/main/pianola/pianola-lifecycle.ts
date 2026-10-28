@@ -17,6 +17,7 @@ import { runRelearnJob } from './pianola-relearn';
 import {
 	readRules,
 	writeSuggestions,
+	readSuggestions,
 	getProfile,
 	readDecisions,
 	onHumanDecisionSettled,
@@ -148,6 +149,7 @@ export function createPianolaLifecycle(deps: PianolaLifecycleDependencies): Pian
 				readExisting: () => ({
 					...readExistingForRelearn(),
 					minSamples: deps.settingsStore.get('pianolaLearningMinSamples'),
+					suggestions: readSuggestions(),
 				}),
 				writeSuggestions,
 				relaunchStale: () => supervisor?.relaunchStale() ?? 0,

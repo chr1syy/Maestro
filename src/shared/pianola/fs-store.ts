@@ -47,6 +47,7 @@ import {
 	type PianolaScopeCheckpoint,
 } from './pianola-scope-checkpoint';
 import { isPianolaScopeId } from './pianola-scope';
+import { canonicalJson } from '../canonicalJson';
 
 export interface PianolaFsStoreConfig {
 	/** Resolve the data dir (Electron userData for main, config dir for CLI). Re-read per op. */
@@ -214,15 +215,60 @@ export function createPianolaFsStore(config: PianolaFsStoreConfig): PianolaFsSto
 	}
 
 	function readSuggestions(): PianolaSuggestionsFile {
-		return readFileOr(
-			PIANOLA_SUGGESTIONS_FILENAME,
-			() => validatePianolaSuggestionsFile(undefined),
-			(parsed) => validatePianolaSuggestionsFile(parsed)
-		);
+		let content: string;
+		try {
+			content = fs.readFileSync(filePath(PIANOLA_SUGGESTIONS_FILENAME), 'utf-8');
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+				return validatePianolaSuggestionsFile(undefined);
+			throw error;
+		}
+		// Corruption must not erase persistent rejection/approval evidence.
+		const raw: unknown = JSON.parse(content);
+		if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+			throw new Error('InvalidSuggestionFile');
+		return validatePianolaSuggestionsFile(raw);
 	}
 
 	function writeSuggestions(file: PianolaSuggestionsFile): PianolaSuggestionsFile {
 		const validated = validatePianolaSuggestionsFile(file);
+		const current = readSuggestions();
+		// Re-read at the atomic write boundary: asynchronous mining must never
+		// overwrite a review that was committed while it was in flight.
+		if (current.rejections || validated.rejections) {
+			const rejections = new Map(
+				[...(current.rejections ?? []), ...(validated.rejections ?? [])].map((item) => [
+					canonicalJson([item.candidateId, item.evidenceFingerprint]),
+					item,
+				])
+			);
+			validated.rejections = [...rejections.values()];
+		}
+		if (current.approvals || validated.approvals) {
+			const approvals = new Map(
+				[...(current.approvals ?? []), ...(validated.approvals ?? [])].map((item) => [
+					canonicalJson([item.candidate.id, item.candidate.evidenceFingerprint, item.approvedAt]),
+					item,
+				])
+			);
+			validated.approvals = [...approvals.values()];
+		}
+		if (validated.candidates) {
+			validated.candidates = validated.candidates.filter(
+				(candidate) =>
+					!validated.rejections?.some(
+						(item) =>
+							item.candidateId === candidate.id &&
+							item.evidenceFingerprint === candidate.evidenceFingerprint
+					)
+			);
+			validated.proposals = validated.candidates.map((candidate) => candidate.rule);
+		} else {
+			// Legacy writers cannot resurrect a rejected source-linked candidate.
+			validated.proposals = validated.proposals.filter(
+				(proposal) => !validated.rejections?.some((item) => item.candidateId === proposal.id)
+			);
+		}
 		writeJsonAtomic(PIANOLA_SUGGESTIONS_FILENAME, validated);
 		return validated;
 	}

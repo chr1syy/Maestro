@@ -17,7 +17,8 @@ import type {
 // Runtime enum arrays are single-sourced from types.ts; the union types derive from them.
 import { RULE_SCOPES, ACTION_KINDS, RISKS, SIGNAL_KINDS } from './types';
 import { validatePlan, type PianolaPlan, type PianolaTask } from './pianola-tasks';
-import { matchHasNarrowingPredicate } from './pianola-policy';
+import { learnableDecisionAction, matchHasNarrowingPredicate } from './pianola-policy';
+import { canonicalJson } from '../canonicalJson';
 import {
 	isPianolaScopeId,
 	validatePianolaScopeSelection,
@@ -650,6 +651,128 @@ export function validatePianolaSupervisorFile(raw: unknown): PianolaSupervisorFi
  * written by the scheduled re-learn job and read by the in-app suggestions UI.
  * Nothing here is live; the user approves individual items to persist them.
  */
+export interface PianolaSuggestionCandidate {
+	id: string;
+	/** Exact disabled draft; timestamps are not part of the evidence identity. */
+	rule: PianolaRule;
+	action: string;
+	conditions: string[];
+	/** Explicit descriptions of the draft's enforced boundaries, not new policy. */
+	exclusions: string[];
+	evidence: PianolaHumanDecisionEvidence[];
+	sampleCount: number;
+	evidenceFingerprint: string;
+}
+
+export interface PianolaSuggestionRejection {
+	sourceKind: 'native-human-review';
+	principal: 'chris';
+	candidateId: string;
+	evidenceFingerprint: string;
+	/** Retain the rejected proposal and its source links for audit/review. */
+	candidate: PianolaSuggestionCandidate;
+	rejectedAt: number;
+	actorId: string;
+	reason?: string;
+}
+
+/** Human approval receipt. Live activation is determined from the rules file. */
+export interface PianolaSuggestionApproval {
+	sourceKind: 'native-human-review';
+	principal: 'chris';
+	candidate: PianolaSuggestionCandidate;
+	rule: PianolaRule;
+	approvedAt: number;
+	actorId: string;
+	edited: boolean;
+}
+
+export type PianolaSuggestionReview = {
+	candidateId: string;
+	evidenceFingerprint: string;
+} & (
+	| { operation: 'accept' }
+	| { operation: 'edit'; rule: PianolaRule }
+	| { operation: 'reject'; reason?: string }
+);
+
+/** Stable across generation time and corpus ordering; every source change matters. */
+export function pianolaCandidateEvidenceFingerprint(
+	candidate: Omit<PianolaSuggestionCandidate, 'evidenceFingerprint'>
+): string {
+	const { rule } = candidate;
+	return canonicalJson({
+		id: candidate.id,
+		scope: rule.scope,
+		scopeId: rule.scopeId,
+		match: rule.match,
+		action: candidate.action,
+		conditions: candidate.conditions,
+		exclusions: candidate.exclusions,
+		answer: rule.answer,
+		evidence: candidate.evidence.map((source) => canonicalJson(source)).sort(),
+	});
+}
+
+function validateSuggestionCandidate(raw: unknown): PianolaSuggestionCandidate | null {
+	if (!isRecord(raw)) return null;
+	const rule = validatePianolaRule(raw.rule);
+	if (
+		!rule ||
+		rule.enabled ||
+		rule.id !== raw.id ||
+		!['agent', 'group'].includes(rule.scope) ||
+		rule.action !== 'auto_answer' ||
+		rule.match.maxRisk !== 'low' ||
+		rule.match.kinds?.length !== 1 ||
+		rule.match.kinds[0] !== 'question' ||
+		rule.match.groupId === undefined ||
+		typeof raw.action !== 'string' ||
+		learnableDecisionAction(rule.match.exactQuestion ?? '') !== raw.action ||
+		!isStringArray(raw.conditions) ||
+		canonicalJson(raw.conditions) !== canonicalJson([rule.match.exactQuestion]) ||
+		!isStringArray(raw.exclusions) ||
+		!Array.isArray(raw.evidence) ||
+		raw.evidence.length === 0 ||
+		raw.sampleCount !== raw.evidence.length ||
+		typeof raw.evidenceFingerprint !== 'string'
+	)
+		return null;
+	const asks = new Set<string>();
+	const answers = new Set<string>();
+	for (const source of raw.evidence) {
+		if (
+			!isValidHumanDecisionEvidence(source) ||
+			source.question !== rule.match.exactQuestion ||
+			source.answer !== rule.answer ||
+			source.groupId !== rule.match.groupId ||
+			(rule.scope === 'agent' ? source.agentId : source.groupId) !== rule.scopeId ||
+			(source.action !== null && source.action !== raw.action) ||
+			(source.conditions !== null &&
+				canonicalJson(source.conditions) !== canonicalJson(raw.conditions))
+		)
+			return null;
+		const ask = canonicalJson([source.agentId, source.tabId, source.questionMessageId]);
+		const answer = canonicalJson([source.actorId, source.answerMessageId]);
+		if (asks.has(ask) || answers.has(answer)) return null;
+		asks.add(ask);
+		answers.add(answer);
+	}
+	const candidate: PianolaSuggestionCandidate = {
+		id: rule.id,
+		rule,
+		action: raw.action,
+		conditions: raw.conditions,
+		exclusions: raw.exclusions,
+		evidence: raw.evidence as PianolaHumanDecisionEvidence[],
+		sampleCount: raw.evidence.length,
+		evidenceFingerprint: raw.evidenceFingerprint,
+	};
+	return pianolaCandidateEvidenceFingerprint(candidate) === candidate.evidenceFingerprint
+		? candidate
+		: null;
+}
+
 export interface PianolaSuggestionsFile {
 	/** Epoch ms the suggestions were generated. */
 	generatedAt: number;
@@ -661,11 +784,17 @@ export interface PianolaSuggestionsFile {
 	proposedProfile: string;
 	/** The profile that was current when this draft was generated. */
 	previousProfile: string;
+	/** Optional only for legacy files; new synthesis always supplies source-linked candidates. */
+	candidates?: PianolaSuggestionCandidate[];
+	/** Review records survive regeneration, empty corpora and process restarts. */
+	rejections?: PianolaSuggestionRejection[];
+	approvals?: PianolaSuggestionApproval[];
 }
 
 /**
  * Validate an untrusted suggestions payload, dropping malformed proposals.
- * Always returns a well-formed object so callers never null-check the shape.
+ * Legacy proposals degrade gracefully; invalid review evidence throws so a
+ * subsequent staging write cannot silently discard durable human decisions.
  */
 export function validatePianolaSuggestionsFile(raw: unknown): PianolaSuggestionsFile {
 	const result: PianolaSuggestionsFile = {
@@ -690,6 +819,99 @@ export function validatePianolaSuggestionsFile(raw: unknown): PianolaSuggestions
 	}
 	if (typeof raw.previousProfile === 'string') {
 		result.previousProfile = raw.previousProfile.slice(0, PIANOLA_PROFILE_MAX_CHARS);
+	}
+	// Review metadata must fail closed: silently dropping it could revive a rejected
+	// proposal or lose the human authorization for an edited rule.
+	if (raw.candidates !== undefined) {
+		if (!Array.isArray(raw.candidates)) throw new Error('InvalidSuggestionCandidates');
+		result.candidates = raw.candidates.map((item) => {
+			const candidate = validateSuggestionCandidate(item);
+			if (!candidate) throw new Error('InvalidSuggestionCandidate');
+			return candidate;
+		});
+		result.proposals = result.candidates.map((candidate) => candidate.rule);
+	}
+	if (raw.rejections !== undefined) {
+		if (!Array.isArray(raw.rejections)) throw new Error('InvalidSuggestionRejections');
+		result.rejections = raw.rejections.map((item) => {
+			if (
+				!isRecord(item) ||
+				item.sourceKind !== 'native-human-review' ||
+				item.principal !== 'chris' ||
+				typeof item.candidateId !== 'string' ||
+				!item.candidateId ||
+				typeof item.evidenceFingerprint !== 'string' ||
+				!item.evidenceFingerprint ||
+				typeof item.rejectedAt !== 'number' ||
+				!Number.isFinite(item.rejectedAt) ||
+				typeof item.actorId !== 'string' ||
+				!item.actorId.trim() ||
+				(item.reason !== undefined && typeof item.reason !== 'string')
+			)
+				throw new Error('InvalidSuggestionRejection');
+			const candidate = validateSuggestionCandidate(item.candidate);
+			if (
+				!candidate ||
+				candidate.id !== item.candidateId ||
+				candidate.evidenceFingerprint !== item.evidenceFingerprint
+			)
+				throw new Error('InvalidSuggestionRejection');
+			return {
+				sourceKind: 'native-human-review',
+				principal: 'chris',
+				candidateId: item.candidateId,
+				evidenceFingerprint: item.evidenceFingerprint,
+				candidate,
+				rejectedAt: item.rejectedAt,
+				actorId: item.actorId,
+				...(typeof item.reason === 'string' ? { reason: item.reason } : {}),
+			};
+		});
+	}
+	if (raw.approvals !== undefined) {
+		if (!Array.isArray(raw.approvals)) throw new Error('InvalidSuggestionApprovals');
+		result.approvals = raw.approvals.map((item) => {
+			if (
+				!isRecord(item) ||
+				item.sourceKind !== 'native-human-review' ||
+				item.principal !== 'chris'
+			)
+				throw new Error('InvalidSuggestionApproval');
+			const candidate = validateSuggestionCandidate(item.candidate);
+			const rule = validatePianolaRule(item.rule);
+			if (
+				!candidate ||
+				!rule ||
+				rule.id !== candidate.id ||
+				!rule.enabled ||
+				typeof item.approvedAt !== 'number' ||
+				!Number.isFinite(item.approvedAt) ||
+				typeof item.actorId !== 'string' ||
+				!item.actorId.trim() ||
+				typeof item.edited !== 'boolean'
+			)
+				throw new Error('InvalidSuggestionApproval');
+			if (
+				canonicalJson([rule.scope, rule.scopeId, rule.match, rule.action]) !==
+					canonicalJson([
+						candidate.rule.scope,
+						candidate.rule.scopeId,
+						candidate.rule.match,
+						candidate.rule.action,
+					]) ||
+				(!item.edited && rule.answer !== candidate.rule.answer)
+			)
+				throw new Error('InvalidSuggestionApproval');
+			return {
+				sourceKind: 'native-human-review',
+				principal: 'chris',
+				candidate,
+				rule,
+				approvedAt: item.approvedAt,
+				actorId: item.actorId,
+				edited: item.edited,
+			};
+		});
 	}
 	return result;
 }

@@ -14,6 +14,7 @@ import type {
 	RulesLoadResult,
 	PianolaSupervisedTarget,
 	PianolaSuggestionsFile,
+	PianolaSuggestionReview,
 } from '../../shared/pianola/storage';
 import type { PianolaSupervisorSnapshot } from '../ipc/handlers/pianola';
 import type { PianolaDecisionResolution } from '../../shared/pianola/pianola-decision-lifecycle';
@@ -49,6 +50,14 @@ export function createPianolaApi() {
 		/** Read the staged learning suggestions (rule proposals + profile draft). */
 		getSuggestions: (): Promise<PianolaSuggestionsFile> =>
 			ipcRenderer.invoke('pianola:get-suggestions'),
+
+		/** Explicit owner accept/edit/reject with optimistic source-evidence validation. */
+		reviewSuggestion: (
+			review: PianolaSuggestionReview
+		): Promise<{
+			rules: PianolaRule[];
+			suggestions: PianolaSuggestionsFile;
+		}> => ipcRenderer.invoke('pianola:review-suggestion', review),
 
 		/** Approve a suggestion: persist a rule and/or a profile draft. Returns updated rules. */
 		applySuggestion: (payload: {

@@ -147,7 +147,12 @@ export async function handleBridgeInvoke(
 	// Default deny, including any subsequently registered host-only channel.
 	if (
 		!isRemoteMethodAllowed(channel) ||
-		(client.cli && channel === 'pianola:resolve-decision') ||
+		(client.cli &&
+			[
+				'pianola:resolve-decision',
+				'pianola:review-suggestion',
+				'pianola:apply-suggestion',
+			].includes(channel)) ||
 		(channel === 'settings:set' && !isRemoteSettingWritable(args[0])) ||
 		(channel === 'agents:setConfigValue' &&
 			(typeof args[1] !== 'string' || /[.\[\]]/.test(args[1]) || isRemoteSecretField(args[1])))

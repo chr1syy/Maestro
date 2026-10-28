@@ -1,0 +1,60 @@
+{
+  "taskId": "R05",
+  "status": "source-implementation-reviewed; runtime-and-static-execution-deferred",
+  "contract": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-candidate-contract.md",
+  "sourceParent": "35d45dfbaf82c086d73ebbaadb515ad8dd1c4956",
+  "sourceSha256": {
+    "src/main/ipc/handlers/pianola.ts": "2855ee46323003c62e1102f7913958d64914c956e4f4ab7978fe7eaa6ab3a95e",
+    "src/main/pianola/pianola-lifecycle.ts": "235bcfc4712e95c13beadad2db9ebf5ee460f015bee44f06a1627f65b3a4029c",
+    "src/main/pianola/pianola-relearn.ts": "e84c9c3d5a334ac2902ec9f9a5a0466c121c6e5c7ee2e6e68eabb7d95e3cb07d",
+    "src/main/preload/pianola.ts": "3ae7d472d22ed56514ccfd40fa4a7d9f54c5c9eea565f3e17f265b9dfab36410",
+    "src/main/web-server/handlers/bridgeDenyList.ts": "2a3dbfec929d382b64a5003c0a73f2d391f333eb7898593be012bdb215df64f5",
+    "src/main/web-server/handlers/bridgeHandlers.ts": "71b9aee0ccc53b5e0f7645a6ca5a99b63b0960fe69cf8f58a8985baf46d2fe7b",
+    "src/shared/pianola/fs-store.ts": "e9a584265f863d0df063f97feabd0c82d4521ca1961f13842c2c495b3cd651d5",
+    "src/shared/pianola/pianola-synthesis.ts": "25b917bcb9d7429e8701d93d25fbcd6e47ddc0bcc2c8b3e31c42a3935ac89fd2",
+    "src/shared/pianola/storage.ts": "7fda6e386a96e710e7212ddb14ef3894bc27a7af75c047b838fd23230a1cf2cb"
+  },
+  "inspection": [
+    "Existing synthesis now retains candidate identity, exact disabled rule, concrete action/conditions/exclusions and independent full human source examples/count.",
+    "Lifecycle reads durable review state after mining; relearn stages linked candidates only and preserves human review receipts.",
+    "Shared main/CLI filesystem boundary merges reviews, suppresses exact rejected fingerprints and refuses corrupt review metadata.",
+    "Native review revalidates current settled evidence and the displayed fingerprint before writes, including group-scoped candidates.",
+    "Review requires existing explicit Chris identity binding and transport identity; CLI bridge cannot claim human review.",
+    "Approval receipt precedes live rules write; generation and rejection never write active rules/profiles.",
+    "Legacy unchanged draft approval delegates to guarded review; edits retain exact scope/match/action and require explicit human approval.",
+    "Preload and remote UI channel are registered; renderer API derives from the existing preload type.",
+    "No GLOSSARY.md or ADR files found in the repository; applicable CLAUDE/IPC and reuse guides inspected."
+  ],
+  "commands": [
+    {
+      "command": "./node_modules/.bin/prettier --write src/main/ipc/handlers/pianola.ts src/main/pianola/pianola-lifecycle.ts src/main/pianola/pianola-relearn.ts src/main/preload/pianola.ts src/main/web-server/handlers/bridgeDenyList.ts src/main/web-server/handlers/bridgeHandlers.ts src/shared/pianola/fs-store.ts src/shared/pianola/pianola-synthesis.ts src/shared/pianola/storage.ts",
+      "status": "applied",
+      "exitCode": 0
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "exitCode": 0
+    }
+  ],
+  "deferred": {
+    "R06": "later correction notification and durable accepted-rule conflict projection",
+    "R07": "Suggestions UI consuming persisted review and source evidence",
+    "R08": "permanent learning/storage/API/rendered regression authoring",
+    "R09": "affected tests, changed-file lint/format/types and runtime evidence",
+    "R10": "complete acceptance, including original R00 repros",
+    "R11": "focused current-base upstream PR after acceptance"
+  },
+  "testsAuthored": false,
+  "testsExecuted": false,
+  "lintExecuted": false,
+  "typesExecuted": false,
+  "fullPushSuite": "skipped by task-local hook suppression; authoring/execution split and scoped-push mandate",
+  "effectiveModel": "unknown",
+  "effectiveEffort": "unknown",
+  "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+  "imagesAnalyzed": 0,
+  "installed": false,
+  "productiveConfigurationChanged": false,
+  "acceptanceStatus": "unchanged; L08/L09 pending"
+}

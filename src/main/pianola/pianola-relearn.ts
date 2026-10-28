@@ -28,7 +28,12 @@ export interface RelearnDeps {
 	/** Read attributable settled decisions; unknown-origin imports are filtered again. */
 	mine: () => Promise<DecisionPair[]>;
 	/** Read the user's current rules + global decision-profile markdown (live state). */
-	readExisting: () => { rules: PianolaRule[]; profile: string; minSamples?: number };
+	readExisting: () => {
+		rules: PianolaRule[];
+		profile: string;
+		minSamples?: number;
+		suggestions?: PianolaSuggestionsFile;
+	};
 	/** Persist the staged suggestions. Proposal-only; never the live profile/rules. */
 	writeSuggestions: (file: PianolaSuggestionsFile) => void;
 	/** Relaunch any enabled supervised target whose child is not alive. Returns count. */
@@ -72,20 +77,32 @@ export async function runRelearnJob(deps: RelearnDeps): Promise<RelearnResult> {
 
 	try {
 		const pairs = confirmedHumanDecisionPairs(await deps.mine());
-		const { rules, profile, minSamples } = deps.readExisting();
-		const { proposals, profileDiff } = synthesizeSuggestions({
+		const { rules, profile, minSamples, suggestions } = deps.readExisting();
+		const synthesis = synthesizeSuggestions({
 			pairs,
 			minSamples,
 			existingRules: rules,
 			existingProfile: profile,
 			now: deps.now(),
 		});
+		const candidates = synthesis.candidates.filter(
+			(candidate) =>
+				!suggestions?.rejections?.some(
+					(item) =>
+						item.candidateId === candidate.id &&
+						item.evidenceFingerprint === candidate.evidenceFingerprint
+				)
+		);
+		const proposals = candidates.map((candidate) => candidate.rule);
 		deps.writeSuggestions({
 			generatedAt: deps.now(),
 			pairCount: pairs.length,
 			proposals,
-			proposedProfile: profileDiff.after,
-			previousProfile: profileDiff.before,
+			candidates,
+			rejections: suggestions?.rejections ?? [],
+			approvals: suggestions?.approvals ?? [],
+			proposedProfile: synthesis.profileDiff.after,
+			previousProfile: synthesis.profileDiff.before,
 		});
 		const relaunched = deps.relaunchStale();
 		deps.log(

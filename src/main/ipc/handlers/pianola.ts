@@ -35,6 +35,7 @@ import {
 	type PianolaSupervisedTarget,
 	validatePianolaRule,
 	type PianolaSuggestionsFile,
+	type PianolaSuggestionCandidate,
 } from '../../../shared/pianola/storage';
 import type { PianolaRule } from '../../../shared/pianola/types';
 import {
@@ -259,13 +260,149 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 		handlerOpts('getSuggestions'),
 		async (): Promise<PianolaSuggestionsFile> => readSuggestions()
 	);
+	/** Shared by legacy approval and source-linked accept/edit/reject. No await
+	 * occurs between fresh evidence validation and the durable writes. */
+	const reviewSuggestion = (
+		event: unknown,
+		raw: unknown
+	): {
+		rules: PianolaRule[];
+		suggestions: PianolaSuggestionsFile;
+	} => {
+		if (
+			!isRecord(raw) ||
+			typeof raw.candidateId !== 'string' ||
+			typeof raw.evidenceFingerprint !== 'string' ||
+			typeof raw.operation !== 'string' ||
+			!['accept', 'edit', 'reject'].includes(raw.operation)
+		)
+			throw new Error('InvalidSuggestionReview');
+		const loaded = readRulesResult();
+		if (loaded.malformed) throw new Error('MalformedRulesFile');
+		const staged = readSuggestions();
+		const candidate = staged.candidates?.find((item) => item.id === raw.candidateId);
+		const current = synthesizeSuggestions({
+			pairs: settledDecisionPairs(readDecisions()),
+			existingRules: loaded.rules,
+			learningScope: candidate?.rule.scope === 'group' ? 'group' : 'agent',
+			minSamples: settingsStore.get('pianolaLearningMinSamples') as number | undefined,
+		}).candidates.find((item) => item.id === raw.candidateId);
+		if (
+			!candidate ||
+			!current ||
+			candidate.evidenceFingerprint !== raw.evidenceFingerprint ||
+			current.evidenceFingerprint !== raw.evidenceFingerprint ||
+			staged.rejections?.some(
+				(item) =>
+					item.candidateId === candidate.id && item.evidenceFingerprint === raw.evidenceFingerprint
+			)
+		)
+			throw new Error('StaleOrChangedSuggestion');
+
+		// Only a transport-attributed owner review grants learned-rule consent.
+		// The caller cannot supply its own human role or reviewer identity.
+		const user = getActingUser();
+		const bridge = isRecord(event) && event.type === 'bridge';
+		const identity = settingsStore.get('pianolaLearningIdentity');
+		const confirmed =
+			isRecord(identity) &&
+			((user &&
+				typeof identity.chrisWebUserId === 'string' &&
+				!!identity.chrisWebUserId &&
+				user.id === identity.chrisWebUserId) ||
+				(!user &&
+					!bridge &&
+					isRecord(event) &&
+					!!event.sender &&
+					identity.desktopOwnerIsChris === true));
+		if (!confirmed) throw new Error('HumanSuggestionReviewRequired');
+		const actorId = user?.id ?? 'desktop';
+		const now = Date.now();
+		if (raw.operation === 'reject') {
+			if (raw.reason !== undefined && typeof raw.reason !== 'string')
+				throw new Error('InvalidSuggestionRejection');
+			const suggestions = writeSuggestions({
+				...staged,
+				candidates: staged.candidates!.filter((item) => item.id !== candidate.id),
+				rejections: [
+					...(staged.rejections ?? []),
+					{
+						sourceKind: 'native-human-review',
+						principal: 'chris',
+						candidateId: candidate.id,
+						evidenceFingerprint: candidate.evidenceFingerprint,
+						candidate,
+						rejectedAt: now,
+						actorId,
+						...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
+					},
+				],
+			});
+			return { rules: loaded.rules, suggestions };
+		}
+
+		let rule = candidate.rule;
+		if (raw.operation === 'edit') {
+			const edited = validatePianolaRule(raw.rule);
+			if (!edited || edited.id !== candidate.id) throw new Error('InvalidSuggestionRule');
+			// Answer, description and priority can be edited by Chris. Scope, the
+			// exact condition and risk guard retain the evidenced authorization.
+			const boundary = (value: PianolaRule): string =>
+				canonicalJson([value.scope, value.scopeId, value.match, value.action]);
+			if (boundary(edited) !== boundary(candidate.rule)) throw new Error('BroadenedSuggestionEdit');
+			rule = {
+				...candidate.rule,
+				answer: edited.answer,
+				description: edited.description,
+				priority: edited.priority,
+			};
+		}
+		const approvedRule = { ...rule, enabled: true, updatedAt: now };
+		// Persist the human authorization before activating policy. A failure to
+		// write rules leaves an approval receipt and the candidate available to retry;
+		// a receipt alone never activates a rule, including after restart.
+		const authorized = writeSuggestions({
+			...staged,
+			approvals: [
+				...(staged.approvals ?? []),
+				{
+					sourceKind: 'native-human-review',
+					principal: 'chris',
+					candidate,
+					rule: approvedRule,
+					approvedAt: now,
+					actorId,
+					edited: raw.operation === 'edit',
+				},
+			],
+		});
+		const rules = writeRules([...loaded.rules, approvedRule]);
+		let suggestions = authorized;
+		try {
+			suggestions = writeSuggestions({
+				...authorized,
+				candidates: authorized.candidates!.filter((item) => item.id !== candidate.id),
+			});
+		} catch (error) {
+			// Authorization and activation succeeded; report cleanup separately.
+			void captureException(error, {
+				operation: 'prune approved Pianola suggestion',
+				ruleId: rule.id,
+			});
+		}
+		return { rules, suggestions };
+	};
+	const wrappedReviewSuggestion = withIpcErrorLogging(
+		handlerOpts('reviewSuggestion'),
+		async (event: unknown, payload: unknown) => reviewSuggestion(event, payload)
+	);
 	const wrappedApplySuggestion = withIpcErrorLogging(
 		handlerOpts('applySuggestion'),
 		// Approving a suggestion only writes config: an approved rule is appended to
 		// the rules file (still subject to decide() at runtime, so high-risk always
 		// escalates), and an approved profile draft is persisted. Nothing here ever
 		// auto-answers or bypasses the policy.
-		async (raw: unknown): Promise<{ rules: PianolaRule[] }> => {
+		async (raw: unknown, event: unknown): Promise<{ rules: PianolaRule[] }> => {
 			if (!isRecord(raw)) throw new Error('InvalidSuggestionPayload');
 			const loaded = readRulesResult();
 			if (loaded.malformed) throw new Error('MalformedRulesFile');
@@ -274,15 +411,9 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 				const rule = validatePianolaRule(raw.rule);
 				if (!rule) throw new Error('InvalidSuggestionRule');
 				const staged = readSuggestions();
-				// The scheduler may not have processed a just-settled correction.
-				// Recompute synchronously from current native evidence before approval;
-				// caller-supplied rules and stale drafts cannot grant wider consent.
-				const current = synthesizeSuggestions({
-					pairs: settledDecisionPairs(readDecisions()),
-					existingRules: rules,
-					minSamples: settingsStore.get('pianolaLearningMinSamples') as number | undefined,
-				}).proposals.find((proposal) => proposal.id === rule.id);
-				const draft = staged.proposals.find((proposal) => proposal.id === rule.id);
+				const candidate: PianolaSuggestionCandidate | undefined = staged.candidates?.find(
+					(item) => item.id === rule.id
+				);
 				const policy = (value: PianolaRule): string =>
 					canonicalJson([
 						value.scope,
@@ -292,27 +423,17 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 						value.answer ?? null,
 					]);
 				if (
-					!current ||
-					!draft ||
-					policy(rule) !== policy(draft) ||
-					policy(rule) !== policy(current)
+					!candidate ||
+					policy(rule) !== policy(candidate.rule) ||
+					rule.createdAt !== candidate.rule.createdAt ||
+					rule.updatedAt !== candidate.rule.updatedAt
 				)
 					throw new Error('StaleOrChangedSuggestion');
-				rules = writeRules([...rules, { ...draft, enabled: true, updatedAt: Date.now() }]);
-				try {
-					writeSuggestions({
-						...staged,
-						proposals: staged.proposals.filter((proposal) => proposal.id !== rule.id),
-					});
-				} catch (error) {
-					// The rule is already active. Report a staging failure without
-					// telling the user that the completed approval failed. Current
-					// evidence/rules still prevent a second approval of this draft.
-					void captureException(error, {
-						operation: 'prune approved Pianola suggestion',
-						ruleId: rule.id,
-					});
-				}
+				rules = reviewSuggestion(event, {
+					operation: 'accept',
+					candidateId: candidate.id,
+					evidenceFingerprint: candidate.evidenceFingerprint,
+				}).rules;
 			}
 			if (isRecord(raw.profile) && typeof raw.profile.text === 'string') {
 				const projectPath =
@@ -390,6 +511,10 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 		if (!isPianolaEnabled(settingsStore)) throw new Error('PianolaDisabled');
 		return wrappedGetSuggestions(event);
 	});
+	ipcMain.handle('pianola:review-suggestion', async (event, payload: unknown) => {
+		if (!isPianolaEnabled(settingsStore)) throw new Error('PianolaDisabled');
+		return wrappedReviewSuggestion(event, event, payload);
+	});
 
 	// Only this explicit human UI action may create human provenance. The CLI
 	// manager endpoint cannot choose its actor kind or impersonate a human.
@@ -417,7 +542,7 @@ export function registerPianolaHandlers(deps: PianolaHandlerDependencies): void 
 		'pianola:apply-suggestion',
 		async (event, payload: unknown): Promise<{ rules: PianolaRule[] }> => {
 			if (!isPianolaEnabled(settingsStore)) throw new Error('PianolaDisabled');
-			return wrappedApplySuggestion(event, payload);
+			return wrappedApplySuggestion(event, payload, event);
 		}
 	);
 
