@@ -1,0 +1,10 @@
+{
+  "sourceHead": "a4805bc814412f00ace57823b4d5de71b2b59ea0",
+  "backupRef": "refs/heads/backup/pianola-r11-20261028",
+  "base": "9c1561e538f17ac61a949ccab3211b55bfd6f647",
+  "upstream": "be54af44351895e630efccac07d51564cd12e9b9",
+  "trackedStatus": "",
+  "patchSha256": "42a4dce171ba387696f316f2369a96c8c6104685f326095974ead81c21f2f65a",
+  "internalFiles": 92,
+  "preservedCommit": "5edef58da8e72bbb13a779628fbf22da4101582e"
+}

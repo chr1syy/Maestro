@@ -1,0 +1,85 @@
+{
+  "baseRefName": "rc",
+  "baseRefOid": "be54af44351895e630efccac07d51564cd12e9b9",
+  "headRefName": "fix/pianola-agent-group-supervision-20261028",
+  "headRefOid": "b355436661bbe1b10c4dc17aef8d4905f55756a7",
+  "isDraft": false,
+  "mergeStateStatus": "UNSTABLE",
+  "mergeable": "MERGEABLE",
+  "number": 1942,
+  "state": "OPEN",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/RunMaestro/Maestro/actions/runs/40741185889/job/123002882774",
+      "name": "lint-and-format",
+      "startedAt": "2026-10-28T18:01:20Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/RunMaestro/Maestro/actions/runs/40741185889/job/123002882722",
+      "name": "Test (ubuntu-latest, shard 1/2)",
+      "startedAt": "2026-10-28T18:01:20Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/RunMaestro/Maestro/actions/runs/40741185889/job/123002882897",
+      "name": "Test (ubuntu-latest, shard 2/2)",
+      "startedAt": "2026-10-28T18:01:20Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/RunMaestro/Maestro/actions/runs/40741185889/job/123002882850",
+      "name": "Test (windows-latest, shard 1/2)",
+      "startedAt": "2026-10-28T18:01:21Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/RunMaestro/Maestro/actions/runs/40741185889/job/123002882342",
+      "name": "Test (windows-latest, shard 2/2)",
+      "startedAt": "2026-10-28T18:01:20Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://app.greptile.com/maestro/github/runmaestro/maestro--bd287869-cf74-48c1-9d3e-b4d8f6c6a58b/-/pull/1942",
+      "name": "Greptile Review",
+      "startedAt": "2026-10-28T18:01:19Z",
+      "status": "IN_PROGRESS",
+      "workflowName": ""
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-10-28T18:01:16Z",
+      "conclusion": "NEUTRAL",
+      "detailsUrl": "https://github.com/RunMaestro/Maestro/pull/1942",
+      "name": "Mintlify Preview (fork)",
+      "startedAt": "2026-10-28T18:01:16Z",
+      "status": "COMPLETED",
+      "workflowName": ""
+    }
+  ],
+  "title": "feat(pianola): supervise agent groups and review learned decisions",
+  "url": "https://github.com/RunMaestro/Maestro/pull/1942"
+}

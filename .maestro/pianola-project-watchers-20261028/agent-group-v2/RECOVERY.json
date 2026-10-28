@@ -1,12 +1,12 @@
 {
-  "status": "in_progress",
+  "status": "source-accepted-pr-open-final-report-pending",
   "sourceHead": "5edef58da8",
   "previousOutcome": "partial;28pass4fail",
   "unfinishedOriginalTasks": [],
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R11: source accepted 32/32; preserve source/WIP, resolve current-upstream rc composition and publish focused PR",
+  "nextAction": "R12: final report from recovery-publication.json and prior acceptance; CI/review pending",
   "tasks": [
     {
       "taskId": "R00",
@@ -358,9 +358,41 @@
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "imagesAnalyzed": 0,
       "nextAction": "R11; V2-16 remains partial until focused publication and final R12 handoff; no merge/install/restart/activation"
+    },
+    {
+      "taskId": "R11",
+      "status": "complete",
+      "outcome": "Prepared one-commit current-upstream rc candidate, resolved 17 conflicts and opened normal upstream PR #1942; 778 affected tests and scoped static checks pass; CI/review pending, installed:false",
+      "files": [
+        "recovery-publication.md",
+        "checks/recovery-publication.json",
+        "checks/recovery-publication-pr.json",
+        "checks/recovery-publication-diff.json",
+        "checks/recovery-publication-backup.json",
+        "RECOVERY.json",
+        "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": {
+        "source": "b355436661bbe1b10c4dc17aef8d4905f55756a7",
+        "ledgerSubject": "MAESTRO: record Pianola current rc PR publication",
+        "resolve": "git log -1 --format=%H -- .maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-publication.json"
+      },
+      "checks": "checks/recovery-publication.json",
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "imagesAnalyzed": 0,
+      "nextAction": "R12: final report from current-base acceptance/publication receipts; upstream CI/review still pending; no merge/install/restart/activation"
     }
   ],
   "sourceAcceptance": "pass;32pass0fail",
   "candidateReady": true,
-  "installed": false
+  "installed": false,
+  "publication": {
+    "pr": "https://github.com/RunMaestro/Maestro/pull/1942",
+    "candidateCommit": "b355436661bbe1b10c4dc17aef8d4905f55756a7",
+    "base": "be54af44351895e630efccac07d51564cd12e9b9",
+    "status": "open-ci-pending",
+    "receipt": "checks/recovery-publication.json"
+  }
 }

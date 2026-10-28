@@ -1,0 +1,24 @@
+{
+  "command": [
+    "node_modules/.bin/eslint",
+    "-c",
+    "eslint.dashes.config.mjs",
+    "src/__tests__/cli/commands/pianola.test.ts",
+    "src/__tests__/helpers/pianola.ts",
+    "src/__tests__/integration/pianola-native-acceptance.config.ts",
+    "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+    "src/__tests__/main/ipc/pianola-suggestions-handlers.test.ts",
+    "src/__tests__/main/pianola/pianola-relearn.test.ts",
+    "src/__tests__/main/web-server/handlers/messageHandlers.test.ts",
+    "src/__tests__/main/web-server/web-server-factory.test.ts",
+    "src/__tests__/renderer/components/PianolaDashboard/PianolaDashboard.test.tsx",
+    "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx",
+    "src/__tests__/renderer/components/PianolaModal.test.tsx",
+    "src/__tests__/renderer/components/RuleEditor.test.tsx",
+    "src/__tests__/shared/pianola/pianola-scope-checkpoint.test.ts",
+    "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
+    "src/__tests__/shared/pianola/pianola-synthesis.test.ts",
+    "src/__tests__/shared/pianola/transcript-mining.test.ts"
+  ],
+  "exitCode": 0
+}
