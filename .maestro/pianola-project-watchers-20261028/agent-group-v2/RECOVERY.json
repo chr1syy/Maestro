@@ -6,7 +6,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R12: final report from recovery-publication.json and prior acceptance; CI/review pending",
+  "nextAction": "R12 complete: source acceptance passes 32/32; PR #1942 open with CI/review pending; installed:false; Mira owns follow-up.",
   "tasks": [
     {
       "taskId": "R00",
@@ -383,6 +383,43 @@
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "imagesAnalyzed": 0,
       "nextAction": "R12: final report from current-base acceptance/publication receipts; upstream CI/review still pending; no merge/install/restart/activation"
+    },
+    {
+      "taskId": "R12",
+      "status": "complete",
+      "files": [
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/REPORT.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/results.json",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": "this task commit; see git log -1",
+      "checks": [
+        {
+          "command": "JSON parse validation for acceptance/results/RECOVERY receipts",
+          "status": "pass"
+        },
+        {
+          "command": "git diff --check",
+          "status": "pass"
+        }
+      ],
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "Mira: monitor upstream PR #1942 CI/review; installation and live activation remain separate, unperformed follow-up.",
+      "imagesAnalyzed": 0,
+      "acceptance": {
+        "passed": 32,
+        "failed": 0,
+        "receipt": "acceptance.json"
+      },
+      "publication": {
+        "pr": "https://github.com/RunMaestro/Maestro/pull/1942",
+        "status": "open-ci-review-pending",
+        "receipt": "checks/recovery-publication.json"
+      },
+      "installed": false
     }
   ],
   "sourceAcceptance": "pass;32pass0fail",
@@ -392,7 +429,20 @@
     "pr": "https://github.com/RunMaestro/Maestro/pull/1942",
     "candidateCommit": "b355436661bbe1b10c4dc17aef8d4905f55756a7",
     "base": "be54af44351895e630efccac07d51564cd12e9b9",
-    "status": "open-ci-pending",
+    "status": "open-ci-review-pending",
     "receipt": "checks/recovery-publication.json"
+  },
+  "setupProposal": {
+    "status": "unapplied",
+    "managerAgentId": "bd4b5d0b-1ec3-4280-9549-b9584c0da261",
+    "groupIds": {
+      "Synapse": "group-a5814954-a23a-43ab-b226-2ad90d073195",
+      "Maestro": "group-e4f486d7-914c-4939-a783-1f0e852fea7a",
+      "Clippmann": "group-8d4cffcc-b460-418c-9f9d-8d33ed22e078"
+    },
+    "excludedAgentIds": [
+      "bd4b5d0b-1ec3-4280-9549-b9584c0da261"
+    ],
+    "proposalFile": "REPORT.md"
   }
 }

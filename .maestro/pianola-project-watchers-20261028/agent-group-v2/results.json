@@ -1,58 +1,54 @@
 {
-  "taskId": "V2-16",
-  "status": "partial",
-  "sourceCommit": "d020c15d4b",
-  "candidateReadiness": "partial; not ready for full acceptance or publication",
-  "installed": false,
-  "modelEvidence": {
-    "effectiveModel": "unknown",
-    "effectiveEffort": "unknown",
-    "configuredHintsAreExecutionEvidence": false
-  },
-  "verification": {
-    "nativeAcceptance": {"passed": 21, "total": 21, "receipt": "checks/"},
-    "targetedRegressions": {"passed": 622, "total": 622, "files": 12, "receipt": "checks/"},
-    "censusTests": {"passed": 339, "files": 2, "receipt": "V2-15-PUBLICATION.md"},
-    "specAcceptance": {"passed": 28, "failed": 4, "receipt": "acceptance.json"},
-    "fullSuite": "not run",
-    "ci": "not checked"
+  "taskId": "R12",
+  "status": "source-accepted-pr-open-ci-review-pending",
+  "effectiveModel": "unknown",
+  "effectiveEffort": "unknown",
+  "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+  "imagesAnalyzed": 0,
+  "acceptance": {
+    "status": "pass",
+    "passed": 32,
+    "failed": 0,
+    "receipt": "checks/recovery-acceptance.json",
+    "nativeCases": {
+      "passed": 58,
+      "failed": 0,
+      "receipt": "checks/recovery-acceptance-native.json"
+    },
+    "originalReproductions": {
+      "passed": 11,
+      "failed": 0,
+      "receipt": "checks/recovery-original-repro.json"
+    }
   },
   "publication": {
-    "pr": "none",
-    "reason": "candidate branch is not a focused current-base composition; recorded upstream rc merge simulation has 16 conflicts",
-    "upstreamMerge": "not performed"
+    "status": "open-ci-review-pending",
+    "pr": "https://github.com/RunMaestro/Maestro/pull/1942",
+    "candidateCommit": "b355436661bbe1b10c4dc17aef8d4905f55756a7",
+    "base": "be54af44351895e630efccac07d51564cd12e9b9",
+    "receipt": "checks/recovery-publication.json",
+    "ci": "pending at recorded snapshot; no pass claimed"
   },
-  "unfulfilled": [
-    {
-      "criterion": "U02",
-      "status": "failed",
-      "owner": "V2-05/06/07 owners",
-      "nextAction": "Complete current per-agent/per-tab failure and freshness reporting plus rendered controls/status regressions; record task receipts."
+  "installed": false,
+  "liveActivation": false,
+  "merged": false,
+  "setupProposal": {
+    "status": "unapplied",
+    "managerAgentId": "bd4b5d0b-1ec3-4280-9549-b9584c0da261",
+    "manager": "Mira",
+    "groupIds": {
+      "Synapse": "group-a5814954-a23a-43ab-b226-2ad90d073195",
+      "Maestro": "group-e4f486d7-914c-4939-a783-1f0e852fea7a",
+      "Clippmann": "group-8d4cffcc-b460-418c-9f9d-8d33ed22e078"
     },
-    {
-      "criterion": "L08",
-      "status": "failed",
-      "owner": "V2-10 owner",
-      "nextAction": "Persist source-linked candidate/rejection evidence and implement linked examples with accept/edit/reject; add restart regressions in V2-11/12."
-    },
-    {
-      "criterion": "L09",
-      "status": "failed",
-      "owner": "V2-10 owner",
-      "nextAction": "Persist accepted provenance and surface contradictions for review without policy mutation; test correction/restart."
-    },
-    {
-      "criterion": "P01",
-      "status": "failed",
-      "owner": "Mira / prerequisite Auto Run owners",
-      "nextAction": "Complete V2-05/06/07/10/11/12, reconcile commits and receipts, then rerun affected acceptance."
-    }
-  ],
-  "activation": {
-    "performed": false,
-    "setupCommands": null,
-    "rollbackCommands": null,
-    "reason": "Native roster/group IDs are not evidenced and candidate acceptance is incomplete; obtain current IDs and prepare commands after prerequisites pass."
+    "excludedAgentIds": [
+      "bd4b5d0b-1ec3-4280-9549-b9584c0da261"
+    ],
+    "laterRcSolutions": "enrollable after actual native ID exists",
+    "proposalFile": "REPORT.md"
   },
-  "nextAction": "Complete missing prerequisite work, rerun affected acceptance, then prepare a focused current-upstream branch and publish only after scoped checks."
+  "nextAction": {
+    "owner": "Mira",
+    "action": "Monitor PR #1942 CI/review; coordinate separately approved installation and productive activation after upstream readiness."
+  }
 }

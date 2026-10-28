@@ -1,47 +1,53 @@
 ---
 type: report
-title: Pianola V2 partial handoff
+title: Pianola V2 source acceptance and publication handoff
 created: 2026-10-28
 tags:
   - pianola
   - handoff
 related:
   - '[[SPEC]]'
-  - '[[V2-14-ACCEPTANCE]]'
-  - '[[V2-15-PUBLICATION]]'
+  - '[[recovery-acceptance]]'
+  - '[[recovery-publication]]'
 ---
 
-# Pianola V2 partial handoff
+# Pianola V2 final source handoff
 
-## Candidate and changed behavior
+## Acceptance
 
-Reviewed candidate source head: `d020c15d4b` (`MAESTRO: preserve Pianola census tests and document publication boundary`). The implemented candidate adds native agent/group identity selection, scope workers and guarded admission, manager decision lifecycle, human-decision evidence and narrow relearning, plus a controlled native acceptance harness. The source changes are only a partial implementation of [[SPEC]]. The fork branch is not a focused upstream PR composition.
+The recovered source candidate satisfies all 32/32 criteria in `acceptance.json` (zero failures), including the original U02, L08, L09 and P01 failures. Current-base isolated native composition passed 58/58 cases; original diagnostic reproductions passed 11/11. The scoped publication checks passed 778 tests across 12 files, scoped static checks (36 roots, zero diagnostics), formatting, lint and documentation verification. See `checks/recovery-acceptance.json` and `checks/recovery-publication.json`.
 
-## Verification receipts
+## Candidate and publication
 
-- Native isolated production composition: **21/21 cases passed** (V2-14 receipt in `checks/`).
-- Targeted working-tree regressions: **622/622 tests passed across 12 files** (V2-14 receipt in `checks/`).
-- Preserved census regressions: **339 tests passed across two files** (V2-15 publication report).
-- Scoped static checks are recorded in `checks/V2-14-checks.json`; do not interpret these targeted receipts as a full-suite or installed-runtime result.
-- Acceptance ledger: **28 pass, 4 fail** in `acceptance.json`.
+Focused current-`rc` candidate: `b355436661bbe1b10c4dc17aef8d4905f55756a7`, based on `be54af44351895e630efccac07d51564cd12e9b9`. Upstream PR [#1942](https://github.com/RunMaestro/Maestro/pull/1942) is open and mergeable. CI and review were pending at the recorded snapshot; no CI pass is claimed. The original source and WIP remain preserved in backup ref `refs/heads/backup/pianola-r11-20261028` and the verified bundle/patch documented in `checks/recovery-publication.json`.
 
-## Unfulfilled acceptance criteria
+## Proposed productive selection (not applied)
 
-| Criterion | Status and cause | Owner | Next action |
-| --- | --- | --- | --- |
-| U02 current per-agent/per-tab coverage, failures and rendered lifecycle controls | Failed. Current UI lacks complete current per-tab failure reporting and complete rendered acceptance. | V2-05/06/07 owners | Finish per-agent failure/freshness display and rendered control/status regressions; record V2-05/06/07 receipts. |
-| L08 durable source-linked suggestions, counts/scope/exclusions, edit/reject and rejection suppression | Failed. Candidate evidence is not durably persisted and Suggestions lacks the complete review flow. | V2-10 owner | Persist candidate identity/evidence and rejection fingerprints; implement linked examples and accept/edit/reject; add restart regressions in V2-11/12. |
-| L09 accepted learned-rule conflict handling | Failed. Accepted provenance/conflict state and review UI are absent. | V2-10 owner | Persist accepted provenance and surface contradictory evidence as a review conflict without changing policy; test correction/restart. |
-| P01 prerequisite implementation/regression receipts | Failed. V2-05/10 are in progress; V2-06/07/11/12 lack completion receipts. | Mira / prerequisite Auto Run owners | Resume these tasks, reconcile actual commits/checks, then rerun affected acceptance. |
+The following native IDs were read from the current Maestro roster. Proposed supervisor manager is Mira (`bd4b5d0b-1ec3-4280-9549-b9584c0da261`). Proposed selected groups are Synapse (`group-a5814954-a23a-43ab-b226-2ad90d073195`), Maestro (`group-e4f486d7-914c-4939-a783-1f0e852fea7a`) and Clippmann (`group-8d4cffcc-b460-418c-9f9d-8d33ed22e078`). Exclude Mira by ID. These group selections cover future members according to the accepted identity-based contract; review the broad Maestro group membership before any activation. Later RC-Solutions is intentionally not selected yet and remains enrollable by adding its actual native group or agent ID after creation.
 
-## Model, publication and runtime state
+Unapplied setup payload:
 
-Actual effective model and effort telemetry are unavailable. Configured per-task model hints are not evidence of the executed model. No PR exists, no CI result was checked, and the current branch is not ready to publish: the recorded upstream `rc` comparison reports 16 merge conflicts and the candidate requires a focused current-base port. Candidate readiness is **partial / not ready for full acceptance**. Installed runtime status: **installed:false**. No installation, restart, live activation or upstream merge occurred.
+```json
+{
+  "kind": "watch-scope",
+  "managerAgentId": "bd4b5d0b-1ec3-4280-9549-b9584c0da261",
+  "selection": {
+    "label": "Synapse, Maestro and Clippmann",
+    "mode": "agents-and-groups",
+    "agentIds": [],
+    "groupIds": [
+      "group-a5814954-a23a-43ab-b226-2ad90d073195",
+      "group-e4f486d7-914c-4939-a783-1f0e852fea7a",
+      "group-8d4cffcc-b460-418c-9f9d-8d33ed22e078"
+    ],
+    "excludedAgentIds": ["bd4b5d0b-1ec3-4280-9549-b9584c0da261"]
+  },
+  "enabled": true
+}
+```
 
-## Activation boundary
+Rollback proposal: disable the created `watch-scope` by its returned scope ID using the native Pianola scope controls, then remove that same scope ID if permanent removal is desired. No productive scope was created, changed or activated in this run; the JSON is a review payload, not a command to execute.
 
-No native setup or rollback commands are supplied: the current native roster/group IDs are not evidenced in the acceptance inputs, and the candidate is not complete. The existing `selection-proposal.json` is an unapplied draft only. Once the remaining criteria pass, refresh the roster and prepare exact, reviewable setup and rollback commands from those IDs. Do not run them as part of this handoff.
+## Runtime boundary and ownership
 
-## Next action
-
-Complete V2-05/06/07/10/11/12, update the acceptance ledger from their actual receipts, and rerun affected end-to-end acceptance. Then port the focused implementation to current upstream `rc`, resolve conflicts, run scoped checks, and open a PR. Keep `installed:false` until separately authorized installation and runtime acceptance.
+Source candidate is ready; upstream CI/review is pending; installed runtime is **false/unverified**. No merge, installation, restart, or live activation occurred. Effective model and effort telemetry are unavailable (`unknown`); configured task tiers are not execution evidence. No images were analyzed. Mira owns the next step: monitor PR #1942 CI/review, then separately coordinate any approved installation and productive activation. See `results.json` and `RECOVERY.json` for the task receipt.
