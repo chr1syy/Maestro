@@ -211,3 +211,60 @@ describe('scope checkpoint filesystem storage', () => {
 		expect(store.readScopeCheckpoint(scopeId)).toEqual(value);
 	});
 });
+
+describe('current coverage persistence contract', () => {
+	it('round trips coverage failures and census metadata with an admitted unknown intent', () => {
+		const value = checkpoint();
+		value.coverageRegistryFingerprint = 'c'.repeat(64);
+		value.lastCycleError = { observedAt: 120, reason: 'Native census unavailable' };
+		value.tabs[0].unresolvedIntent = { decisionId: 'decision', messageId: 'ask', admitted: true };
+		value.tabs[0].coverage = {
+			observedAt: 110,
+			status: 'blocked',
+			ownerScopeId: scopeId,
+			reason: 'Transcript cursor unavailable',
+			nextActor: 'operator',
+			nextAction: 'Restore native cursor access',
+		};
+		store.writeScopeCheckpoint(value);
+		const restarted = createPianolaFsStore({
+			resolveDir: () => directory,
+			indent: 2,
+			trailingNewline: true,
+		});
+		expect(restarted.readScopeCheckpoint(scopeId)).toEqual(value);
+	});
+
+	it.each([
+		{ observedAt: -1 },
+		{ observedAt: '2026-10-28' },
+		{ status: 'healthy' },
+		{ ownerScopeId: 'invalid' },
+		{ nextActor: 'manager' },
+		{ reason: 1 },
+		{ nextAction: undefined },
+	])('rejects malformed per-tab coverage %j', (fields) => {
+		const value = checkpoint();
+		const coverage = {
+			observedAt: 110,
+			status: 'blocked',
+			ownerScopeId: scopeId,
+			reason: 'Cursor unavailable',
+			nextActor: 'operator',
+			nextAction: 'Restore cursor',
+			...fields,
+		};
+		expect(
+			validatePianolaScopeCheckpoint({ ...value, tabs: [{ ...value.tabs[0], coverage }] }, scopeId)
+		).toBeNull();
+	});
+
+	it.each([
+		{ coverageRegistryFingerprint: 'invalid' },
+		{ lastCycleError: { observedAt: -1, reason: 'failure' } },
+		{ lastCycleError: { observedAt: '2026-10-28', reason: 'failure' } },
+		{ lastCycleError: { observedAt: 120, reason: 42 } },
+	])('rejects malformed current census metadata %j', (fields) => {
+		expect(validatePianolaScopeCheckpoint({ ...checkpoint(), ...fields }, scopeId)).toBeNull();
+	});
+});

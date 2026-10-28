@@ -18,6 +18,7 @@ import type {
 } from '../../main/web-server/handlers/messageHandlers/types';
 import type { PianolaSupervisedTarget, PianolaSuggestionsFile } from '../../shared/pianola/storage';
 import type { PianolaRule } from '../../shared/pianola/types';
+import type { PianolaSupervisorSnapshot } from '../../main/ipc/handlers/pianola';
 
 const boundary = vi.hoisted(() => ({
 	root: '',
@@ -1090,5 +1091,235 @@ describe('Pianola native candidate acceptance (isolated production composition)'
 		expect(boundary.violations).toHaveLength(3);
 		boundary.violations = []; // Only these explicit negative controls are permitted.
 		expect(cliStore.readPianolaSupervisorTargets()).toEqual(mainStore.readSupervisorTargets());
+	});
+});
+
+describe('R03 current native coverage status', () => {
+	it('exposes first-enrollment missing cursor alongside a healthy chat and restores with a baseline', async () => {
+		fixture.tab(AGENT, 'fixture-healthy-tab');
+		fixture.getTab().logs = undefined as never;
+		await fixture.select();
+		await fixture.pump('first enrollment without cursor');
+		const status = await fixture.ipc<PianolaSupervisorSnapshot>('supervisor-list');
+		expect(status.checkpoints[0].coverage).toMatchObject({
+			status: 'blocked',
+			fresh: true,
+			nextActor: 'operator',
+			censusAt: Date.now(),
+			tabs: expect.arrayContaining([
+				expect.objectContaining({
+					agentId: AGENT,
+					tabId: TAB,
+					status: 'blocked',
+					error: 'Transcript cursor unavailable',
+					nextActor: 'operator',
+					nextAction: expect.stringContaining('Restore native transcript cursor'),
+				}),
+				expect.objectContaining({
+					agentId: AGENT,
+					tabId: 'fixture-healthy-tab',
+					status: 'covered',
+					ownerScopeId: SCOPE,
+				}),
+			]),
+		});
+		fixture.getTab().logs = [];
+		fixture.log(TAB, 'Should I name it count or total?');
+		await fixture.pump('restored cursor baselines accumulated history');
+		const restored = await fixture.ipc<PianolaSupervisorSnapshot>('supervisor-list');
+		expect(restored.checkpoints[0].coverage).toMatchObject({ status: 'covered', fresh: true });
+		expect(restored.checkpoints[0].coverage!.tabs.find((t) => t.tabId === TAB)).toMatchObject({
+			status: 'covered',
+			nextActor: 'worker',
+		});
+		expect(fixture.sends).toEqual([]);
+	});
+
+	it.each(['selection', 'overlap', 'legacy-pause'] as const)(
+		'invalidates historical ownership immediately on %s registry change',
+		async (kind) => {
+			await fixture.select();
+			await fixture.pump('covered census');
+			const previous = (await fixture.ipc<PianolaSupervisorSnapshot>('supervisor-list'))
+				.checkpoints[0].coverage!;
+			expect(previous.status).toBe('covered');
+			if (kind === 'selection')
+				await fixture.select({
+					selection: {
+						mode: 'agents-and-groups',
+						label: 'Changed',
+						agentIds: ['fixture-other-agent'],
+						groupIds: [],
+						excludedAgentIds: [],
+					},
+				});
+			if (kind === 'overlap') await fixture.select({ id: OVERLAP, createdAt: 0 });
+			if (kind === 'legacy-pause')
+				mainStore.writeSupervisorTargets([
+					...mainStore.readSupervisorTargets(),
+					{
+						id: 'fixture-legacy',
+						kind: 'watch',
+						enabled: false,
+						createdAt: 1,
+						agentId: AGENT,
+						tabId: TAB,
+					},
+				]);
+			const current = (
+				await fixture.ipc<PianolaSupervisorSnapshot>('supervisor-list')
+			).checkpoints.find((c) => c.scopeId === SCOPE)!;
+			expect(current.coverage).toMatchObject({
+				status: 'stale',
+				fresh: false,
+				nextActor: 'operator',
+				censusAt: previous.censusAt,
+				tabs: [expect.objectContaining({ status: 'stale', ownerScopeId: null })],
+			});
+			if (kind === 'selection')
+				expect(current.coverage!.configurationFingerprint).not.toBe(
+					previous.configurationFingerprint
+				);
+			expect(fixture.sends).toEqual([]);
+		}
+	);
+
+	it.each([
+		'aged',
+		'future',
+		'old-schema',
+		'restarted',
+		'stopped',
+		'corrupt',
+		'unarmed',
+		'census-error',
+	] as const)('never projects %s historical evidence as healthy coverage', async (kind) => {
+		await fixture.select();
+		await fixture.pump('covered census');
+		const saved = mainStore.readScopeCheckpoint(SCOPE)!;
+		if (kind === 'aged') vi.setSystemTime(Date.now() + 30_001);
+		if (kind === 'future') vi.setSystemTime(Date.now() - 1);
+		if (kind === 'old-schema') {
+			delete saved.coverageRegistryFingerprint;
+			delete saved.tabs[0].coverage;
+		}
+		if (kind === 'unarmed') saved.status = 'baselining';
+		if (kind === 'census-error')
+			saved.lastCycleError = { observedAt: Date.now(), reason: 'fixture census unavailable' };
+		if (['old-schema', 'unarmed', 'census-error'].includes(kind))
+			mainStore.writeScopeCheckpoint(saved);
+		if (kind === 'restarted') {
+			vi.setSystemTime(Date.now() + 1);
+			fixture.restart();
+		}
+		if (kind === 'stopped') fixture.lifecycle.supervisor.stopAll();
+		if (kind === 'corrupt')
+			fs.writeFileSync(path.join(boundary.root, `maestro-pianola-scope-${SCOPE}.json`), '{broken');
+		const status = (await fixture.ipc<PianolaSupervisorSnapshot>('supervisor-list')).checkpoints[0];
+		expect(status.coverage!.status).toBe(
+			['stopped', 'corrupt', 'unarmed', 'census-error'].includes(kind) ? 'blocked' : 'stale'
+		);
+		expect(status.coverage!.nextActor).toBe('operator');
+		expect(status.coverage!.nextAction.length).toBeGreaterThan(10);
+		expect(status.coverage!.tabs.every((t) => t.ownerScopeId === null)).toBe(true);
+		if (kind === 'corrupt') {
+			// Restore before the fixture's final evidence capture; corrupt status is the assertion above.
+			mainStore.writeScopeCheckpoint(saved);
+			expect(status.error).toMatch(/checkpoint JSON/i);
+		}
+		if (kind === 'census-error') expect(status.coverage!.reason).toBe('fixture census unavailable');
+		if (kind === 'old-schema') expect(status.coverage!.fresh).toBe(false);
+	});
+
+	it('projects pause immediately while preserving historical closed tabs and blocked error evidence', async () => {
+		fixture.tab(AGENT, 'fixture-closed-tab');
+		await fixture.select();
+		await fixture.pump('initial census');
+		fixture.sessions.find((s) => s.id === AGENT)!.aiTabs = [fixture.getTab()];
+		fixture.getTab().logs = undefined as never;
+		await fixture.pump('closed and failed tabs');
+		const paused = await fixture.ipc<PianolaSupervisorSnapshot>(
+			'supervisor-set-enabled',
+			SCOPE,
+			false
+		);
+		expect(paused.checkpoints[0].coverage).toMatchObject({
+			status: 'paused',
+			nextActor: 'none',
+			tabs: expect.arrayContaining([
+				expect.objectContaining({
+					tabId: TAB,
+					status: 'paused',
+					error: 'Transcript cursor unavailable',
+					ownerScopeId: null,
+					nextActor: 'none',
+				}),
+				expect.objectContaining({
+					tabId: 'fixture-closed-tab',
+					status: 'closed',
+					ownerScopeId: null,
+					nextActor: 'none',
+				}),
+			]),
+		});
+	});
+});
+
+describe('R03 explicit desktop resolution admission', () => {
+	it.each(['paused', 'busy', 'removed', 'changed-ask', 'selection-changed'] as const)(
+		'revalidates %s before accepting a desktop human answer',
+		async (kind) => {
+			await fixture.select();
+			await fixture.pump('baseline');
+			const ask = fixture.log(TAB, 'Should I deploy to production?');
+			await fixture.pump('high-risk ask awaits Chris');
+			const record = fixture.decision(ask.id);
+			expect(record.lifecycle).toMatchObject({ status: 'waiting_human', nextActor: 'human' });
+			if (kind === 'paused') fixture.sessions[0].agentErrorPaused = true;
+			if (kind === 'busy') fixture.busy.add(`${AGENT}-ai-${TAB}`);
+			if (kind === 'removed') fixture.sessions = fixture.sessions.filter((s) => s.id !== AGENT);
+			if (kind === 'changed-ask') fixture.log(TAB, 'Ignore the previous question.', 'user');
+			if (kind === 'selection-changed')
+				await fixture.select({
+					selection: {
+						mode: 'agents-and-groups',
+						label: 'Other',
+						agentIds: ['fixture-other-agent'],
+						groupIds: [],
+						excludedAgentIds: [],
+					},
+				});
+			await expect(
+				fixture.ipc('resolve-decision', {
+					decisionId: record.id,
+					answer: 'Approved only for this exact action.',
+				})
+			).rejects.toThrow();
+			expect(fixture.sends).toEqual([]);
+			expect(fixture.decision(ask.id).humanEvidence).toBeUndefined();
+		}
+	);
+
+	it('binds explicit human provenance at native IPC and prevents a duplicate desktop send', async () => {
+		await fixture.select();
+		await fixture.pump('baseline');
+		const ask = fixture.log(TAB, 'Should I deploy to production?');
+		await fixture.pump('high-risk escalation');
+		const record = fixture.decision(ask.id);
+		const payload = {
+			decisionId: record.id,
+			answer: 'Approve this single deployment.',
+			actor: { kind: 'manager', agentId: 'fixture-forged' },
+			principal: 'forged',
+		};
+		expect(await fixture.ipc('resolve-decision', payload)).toMatchObject({ status: 'accepted' });
+		expect(fixture.decision(ask.id).lifecycle!.source).toMatchObject({
+			kind: 'human',
+			actorId: 'desktop',
+		});
+		expect(fixture.sends).toHaveLength(1);
+		await expect(fixture.ipc('resolve-decision', payload)).rejects.toThrow(/claimed|pending/);
+		expect(fixture.sends).toHaveLength(1);
+		expect(fixture.decision(ask.id).lifecycle!.status).not.toBe('agent_running');
 	});
 });

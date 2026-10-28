@@ -18,7 +18,7 @@ Each current checkbox is an actual bounded implementation/check task. Before tic
 
 <!-- MAESTRO:MODEL tier="high" effort="medium" reason="Regressions must exercise actual lifecycle and rendered controls including the earlier missing criteria." -->
 
-- [ ] R03 Finish V2-06 permanent monitoring regressions against production seams and rendered controls, using E/SPEC.md original matrix and R01/R02 contracts. Cover missing-cursor errors/freshness/current config, six actor/action states, real selection/pause and resolution controls, existing/new chats, group/worktree changes, exclusions/overlap/self/legacy pause, stream completion/same ID, full-turn risk, restart/dedup/unknown delivery and CLI/desktop admission. Reuse prior meaningful tests instead of duplicate assertions. Success: precise missing cases authored and narrow command list in E/recovery-checks.md; no test execution in this task.
+- [x] R03 Finish V2-06 permanent monitoring regressions against production seams and rendered controls, using E/SPEC.md original matrix and R01/R02 contracts. Cover missing-cursor errors/freshness/current config, six actor/action states, real selection/pause and resolution controls, existing/new chats, group/worktree changes, exclusions/overlap/self/legacy pause, stream completion/same ID, full-turn risk, restart/dedup/unknown delivery and CLI/desktop admission. Reuse prior meaningful tests instead of duplicate assertions. Success: precise missing cases authored and narrow command list in E/recovery-checks.md; no test execution in this task.
 
 <!-- MAESTRO:MODEL tier="medium" effort="medium" reason="Run focused checks and resolve limited failures without repeating broad passing suites." -->
 

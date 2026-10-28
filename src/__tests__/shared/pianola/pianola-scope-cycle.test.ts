@@ -52,7 +52,7 @@ function fixture() {
 			mode: 'agents-and-groups',
 			agentIds: ['owner'],
 			groupIds: [],
-			excludedAgentIds: [],
+			excludedAgentIds: [] as string[],
 		},
 	} satisfies PianolaSupervisedTarget;
 	store.writeSupervisorTargets([scope]);
@@ -304,10 +304,25 @@ describe('scope activation and working-tab discovery', () => {
 		const missing = f.tab('missing');
 		missing.cursorAvailable = false;
 		expect((await f.cycle()).status).toBe('armed');
+		expect(f.checkpoint().tabs.find((tab) => tab.tabId === 'missing')).toMatchObject({
+			status: 'suspended',
+			coverage: {
+				status: 'blocked',
+				reason: 'Transcript cursor unavailable',
+				nextActor: 'operator',
+				nextAction: expect.stringContaining('Restore native transcript cursor'),
+			},
+		});
+		expect(f.checkpoint().tabs.find((tab) => tab.tabId === healthy.tabId)?.coverage?.status).toBe(
+			'covered'
+		);
 		f.history(healthy, [message('during-incomplete-baseline')]);
 		missing.cursorAvailable = true;
 		expect((await f.cycle()).status).toBe('armed');
-		expect(f.checkpoint().tabs.find((tab) => tab.tabId === 'missing')?.baseline).toBeNull();
+		expect(f.checkpoint().tabs.find((tab) => tab.tabId === 'missing')).toMatchObject({
+			baseline: null,
+			coverage: { status: 'covered', nextActor: 'worker' },
+		});
 		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
 		expect(vi.mocked(f.deps.dispatch).mock.calls[0][0].tabId).toBe(healthy.tabId);
 	});
@@ -504,11 +519,18 @@ describe('scope ownership and lifecycle', () => {
 });
 
 describe('scope transcript and delivery safety', () => {
-	it('rejects an incomplete snapshot before creating a baseline', async () => {
+	it('persists an incomplete-census failure without enrolling any tab', async () => {
 		const f = fixture();
 		f.snapshot.complete = false;
 		await expect(f.cycle()).rejects.toThrow('Incomplete');
-		expect(f.store.readScopeCheckpoint(scopeId)).toBeNull();
+		expect(f.store.readScopeCheckpoint(scopeId)).toMatchObject({
+			status: 'suspended',
+			tabs: [],
+			lastCycleError: {
+				reason: expect.stringContaining('Incomplete'),
+				observedAt: expect.any(Number),
+			},
+		});
 	});
 
 	it.each(['gap', 'wrong-tab', 'duplicate-id', 'missing-id', 'wrong-count'] as const)(
@@ -846,4 +868,111 @@ describe('native scope snapshot contract', () => {
 			tabs: [],
 		});
 	});
+});
+
+describe('current coverage failure producers', () => {
+	it('persists a history failure, retries an unchanged cursor and clears only after successful access', async () => {
+		const f = fixture();
+		const broken = f.tab('broken');
+		const healthy = f.tab('healthy');
+		await f.cycle();
+		f.history(broken, [message('broken-ask')]);
+		f.history(healthy, [message('healthy-ask')]);
+		const read = f.deps.readTranscript;
+		f.deps.readTranscript = vi.fn(async (target) => {
+			if (target.tabId === 'broken') throw new Error('fixture history unavailable');
+			return read(target);
+		});
+		expect((await f.cycle()).issues).toContain('owner/broken: fixture history unavailable');
+		expect(f.checkpoint().tabs.find((t) => t.tabId === 'broken')?.coverage).toMatchObject({
+			status: 'blocked',
+			reason: 'fixture history unavailable',
+			nextActor: 'operator',
+			nextAction: expect.stringContaining('Restore transcript access'),
+		});
+		expect(f.checkpoint().tabs.find((t) => t.tabId === 'healthy')?.coverage?.status).toBe(
+			'covered'
+		);
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		await f.cycle();
+		expect(f.checkpoint().tabs.find((t) => t.tabId === 'broken')?.coverage?.status).toBe('blocked');
+		f.deps.readTranscript = read;
+		await f.cycle();
+		expect(f.checkpoint().tabs.find((t) => t.tabId === 'broken')?.coverage).toMatchObject({
+			status: 'covered',
+			reason: 'Transcript cursor verified',
+		});
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(2);
+	});
+
+	it.each(['incomplete', 'unavailable'] as const)(
+		'persists %s census failure without refreshing census time',
+		async (kind) => {
+			const f = fixture();
+			f.tab();
+			await f.cycle();
+			const censusAt = f.checkpoint().lastSnapshotAt;
+			const read = f.deps.readSnapshot;
+			if (kind === 'incomplete') f.snapshot.complete = false;
+			else
+				f.deps.readSnapshot = async () => {
+					throw new Error('fixture census unavailable');
+				};
+			await expect(f.cycle()).rejects.toThrow();
+			expect(f.checkpoint()).toMatchObject({
+				lastSnapshotAt: censusAt,
+				lastCycleError: {
+					reason: expect.stringMatching(/Incomplete|fixture census unavailable/),
+					observedAt: expect.any(Number),
+				},
+			});
+			f.snapshot.complete = true;
+			f.deps.readSnapshot = read;
+			await f.cycle();
+			expect(f.checkpoint().lastCycleError).toBeUndefined();
+			expect(f.checkpoint().lastSnapshotAt).toBeGreaterThan(censusAt!);
+		}
+	);
+
+	it('persists iteration delivery refusal and clears it on a bounded successful retry', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('fresh')]);
+		vi.mocked(f.deps.dispatch).mockResolvedValueOnce({
+			status: 'rejected',
+			error: 'fixture delivery refused',
+		});
+		await f.cycle();
+		expect(f.checkpoint().tabs[0].coverage).toMatchObject({
+			status: 'blocked',
+			nextActor: 'operator',
+			reason: expect.stringContaining('fixture delivery refused'),
+		});
+		await f.cycle();
+		expect(f.checkpoint().tabs[0].coverage?.status).toBe('covered');
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(2);
+	});
+
+	it.each(['paused', 'excluded', 'closed'] as const)(
+		'records %s membership with an explicit resume/owner action',
+		async (kind) => {
+			const f = fixture();
+			const tab = f.tab();
+			await f.cycle();
+			if (kind === 'paused') tab.paused = true;
+			if (kind === 'closed') f.snapshot.tabs = [];
+			if (kind === 'excluded') {
+				f.scope.selection.excludedAgentIds.push('owner');
+				f.saveScopes(f.scope);
+			}
+			await f.cycle();
+			expect(f.checkpoint().tabs[0].coverage).toMatchObject({
+				status: kind,
+				nextActor: 'none',
+				nextAction: expect.any(String),
+			});
+			expect(f.deps.dispatch).not.toHaveBeenCalled();
+		}
+	);
 });

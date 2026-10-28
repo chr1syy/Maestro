@@ -13,7 +13,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R03: author focused monitoring regressions for current coverage and human resolution controls",
+  "nextAction": "R04: execute the focused monitoring commands in recovery-checks.md, repair bounded defects and record actual receipts",
   "tasks": [
     {
       "taskId": "R00",
@@ -110,6 +110,38 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R03 author rendered and native regressions; R04 execute checks",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R03",
+      "status": "complete",
+      "outcome": "Authored missing current coverage/storage/native admission and rendered control regressions; reused existing monitoring matrix; execution explicitly deferred to R04",
+      "files": [
+        "src/__tests__/shared/pianola/pianola-scope-cycle.test.ts",
+        "src/__tests__/shared/pianola/pianola-scope-checkpoint.test.ts",
+        "src/__tests__/renderer/components/PianolaDashboard/PianolaDashboard.test.tsx",
+        "src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx",
+        "src/__tests__/integration/pianola-native-acceptance.integration.test.ts",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-checks.md",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/checks/recovery-monitoring-static.cjs",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json",
+        ".maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md"
+      ],
+      "commit": {
+        "subject": "MAESTRO: add Pianola current coverage and rendered monitoring regressions",
+        "parent": "3df1f34a16b955179db24b5716a21e7cf61b6311",
+        "resolve": "git log -1 --format=%H -- src/__tests__/renderer/components/PianolaDashboard/PianolaScopeControls.test.tsx"
+      },
+      "checks": {
+        "status": "authored_not_executed",
+        "evidence": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-checks.md",
+        "details": "Formatter write and git diff --check only. No tests, lint, types, live operations or full suite. Command-only hook suppression preserves the authoring/execution split; R04 owns runtime/static receipts.",
+        "sourceInspectionLead": "Census error producer uses ISO now() where checkpoint schema requires milliseconds; retained numeric regression expectations for R04."
+      },
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R04: execute the focused monitoring commands in recovery-checks.md, repair bounded defects and record actual receipts",
       "imagesAnalyzed": 0
     }
   ]
