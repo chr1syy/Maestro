@@ -6,7 +6,6 @@
  */
 import { createHash } from 'crypto';
 import { canonicalJson } from '../canonicalJson';
-import { isPathAtOrUnderRoot } from '../worktreePaths';
 import type { PianolaFsStore } from './fs-store';
 import {
 	resolvePianolaScopeOwnership,
@@ -108,9 +107,13 @@ export function pianolaScopeConfigurationFingerprint(scope: PianolaScopeCandidat
 	return fingerprint({
 		managerAgentId: scope.managerAgentId,
 		mode: selection.mode,
-		projectRoots: [...selection.projectRoots].sort(),
-		ownerRoots: selection.ownerRoots,
-		includeWorktrees: selection.includeWorktrees,
+		...(selection.mode === 'agents-and-groups'
+			? { agentIds: [...selection.agentIds].sort(), groupIds: [...selection.groupIds].sort() }
+			: {
+					projectRoots: [...selection.projectRoots].sort(),
+					ownerRoots: selection.ownerRoots,
+					includeWorktrees: selection.includeWorktrees,
+				}),
 		excludedAgentIds: [...selection.excludedAgentIds].sort(),
 	});
 }
@@ -150,8 +153,8 @@ function assertSnapshot(snapshot: PianolaScopeSnapshot): void {
 }
 
 /**
- * Hash the effective binding, so adding an unrelated project root preserves
- * existing cursors while changing an owner's root/lineage requires a baseline.
+ * Hash the identity binding. Directory and group moves that remain selected
+ * preserve cursors; changing an owner's parent lineage requires a baseline.
  * Only called after the ownership resolver has verified the entire chain.
  */
 function bindingFingerprint(
@@ -159,12 +162,11 @@ function bindingFingerprint(
 	agentId: string,
 	owners: PianolaScopeOwner[]
 ): string {
-	const chain: PianolaScopeOwner[] = [];
+	const chain: Array<Omit<PianolaScopeOwner, 'cwd' | 'groupId'>> = [];
 	let owner = owners.find((candidate) => candidate.id === agentId)!;
 	for (;;) {
 		chain.push({
 			id: owner.id,
-			cwd: owner.cwd,
 			parentSessionId: owner.parentSessionId ?? null,
 			isPianola: owner.isPianola,
 			remote: owner.remote,
@@ -176,10 +178,6 @@ function bindingFingerprint(
 		managerAgentId: scope.managerAgentId,
 		mode: scope.selection.mode,
 		chain,
-		boundRoot: scope.selection.ownerRoots[owner.id] ?? null,
-		roots: scope.selection.projectRoots
-			.filter((root) => isPathAtOrUnderRoot(owner.cwd, root))
-			.sort(),
 	});
 }
 
@@ -231,6 +229,16 @@ export async function runPianolaScopeCycle(
 			checkpoint.status = 'suspended';
 			persist();
 		}
+		return result;
+	}
+	if (scope.selection.mode !== 'agents-and-groups') {
+		// Do not infer consent from old directory roots or replay its checkpoint
+		// under a broader whole-agent selection. Explicit reconfiguration follows.
+		if (checkpoint) {
+			checkpoint.status = 'suspended';
+			persist();
+		}
+		result.issues.push('Legacy scope requires explicit agent/group selection');
 		return result;
 	}
 	const snapshot = await deps.readSnapshot();

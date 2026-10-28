@@ -370,7 +370,8 @@ export type PianolaSupervisedKind = 'watch' | 'watch-scope' | 'orchestrate';
  * One persisted background target the desktop supervisor manages. A 'watch'
  * target babysits a tab and needs both tabId and agentId; an 'orchestrate'
  * target drives a saved plan to completion and needs planId. The optional
- * intervalSeconds / concurrency tune the spawned CLI command.
+ * intervalSeconds / concurrency tune the spawned CLI command. A 'watch-scope'
+ * target selects whole agents/groups and needs selection + managerAgentId.
  */
 export interface PianolaSupervisedTarget {
 	id: string;
@@ -382,7 +383,7 @@ export interface PianolaSupervisedTarget {
 	planId?: string;
 	intervalSeconds?: number;
 	concurrency?: number;
-	/** Explicit ownership and manager for a project-scoped watch. */
+	/** Agent/group selection, or a readable legacy selection awaiting migration. */
 	selection?: PianolaScopeSelection;
 	managerAgentId?: string;
 	/** Auto-watch targets are removed when their agent session is closed. */
@@ -441,6 +442,8 @@ export function validatePianolaSupervisedTarget(raw: unknown): PianolaSupervised
 		target.autoCreated = raw.autoCreated;
 	}
 	if (target.kind === 'watch-scope') {
+		// The discriminated selection validator retains old path-based records
+		// without turning their roots into permission to monitor whole agents.
 		const selection = validatePianolaScopeSelection(raw.selection);
 		if (
 			!isPianolaScopeId(target.id) ||
