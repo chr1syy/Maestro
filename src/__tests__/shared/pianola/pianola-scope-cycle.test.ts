@@ -1,0 +1,594 @@
+/** Scope lifecycle contracts through the real watcher and filesystem checkpoint store.
+ * Delivery and desktop snapshots are controlled; no live agent receives a message. */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import { createPianolaFsStore } from '../../../shared/pianola/fs-store';
+import {
+	runPianolaScopeCycle,
+	type PianolaScopeCycleDeps,
+	type PianolaScopeSnapshot,
+	type PianolaScopeSnapshotTab,
+} from '../../../shared/pianola/pianola-scope-cycle';
+import {
+	HANDOFF_TIMEOUT_POLLS,
+	MAX_DISPATCH_ATTEMPTS,
+} from '../../../shared/pianola/pianola-watcher';
+import type { PianolaMessage, PianolaRule } from '../../../shared/pianola/types';
+import type { PianolaSupervisedTarget } from '../../../shared/pianola/storage';
+
+const scopeId = '11111111-1111-4111-8111-111111111111';
+const otherScopeId = '22222222-2222-4222-8222-222222222222';
+const projectRoot = path.resolve('pianola-fixture-project');
+const fixtureRoot = path.resolve('.maestro/pianola-project-watchers-20261028/auto-run/Working');
+const directories: string[] = [];
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const directory of directories.splice(0))
+		fs.rmSync(directory, { recursive: true, force: true });
+});
+
+function message(id: string, content = 'Should I name it count or total?'): PianolaMessage {
+	return { id, role: 'assistant', source: 'ai', content, timestamp: '2026-10-28T00:00:00.000Z' };
+}
+
+function fixture() {
+	fs.mkdirSync(fixtureRoot, { recursive: true });
+	const directory = fs.mkdtempSync(path.join(fixtureRoot, 'scope-cycle-'));
+	directories.push(directory);
+	const store = createPianolaFsStore({
+		resolveDir: () => directory,
+		indent: 2,
+		trailingNewline: true,
+	});
+	const scope: PianolaSupervisedTarget = {
+		id: scopeId,
+		kind: 'watch-scope',
+		enabled: true,
+		createdAt: 1,
+		managerAgentId: 'manager',
+		selection: {
+			label: 'Selected project',
+			mode: 'project',
+			projectRoots: [projectRoot],
+			ownerRoots: { owner: projectRoot },
+			includeWorktrees: true,
+			excludedAgentIds: [],
+		},
+	};
+	store.writeSupervisorTargets([scope]);
+	const snapshot: PianolaScopeSnapshot = {
+		capturedAt: 100,
+		complete: true,
+		owners: [{ id: 'owner', cwd: projectRoot, isPianola: false, remote: false }],
+		tabs: [],
+	};
+	const transcripts = new Map<string, PianolaMessage[]>();
+	const rules: PianolaRule[] = [
+		{
+			id: 'naming-rule',
+			enabled: true,
+			scope: 'project',
+			scopeId: projectRoot,
+			match: { kinds: ['question'], maxRisk: 'low' },
+			action: 'auto_answer',
+			answer: 'Use count.',
+			priority: 1,
+			createdAt: 1,
+			updatedAt: 1,
+		},
+	];
+	let decisionSequence = 0;
+	const deps: PianolaScopeCycleDeps = {
+		store,
+		readSnapshot: vi.fn(async () => JSON.parse(JSON.stringify(snapshot)) as PianolaScopeSnapshot),
+		readTranscript: vi.fn(async (target) => ({
+			agentId: target.agentId,
+			tabId: target.tabId,
+			messages: transcripts.get(target.tabId) ?? [],
+		})),
+		watch: {
+			readRules: () => rules,
+			recordDecision: (record) => store.appendDecision(record),
+			now: () => '2026-10-28T00:00:00.000Z',
+			genId: () => `decision-${++decisionSequence}`,
+			log: vi.fn(),
+			notify: vi.fn(),
+		},
+		dispatch: vi.fn<PianolaScopeCycleDeps['dispatch']>(async () => ({ status: 'accepted' })),
+		requestJudgment: vi.fn<NonNullable<PianolaScopeCycleDeps['requestJudgment']>>(async () => ({
+			status: 'accepted',
+		})),
+	};
+	function tab(tabId = 'existing', agentId = 'owner', createdAt = 50): PianolaScopeSnapshotTab {
+		const value: PianolaScopeSnapshotTab = {
+			agentId,
+			tabId,
+			createdAt,
+			paused: false,
+			consult: false,
+			ephemeral: false,
+			busy: false,
+			cursorAvailable: true,
+			cursor: null,
+		};
+		snapshot.tabs.push(value);
+		return value;
+	}
+	function history(value: PianolaScopeSnapshotTab, messages: PianolaMessage[]) {
+		transcripts.set(value.tabId, messages);
+		const last = messages[messages.length - 1];
+		value.cursor = last
+			? { id: last.id, count: messages.length, textLength: last.content.length }
+			: null;
+	}
+	function cycle(id = scopeId) {
+		snapshot.capturedAt += 10;
+		return runPianolaScopeCycle(id, deps, { dryRun: false });
+	}
+	function saveScopes(...values: PianolaSupervisedTarget[]) {
+		store.writeSupervisorTargets(values);
+	}
+	function checkpoint() {
+		return store.readScopeCheckpoint(scopeId)!;
+	}
+	return {
+		store,
+		scope,
+		snapshot,
+		transcripts,
+		rules,
+		deps,
+		tab,
+		history,
+		cycle,
+		saveScopes,
+		checkpoint,
+	};
+}
+
+describe('scope activation and working-tab discovery', () => {
+	it('baselines every existing tab without reading or acting on historical asks', async () => {
+		const f = fixture();
+		f.history(f.tab('first'), [message('old-1')]);
+		f.history(f.tab('second'), [message('old-2')]);
+		expect(await f.cycle()).toMatchObject({ status: 'armed', iterations: [], issues: [] });
+		expect(f.checkpoint().tabs.map((tab) => tab.baseline?.id)).toEqual(['old-1', 'old-2']);
+		await f.cycle();
+		expect(f.deps.readTranscript).not.toHaveBeenCalled();
+		expect(f.store.readDecisions()).toEqual([]);
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+		expect(f.deps.requestJudgment).not.toHaveBeenCalled();
+	});
+
+	it('commits membership and an audited delivery intent before answering fresh work', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		f.history(tab, [message('old')]);
+		await f.cycle();
+		f.history(tab, [message('old'), message('fresh')]);
+		vi.mocked(f.deps.dispatch).mockImplementation(async (target, answer, guard) => {
+			expect(target).toEqual({ agentId: 'owner', tabId: 'existing', projectPath: projectRoot });
+			expect(answer).toBe('Use count.');
+			expect(guard).toMatchObject({
+				scopeId,
+				agentId: 'owner',
+				tabId: 'existing',
+				messageId: 'fresh',
+			});
+			expect(f.checkpoint()).toMatchObject({
+				status: 'armed',
+				tabs: [
+					{
+						baseline: { id: 'old' },
+						unresolvedIntent: { decisionId: guard.decisionId, messageId: 'fresh' },
+					},
+				],
+			});
+			expect(f.store.readDecisions()).toMatchObject([{ id: guard.decisionId, dispatched: false }]);
+			return { status: 'accepted' };
+		});
+		expect((await f.cycle()).iterations[0].result.dispatched).toBe(true);
+		expect(f.checkpoint().tabs[0]).toMatchObject({
+			unresolvedIntent: null,
+			state: { lastHandledMessageId: 'fresh' },
+		});
+		expect(f.store.readDecisions()).toMatchObject([{ dispatched: true }]);
+	});
+
+	it('fails closed when the baseline write fails', async () => {
+		const f = fixture();
+		f.history(f.tab(), [message('old')]);
+		vi.spyOn(f.store, 'writeScopeCheckpoint').mockImplementation(() => {
+			throw new Error('disk full');
+		});
+		await expect(f.cycle()).rejects.toThrow('disk full');
+		expect(f.deps.readTranscript).not.toHaveBeenCalled();
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+	});
+
+	it('keeps activation inert until every selected transcript cursor is available', async () => {
+		const f = fixture();
+		const healthy = f.tab();
+		const missing = f.tab('missing');
+		missing.cursorAvailable = false;
+		expect((await f.cycle()).status).toBe('baselining');
+		f.history(healthy, [message('during-incomplete-baseline')]);
+		missing.cursorAvailable = true;
+		expect((await f.cycle()).status).toBe('armed');
+		expect(f.checkpoint().tabs[0].baseline?.id).toBe('during-incomplete-baseline');
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+	});
+
+	it('processes the first ask in a genuinely new tab but baselines a newly discovered old tab', async () => {
+		const f = fixture();
+		await f.cycle();
+		f.history(f.tab('new', 'owner', 115), [message('new-ask')]);
+		f.history(f.tab('historical', 'owner', 60), [message('old-ask')]);
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.dispatch).mock.calls[0][0].tabId).toBe('new');
+		expect(f.checkpoint().tabs.find((tab) => tab.tabId === 'historical')?.baseline?.id).toBe(
+			'old-ask'
+		);
+	});
+
+	it('restores persisted cursors through a new store instance without losing unhandled activity', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('before-restart')]);
+		const directory = path.dirname(f.store.supervisorFilePath());
+		f.deps.store = createPianolaFsStore({
+			resolveDir: () => directory,
+			indent: 2,
+			trailingNewline: true,
+		});
+		await f.cycle();
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		f.history(tab, [message('before-restart'), message('after-restart')]);
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(2);
+	});
+
+	it('baselines new scope members while preserving an unchanged owner pending ask', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('still-pending')]);
+		const newRoot = path.resolve('pianola-added-project');
+		f.scope.selection!.projectRoots.push(newRoot);
+		f.saveScopes(f.scope);
+		f.snapshot.owners.push({ id: 'added', cwd: newRoot, isPianola: false, remote: false });
+		f.history(f.tab('added', 'added', 115), [message('old-new-member')]);
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.dispatch).mock.calls[0][2].messageId).toBe('still-pending');
+	});
+
+	it('rejects a rolled-back host census instead of replaying history', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('fresh')]);
+		f.snapshot.capturedAt = 1;
+		await expect(f.cycle()).rejects.toThrow('host clock');
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+	});
+});
+
+describe('scope ownership and lifecycle', () => {
+	it.each(['paused', 'closed', 'disabled', 'binding'] as const)(
+		'baselines accumulated work after %s and resumes only fresh asks',
+		async (transition) => {
+			const f = fixture();
+			const tab = f.tab();
+			await f.cycle();
+			if (transition === 'paused') tab.paused = true;
+			if (transition === 'closed') f.snapshot.tabs = [];
+			if (transition === 'disabled') {
+				f.scope.enabled = false;
+				f.saveScopes(f.scope);
+			}
+			if (transition === 'binding') f.snapshot.owners[0].cwd = path.resolve('elsewhere');
+			await f.cycle();
+			f.history(tab, [message('while-suspended')]);
+			tab.paused = false;
+			f.snapshot.tabs = [tab];
+			f.scope.enabled = true;
+			f.saveScopes(f.scope);
+			f.snapshot.owners[0].cwd = projectRoot;
+			await f.cycle();
+			expect(f.deps.dispatch).not.toHaveBeenCalled();
+			f.history(tab, [message('while-suspended'), message('after-resume')]);
+			await f.cycle();
+			expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		}
+	);
+
+	it.each([
+		'manager',
+		'pianola',
+		'remote',
+		'consult',
+		'ephemeral',
+		'disabled-watch',
+		'explicit-watch',
+		'disabled-scope',
+	] as const)('excludes %s without reading a transcript', async (reason) => {
+		const f = fixture();
+		const tab = f.tab();
+		if (reason === 'manager') f.scope.managerAgentId = 'owner';
+		if (reason === 'pianola') f.snapshot.owners[0].isPianola = true;
+		if (reason === 'remote') f.snapshot.owners[0].remote = true;
+		if (reason === 'consult') tab.consult = true;
+		if (reason === 'ephemeral') tab.ephemeral = true;
+		const extra: PianolaSupervisedTarget[] = [];
+		if (reason === 'disabled-watch' || reason === 'explicit-watch')
+			extra.push({
+				id: 'legacy-watch',
+				kind: 'watch',
+				enabled: reason === 'explicit-watch',
+				createdAt: 1,
+				agentId: 'owner',
+				tabId: tab.tabId,
+			});
+		if (reason === 'disabled-scope') extra.push({ ...f.scope, id: otherScopeId, enabled: false });
+		f.saveScopes(f.scope, ...extra);
+		await f.cycle();
+		f.history(tab, [message('must-not-act')]);
+		await f.cycle();
+		expect(f.deps.readTranscript).not.toHaveBeenCalled();
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+	});
+
+	it('gives a selected-owner scope precedence over a project scope for worktree tabs', async () => {
+		const f = fixture();
+		f.snapshot.owners.push({
+			id: 'worktree',
+			cwd: path.resolve('worktree'),
+			parentSessionId: 'owner',
+			isPianola: false,
+			remote: false,
+		});
+		const tab = f.tab('worktree-tab', 'worktree');
+		const selected = {
+			...f.scope,
+			id: otherScopeId,
+			createdAt: 20,
+			selection: { ...f.scope.selection!, mode: 'agents' as const },
+		};
+		f.saveScopes(f.scope, selected);
+		await f.cycle();
+		await f.cycle(otherScopeId);
+		f.history(tab, [message('worktree-ask')]);
+		await f.cycle();
+		await f.cycle(otherScopeId);
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.dispatch).mock.calls[0][2].scopeId).toBe(otherScopeId);
+	});
+
+	it.each(['closed', 'paused', 'busy', 'disabled', 'answered', 'owner-changed'] as const)(
+		'rejects a %s target discovered during final recheck',
+		async (change) => {
+			const f = fixture();
+			const tab = f.tab();
+			await f.cycle();
+			f.history(tab, [message('fresh')]);
+			const readTranscript = f.deps.readTranscript;
+			f.deps.readTranscript = async (target) => {
+				const history = await readTranscript(target);
+				if (change === 'closed') f.snapshot.tabs = [];
+				if (change === 'paused') tab.paused = true;
+				if (change === 'busy') tab.busy = true;
+				if (change === 'disabled') {
+					f.scope.enabled = false;
+					f.saveScopes(f.scope);
+				}
+				if (change === 'answered') tab.cursor = { id: 'human-answer', count: 2, textLength: 10 };
+				if (change === 'owner-changed') f.snapshot.owners[0].cwd = path.resolve('elsewhere');
+				return history;
+			};
+			expect((await f.cycle()).issues).toHaveLength(1);
+			expect(f.deps.dispatch).not.toHaveBeenCalled();
+			expect(f.checkpoint().tabs[0].unresolvedIntent).toBeNull();
+		}
+	);
+});
+
+describe('scope transcript and delivery safety', () => {
+	it('rejects an incomplete snapshot before creating a baseline', async () => {
+		const f = fixture();
+		f.snapshot.complete = false;
+		await expect(f.cycle()).rejects.toThrow('Incomplete');
+		expect(f.store.readScopeCheckpoint(scopeId)).toBeNull();
+	});
+
+	it.each(['gap', 'wrong-tab', 'duplicate-id', 'missing-id', 'wrong-count'] as const)(
+		'rejects %s transcript evidence and leaves another tab able to progress',
+		async (failure) => {
+			const f = fixture();
+			const broken = f.tab('broken');
+			const healthy = f.tab('healthy');
+			f.history(broken, [message('baseline')]);
+			await f.cycle();
+			f.history(broken, [message('baseline'), message('fresh')]);
+			f.history(healthy, [message('healthy-ask')]);
+			const readTranscript = f.deps.readTranscript;
+			f.deps.readTranscript = async (target) => {
+				const history = await readTranscript(target);
+				if (target.tabId !== 'broken') return history;
+				if (failure === 'gap') history.messages = [message('replaced'), message('fresh')];
+				if (failure === 'wrong-tab') history.tabId = 'someone-else';
+				if (failure === 'duplicate-id') history.messages = [message('fresh'), message('fresh')];
+				if (failure === 'missing-id') history.messages = [message(''), message('fresh')];
+				if (failure === 'wrong-count') history.messages = [message('fresh')];
+				return history;
+			};
+			const result = await f.cycle();
+			expect(result.issues).toHaveLength(1);
+			expect(result.iterations.map((iteration) => iteration.tabId)).toEqual(['healthy']);
+			expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		}
+	);
+
+	it('retries only definitive rejections and stops at the existing watcher limit', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('fresh')]);
+		vi.mocked(f.deps.dispatch).mockResolvedValue({
+			status: 'rejected',
+			error: 'admission refused',
+		});
+		await f.cycle();
+		expect(f.checkpoint().tabs[0]).toMatchObject({
+			unresolvedIntent: null,
+			state: { pendingRetry: { attempts: 1 } },
+		});
+		for (let attempt = 1; attempt <= MAX_DISPATCH_ATTEMPTS; attempt++) await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(MAX_DISPATCH_ATTEMPTS);
+		expect(f.deps.watch.notify).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(['unknown', 'throw', 'outcome-write'] as const)(
+		'latches %s delivery across restart, disable and close',
+		async (failure) => {
+			const f = fixture();
+			const tab = f.tab();
+			await f.cycle();
+			f.history(tab, [message('fresh')]);
+			vi.mocked(f.deps.dispatch).mockImplementation(async () => {
+				if (failure === 'throw') throw new Error('connection lost after send');
+				if (failure === 'outcome-write')
+					f.deps.watch.recordDecision = () => {
+						throw new Error('audit disk full');
+					};
+				return failure === 'unknown'
+					? { status: 'unknown', error: 'no receipt' }
+					: { status: 'accepted' };
+			});
+			const result = await f.cycle();
+			expect(result.issues).toHaveLength(1);
+			expect(f.checkpoint().tabs[0].unresolvedIntent?.messageId).toBe('fresh');
+			f.scope.enabled = false;
+			f.saveScopes(f.scope);
+			await f.cycle();
+			f.scope.enabled = true;
+			f.saveScopes(f.scope);
+			f.snapshot.tabs = [];
+			await f.cycle();
+			f.snapshot.tabs = [tab];
+			expect((await f.cycle()).issues.join(' ')).toContain('Delivery outcome unknown');
+			expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+		}
+	);
+
+	it('stops the cycle if the durable intent cannot be persisted', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('fresh')]);
+		const write = f.store.writeScopeCheckpoint;
+		vi.spyOn(f.store, 'writeScopeCheckpoint').mockImplementation((checkpoint) => {
+			if (checkpoint.tabs.some((tab) => tab.unresolvedIntent)) throw new Error('intent disk full');
+			write(checkpoint);
+		});
+		await expect(f.cycle()).rejects.toThrow('intent disk full');
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+	});
+
+	it('keeps an unresolved attempt when ownership transfers away and back', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('uncertain-ask')]);
+		vi.mocked(f.deps.dispatch).mockResolvedValue({ status: 'unknown', error: 'no receipt' });
+		await f.cycle();
+		const selected: PianolaSupervisedTarget = {
+			...f.scope,
+			id: otherScopeId,
+			selection: { ...f.scope.selection!, mode: 'agents' },
+		};
+		f.saveScopes(f.scope, selected);
+		await f.cycle();
+		await f.cycle(otherScopeId);
+		expect(f.checkpoint().tabs[0]).toMatchObject({
+			status: 'suspended',
+			unresolvedIntent: { messageId: 'uncertain-ask' },
+		});
+		f.saveScopes(f.scope);
+		expect((await f.cycle()).issues.join(' ')).toContain('Delivery outcome unknown');
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+	});
+
+	it('retains an accepted-send intent if persisting the resulting watcher state fails', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		await f.cycle();
+		f.history(tab, [message('fresh')]);
+		const write = f.store.writeScopeCheckpoint;
+		vi.spyOn(f.store, 'writeScopeCheckpoint').mockImplementation((checkpoint) => {
+			if (checkpoint.tabs[0]?.state.lastHandledMessageId === 'fresh')
+				throw new Error('checkpoint disk full');
+			write(checkpoint);
+		});
+		await expect(f.cycle()).rejects.toThrow('checkpoint disk full');
+		expect(f.store.readDecisions()).toMatchObject([{ dispatched: true }]);
+		expect(f.checkpoint().tabs[0].unresolvedIntent?.messageId).toBe('fresh');
+		await f.cycle();
+		expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+	});
+
+	it('hands an uncovered ask to the manager once and preserves timeout progress across cycles', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		f.rules.splice(0);
+		f.deps.watch.resolveProfile = () => ({
+			profile: 'Use the original task authority.',
+			updatedAt: 1,
+			pairCount: 1,
+		});
+		await f.cycle();
+		f.history(tab, [message('uncovered')]);
+		await f.cycle();
+		expect(f.deps.requestJudgment).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(f.deps.requestJudgment!).mock.calls[0][1]).toMatchObject({
+			scopeId,
+			messageId: 'uncovered',
+		});
+		await f.cycle();
+		expect(f.checkpoint().tabs[0].state.pendingHandoff?.polls).toBe(1);
+		for (let poll = 1; poll < HANDOFF_TIMEOUT_POLLS; poll++) await f.cycle();
+		expect(f.deps.requestJudgment).toHaveBeenCalledTimes(1);
+		expect(f.deps.watch.notify).toHaveBeenCalledWith(
+			expect.objectContaining({ kind: 'handoff_timeout' })
+		);
+	});
+
+	it('escalates high-risk asks with source identity without sending a reply or judgment request', async () => {
+		const f = fixture();
+		const tab = f.tab();
+		f.deps.watch.resolveProfile = () => ({
+			profile: 'Approve routine work.',
+			updatedAt: 1,
+			pairCount: 1,
+		});
+		await f.cycle();
+		f.history(tab, [message('high-risk', 'Should I deploy to production?')]);
+		await f.cycle();
+		await f.cycle();
+		expect(f.deps.watch.notify).toHaveBeenCalledTimes(1);
+		expect(f.deps.watch.notify).toHaveBeenCalledWith(
+			expect.objectContaining({
+				highRisk: true,
+				kind: 'escalate',
+				target: { agentId: 'owner', tabId: 'existing', projectPath: projectRoot },
+			})
+		);
+		expect(f.deps.dispatch).not.toHaveBeenCalled();
+		expect(f.deps.requestJudgment).not.toHaveBeenCalled();
+	});
+});
