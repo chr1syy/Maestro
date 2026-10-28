@@ -173,16 +173,36 @@ describe('PianolaModal suggestions tab', () => {
 			answer: 'Yes, go ahead.',
 			description: 'Auto-approve low-risk question prompts',
 		});
+		const candidate = {
+			id: proposal.id,
+			rule: proposal,
+			action: 'approve',
+			conditions: ['specific question'],
+			exclusions: ['high risk'],
+			evidence: [],
+			sampleCount: 3,
+			evidenceFingerprint: 'fingerprint',
+		};
 		vi.mocked(window.maestro.pianola.getSuggestions).mockResolvedValue({
+			candidates: [candidate],
 			generatedAt: 1,
 			pairCount: 10,
 			proposals: [proposal],
 			proposedProfile: '',
 			previousProfile: '',
 		});
-		const applySpy = vi
-			.mocked(window.maestro.pianola.applySuggestion)
-			.mockResolvedValue({ rules: [proposal] });
+		const applySpy = vi.fn().mockResolvedValue({
+			rules: [proposal],
+			suggestions: {
+				generatedAt: 1,
+				pairCount: 10,
+				proposals: [],
+				candidates: [],
+				proposedProfile: '',
+				previousProfile: '',
+			},
+		});
+		window.maestro.pianola.reviewSuggestion = applySpy;
 
 		render(<PianolaModal theme={theme} onClose={vi.fn()} />);
 		await screen.findByText('No decisions recorded yet.');
@@ -190,9 +210,13 @@ describe('PianolaModal suggestions tab', () => {
 		fireEvent.click(screen.getByText('Suggestions (1)'));
 		expect(await screen.findByText('Auto-approve low-risk question prompts')).toBeInTheDocument();
 
-		fireEvent.click(screen.getByText('Approve'));
+		fireEvent.click(screen.getByText('Accept'));
 		await waitFor(() => {
-			expect(applySpy).toHaveBeenCalledWith({ rule: proposal });
+			expect(applySpy).toHaveBeenCalledWith({
+				operation: 'accept',
+				candidateId: proposal.id,
+				evidenceFingerprint: 'fingerprint',
+			});
 		});
 	});
 
@@ -200,6 +224,6 @@ describe('PianolaModal suggestions tab', () => {
 		render(<PianolaModal theme={theme} onClose={vi.fn()} />);
 		await screen.findByText('No decisions recorded yet.');
 		fireEvent.click(screen.getByText('Suggestions'));
-		expect(await screen.findByText(/No learning suggestions yet/)).toBeInTheDocument();
+		expect(await screen.findByText(/No current learning suggestions/)).toBeInTheDocument();
 	});
 });

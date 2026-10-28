@@ -38,7 +38,9 @@ R06 evidence: correction-aware native settlement and durable accepted-rule confl
 
 <!-- MAESTRO:MODEL tier="medium" effort="medium" reason="Complete the existing Suggestions component using the persisted review contract." -->
 
-- [ ] R07 Finish V2-10 Suggestions UI with linked source chats/message examples, count, concrete condition/answer/scope/exclusions, accept/edit/reject actions and active-rule conflict review display. Inputs E/SPEC.md, R05/R06 contracts and existing SuggestionsView. Clearly show owner/next action; never imply active proposal before acceptance, never auto-apply profile changes, never repeatedly show rejected unchanged candidates. Success: real persisted native handlers are used and reloaded state remains truthful. No unrelated UI redesign. Original V2-10 stays incomplete until checks pass.
+- [x] R07 Finish V2-10 Suggestions UI with linked source chats/message examples, count, concrete condition/answer/scope/exclusions, accept/edit/reject actions and active-rule conflict review display. Inputs E/SPEC.md, R05/R06 contracts and existing SuggestionsView. Clearly show owner/next action; never imply active proposal before acceptance, never auto-apply profile changes, never repeatedly show rejected unchanged candidates. Success: real persisted native handlers are used and reloaded state remains truthful. No unrelated UI redesign. Original V2-10 stays incomplete until checks pass.
+
+R07 evidence: native candidate review and conflict UI connected; targeted modal regression 10/10 passed. Full learning regressions and static checks remain R08/R09. See E/RECOVERY.json.
 
 <!-- MAESTRO:MODEL tier="high" effort="medium" reason="Learning tests must catch provenance, contradiction and restart leaks at real API and UI seams." -->
 

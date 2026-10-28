@@ -10,7 +10,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R07: finish Suggestions source-linked review UI and active-rule conflict display using R05/R06 persisted contracts",
+  "nextAction": "R08: author learning storage, API and rendered regressions",
   "tasks": [
     {
       "taskId": "R00",
@@ -234,6 +234,30 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R07: finish Suggestions source-linked review UI and active-rule conflict display using R05/R06 persisted contracts",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R07",
+      "status": "complete",
+      "outcome": "Connected source-linked candidate reviews and durable conflict display to native persisted state",
+      "files": [
+        "src/renderer/components/PianolaModal/SuggestionsView.tsx",
+        "src/renderer/components/PianolaModal/PianolaModal.tsx",
+        "src/renderer/global.d.ts",
+        "src/__tests__/renderer/components/PianolaModal.test.tsx"
+      ],
+      "commit": {
+        "subject": "MAESTRO: connect Pianola suggestions review UI",
+        "resolve": "git log -1 --format=%H -- src/renderer/components/PianolaModal/SuggestionsView.tsx"
+      },
+      "checks": {
+        "status": "targeted modal regression passed; comprehensive learning and static checks remain R08/R09",
+        "executed": "npx vitest run src/__tests__/renderer/components/PianolaModal.test.tsx: 10 passed; prettier; git diff --check"
+      },
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R08: author learning storage, API and rendered regressions",
       "imagesAnalyzed": 0
     }
   ]

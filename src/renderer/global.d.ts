@@ -4718,6 +4718,9 @@ interface MaestroAPI {
 			resolution: import('../shared/pianola/pianola-decision-lifecycle').PianolaDecisionResolution
 		) => Promise<import('../shared/pianola/pianola-scope-cycle').PianolaScopeDeliveryResult>;
 		getSuggestions: () => Promise<PianolaSuggestionsFile>;
+		reviewSuggestion: (
+			review: import('../shared/pianola/storage').PianolaSuggestionReview
+		) => Promise<{ rules: PianolaRule[]; suggestions: PianolaSuggestionsFile }>;
 		applySuggestion: (payload: {
 			rule?: PianolaRule;
 			profile?: { text: string; projectPath?: string };
