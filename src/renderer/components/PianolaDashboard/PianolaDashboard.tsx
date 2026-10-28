@@ -34,7 +34,10 @@ import {
 import { usePianolaSupervisor, type PianolaSupervisorState } from './usePianolaSupervisor';
 import { PianolaScopeControls } from './PianolaScopeControls';
 import type { PianolaSupervisedState } from '../../../main/pianola/pianola-supervisor';
-import type { PianolaDecisionLifecycle } from '../../../shared/pianola/storage';
+import type {
+	PianolaDecisionLifecycle,
+	PianolaDecisionRecord,
+} from '../../../shared/pianola/storage';
 
 const DECISION_STATUS: Record<PianolaDecisionLifecycle['status'], string> = {
 	mira_processing: 'Mira bearbeitet',
@@ -52,6 +55,56 @@ const DECISION_ACTOR: Record<PianolaDecisionLifecycle['nextActor'], string> = {
 	operator: 'Betreiber',
 	none: 'Niemand',
 };
+
+function HumanDecision({
+	record,
+	refresh,
+}: {
+	record: PianolaDecisionRecord;
+	refresh: () => void;
+}): React.ReactElement {
+	const [answer, setAnswer] = React.useState('');
+	const [pending, setPending] = React.useState(false);
+	const [message, setMessage] = React.useState('');
+	return (
+		<form
+			onSubmit={(event) => {
+				event.preventDefault();
+				if (pending || !answer.trim()) return;
+				setPending(true);
+				setMessage('');
+				void window.maestro.pianola
+					.resolveDecision({ decisionId: record.id, answer: answer.trim() })
+					.then((result) => {
+						if (result.status === 'accepted') {
+							setAnswer('');
+							setMessage('Answer accepted for delivery; awaiting agent acknowledgment.');
+						} else setMessage(`${result.status}: ${result.error}`);
+						refresh();
+					})
+					.catch((error: unknown) => {
+						setMessage(error instanceof Error ? error.message : String(error));
+						refresh();
+					})
+					.finally(() => setPending(false));
+			}}
+		>
+			<label>
+				Human answer{' '}
+				<textarea
+					value={answer}
+					maxLength={8000}
+					onChange={(event) => setAnswer(event.target.value)}
+					className="w-full text-black"
+				/>
+			</label>
+			<button type="submit" disabled={pending || !answer.trim()}>
+				Send human answer
+			</button>
+			{message && <div role="status">{message}</div>}
+		</form>
+	);
+}
 
 interface PianolaDashboardProps {
 	theme: Theme;
@@ -439,6 +492,22 @@ export function PianolaDashboard({
 							<div className="text-xs" style={{ color: theme.colors.textDim }}>
 								{DECISION_ACTOR[life.nextActor]}: {life.nextAction}
 							</div>
+							{life.status === 'waiting_human' && (
+								<div className="text-sm select-text">
+									{record.classification.questionText ?? record.classification.topic} ·{' '}
+									{record.decision.reason}
+								</div>
+							)}
+							{life.status === 'waiting_human' &&
+								life.nextActor === 'human' &&
+								!record.dryRun &&
+								!life.acknowledgedAt &&
+								!(life.phase === 'answer' && record.deliveryStatus === 'admitted') &&
+								!(
+									life.phase === 'answer' &&
+									life.delivery !== 'not_sent' &&
+									life.delivery !== 'rejected'
+								) && <HumanDecision record={record} refresh={refresh} />}
 						</div>
 					);
 				})}

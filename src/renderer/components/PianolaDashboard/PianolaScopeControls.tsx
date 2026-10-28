@@ -96,22 +96,35 @@ export function PianolaScopeControls({
 						{evidence?.error && (
 							<div className="text-xs">Checkpoint unavailable: {evidence.error}</div>
 						)}
-						{evidence?.checkpoint && (
+						{!evidence?.coverage && (
+							<div className="text-xs">
+								Coverage unknown: current census unavailable. Operator: refresh or inspect the
+								supervisor.
+							</div>
+						)}
+						{evidence?.coverage && (
 							<div className="text-xs" style={{ color: theme.colors.textDim }}>
-								Checkpoint {evidence.checkpoint.status}, last census:{' '}
-								{evidence.checkpoint.lastSnapshotAt
-									? new Date(evidence.checkpoint.lastSnapshotAt).toLocaleString()
+								Coverage: {evidence.coverage.status} (
+								{evidence.coverage.fresh ? 'fresh' : 'not fresh'}). {evidence.coverage.reason} ·{' '}
+								{evidence.coverage.nextActor}: {evidence.coverage.nextAction} · Last census:{' '}
+								{evidence.coverage.censusAt !== null
+									? new Date(evidence.coverage.censusAt).toLocaleString()
 									: 'not yet recorded'}
 								.
-								{Array.from(new Set(evidence.checkpoint.tabs.map((tab) => tab.agentId))).map(
+								{Array.from(new Set(evidence.coverage.tabs.map((tab) => tab.agentId))).map(
 									(agentId) => {
-										const tabs = evidence.checkpoint!.tabs.filter((tab) => tab.agentId === agentId);
+										const tabs = evidence.coverage!.tabs.filter((tab) => tab.agentId === agentId);
 										return (
 											<div key={agentId}>
-												{sessions.find((session) => session.id === agentId)?.name ?? agentId}:{' '}
-												{tabs.filter((tab) => tab.status === 'active').length} active,{' '}
-												{tabs.filter((tab) => tab.status === 'suspended').length} suspended,{' '}
-												{tabs.filter((tab) => tab.status === 'closed').length} closed at census
+												<strong>
+													{sessions.find((session) => session.id === agentId)?.name ?? agentId}
+												</strong>
+												{tabs.map((tab) => (
+													<div key={tab.tabId}>
+														Chat {tab.tabId}: {tab.status} · {tab.reason}
+														{tab.error ? ` · ${tab.error}` : ''} · {tab.nextActor}: {tab.nextAction}
+													</div>
+												))}
 											</div>
 										);
 									}

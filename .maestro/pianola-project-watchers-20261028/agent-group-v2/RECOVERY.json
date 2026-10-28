@@ -13,7 +13,7 @@
   "document": "/home/chris/code/worktrees/fix/pianola-project-watchers-20261028/.maestro/pianola-project-watchers-20261028/auto-run/2026-10-28-Agent-Gruppen-Pianola/PIANOLA-RECOVERY-01.md",
   "taskCount": 13,
   "responsibleActor": "same worktree agent",
-  "nextAction": "R02: renderer controls/current coverage and guarded human resolution; contract in recovery-coverage-contract.md",
+  "nextAction": "R03: author focused monitoring regressions for current coverage and human resolution controls",
   "tasks": [
     {
       "taskId": "R00",
@@ -85,6 +85,31 @@
       "effectiveEffort": "unknown",
       "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
       "nextAction": "R02 consumes checkpoints[].coverage; R03/R04 verify; no PR before R10/R11",
+      "imagesAnalyzed": 0
+    },
+    {
+      "taskId": "R02",
+      "status": "complete",
+      "outcome": "Renderer consumes current per-tab coverage projection and exposes guarded human answer through native resolution; existing scope selection and pause controls retained",
+      "files": [
+        "src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx",
+        "src/renderer/components/PianolaDashboard/PianolaDashboard.tsx",
+        ".maestro/pianola-project-watchers-20261028/agent-group-v2/RECOVERY.json"
+      ],
+      "commit": {
+        "subject": "MAESTRO: expose current Pianola coverage and human resolution",
+        "parent": "c9606ef70a",
+        "resolve": "git log -1 --format=%H -- src/renderer/components/PianolaDashboard/PianolaScopeControls.tsx"
+      },
+      "checks": {
+        "status": "source_inspection_and_format_only; regression execution deferred to R03/R04",
+        "evidence": ".maestro/pianola-project-watchers-20261028/agent-group-v2/recovery-coverage-contract.md",
+        "details": "Inspected native resolution provenance and pending guards; prettier applied and git diff --check passed. No runtime or type validation claimed."
+      },
+      "effectiveModel": "unknown",
+      "effectiveEffort": "unknown",
+      "actor": "e28c91e9-3a1f-43ae-a54e-7f4561e7a0aa",
+      "nextAction": "R03 author rendered and native regressions; R04 execute checks",
       "imagesAnalyzed": 0
     }
   ]
