@@ -9,6 +9,9 @@
 import { ipcRenderer } from 'electron';
 import type { StoredBoardWorker } from '../board/board-workspace-storage';
 import type {
+	BoardCaptureCatalog,
+	BoardCaptureCommand,
+	BoardCaptureResponse,
 	Board,
 	BoardCard,
 	CardStatus,
@@ -23,6 +26,9 @@ export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
  */
 export function createBoardApi() {
 	return {
+		captureCatalog: (): Promise<BoardCaptureCatalog> => ipcRenderer.invoke('board:captureCatalog'),
+		captureCard: (command: BoardCaptureCommand): Promise<BoardCaptureResponse> =>
+			ipcRenderer.invoke('board:captureCard', command),
 		queryWorkspace: (query?: BoardWorkspaceQuery): Promise<BoardWorkspaceQueryResponse> =>
 			ipcRenderer.invoke('board:queryWorkspace', query),
 		listWorkerAccessOptions: (): Promise<

@@ -189,6 +189,8 @@ export interface CardRun {
  * single worker; otherwise the free project pool is used.
  */
 export interface BoardCard extends BoardCaptureOptions {
+	/** Host-owned snapshot; CRUD cannot create or change grants. */
+	capturePolicy?: BoardCapturePolicy;
 	/** Central read token; transport metadata only, never persisted in card payload. */
 	storageRevision?: number;
 	/** Stable unique id (UUID). */
@@ -289,6 +291,8 @@ export interface BoardStorageRef {
 
 /** A named collection of cards plus optional concurrency cap. */
 export interface Board {
+	/** Host-owned default; absent legacy boards resolve conservatively. */
+	defaultStartMode?: BoardStartMode;
 	storage?: BoardStorageRef;
 	/** Stable unique id (UUID). */
 	id: string;
@@ -549,4 +553,39 @@ export interface BoardCaptureOptions {
 	repositoryId?: string;
 	workingDirectory?: string;
 	startModeOverride?: BoardStartMode;
+}
+
+/** Current host catalog. Never accepts policy authority from transport payloads. */
+export interface BoardCaptureCatalog {
+	agents: { id: string; groupId?: string | null }[];
+	groups: { id: string }[];
+	profiles: { namespace: string; profile: import('../profiles/types').AgentProfile }[];
+	repositories: { id: string; workingDirectory: string; validated: boolean }[];
+	defaultStartMode: BoardStartMode;
+}
+export interface BoardCaptureCommand {
+	projectRoot: string;
+	boardId: string;
+	expectedRevision: number;
+	card: BoardCard;
+}
+export type BoardCaptureResponse =
+	| {
+			ok: true;
+			value: Board;
+			readiness: Record<string, import('./domain').BoardCaptureWaitReason[]>;
+	  }
+	| {
+			ok: false;
+			error: {
+				code: string;
+				message: string;
+				captureErrors?: import('./domain').BoardCaptureError[];
+			};
+	  };
+
+export interface BoardCapturePolicy {
+	effectiveStartMode: BoardStartMode;
+	specificationRevision: number;
+	dispatchApproval: 'required' | 'granted' | 'not-required';
 }

@@ -41,7 +41,21 @@ function nonBlank(value: unknown): value is string {
 export function validateCapture(raw: unknown, context: BoardCaptureContext): BoardCaptureResult {
 	if (!record(raw)) return { ok: false, errors: ['invalid-options'] };
 	const errors: BoardCaptureError[] = [];
+
 	const options: BoardCaptureOptions = { ...raw };
+	if (raw.profileNamespace !== undefined && raw.role === undefined) {
+		if (nonBlank(raw.profileNamespace) && nonBlank(raw.assigneeProfileId))
+			options.role = { namespace: raw.profileNamespace, profileId: raw.assigneeProfileId };
+		else errors.push('invalid-role');
+	} else if (
+		raw.role !== undefined &&
+		((raw.assigneeProfileId !== undefined &&
+			(!record(raw.role) || raw.assigneeProfileId !== raw.role.profileId)) ||
+			(raw.profileNamespace !== undefined &&
+				(!record(raw.role) || raw.profileNamespace !== raw.role.namespace)))
+	)
+		errors.push('invalid-role');
+
 	if (raw.kind !== undefined) {
 		if (
 			raw.kind === 'work' ||
@@ -132,6 +146,7 @@ function findProfile(role: BoardRoleRef, context: BoardCaptureContext): AgentPro
 }
 
 export type BoardCaptureWaitReason =
+	| 'scope-conflict'
 	| 'missing-scope'
 	| 'target-missing'
 	| 'group-missing'
@@ -144,6 +159,9 @@ export function evaluateCaptureReadiness(
 	context: BoardCaptureContext & { repositoryIds: readonly string[] }
 ): BoardCaptureWaitReason[] {
 	const reasons: BoardCaptureWaitReason[] = [];
+	const validation = validateCapture(options, { ...context, canRelaxStartPolicy: true });
+	if (!validation.ok) reasons.push('scope-conflict');
+	else options = validation.options;
 	const scope = options.executionScope;
 	if (!scope) reasons.push('missing-scope');
 	else if (scope.kind === 'agent' && !context.agents.some((agent) => agent.id === scope.agentId))
@@ -156,7 +174,19 @@ export function evaluateCaptureReadiness(
 		!reasons.includes('target-missing')
 	)
 		reasons.push('target-missing');
-	if (options.role && !findProfile(options.role, context)) reasons.push('role-missing');
+	if (
+		(options.role && !findProfile(options.role, context)) ||
+		(!options.role &&
+			(options as BoardCaptureOptions & { assigneeProfileId?: string }).assigneeProfileId)
+	)
+		reasons.push('role-missing');
+	const rolePin = options.role && findProfile(options.role, context)?.baseAgentId;
+	if (
+		rolePin &&
+		!context.agents.some((agent) => agent.id === rolePin) &&
+		!reasons.includes('target-missing')
+	)
+		reasons.push('target-missing');
 	if (
 		!options.repositoryId ||
 		!options.workingDirectory ||

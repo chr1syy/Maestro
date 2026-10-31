@@ -4907,6 +4907,10 @@ interface MaestroAPI {
 
 	// Board API (persistent task DAG stored in .maestro/board.yaml)
 	board: {
+		captureCatalog: () => Promise<import('../shared/board/types').BoardCaptureCatalog>;
+		captureCard: (
+			command: import('../shared/board/types').BoardCaptureCommand
+		) => Promise<import('../shared/board/types').BoardCaptureResponse>;
 		queryWorkspace: (
 			query?: import('../shared/board/types').BoardWorkspaceQuery
 		) => Promise<import('../shared/board/types').BoardWorkspaceQueryResponse>;

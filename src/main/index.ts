@@ -214,7 +214,12 @@ import { setupIpcHandlers } from './ipc/bootstrap';
 import { stopCoworkingBridge } from './coworking/coworking-bridge';
 import { initializeStatsDB, closeStatsDB } from './stats';
 import { createSshRemoteStoreAdapter } from './utils/ssh-remote-resolver';
-import { listBoards, saveBoard, setBoardSavedListener } from './board/board-storage';
+import {
+	configureBoardCaptureHost,
+	listBoards,
+	saveBoard,
+	setBoardSavedListener,
+} from './board/board-storage';
 import { setProfilesSavedListener } from './profiles/profile-storage';
 import {
 	resolveCardOverrides,
@@ -610,6 +615,10 @@ noteSentryAgentInventory(sessionsStore.get('sessions', []));
 noteSentryWorkReasons(powerManager.getStatus().reasons);
 powerManager.onReasonsChanged(noteSentryWorkReasons);
 const groupsStore = getGroupsStore();
+configureBoardCaptureHost(() => ({
+	agents: sessionsStore.get('sessions', []),
+	groups: groupsStore.get('groups', []),
+}));
 const agentConfigsStore = getAgentConfigsStore();
 const agentCapabilitiesStore = getAgentCapabilitiesStore();
 const windowStateStore = getWindowStateStore();

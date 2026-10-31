@@ -15,14 +15,21 @@ import {
 	type BoardWorkspaceQuery,
 	type BoardWorkspaceQueryResult,
 	type CardRun,
+	type BoardCaptureCatalog,
+	type BoardCaptureCommand,
 } from '../../shared/board/types';
-import { validateCapture } from '../../shared/board/domain';
+import {
+	evaluateCaptureReadiness,
+	validateCapture,
+	type BoardCaptureContext,
+} from '../../shared/board/domain';
 import { hasCycle } from '../../shared/board/graph';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
 import { resolveUserDataDir } from '../../shared/userDataDir';
 import { createKeyedWriteQueue } from '../../shared/keyedWriteQueue';
 import { logger } from '../utils/logger';
+import { isPathWithin, foldPathCase } from '../utils/real-path-containment';
 import { openBoardDb } from './board-db';
 import { boardMigrationSourceKey } from './board-migration';
 import {
@@ -41,6 +48,24 @@ import {
 	type BoardWorkspacePatch,
 	type BoardCardWrite,
 } from './board-workspace-storage';
+
+/** Changes to these fields invalidate a dispatch grant, independently of human review. */
+const BOARD_CAPTURE_SPEC_FIELDS = [
+	'title',
+	'body',
+	'parents',
+	'kind',
+	'executionScope',
+	'assigneeAgentId',
+	'assigneeProfileId',
+	'profileNamespace',
+	'role',
+	'repositoryId',
+	'workingDirectory',
+	'startModeOverride',
+	'worktree',
+	'prOnDone',
+] as const;
 
 export { BoardWorkspaceStorageError as BoardStorageError } from './board-workspace-storage';
 export type BoardSavedListener = (projectRoot: string, boards: Board[]) => void;
@@ -66,6 +91,15 @@ export function resolveLocalBoardSourceKeys(projectRoot: string): string[] {
 	}
 }
 
+let hostRegisters: () => Pick<BoardCaptureCatalog, 'agents' | 'groups'> = () => ({
+	agents: [],
+	groups: [],
+});
+/** Host startup supplies live stores; the callback is re-read on every command. */
+export function configureBoardCaptureHost(provider: typeof hostRegisters): void {
+	hostRegisters = provider;
+}
+
 /** Injectable facade: fixtures and host share the same SQLite adapter and source resolver. */
 export class BoardStorageFacade {
 	readonly workspace: BoardWorkspaceStorage;
@@ -76,6 +110,109 @@ export class BoardStorageFacade {
 		) => readonly string[] = resolveLocalBoardSourceKeys
 	) {
 		this.workspace = new BoardWorkspaceStorage(db);
+	}
+
+	captureCatalog(): BoardCaptureCatalog {
+		const registers = hostRegisters();
+		for (const entries of [registers.agents, registers.groups]) {
+			if (
+				entries.some((entry) => typeof entry.id !== 'string' || !entry.id.trim()) ||
+				new Set(entries.map((entry) => entry.id)).size !== entries.length
+			)
+				throw new BoardWorkspaceStorageError(
+					'invalid-input',
+					'Host register has missing or ambiguous identities'
+				);
+		}
+
+		const profiles = this.db
+			.prepare(
+				'SELECT profile_namespace, payload_json FROM profiles ORDER BY profile_namespace, id'
+			)
+			.all() as { profile_namespace: string; payload_json: string }[];
+		const repositories = this.db
+			.prepare('SELECT id, payload_json FROM repositories ORDER BY id')
+			.all() as { id: string; payload_json: string }[];
+		return {
+			...registers,
+			profiles: profiles.map((row) => ({
+				namespace: row.profile_namespace,
+				profile: JSON.parse(row.payload_json),
+			})),
+			repositories: repositories.map((row) => ({ ...JSON.parse(row.payload_json), id: row.id })),
+			defaultStartMode: 'approval',
+		};
+	}
+	captureContext(board: Board, human = false): BoardCaptureContext {
+		const catalog = this.captureCatalog();
+		return {
+			...catalog,
+			defaultStartMode: board.defaultStartMode === 'direct' ? 'direct' : 'approval',
+			canRelaxStartPolicy: human,
+		};
+	}
+
+	captureReadiness(board: Board) {
+		const catalog = this.captureCatalog();
+		return Object.fromEntries(
+			board.cards.map((card) => {
+				const reasons = evaluateCaptureReadiness(card, {
+					...this.captureContext(board),
+					repositoryIds: catalog.repositories
+						.filter((repo) => repo.validated)
+						.map((repo) => repo.id),
+				});
+				const repository = catalog.repositories.find(
+					(repo) => repo.id === card.repositoryId && repo.validated
+				);
+				try {
+					if (
+						!repository ||
+						!card.workingDirectory ||
+						!fs.statSync(card.workingDirectory).isDirectory() ||
+						!isPathWithin(
+							foldPathCase(fs.realpathSync(card.workingDirectory)),
+							foldPathCase(fs.realpathSync(repository.workingDirectory))
+						)
+					) {
+						if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
+					}
+				} catch {
+					if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
+				}
+				return [card.id, reasons];
+			})
+		);
+	}
+
+	/** Atomic host mutation using the caller's collection AND card read revisions. */
+	capture(command: BoardCaptureCommand, human = false): Board {
+		return (() => {
+			const board = this.read(command.projectRoot, command.boardId);
+			if (board.storage!.expectedRevision !== command.expectedRevision)
+				throw new BoardWorkspaceStorageError('stale-revision', 'Board changed since read');
+			const previous = board.cards.find((card) => card.id === command.card.id);
+			if (previous && previous.storageRevision !== command.card.storageRevision)
+				throw new BoardWorkspaceStorageError('stale-revision', 'Card changed since read');
+			if (
+				previous?.status === 'running' ||
+				command.card.status === 'running' ||
+				command.card.status === 'ready'
+			)
+				throw new BoardWorkspaceStorageError('runtime-unavailable', 'Capture cannot start a run');
+			if (previous && previous.status !== command.card.status)
+				throw new BoardWorkspaceStorageError('invalid-input', 'Use the separate status command');
+			const card = validateBoardCard({
+				...command.card,
+				createdAt: previous?.createdAt ?? nowIso(),
+				updatedAt: nowIso(),
+			});
+			if (!card) throw new BoardWorkspaceStorageError('invalid-payload', 'Invalid card');
+			board.cards = previous
+				? board.cards.map((entry) => (entry.id === card.id ? card : entry))
+				: [...board.cards, card];
+			return this.save(command.projectRoot, [board], human)[0];
+		})();
 	}
 
 	sourceKeys(projectRoot: string): string[] {
@@ -231,7 +368,7 @@ export class BoardStorageFacade {
 		return ref;
 	}
 
-	plan(projectRoot: string, board: Board): BoardCollectionWrite {
+	plan(projectRoot: string, board: Board, human = false): BoardCollectionWrite {
 		const ref = this.reference(projectRoot, board);
 		const stored = this.workspace.readCollection(ref);
 		if (stored && ref.expectedRevision !== stored.revision)
@@ -270,32 +407,61 @@ export class BoardStorageFacade {
 					'protected-field',
 					'Clearing a hold requires an explicit resume command'
 				);
-			const captureFields = [
-				'kind',
-				'executionScope',
-				'assigneeAgentId',
-				'role',
-				'repositoryId',
-				'workingDirectory',
-				'startModeOverride',
-			];
-			const captureChanged = captureFields.some(
-				(field) =>
-					canonicalJson({ value: original?.payload[field] }) !==
-					canonicalJson({ value: (card as unknown as Record<string, unknown>)[field] })
-			);
+
+			const captureChanged =
+				!original ||
+				BOARD_CAPTURE_SPEC_FIELDS.some(
+					(field) =>
+						canonicalJson({ value: original?.payload[field] }) !==
+						canonicalJson({ value: (card as unknown as Record<string, unknown>)[field] })
+				);
 			if (captureChanged) {
-				const result = validateCapture(card, {
-					agents: [],
-					groups: [],
-					profiles: [],
-					defaultStartMode: 'approval',
-					canRelaxStartPolicy: false,
+				const captureInput = { ...card } as unknown as Record<string, unknown>;
+				// Migration persisted explicit nulls for unresolved bindings. Retain those bytes;
+				// only an unchanged, already persisted null is treated as missing for validation.
+				for (const field of [
+					'executionScope',
+					'profileNamespace',
+					'repositoryId',
+					'workingDirectory',
+				]) {
+					if (original?.payload[field] === null && captureInput[field] === null)
+						delete captureInput[field];
+				}
+				const result = validateCapture(captureInput, {
+					...this.captureContext(board, human),
+					canRelaxStartPolicy:
+						human ||
+						(original?.payload.capturePolicy as { effectiveStartMode?: string } | undefined)
+							?.effectiveStartMode === 'direct' ||
+						(original?.payload.migration as { intent?: string } | undefined)?.intent ===
+							'legacy-direct',
 				});
+				const repository = this.captureCatalog().repositories.find(
+					(repo) => repo.id === card.repositoryId
+				);
+				if (repository?.validated && card.workingDirectory) {
+					try {
+						if (
+							!isPathWithin(
+								foldPathCase(fs.realpathSync(card.workingDirectory)),
+								foldPathCase(fs.realpathSync(repository.workingDirectory))
+							)
+						)
+							throw new BoardWorkspaceStorageError(
+								'invalid-input',
+								'Repository and working directory conflict'
+							);
+					} catch (error) {
+						if (error instanceof BoardWorkspaceStorageError) throw error;
+						// A vanished path remains a repairable reference, never executable.
+					}
+				}
 				if (!result.ok)
 					throw new BoardWorkspaceStorageError(
 						'invalid-input',
-						`Invalid capture: ${result.errors.join(', ')}`
+						`Invalid capture: ${result.errors.join(', ')}`,
+						{ captureErrors: result.errors }
 					);
 			}
 			return {
@@ -385,9 +551,43 @@ export class BoardStorageFacade {
 		return { set, unset };
 	}
 
-	save(projectRoot: string, boards: Board[]): Board[] {
-		const plans = boards.map((board) => this.plan(projectRoot, board));
-		const saved = this.workspace.writeCollections(plans).map((snapshot) => this.project(snapshot));
+	save(projectRoot: string, boards: Board[], human = false): Board[] {
+		const saved = (() => {
+			const plans = boards.map((board) => this.plan(projectRoot, board, human));
+			const before = plans.map((plan) => this.workspace.readCollection(plan));
+			const snapshots = this.workspace.writeCollections(plans, (snapshots) => {
+				snapshots.forEach((snapshot, i) =>
+					snapshot.cards.forEach((card) => {
+						const previous = before[i]?.cards.find((entry) => entry.cardId === card.cardId);
+
+						const changed =
+							!previous ||
+							BOARD_CAPTURE_SPEC_FIELDS.some(
+								(field) =>
+									canonicalJson({ v: previous.payload[field] }) !==
+									canonicalJson({ v: card.payload[field] })
+							);
+						if (changed && !card.archived) {
+							const context = this.captureContext(boards[i], human);
+							const effectiveStartMode =
+								card.payload.startModeOverride ??
+								(previous?.payload.capturePolicy as { effectiveStartMode?: string } | undefined)
+									?.effectiveStartMode ??
+								((previous?.payload.migration as { intent?: string } | undefined)?.intent ===
+								'legacy-direct'
+									? 'direct'
+									: context.defaultStartMode);
+							this.workspace.recordCapturePolicy(snapshot, card.cardId, {
+								effectiveStartMode,
+								specificationRevision: card.revision,
+								dispatchApproval: effectiveStartMode === 'direct' ? 'not-required' : 'required',
+							});
+						}
+					})
+				);
+			});
+			return snapshots.map((snapshot) => this.project(snapshot));
+		})();
 		saved.forEach((board, index) => Object.assign(boards[index], board));
 		return saved;
 	}
@@ -408,6 +608,15 @@ function storage(): BoardStorageFacade {
 export function closeBoardStorage(): void {
 	defaultFacade?.db.close();
 	defaultFacade = null;
+}
+
+export function getBoardCaptureCatalog(): BoardCaptureCatalog {
+	return storage().captureCatalog();
+}
+export function captureBoardCard(command: BoardCaptureCommand, human = false) {
+	const board = storage().capture(command, human);
+	announce(command.projectRoot);
+	return { ok: true as const, value: board, readiness: storage().captureReadiness(board) };
 }
 
 /** Machine-local registry shared by every Board collection. */

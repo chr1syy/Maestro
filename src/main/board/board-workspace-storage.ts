@@ -250,6 +250,7 @@ export class BoardWorkspaceStorageError extends Error {
 			expectedRevision?: number | null;
 			actualRevision?: number | null;
 			candidates?: BoardCollectionKey[];
+			captureErrors?: import('../../shared/board/domain').BoardCaptureError[];
 		} = {}
 	) {
 		super(message);
@@ -460,6 +461,31 @@ export class BoardWorkspaceStorage {
 		};
 	}
 
+	/** Host-owned policy snapshot; called inside the facade's capture transaction only.
+	 * Deliberately absent from ordinary editable-field allowlists. */
+	recordCapturePolicy(
+		key: StoredBoardCollection,
+		cardId: string,
+		policy: { effectiveStartMode: unknown; specificationRevision: number; dispatchApproval: string }
+	): void {
+		if (!this.db.inTransaction)
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
+				'Host capture policy requires the writer transaction'
+			);
+		this.collectionRow(key);
+		const row = this.db
+			.prepare('SELECT payload_json FROM cards WHERE collection_key = ? AND id = ?')
+			.get(key.collectionKey, cardId) as { payload_json: string };
+		this.db
+			.prepare('UPDATE cards SET payload_json = ? WHERE collection_key = ? AND id = ?')
+			.run(
+				canonicalJson({ ...readPayload(row.payload_json), capturePolicy: policy }),
+				key.collectionKey,
+				cardId
+			);
+	}
+
 	/** Catalog comes only from persisted source registrations and migration ledgers. */
 	listSourceKeys(): string[] {
 		return (
@@ -656,7 +682,10 @@ export class BoardWorkspaceStorage {
 			.immediate();
 	}
 
-	writeCollections(inputs: readonly BoardCollectionWrite[]): BoardCollectionSnapshot[] {
+	writeCollections(
+		inputs: readonly BoardCollectionWrite[],
+		recordHostState?: (snapshots: BoardCollectionSnapshot[]) => void
+	): BoardCollectionSnapshot[] {
 		if (this.db.inTransaction) {
 			throw new BoardWorkspaceStorageError(
 				'invalid-input',
@@ -664,7 +693,11 @@ export class BoardWorkspaceStorage {
 			);
 		}
 		return this.db
-			.transaction(() => inputs.map((input) => this.applyCollection(input)))
+			.transaction(() => {
+				const snapshots = inputs.map((input) => this.applyCollection(input));
+				recordHostState?.(snapshots);
+				return snapshots.map((snapshot) => this.readCollection(snapshot)!);
+			})
 			.immediate();
 	}
 

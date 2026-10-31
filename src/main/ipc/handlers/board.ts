@@ -10,10 +10,12 @@
  * handler is a 1-line delegation, mirroring the Cue and Profiles IPC handlers.
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, type BrowserWindow } from 'electron';
 import { getLiveSessions } from '../../stores/getters';
 import { withIpcErrorLogging, type CreateHandlerOptions } from '../../utils/ipcHandler';
 import {
+	getBoardCaptureCatalog,
+	captureBoardCard,
 	listBoards,
 	queryBoardWorkspace,
 	BoardStorageError,
@@ -38,6 +40,8 @@ import { applyCardCancel } from '../../board/board-dispatcher';
 import { startCardPr } from '../../board/board-pr';
 import type { BoardCardToastPayload } from '../../board/board-toast';
 import type {
+	BoardCaptureCommand,
+	BoardCaptureResponse,
 	Board,
 	BoardCard,
 	CardStatus,
@@ -55,6 +59,7 @@ const handlerOpts = (operation: string): Pick<CreateHandlerOptions, 'context' | 
 
 /** Dependencies required for Board handler registration. */
 export interface BoardHandlerDependencies {
+	getMainWindow?: () => BrowserWindow | null;
 	/** The live Cue engine (Board rides its tick), or `null` before it is built. */
 	getCueEngine: () => CueEngine | null;
 	/**
@@ -74,6 +79,49 @@ export interface BoardHandlerDependencies {
  * dispatcher so the in-flight process is actually killed.
  */
 export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
+	ipcMain.handle(
+		'board:captureCatalog',
+		withIpcErrorLogging(handlerOpts('captureCatalog'), async () => getBoardCaptureCatalog())
+	);
+	// This native-only channel derives authority from the actual top-level desktop sender.
+	// Remote/web/CLI callers use ordinary mutations and cannot claim human policy authority.
+	ipcMain.handle(
+		'board:captureCard',
+		async (event, command: BoardCaptureCommand): Promise<BoardCaptureResponse> => {
+			try {
+				const window = deps.getMainWindow?.();
+				const human =
+					!!window &&
+					!window.isDestroyed() &&
+					event?.sender === window.webContents &&
+					event.senderFrame === window.webContents.mainFrame;
+				if (!human)
+					throw new BoardStorageError(
+						'protected-field',
+						'Native human capture requires the desktop main frame'
+					);
+				if (
+					!command ||
+					Object.keys(command).some(
+						(key) => !['projectRoot', 'boardId', 'expectedRevision', 'card'].includes(key)
+					)
+				)
+					throw new BoardStorageError('invalid-input', 'Invalid capture command');
+				return await enqueueBoardWrite(command.projectRoot, () => captureBoardCard(command, true));
+			} catch (error) {
+				if (!(error instanceof BoardStorageError)) throw error;
+				return {
+					ok: false,
+					error: {
+						code: error.code,
+						message: error.message,
+						captureErrors: error.details.captureErrors,
+					},
+				};
+			}
+		}
+	);
+
 	ipcMain.handle(
 		'board:queryWorkspace',
 		withIpcErrorLogging(
