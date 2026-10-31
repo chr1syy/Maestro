@@ -18,6 +18,8 @@ import type {
 	Board,
 	BoardCard,
 	BoardCardKind,
+	BoardWorkspaceCollection,
+	BoardSourceCatalogEntry,
 	CardPriority,
 	CardStatus,
 } from '../../shared/board/types';
@@ -59,7 +61,7 @@ const DELETE_DISARM_MS = 4000;
 const TITLE_ID = 'board-modal-title';
 
 /**
- * Per-project "last board I had open" memory. A pure UI preference, so it lives
+ * Workspace "last collection I had open" memory. A pure UI preference, so it lives
  * in localStorage next to the other view-state keys (Git diff view mode, History
  * filters) rather than becoming a real synced setting.
  */
@@ -126,6 +128,8 @@ interface CardDraft {
 	status: CardStatus;
 	createdAt?: string;
 	storageRevision?: number;
+	collection: BoardWorkspaceCollection;
+	projectRoot: string;
 }
 
 /**
@@ -144,9 +148,47 @@ interface CardDraft {
  */
 export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const activeSession = useSessionStore(selectActiveSession);
-	const projectRoot = activeSession?.projectRoot ?? '';
+	const activeProjectRoot = activeSession?.projectRoot ?? '';
+	const [collections, setCollections] = useState<BoardWorkspaceCollection[]>([]);
+	const [sources, setSources] = useState<BoardSourceCatalogEntry[]>([]);
+	const [sourceRoots, setSourceRoots] = useState<Record<string, string>>({});
+	const [projectFilter, setProjectFilter] = useState('all');
+	const [groupFilter, setGroupFilter] = useState('all');
+	const [agentFilter, setAgentFilter] = useState('all');
+	const groups = useSessionStore((s) => s.groups);
+
 	const allSessions = useSessionStore((s) => s.sessions);
+	const projectRoots = useMemo(
+		() => [
+			...new Set(allSessions.map((s) => s.projectRoot).filter((root): root is string => !!root)),
+		],
+		[allSessions]
+	);
 	const liveSessions = useLiveSessions();
+
+	const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
+	const [draft, setDraft] = useState<CardDraft | null>(null);
+	const visibleCollections = useMemo(
+		() =>
+			collections.filter(
+				(entry) => projectFilter === 'all' || entry.projectRef.sourceKey === projectFilter
+			),
+		[collections, projectFilter]
+	);
+	const selectedCollection =
+		visibleCollections.find((entry) => entry.collectionKey === selectedBoardId) ??
+		visibleCollections[0] ??
+		null;
+	const editorCollection = draft?.collection ?? selectedCollection;
+	const board = editorCollection?.board ?? null;
+	const projectRoot =
+		draft?.projectRoot ??
+		(selectedCollection
+			? (sourceRoots[selectedCollection.sourceKey] ?? '')
+			: projectFilter === 'all'
+				? activeProjectRoot
+				: (sourceRoots[projectFilter] ?? ''));
+	const boards = useMemo(() => collections.map((entry) => entry.board), [collections]);
 
 	// Legacy cards display the current project worker marker until dispatch is migrated.
 	const projectAgents = useMemo(
@@ -252,8 +294,6 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		}
 	}, []);
 
-	const [boards, setBoards] = useState<Board[]>([]);
-	const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
 	const [profiles, setProfiles] = useState<AgentProfile[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [creatingBoard, setCreatingBoard] = useState(false);
@@ -268,7 +308,6 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const [pendingBoardDelete, setPendingBoardDelete] = useState(false);
 
 	// Editor state: null = board view, otherwise the card editor is showing.
-	const [draft, setDraft] = useState<CardDraft | null>(null);
 	const [showNewRole, setShowNewRole] = useState(false);
 	const [cycleError, setCycleError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
@@ -278,11 +317,6 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const draftBaselineRef = useRef<CardDraft | null>(null);
 	/** Which close the user asked for while the editor was dirty, pending confirm. */
 	const [pendingDiscard, setPendingDiscard] = useState<null | 'editor' | 'modal'>(null);
-
-	const board = useMemo(
-		() => boards.find((b) => b.id === selectedBoardId) ?? boards[0] ?? null,
-		[boards, selectedBoardId]
-	);
 
 	// Cheap structural compare: the draft is a flat object of primitives plus a
 	// string array, so serializing both sides is simpler (and less bug-prone) than
@@ -301,36 +335,44 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		[profiles]
 	);
 
-	// Load every board for the project plus the profiles that back card
-	// assignees. Reused by the push listener and by explicit refresh.
+	// Read the central workspace; resolve only explicit session project roots through
+	// the host for compatibility writers. Unknown sources remain visible and read-only.
 	const load = useCallback(
 		async (showSpinner = true) => {
 			const generation = ++loadGenerationRef.current;
-			if (!projectRoot) {
-				setBoards([]);
-				setProfiles([]);
-				setLoading(false);
-				return;
-			}
+
 			if (showSpinner) setLoading(true);
 			try {
-				const [boardList, profileList] = await Promise.all([
-					window.maestro.board.list(projectRoot),
-					window.maestro.profiles.list(projectRoot),
+				const [response, mappings] = await Promise.all([
+					window.maestro.board.queryWorkspace(),
+					Promise.all(
+						projectRoots.map(async (root) => {
+							const result = await window.maestro.board
+								.queryWorkspace({ projectRoot: root })
+								.catch(() => null);
+							return { root, result };
+						})
+					),
 				]);
 				if (generation !== loadGenerationRef.current) return;
-				setProfiles(profileList);
-				setBoards(boardList);
-				// Keep the currently-open board if it still exists, else the one this
-				// project was last left on, else the first.
+				if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
+				const roots: Record<string, string> = {};
+				for (const { root, result } of mappings) {
+					if (result?.ok) {
+						const keys = [...new Set(result.value.collections.map((entry) => entry.sourceKey))];
+						if (keys.length === 1) roots[keys[0]] = root;
+					}
+				}
+				setSourceRoots(roots);
+				setSources(response.value.sources);
+				setCollections(response.value.collections);
 				const current = selectedBoardIdRef.current;
-				const remembered = readLastBoardId(projectRoot);
+				const remembered = readLastBoardId('workspace');
 				const next =
-					boardList.find((b) => b.id === current) ??
-					boardList.find((b) => b.id === remembered) ??
-					boardList[0] ??
-					null;
-				setSelectedBoardId(next?.id ?? null);
+					response.value.collections.find((entry) => entry.collectionKey === current) ??
+					response.value.collections.find((entry) => entry.collectionKey === remembered) ??
+					response.value.collections[0];
+				setSelectedBoardId(next?.collectionKey ?? null);
 			} catch (err) {
 				if (generation !== loadGenerationRef.current) return;
 				logger.error(`Failed to load board: ${String(err)}`);
@@ -340,7 +382,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 					// the user has to repair the file by hand. Only reported on an
 					// explicit load: a push-driven refresh would otherwise re-report the
 					// same user-data problem on every write.
-					captureException(err, { tags: { operation: 'board:list' } });
+					captureException(err, { tags: { operation: 'board:queryWorkspace' } });
 					notifyToast({
 						color: 'red',
 						title: 'Board',
@@ -352,7 +394,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				if (generation === loadGenerationRef.current) setLoading(false);
 			}
 		},
-		[projectRoot]
+		[projectRoots]
 	);
 
 	useEffect(() => {
@@ -362,10 +404,29 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		};
 	}, [load]);
 
-	// Remember the selection so reopening the Board lands on the same one.
 	useEffect(() => {
-		if (projectRoot && selectedBoardId) writeLastBoardId(projectRoot, selectedBoardId);
-	}, [projectRoot, selectedBoardId]);
+		let current = true;
+		if (!projectRoot || !selectedCollection) {
+			setProfiles([]);
+			return;
+		}
+		void window.maestro.profiles
+			.list(projectRoot)
+			.then((items) => {
+				if (current) setProfiles(items);
+			})
+			.catch((error) => {
+				if (current) notifyToast({ color: 'red', title: 'Roles', message: ipcErrorMessage(error) });
+			});
+		return () => {
+			current = false;
+		};
+	}, [projectRoot, collections, selectedCollection]);
+
+	// Remember the collection key, since legacy board IDs can collide across sources.
+	useEffect(() => {
+		if (selectedBoardId) writeLastBoardId('workspace', selectedBoardId);
+	}, [selectedBoardId]);
 
 	// Live updates: the main process pushes `board:changed` after every
 	// `.maestro/board.yaml` write (dispatcher tick, IPC mutation, auto-decompose),
@@ -373,12 +434,10 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	// while the card editor is open too - the draft is separate state, so only the
 	// board behind the editor is reconciled and in-progress edits survive.
 	useEffect(() => {
-		if (!projectRoot) return;
-		return window.maestro.board.onBoardChanged?.((payload) => {
-			if (payload?.projectRoot !== projectRoot) return;
+		return window.maestro.board.onBoardChanged?.(() => {
 			void load(false);
 		});
-	}, [projectRoot, load]);
+	}, [load]);
 
 	// Live updates: profile creation happens in the Profiles modal, which the
 	// card-create gate opens ON TOP of this modal, so the profile list must
@@ -405,8 +464,9 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						? `${activeSession.name} Board`
 						: 'Board';
 			const created = await window.maestro.board.create(projectRoot, name);
-			setBoards((prev) => [...prev.filter((b) => b.id !== created.id), created]);
-			setSelectedBoardId(created.id);
+			selectedBoardIdRef.current = created.storage?.collectionKey ?? null;
+			setSelectedBoardId(created.storage?.collectionKey ?? null);
+			await load(false);
 			if (boards.length > 0) {
 				setRenameValue(created.name);
 				setRenaming(true);
@@ -418,7 +478,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		} finally {
 			setCreatingBoard(false);
 		}
-	}, [projectRoot, creatingBoard, activeSession?.name, boards.length]);
+	}, [projectRoot, creatingBoard, activeSession?.name, boards.length, load]);
 
 	const startRename = useCallback(() => {
 		if (!board) return;
@@ -431,14 +491,14 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		setRenaming(false);
 		if (!board || !projectRoot || !name || name === board.name) return;
 		try {
-			const updated = await window.maestro.board.rename(projectRoot, board.id, name);
-			setBoards((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+			await window.maestro.board.rename(projectRoot, board.id, name);
+			await load(false);
 		} catch (err) {
 			logger.error(`Failed to rename board: ${String(err)}`);
 			captureException(err, { tags: { operation: 'board:rename' } });
 			notifyToast({ color: 'red', title: 'Board', message: 'Failed to rename the board.' });
 		}
-	}, [renameValue, board, projectRoot]);
+	}, [renameValue, board, projectRoot, load]);
 
 	/** Cards that would be destroyed by deleting the board (the CLI's warning). */
 	const openBoardCards = useMemo(
@@ -450,9 +510,8 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		if (!board || !projectRoot) return;
 		try {
 			// The confirm dialog IS the acknowledgment the CLI asks for with --force.
-			const remaining = await window.maestro.board.delete(projectRoot, board.id, true);
-			setBoards(remaining);
-			setSelectedBoardId(remaining[0]?.id ?? null);
+			await window.maestro.board.delete(projectRoot, board.id, true);
+			await load(false);
 			notifyToast({ color: 'green', title: 'Board', message: `Deleted "${board.name}".` });
 		} catch (err) {
 			logger.error(`Failed to delete board: ${String(err)}`);
@@ -463,14 +522,17 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				message: ipcErrorMessage(err),
 			});
 		}
-	}, [board, projectRoot]);
+	}, [board, projectRoot, load]);
 
 	// --- Card editor -------------------------------------------------------
 
 	const openNewCard = useCallback(() => {
 		setCycleError(null);
 		setFocusMovePicker(false);
+		if (!selectedCollection) return;
 		const fresh: CardDraft = {
+			collection: structuredClone(selectedCollection),
+			projectRoot,
 			id: null,
 			title: '',
 			body: '',
@@ -487,31 +549,37 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		};
 		draftBaselineRef.current = fresh;
 		setDraft(fresh);
-	}, [profiles]);
+	}, [profiles, selectedCollection, projectRoot]);
 
-	const openEditCard = useCallback((card: BoardCard, focusMove = false) => {
-		setCycleError(null);
-		setFocusMovePicker(focusMove);
-		const existing: CardDraft = {
-			id: card.id,
-			title: card.title,
-			body: card.body,
-			assigneeProfileId: card.assigneeProfileId ?? '',
-			assigneeAgentId: card.assigneeAgentId ?? '',
-			parents: [...card.parents],
-			priority: card.priority ?? 'normal',
-			worktreeEnabled: !!card.worktree,
-			worktreePath: card.worktree?.path ?? '',
-			worktreeBranch: card.worktree?.branch ?? '',
-			prOnDoneEnabled: !!card.prOnDone,
-			prTargetBranch: card.prOnDone?.targetBranch ?? '',
-			status: card.status,
-			createdAt: card.createdAt,
-			storageRevision: card.storageRevision,
-		};
-		draftBaselineRef.current = existing;
-		setDraft(existing);
-	}, []);
+	const openEditCard = useCallback(
+		(card: BoardCard, focusMove = false) => {
+			setCycleError(null);
+			setFocusMovePicker(focusMove);
+			if (!selectedCollection) return;
+			const existing: CardDraft = {
+				collection: structuredClone(selectedCollection),
+				projectRoot,
+				id: card.id,
+				title: card.title,
+				body: card.body,
+				assigneeProfileId: card.assigneeProfileId ?? '',
+				assigneeAgentId: card.assigneeAgentId ?? '',
+				parents: [...card.parents],
+				priority: card.priority ?? 'normal',
+				worktreeEnabled: !!card.worktree,
+				worktreePath: card.worktree?.path ?? '',
+				worktreeBranch: card.worktree?.branch ?? '',
+				prOnDoneEnabled: !!card.prOnDone,
+				prTargetBranch: card.prOnDone?.targetBranch ?? '',
+				status: card.status,
+				createdAt: card.createdAt,
+				storageRevision: card.storageRevision,
+			};
+			draftBaselineRef.current = existing;
+			setDraft(existing);
+		},
+		[selectedCollection, projectRoot]
+	);
 
 	const closeEditor = useCallback(() => {
 		setShowNewRole(false);
@@ -596,17 +664,38 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	);
 
 	/** Replace one board in the list (every card mutation returns the whole board). */
-	const applyBoard = useCallback((updated: Board) => {
-		setBoards((prev) =>
-			prev.some((b) => b.id === updated.id)
-				? prev.map((b) => (b.id === updated.id ? updated : b))
-				: [...prev, updated]
-		);
-	}, []);
+	const applyBoard = useCallback(
+		(updated: Board) => {
+			const key = editorCollection?.collectionKey;
+			setCollections((prev) =>
+				prev.map((entry) =>
+					entry.collectionKey === key
+						? {
+								...entry,
+								board: updated,
+								revision: updated.storage?.expectedRevision ?? entry.revision,
+							}
+						: entry
+				)
+			);
+		},
+		[editorCollection]
+	);
 
 	const handleSaveCard = useCallback(async () => {
 		if (!draft || !board || !projectRoot || !canSaveDraft) return;
 
+		const current = collections.find(
+			(entry) => entry.collectionKey === draft.collection.collectionKey
+		);
+		if (!current || current.revision !== draft.collection.revision) {
+			notifyToast({
+				color: 'red',
+				title: 'Board',
+				message: 'This collection changed while you were editing. Reopen the card before saving.',
+			});
+			return;
+		}
 		const now = new Date().toISOString();
 		const cardId = draft.id ?? generateUUID();
 		// Phase 4: the toggle expresses intent; blank path/branch fields fall back
@@ -697,7 +786,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		} finally {
 			setSaving(false);
 		}
-	}, [draft, board, projectRoot, canSaveDraft, closeEditor, applyBoard, load]);
+	}, [draft, board, projectRoot, canSaveDraft, closeEditor, applyBoard, load, collections]);
 
 	const handleDeleteCard = useCallback(
 		async (cardId: string) => {
@@ -870,6 +959,17 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		const map = new Map<CardStatus, BoardCard[]>();
 		for (const status of CARD_STATUSES) map.set(status, []);
 		for (const card of board?.cards ?? []) {
+			if (
+				groupFilter !== 'all' &&
+				!(card.executionScope?.kind === 'group' && card.executionScope.groupId === groupFilter)
+			)
+				continue;
+			if (
+				agentFilter !== 'all' &&
+				card.assigneeAgentId !== agentFilter &&
+				!(card.executionScope?.kind === 'agent' && card.executionScope.agentId === agentFilter)
+			)
+				continue;
 			if (statusFilter !== 'all' && card.status !== statusFilter) continue;
 			if (kindFilter === 'unspecified' && card.kind !== undefined) continue;
 			if (kindFilter !== 'all' && kindFilter !== 'unspecified' && card.kind !== kindFilter)
@@ -877,7 +977,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			map.get(card.status)?.push(card);
 		}
 		return map;
-	}, [board, kindFilter, statusFilter]);
+	}, [board, kindFilter, statusFilter, groupFilter, agentFilter]);
 
 	// --- Keyboard grid navigation -------------------------------------------
 
@@ -968,16 +1068,22 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						    the name field in its place. */}
 						{board && !renaming && (
 							<select
-								value={board.id}
+								value={editorCollection?.collectionKey ?? ''}
+								disabled={!!draft}
 								onChange={(e) => setSelectedBoardId(e.target.value)}
 								aria-label="Select board"
 								title="Switch board"
 								className="rounded-md px-2 py-1 text-xs outline-none max-w-[180px]"
 								style={inputStyle}
 							>
-								{boards.map((b) => (
-									<option key={b.id} value={b.id}>
-										{b.name}
+								{(draft ? [draft.collection] : visibleCollections).map((entry) => (
+									<option key={entry.collectionKey} value={entry.collectionKey}>
+										{entry.board.name}
+										{visibleCollections.some(
+											(other) =>
+												other.collectionKey !== entry.collectionKey &&
+												other.board.name === entry.board.name
+										) && ` · ${sourceRoots[entry.sourceKey] ?? entry.sourceKey}`}
 									</option>
 								))}
 							</select>
@@ -998,9 +1104,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						<span className="text-xs shrink-0" style={{ color: theme.colors.textDim }}>
 							card DAG · dispatched on the Cue tick
 						</span>
-						{/* Boards and profiles are scoped per project root, so surface which
-						    root this modal is bound to - a differently-rooted agent has its
-						    own list, so a profile only appears to "disappear" (G1). */}
+						{/* Show the host-confirmed writer project for the selected collection. */}
 						{projectRoot && (
 							<span
 								className="text-xs truncate min-w-0"
@@ -1049,7 +1153,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						{board && !draft && (
 							<button
 								onClick={() => void handleCreateBoard()}
-								disabled={creatingBoard}
+								disabled={creatingBoard || !projectRoot}
 								className="rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-white/5 disabled:opacity-40"
 								style={{ border: `1px solid ${theme.colors.border}`, color: theme.colors.textMain }}
 								title="Create another board for this project"
@@ -1286,24 +1390,44 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				<div className="flex-1 overflow-hidden flex flex-col">
 					{!projectRoot && (
 						<div className="p-5 text-sm" style={{ color: theme.colors.textDim }}>
-							Select an agent first so the board can be stored for its project.
+							Select an agent with a registered project to edit this source. All central boards
+							remain visible.
 						</div>
 					)}
 
-					{projectRoot && !board && !loading && (
+					{!board && !loading && (
 						<div className="flex flex-col items-center justify-center gap-3 h-full">
 							<div className="text-sm" style={{ color: theme.colors.textDim }}>
 								No board yet for this project.
 							</div>
 							<button
 								onClick={() => void handleCreateBoard()}
-								disabled={creatingBoard}
+								disabled={creatingBoard || !projectRoot}
 								className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-opacity disabled:opacity-40"
 								style={{ backgroundColor: theme.colors.accent, color: theme.colors.bgMain }}
 							>
 								<Plus className="w-4 h-4" /> Create board
 							</button>
 						</div>
+					)}
+
+					{!draft && (
+						<label className="px-4 pt-3">
+							Project{' '}
+							<select
+								aria-label="Filter by project"
+								value={projectFilter}
+								style={inputStyle}
+								onChange={(e) => setProjectFilter(e.target.value)}
+							>
+								<option value="all">All projects</option>
+								{sources.map((source) => (
+									<option key={source.sourceKey} value={source.projectRef.sourceKey}>
+										{sourceRoots[source.sourceKey] ?? source.sourceKey}
+									</option>
+								))}
+							</select>
+						</label>
 					)}
 
 					{/* Card editor (create/edit) */}
@@ -1341,7 +1465,40 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 
 					{/* Kanban columns */}
 					{board && !draft && (
-						<div className="flex gap-3 px-4 pt-3">
+						<div className="flex flex-wrap gap-3 px-4 pt-3">
+							<label>
+								Group{' '}
+								<select
+									aria-label="Filter by group"
+									style={inputStyle}
+									value={groupFilter}
+									onChange={(e) => setGroupFilter(e.target.value)}
+								>
+									<option value="all">All groups</option>
+									{groups.map((group) => (
+										<option key={group.id} value={group.id}>
+											{group.name}
+										</option>
+									))}
+								</select>
+							</label>
+							<label>
+								Agent{' '}
+								<select
+									aria-label="Filter by agent"
+									style={inputStyle}
+									value={agentFilter}
+									onChange={(e) => setAgentFilter(e.target.value)}
+								>
+									<option value="all">All agents</option>
+									{allSessions.map((session) => (
+										<option key={session.id} value={session.id}>
+											{session.name}
+										</option>
+									))}
+								</select>
+							</label>
+
 							<label>
 								Type{' '}
 								<select

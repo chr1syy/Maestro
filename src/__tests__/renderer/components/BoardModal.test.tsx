@@ -16,7 +16,12 @@ import { notifyToast } from '../../../renderer/stores/notificationStore';
 import { openUrl } from '../../../renderer/utils/openUrl';
 import { createMockSession } from '../../helpers/mockSession';
 import { mockTheme } from '../../helpers/mockTheme';
-import type { Board, BoardCard, CardRun } from '../../../shared/board/types';
+import type {
+	Board,
+	BoardCard,
+	CardRun,
+	BoardWorkspaceQueryResponse,
+} from '../../../shared/board/types';
 
 // The layer stack is exercised elsewhere; here it is a no-op so the modal can
 // render without a LayerStackProvider.
@@ -62,6 +67,7 @@ function makeCard(overrides: Partial<BoardCard> & { id: string; title: string })
 // Board IPC stub, reassigned per test. The global test harness does not include
 // the board/profiles namespaces, so install them here.
 let boardApi: {
+	queryWorkspace: ReturnType<typeof vi.fn>;
 	list: ReturnType<typeof vi.fn>;
 	create: ReturnType<typeof vi.fn>;
 	rename: ReturnType<typeof vi.fn>;
@@ -102,12 +108,32 @@ function emitProfilesChanged(projectRoot = PROJECT_ROOT): void {
 	for (const listener of profilesChangedListeners) listener({ projectRoot });
 }
 
+function workspaceResponse(boards: Board[]): BoardWorkspaceQueryResponse {
+	return {
+		ok: true,
+		value: {
+			revision: 1,
+			sources: [{ sourceKey: 'source-one', projectRef: { sourceKey: 'source-one' } }],
+			collections: boards.map((board) => ({
+				sourceKey: 'source-one',
+				collectionKey: board.id,
+				revision: board.storage?.expectedRevision ?? 1,
+				projectRef: { sourceKey: 'source-one' },
+				board,
+			})),
+		},
+	};
+}
+
 function installApis(initialBoards: Board[], profiles?: unknown[]): void {
 	boardChangedListeners = [];
 	unsubscribeBoardChanged = vi.fn();
 	profilesChangedListeners = [];
 	unsubscribeProfilesChanged = vi.fn();
 	boardApi = {
+		queryWorkspace: vi.fn(async (query) =>
+			workspaceResponse(query ? initialBoards : await boardApi.list())
+		),
 		list: vi.fn().mockResolvedValue(initialBoards),
 		create: vi.fn(),
 		rename: vi.fn(),
@@ -376,11 +402,11 @@ describe('BoardModal live updates', () => {
 		await waitFor(() => expect(boardApi.list).toHaveBeenCalledTimes(1));
 		expect(boardApi.onBoardChanged).toHaveBeenCalled();
 
-		// A push for this project refetches; a push for another project is ignored.
+		// Every project push refreshes the central workspace.
 		emitBoardChanged();
 		await waitFor(() => expect(boardApi.list).toHaveBeenCalledTimes(2));
 		emitBoardChanged('/some/other/project');
-		expect(boardApi.list).toHaveBeenCalledTimes(2);
+		await waitFor(() => expect(boardApi.list).toHaveBeenCalledTimes(3));
 
 		unmount();
 		expect(unsubscribeBoardChanged).toHaveBeenCalled();
@@ -1556,5 +1582,198 @@ describe('Board native worker creation', () => {
 		act(() => useModalStore.getState().closeModal('newInstance'));
 		expect(screen.getByRole('button', { name: 'Create agent and add worker' })).toBeEnabled();
 		expect(api.registerWorker).not.toHaveBeenCalled();
+	});
+});
+
+describe('BoardModal central workspace identity', () => {
+	function installWorkspace() {
+		const card = makeCard({
+			id: 'same-card',
+			title: 'Project one card',
+			kind: 'work',
+			storageRevision: 4,
+			executionScope: { kind: 'group', groupId: 'g1' },
+			assigneeAgentId: 's1',
+		});
+		const response = workspaceResponse([]);
+		if (!response.ok) throw new Error('fixture');
+		response.value.sources = ['one', 'two'].map((sourceKey) => ({
+			sourceKey,
+			projectRef: { sourceKey },
+		}));
+		response.value.collections = ['one', 'two'].map((sourceKey, index) => ({
+			sourceKey,
+			collectionKey: `collection-${sourceKey}`,
+			revision: index + 10,
+			projectRef: { sourceKey },
+			board: {
+				id: 'same-board',
+				name: `Board ${sourceKey}`,
+				storage: {
+					sourceKey,
+					collectionKey: `collection-${sourceKey}`,
+					expectedRevision: index + 10,
+					cardRevisions: { 'same-card': 4 + index },
+				},
+				cards: [{ ...card, title: `Project ${sourceKey} card`, storageRevision: 4 + index }],
+			},
+		}));
+		installApis([]);
+		useSessionStore.setState({
+			sessions: [
+				createMockSession({
+					id: 's1',
+					name: 'Agent one',
+					projectRoot: '/project-one',
+					groupId: 'g1',
+				}),
+				createMockSession({ id: 's2', name: 'Agent two', projectRoot: '/project-two' }),
+			],
+			groups: [{ id: 'g1', name: 'Group one', emoji: 'G', collapsed: false }],
+		});
+		boardApi.queryWorkspace.mockImplementation(async (query) => {
+			const value = structuredClone(response.value);
+			if (query?.projectRoot)
+				value.collections = value.collections.filter(
+					(entry) => entry.sourceKey === (query.projectRoot === '/project-one' ? 'one' : 'two')
+				);
+			return { ok: true, value };
+		});
+		return response.value;
+	}
+
+	it('uses collection keys across projects and combines all five filters over the central cards', async () => {
+		installWorkspace();
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		await screen.findByText('Project one card');
+		expect(boardApi.queryWorkspace).toHaveBeenCalledWith();
+		expect(boardApi.list).not.toHaveBeenCalled();
+		fireEvent.change(screen.getByLabelText('Select board'), {
+			target: { value: 'collection-two' },
+		});
+		expect(screen.getByText('Project two card')).toBeInTheDocument();
+		expect(screen.queryByText('Project one card')).not.toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by project'), { target: { value: 'two' } });
+		expect(screen.queryByRole('option', { name: 'Board one' })).not.toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by group'), { target: { value: 'g1' } });
+		fireEvent.change(screen.getByLabelText('Filter by agent'), { target: { value: 's1' } });
+		fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'work' } });
+		fireEvent.change(screen.getByLabelText('Filter by status'), { target: { value: 'todo' } });
+		expect(screen.getByText('Project two card')).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by agent'), { target: { value: 's2' } });
+		expect(screen.queryByText('Project two card')).not.toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by agent'), { target: { value: 's1' } });
+		expect(screen.getByText('Project two card')).toBeInTheDocument();
+	});
+
+	it('opens the selected colliding card by keyboard and saves only to its host-confirmed source with its read card revision', async () => {
+		const value = installWorkspace();
+		boardApi.updateCard.mockResolvedValue(value.collections[1].board);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		await screen.findByText('Project one card');
+		fireEvent.change(screen.getByLabelText('Select board'), {
+			target: { value: 'collection-two' },
+		});
+		const tile = screen.getByText('Project two card').closest('[tabindex]')!;
+		fireEvent.keyDown(tile, { key: 'Enter' });
+		expect(await screen.findByPlaceholderText('e.g. Design the schema')).toHaveValue(
+			'Project two card'
+		);
+		expect(screen.getByLabelText('Select board')).toBeDisabled();
+		fireEvent.change(screen.getByPlaceholderText('e.g. Design the schema'), {
+			target: { value: 'Edited two' },
+		});
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+		await waitFor(() =>
+			expect(boardApi.updateCard).toHaveBeenCalledWith(
+				'/project-two',
+				'same-board',
+				expect.objectContaining({ id: 'same-card', storageRevision: 5, title: 'Edited two' })
+			)
+		);
+		fireEvent.change(screen.getByLabelText('Select board'), {
+			target: { value: 'collection-one' },
+		});
+		expect(screen.getByText('Project one card')).toBeInTheDocument();
+	});
+
+	it('refreshes other projects centrally while retaining the editor collection revision and unsaved draft', async () => {
+		const value = installWorkspace();
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Project one card'));
+		fireEvent.change(screen.getByPlaceholderText('e.g. Design the schema'), {
+			target: { value: 'Keep this draft' },
+		});
+		value.collections[0].revision = 12;
+		value.collections[0].board.storage!.expectedRevision = 12;
+		value.collections[1].board.cards[0].title = 'Centrally changed two';
+		act(() => emitBoardChanged('/project-two'));
+		await waitFor(() => expect(boardApi.queryWorkspace).toHaveBeenCalledTimes(6));
+		expect(screen.getByPlaceholderText('e.g. Design the schema')).toHaveValue('Keep this draft');
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+		expect(boardApi.updateCard).not.toHaveBeenCalled();
+		expect(notifyToast).toHaveBeenCalledWith(
+			expect.objectContaining({ message: expect.stringContaining('collection changed') })
+		);
+		expect(screen.getByPlaceholderText('e.g. Design the schema')).toHaveValue('Keep this draft');
+	});
+
+	it('refreshes the selected collection from a foreign-project push and preserves selection isolation', async () => {
+		const value = installWorkspace();
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		await screen.findByText('Project one card');
+		fireEvent.change(screen.getByLabelText('Select board'), {
+			target: { value: 'collection-two' },
+		});
+		value.collections[1].board.cards[0].title = 'Changed centrally';
+		act(() => emitBoardChanged('/project-two'));
+		expect(await screen.findByText('Changed centrally')).toBeInTheDocument();
+		expect(screen.getByLabelText('Select board')).toHaveValue('collection-two');
+		fireEvent.change(screen.getByLabelText('Select board'), {
+			target: { value: 'collection-one' },
+		});
+		expect(screen.getByText('Project one card')).toBeInTheDocument();
+		expect(screen.queryByText('Changed centrally')).not.toBeInTheDocument();
+	});
+
+	it('loads global collections without an active agent or a project-root fallback', async () => {
+		installWorkspace();
+		useSessionStore.setState({ sessions: [], activeSessionId: '' });
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		expect(await screen.findByText('Project one card')).toBeInTheDocument();
+		expect(boardApi.queryWorkspace).toHaveBeenCalledTimes(1);
+		expect(boardApi.queryWorkspace).toHaveBeenCalledWith();
+	});
+
+	it('shows unmapped central sources without mutating the active project', async () => {
+		installWorkspace();
+		boardApi.queryWorkspace.mockImplementation(async (query) =>
+			query
+				? { ok: false, error: { code: 'legacy-mapping-missing', message: 'No mapping' } }
+				: {
+						ok: true,
+						value: {
+							revision: 1,
+							sources: [{ sourceKey: 'unmapped', projectRef: { sourceKey: 'unmapped' } }],
+							collections: [
+								{
+									sourceKey: 'unmapped',
+									collectionKey: 'unmapped-collection',
+									revision: 3,
+									projectRef: { sourceKey: 'unmapped' },
+									board: {
+										id: 'same-board',
+										name: 'Unmapped',
+										cards: [makeCard({ id: 'same-card', title: 'Unmapped card' })],
+									},
+								},
+							],
+						},
+					}
+		);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Unmapped card'));
+		expect(await screen.findByRole('button', { name: /Save changes/ })).toBeDisabled();
+		expect(boardApi.updateCard).not.toHaveBeenCalled();
 	});
 });
