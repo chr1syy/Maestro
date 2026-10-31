@@ -692,7 +692,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						'This card changed while you were editing. Reopen the card to see its current status.',
 				});
 			} else {
-				notifyToast({ color: 'red', title: 'Board', message: 'Failed to save card.' });
+				notifyToast({ color: 'red', title: 'Board', message: `Failed to save card: ${message}` });
 			}
 		} finally {
 			setSaving(false);

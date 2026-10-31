@@ -466,6 +466,26 @@ describe('BoardModal cycle rejection', () => {
 });
 
 describe('BoardModal status conflict', () => {
+	it('shows the host error and keeps the draft when a save fails', async () => {
+		const card = makeCard({ id: 'cardA', title: 'Card A' });
+		installApis([{ id: 'b1', name: 'My Board', cards: [card] }]);
+		boardApi.updateCard.mockRejectedValue(new Error('Repository is unavailable'));
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Card A'));
+		fireEvent.change(screen.getByPlaceholderText('e.g. Design the schema'), {
+			target: { value: 'Unsaved title' },
+		});
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/i }));
+		await waitFor(() =>
+			expect(notifyToast).toHaveBeenCalledWith(
+				expect.objectContaining({
+					message: expect.stringContaining('Repository is unavailable'),
+				})
+			)
+		);
+		expect(screen.getByPlaceholderText('e.g. Design the schema')).toHaveValue('Unsaved title');
+	});
+
 	it('refreshes the board while preserving the draft, then reopens the current status', async () => {
 		const card = makeCard({ id: 'cardA', title: 'Card A' });
 		const board: Board = { id: 'b1', name: 'My Board', cards: [card] };
