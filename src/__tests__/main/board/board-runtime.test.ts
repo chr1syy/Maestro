@@ -639,9 +639,19 @@ import(${JSON.stringify(pathToFileURL(FAKE_AGENT_PATH).href)});
 			};
 			expect(host.agentStates.worker.busy).toBe(true);
 			expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'worker-busy' });
+			manager.kill(config.sessionId, { shutdown: true });
+			expect(manager.getAll()).toHaveLength(0);
+			// Removing tab/process metadata is not a native termination receipt.
+			expect(hasHeadlessAgentActivity('worker')).toBe(true);
+			host.agentStates.worker.busy = isAgentBusy({ id: 'worker', aiTabs: [] }, manager);
+			expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'worker-busy' });
+			await vi.waitFor(() => expect(hasHeadlessAgentActivity('worker')).toBe(false));
+			host.agentStates.worker.busy = isAgentBusy({ id: 'worker', aiTabs: [] }, manager);
+			expect(runtime.claim(command())).toMatchObject({ ok: true });
 		} finally {
 			manager.killAll({ shutdown: true });
 			await vi.waitFor(() => expect(manager.getAll()).toHaveLength(0));
+			await vi.waitFor(() => expect(hasHeadlessAgentActivity('worker')).toBe(false));
 		}
 	});
 	it('keeps a real non-Board Cue turn busy until its native process settles', async () => {

@@ -119,18 +119,16 @@ export class ProcessManager extends EventEmitter {
 	 * creation attaches to a live handle; generic terminal spawn can still replace it.
 	 */
 	spawn(config: ProcessConfig): SpawnResult {
-		if (
-			config.toolType !== 'terminal' &&
-			!canStartAgentTurn(config.originWorkerId ?? resolveOwningMaestroSessionId(config.sessionId))
-		) {
+		const workerId = config.originWorkerId ?? resolveOwningMaestroSessionId(config.sessionId);
+		if (config.toolType !== 'terminal' && !canStartAgentTurn(workerId)) {
 			return {
 				pid: -1,
 				success: false,
 				error: 'Board worker is reserved; wait for its current attempt to settle',
 			};
 		}
-		if (config.toolType === 'terminal' || !config.originWorkerId) return this.spawnManaged(config);
-		const release = trackHeadlessAgentActivity(config.originWorkerId);
+		if (config.toolType === 'terminal') return this.spawnManaged(config);
+		const release = trackHeadlessAgentActivity(workerId);
 		// Attach to the actual child before returning. Caller stop/kill may remove
 		// the process-table row before the OS confirms termination.
 		const result = this.spawnManaged(config);

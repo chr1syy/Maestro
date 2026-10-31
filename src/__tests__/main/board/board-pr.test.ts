@@ -406,6 +406,31 @@ describe('maybeCreateCardPr', () => {
 });
 
 describe('startCardPr', () => {
+	it.each([PROJECT_ROOT, 'maestro-board-source:local-source'])(
+		'resolves the PR base in the run checkout rather than Board source %s',
+		async (source) => {
+			listBoards.mockReturnValue([board()]);
+			queryBoardWorkspace.mockReturnValue({
+				sources: [
+					{
+						sourceKey: 'local-source',
+						location: { location: { kind: 'local' }, path: PROJECT_ROOT },
+					},
+				],
+			});
+			createPullRequest.mockResolvedValue({
+				success: true,
+				prUrl: 'https://github.com/o/r/pull/7',
+			});
+			startCardPr(source, 'b1', 'c1');
+			await vi.waitFor(() => expect(stampBoardRunPr).toHaveBeenCalledTimes(1));
+			expect(createPullRequest).toHaveBeenCalledWith(
+				expect.objectContaining({ worktreePath: WORKTREE_PATH })
+			);
+			expect(createPullRequest.mock.calls[0][0]).not.toHaveProperty('mainRepoCwd');
+		}
+	);
+
 	/** Resolve the pending gh call on demand, so overlap is observable. */
 	function deferredCreate() {
 		let release!: (result: CardPrResult) => void;

@@ -888,6 +888,11 @@ describe('maestro-cli board', () => {
 			// Awaited, not fire-and-forget: the creator finished before we returned.
 			expect(resolved).toBe(true);
 			expect(mockCreatePullRequest).toHaveBeenCalledTimes(1);
+			// The Board source may name another repository or be an opaque source
+			// reference. The existing PR helper resolves the default base in this
+			// run's worktree when no main checkout is supplied.
+			expect(mockCreatePullRequest.mock.calls[0][0]).toMatchObject({ worktreePath: '/tmp/wt/c1' });
+			expect(mockCreatePullRequest.mock.calls[0][0]).not.toHaveProperty('mainRepoCwd');
 			const stored = loadBoards(projectRoot)[0].cards[0];
 			expect(stored.status).toBe('done');
 			expect(stored.runs?.[0].prUrl).toBe('https://github.com/o/r/pull/7');

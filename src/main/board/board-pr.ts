@@ -371,7 +371,8 @@ export function startCardPr(
 						prError: error.slice(0, PR_ERROR_MAX_LENGTH),
 					});
 			}),
-		mainRepoCwd: projectRoot,
+		// Resolve the default base in the run's checkout. A Board source is a
+		// storage identity and may belong to a different repository entirely.
 		...options,
 		...(remoteSource
 			? {

@@ -155,7 +155,8 @@ function createCardPrFromHost(
 				const board = getBoard(projectRoot, boardId);
 				if (board) stampBoardRunPr(projectRoot, board, id, run, { prError: error.slice(0, 500) });
 			}),
-		mainRepoCwd: projectRoot,
+		// The existing PR helper defaults to the run's checkout. projectRoot
+		// identifies Board storage, not necessarily the card's repository.
 		// No toast sink: there is no renderer to relay to from a CLI process. The
 		// outcome is printed by the caller and persisted on the run either way.
 		onLog: (level, message) => {
