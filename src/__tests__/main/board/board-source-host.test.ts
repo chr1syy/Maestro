@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -10,7 +10,50 @@ import { listBoardWorkers } from '../../../main/board/board-workspace-storage';
 
 let dir = '';
 afterEach(() => {
+	vi.restoreAllMocks();
 	if (dir) fs.rmSync(dir, { recursive: true, force: true });
+});
+it('discovers asynchronously outside transactions and preserves filesystem errors', async () => {
+	dir = fs.mkdtempSync(path.resolve('.maestro/board-global-workers-20261031/source-async-'));
+	const root = path.join(dir, 'root');
+	fs.mkdirSync(path.join(root, '.maestro'), { recursive: true });
+	fs.writeFileSync(path.join(root, '.maestro/board.yaml'), '{"boards":[]}');
+	const file = path.join(dir, 'file');
+	fs.writeFileSync(file, 'not a directory');
+	const db = openBoardDb(path.join(dir, 'board.sqlite'));
+	try {
+		const storage = new BoardStorageFacade(db);
+		const realpath = fs.promises.realpath.bind(fs.promises);
+		const readFile = fs.promises.readFile.bind(fs.promises);
+		const realpathSpy = vi.spyOn(fs.promises, 'realpath').mockImplementation(async (...args) => {
+			expect(db.inTransaction).toBe(false);
+			return realpath(...args);
+		});
+		const readSpy = vi.spyOn(fs.promises, 'readFile').mockImplementation(async (...args) => {
+			expect(db.inTransaction).toBe(false);
+			return readFile(...args);
+		});
+		await discoverBoardSources(storage, [
+			{ id: 'missing', dir: path.join(dir, 'missing') },
+			{ id: 'not-dir', dir: path.join(file, 'child') },
+			{ id: 'worker', dir: root, boardWorker: true },
+		]);
+		expect(realpathSpy).toHaveBeenCalled();
+		expect(readSpy).toHaveBeenCalled();
+		expect(storage.query().sources.map((source) => source.location?.path)).toEqual([root]);
+		expect(db.prepare('SELECT count(*) AS n FROM migrations').get()).toEqual({ n: 1 });
+
+		const badRoot = path.join(dir, 'bad');
+		fs.mkdirSync(path.join(badRoot, '.maestro', 'board.yaml'), { recursive: true });
+		await expect(
+			discoverBoardSources(storage, [{ id: 'bad', dir: badRoot }])
+		).rejects.toMatchObject({
+			code: 'EISDIR',
+		});
+		expect(storage.query().sources.map((source) => source.location?.path)).toEqual([root]);
+	} finally {
+		db.close();
+	}
 });
 it('cold-discovers registered repositories and legacy input, retains closed sources, and edits roles centrally', async () => {
 	dir = fs.mkdtempSync(path.resolve('.maestro/board-global-workers-20261031/source-host-'));

@@ -116,7 +116,7 @@ export async function discoverBoardSources(
 	for (const root of roots) {
 		let physical: string;
 		try {
-			physical = fs.realpathSync(root);
+			physical = await fs.promises.realpath(root);
 		} catch (error) {
 			if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) continue;
 			throw error;
@@ -136,19 +136,19 @@ export async function discoverBoardSources(
 			storage.db.prepare('SELECT 1 FROM repositories WHERE id=?').get(`source:${sourceKey}`)
 		)
 			continue;
-		const read = (relative: string): Buffer | null => {
+		const read = async (relative: string): Promise<Buffer | null> => {
 			try {
-				return fs.readFileSync(path.join(physical, relative));
+				return await fs.promises.readFile(path.join(physical, relative));
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
 				throw error;
 			}
 		};
-		const boardBytes = read(BOARD_CONFIG_PATH);
-		const profileBytes = read(PROFILES_CONFIG_PATH);
+		const boardBytes = await read(BOARD_CONFIG_PATH);
+		const profileBytes = await read(PROFILES_CONFIG_PATH);
 		const git = await execGitReadOnly(['rev-parse', '--show-toplevel'], physical);
 		const repository =
-			git.exitCode === 0 && fs.realpathSync(git.stdout.trim()) === physical
+			git.exitCode === 0 && (await fs.promises.realpath(git.stdout.trim())) === physical
 				? { id: `source:${sourceKey}`, workingDirectory: physical, validated: true }
 				: null;
 		if (
