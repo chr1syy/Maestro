@@ -23,8 +23,19 @@ import {
 import { boardWorkerCanStart } from '../../../main/board/board-claims';
 import {
 	configureAgentAdmission,
+	issueAgentTurnAdmission,
+	revokeAgentTurnAdmission,
+	startAdmittedAgentTurn,
+	getHeadlessAgentActivity,
 	hasHeadlessAgentActivity,
 } from '../../../main/utils/headless-agent-activity';
+import * as binaryProber from '../../../shared/maestro-lib/launch/path-prober';
+import { spawnAgent } from '../../../cli/services/agent-spawner';
+import { createPluginHeadlessAgentRunner } from '../../../main/plugins/plugin-headless-agent-runner';
+import type { SessionInfo } from '../../../shared/types';
+import { spawnGroupChatAgent } from '../../../main/group-chat/spawnGroupChatAgent';
+import { pathToFileURL } from 'node:url';
+import { FAKE_AGENT_PATH } from '../../shared/maestro-lib/run/fakeAgent';
 import { isAgentBusy } from '../../../main/utils/agent-busy';
 import { ProcessManager } from '../../../main/process-manager';
 import type { BoardClaimHostContext } from '../../../main/board/board-claims';
@@ -34,6 +45,13 @@ import { generateUUID } from '../../../shared/uuid';
 import { runProcess, stopProcess } from '../../../main/cue/cue-process-lifecycle';
 import { fakeAgentSpec } from '../../shared/maestro-lib/run/fakeAgent';
 
+vi.mock('../../../cli/services/storage', () => ({
+	getAgentCustomPath: () => undefined,
+	readAgentConfig: () => ({}),
+	readSshRemotes: () => [],
+	readSettings: () => ({}),
+}));
+vi.mock('../../../cli/services/wakatime', () => ({ buildCliWakaTimeHeartbeat: () => undefined }));
 vi.mock('node-pty', () => ({ spawn: vi.fn() }));
 vi.mock('../../../main/utils/sentry', () => ({ captureException: vi.fn() }));
 
@@ -283,6 +301,310 @@ describe('durable Board runtime over SQLite and the existing run-service seam', 
 			ok: false,
 			reason: 'review-artifact-unresolved',
 		});
+	});
+	it.each(['codex', 'claude-code'] as const)(
+		'fences the final real %s plugin/Relay start after async planning',
+		async (toolType) => {
+			configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+			const fake = fakeAgentSpec(dir, { chunks: [], close: { code: 0, signal: null } });
+			const marker = path.join(dir, 'spawned.json');
+			let prepared!: () => void;
+			let continuePlanning!: () => void;
+			const ready = new Promise<void>((resolve) => {
+				prepared = resolve;
+			});
+			const planning = new Promise<void>((resolve) => {
+				continuePlanning = resolve;
+			});
+			const run = createPluginHeadlessAgentRunner({
+				getAgent: () =>
+					({
+						id: 'worker',
+						name: 'Worker',
+						projectRoot: dir,
+						toolType,
+						cwd: dir,
+						customEnvVars: { ...fake.env, FAKE_AGENT_ARGV_OUT: marker },
+					}) as SessionInfo,
+				detectAgent: async () => ({ available: true }),
+				hasPluginTools: () => false,
+				prepareSystemPrompt: async () => undefined,
+				issueRunToken: vi.fn(),
+				revokeRunToken: vi.fn(),
+				audit: vi.fn(),
+				cliScriptPath: () => '/unused',
+				spawn: spawnAgent,
+			});
+			vi.spyOn(binaryProber, 'checkBinaryExists').mockImplementationOnce(async () => {
+				prepared();
+				await planning;
+				return { exists: true, path: FAKE_AGENT_PATH };
+			});
+			const pending = run('worker', 'fixture', undefined, undefined, 'relay');
+			await ready;
+			const token = claim(); // proof issued BEFORE the durable Board reservation
+			const denied = expect(pending).rejects.toThrow('reserved');
+			continuePlanning();
+			await denied;
+			expect(fs.existsSync(marker)).toBe(false);
+			expect(hasHeadlessAgentActivity('worker')).toBe(false);
+			expect(reservations()).toHaveLength(1);
+			expect(boardWorkerCanStart(db, 'worker', token.runId)).toBe(true);
+		}
+	);
+
+	it.each(['auto', 'relay'] as const)(
+		'keeps a real %s headless child exclusive before tab persistence and through abort',
+		async (origin) => {
+			configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+			const fake = fakeAgentSpec(
+				dir,
+				{ chunks: [], close: { code: 0, signal: null } },
+				{ hold: true }
+			);
+			const controller = new AbortController();
+			let pid: number | undefined;
+			const run = createPluginHeadlessAgentRunner({
+				getAgent: () =>
+					({ id: 'worker', toolType: 'codex', cwd: dir, customEnvVars: fake.env }) as SessionInfo,
+				detectAgent: async () => ({ available: true, path: FAKE_AGENT_PATH }),
+				hasPluginTools: () => false,
+				prepareSystemPrompt: async () => undefined,
+				issueRunToken: vi.fn(),
+				revokeRunToken: vi.fn(),
+				audit: vi.fn(),
+				cliScriptPath: () => '/unused',
+				spawn: (...args) =>
+					spawnAgent(
+						...(args.slice(0, 4) as [SessionInfo['toolType'], string, string, string | undefined]),
+						{
+							...args[4],
+							onProcessStarted: (value) => {
+								pid = value;
+							},
+						}
+					),
+			});
+			const pending = run('worker', 'fixture', undefined, controller.signal, origin);
+			try {
+				await vi.waitFor(() => expect(pid).toBeGreaterThan(0));
+				expect(() => process.kill(pid!, 0)).not.toThrow();
+				expect(isAgentBusy({ id: 'worker', aiTabs: [] }, null)).toBe(true);
+				host.agentStates.worker.busy = isAgentBusy({ id: 'worker', aiTabs: [] }, null);
+				expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'worker-busy' });
+				controller.abort();
+				expect(hasHeadlessAgentActivity('worker')).toBe(true);
+				await pending;
+				expect(() => process.kill(pid!, 0)).toThrow();
+				expect(hasHeadlessAgentActivity('worker')).toBe(false);
+				host.agentStates.worker.busy = false;
+				expect(runtime.claim(command())).toMatchObject({ ok: true });
+			} finally {
+				controller.abort();
+				await pending;
+			}
+		}
+	);
+
+	it('rejects missing, forged, mismatched, cancelled and revoked headless proofs without starting a child', async () => {
+		const proof = issueAgentTurnAdmission('worker');
+		const controller = new AbortController();
+		const cancelled = issueAgentTurnAdmission('worker', controller.signal);
+		controller.abort();
+		for (const options of [
+			{ originWorkerId: 'worker' },
+			{ originWorkerId: 'worker', workerAdmission: { agentId: 'worker' } },
+			{ originWorkerId: 'other', workerAdmission: proof },
+			{ originWorkerId: 'worker', workerAdmission: cancelled },
+		]) {
+			await expect(
+				spawnAgent('codex', dir, 'fixture', undefined, {
+					...options,
+					agentCommand: FAKE_AGENT_PATH,
+					agentConfigValues: {},
+				})
+			).rejects.toThrow('admission proof');
+		}
+		revokeAgentTurnAdmission(proof);
+		expect(() => startAdmittedAgentTurn(proof, 'worker')).toThrow('admission proof');
+		expect(hasHeadlessAgentActivity('worker')).toBe(false);
+	});
+
+	it('releases successful/failed native attempts independently and admits a safe effort retry', async () => {
+		configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+		const holding = fakeAgentSpec(
+			dir,
+			{ chunks: [], close: { code: 0, signal: null } },
+			{ hold: true }
+		);
+		const rejected = fakeAgentSpec(dir, {
+			chunks: [],
+			stderr: `Unsupported value: 'minimal' is not supported with the 'fixture' model. reasoning.effort`,
+			close: { code: 1, signal: null },
+		});
+		const completed = fakeAgentSpec(dir, {
+			chunks: [
+				JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Done' } }) +
+					'\n',
+				JSON.stringify({ type: 'turn.completed' }) + '\n',
+			],
+			close: { code: 0, signal: null },
+		});
+		const counter = path.join(dir, 'attempts');
+		const shim = path.join(dir, 'retry.cjs');
+		fs.writeFileSync(
+			shim,
+			`#!/usr/bin/env node
+const fs = require('node:fs');
+const n = fs.existsSync(process.env.ATTEMPTS) ? Number(fs.readFileSync(process.env.ATTEMPTS, 'utf8')) : 0;
+fs.writeFileSync(process.env.ATTEMPTS, String(n + 1));
+process.env.FAKE_AGENT_RECORDING = n === 0 ? process.env.FIRST_RECORDING : process.env.SECOND_RECORDING;
+import(${JSON.stringify(pathToFileURL(FAKE_AGENT_PATH).href)});
+`,
+			{ mode: 0o755 }
+		);
+		const siblingProof = issueAgentTurnAdmission('worker');
+		const retryProof = issueAgentTurnAdmission('worker');
+		const controller = new AbortController();
+		let started = false;
+		const sibling = spawnAgent('codex', dir, 'hold', undefined, {
+			originWorkerId: 'worker',
+			workerAdmission: siblingProof,
+			agentCommand: FAKE_AGENT_PATH,
+			agentConfigValues: {},
+			customEnvVars: holding.env as Record<string, string>,
+			signal: controller.signal,
+			onProcessStarted: () => {
+				started = true;
+			},
+		});
+		try {
+			await vi.waitFor(() => expect(started).toBe(true));
+			const attempts: number[] = [];
+			const result = await spawnAgent('codex', dir, 'retry', undefined, {
+				originWorkerId: 'worker',
+				workerAdmission: retryProof,
+				agentCommand: shim,
+				agentConfigValues: {},
+				customEffort: 'minimal',
+				customEnvVars: {
+					ATTEMPTS: counter,
+					FIRST_RECORDING: rejected.env.FAKE_AGENT_RECORDING!,
+					SECOND_RECORDING: completed.env.FAKE_AGENT_RECORDING!,
+				},
+				onProcessStarted: () => {
+					attempts.push(getHeadlessAgentActivity().counts.worker);
+				},
+			});
+			expect(result).toMatchObject({ success: true, response: 'Done' });
+			expect(fs.readFileSync(counter, 'utf8')).toBe('2');
+			expect(attempts).toEqual([2, 2]); // no prior native child overlaps its retry
+			expect(getHeadlessAgentActivity().counts.worker).toBe(1);
+			const failed = await spawnAgent('codex', dir, 'missing binary', undefined, {
+				originWorkerId: 'worker',
+				workerAdmission: retryProof,
+				agentCommand: path.join(dir, 'missing-executable'),
+				agentConfigValues: {},
+			});
+			expect(failed.success).toBe(false);
+			expect(getHeadlessAgentActivity().counts.worker).toBe(1);
+			revokeAgentTurnAdmission(siblingProof);
+			expect(getHeadlessAgentActivity().counts.worker).toBe(1); // revocation cannot free a running sibling
+			expect(() => startAdmittedAgentTurn(siblingProof, 'worker')).toThrow('admission proof');
+		} finally {
+			controller.abort();
+			await sibling;
+			revokeAgentTurnAdmission(siblingProof);
+			revokeAgentTurnAdmission(retryProof);
+		}
+		expect(hasHeadlessAgentActivity('worker')).toBe(false);
+	});
+
+	it('keeps occupancy through a throwing native start observer until the actual child exits', async () => {
+		const proof = issueAgentTurnAdmission('worker');
+		const fake = fakeAgentSpec(
+			dir,
+			{ chunks: [], close: { code: 0, signal: null } },
+			{ hold: true }
+		);
+		let pid: number | undefined;
+		await expect(
+			spawnAgent('codex', dir, 'fixture', undefined, {
+				originWorkerId: 'worker',
+				workerAdmission: proof,
+				agentCommand: FAKE_AGENT_PATH,
+				agentConfigValues: {},
+				customEnvVars: fake.env as Record<string, string>,
+				onProcessStarted: (value) => {
+					pid = value;
+					throw new Error('observer failed');
+				},
+			})
+		).rejects.toThrow('observer failed');
+		revokeAgentTurnAdmission(proof);
+		expect(hasHeadlessAgentActivity('worker')).toBe(true);
+		await vi.waitFor(() => expect(hasHeadlessAgentActivity('worker')).toBe(false));
+		expect(() => process.kill(pid!, 0)).toThrow();
+	});
+	it('preserves unsafe migration holds at the final real headless start', async () => {
+		configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+		db.prepare(
+			'INSERT INTO migration_worker_holds (worker_agent_id, claims_json) VALUES (?, ?)'
+		).run('worker', '[]');
+		const proof = issueAgentTurnAdmission('worker');
+		await expect(
+			spawnAgent('codex', dir, 'fixture', undefined, {
+				originWorkerId: 'worker',
+				workerAdmission: proof,
+				agentCommand: FAKE_AGENT_PATH,
+				agentConfigValues: {},
+			})
+		).rejects.toThrow('reserved');
+		revokeAgentTurnAdmission(proof);
+		expect(db.prepare('SELECT * FROM migration_worker_holds').all()).toHaveLength(1);
+	});
+
+	it('fences attributed Group Chat/Consult children in both orders without guessing from provider/CWD', async () => {
+		configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+		const manager = new ProcessManager(() => false, { isCoworkingEnabled: () => false });
+		const fake = fakeAgentSpec(
+			dir,
+			{ chunks: [], close: { code: 0, signal: null } },
+			{ hold: true }
+		);
+		const spawn = (sessionId: string, originWorkerId?: string) =>
+			spawnGroupChatAgent({
+				sessionId,
+				originWorkerId,
+				agentId: 'codex',
+				agent: { id: 'codex', command: fake.command, capabilities: {} } as never,
+				command: fake.command,
+				args: fake.args,
+				cwd: fake.cwd,
+				customEnvVars: fake.env as Record<string, string>,
+				processManager: manager,
+			});
+		try {
+			const token = claim();
+			expect(await spawn('cross-agent-denied', 'worker')).toMatchObject({ success: false });
+			expect(manager.getAll()).toHaveLength(0);
+			// A standalone moderator is not this worker just because provider/CWD match.
+			expect(await spawn('group-chat-moderator')).toMatchObject({ success: true });
+			manager.kill('group-chat-moderator', { shutdown: true });
+			expect(runtime.hold(token)).toEqual({ ok: true });
+			expect(runtime.resume(token)).toEqual({ ok: true });
+			for (const id of ['cross-agent-consult', 'group-chat-participant']) {
+				expect(await spawn(id, 'worker')).toMatchObject({ success: true });
+				host.agentStates.worker.busy = isAgentBusy({ id: 'worker', aiTabs: [] }, manager);
+				expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'worker-busy' });
+				manager.kill(id, { shutdown: true });
+				expect(hasHeadlessAgentActivity('worker')).toBe(true);
+				await vi.waitFor(() => expect(hasHeadlessAgentActivity('worker')).toBe(false));
+			}
+		} finally {
+			manager.killAll({ shutdown: true });
+			await vi.waitFor(() => expect(hasHeadlessAgentActivity('worker')).toBe(false));
+		}
 	});
 	it('arbitrates a real desktop child and Board reservation in both start orders', async () => {
 		configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
