@@ -55,7 +55,7 @@ import { logger } from '../utils/logger';
 import { captureException } from '../utils/sentry';
 import { triggerHaptic, HAPTIC_PATTERNS, isCoarsePointer } from '../utils/touch';
 import { openUrl } from '../utils/openUrl';
-import { observedWorkerRun } from '../utils/boardWorkerStatus';
+import { observedWorkerRuns } from '../utils/boardWorkerStatus';
 
 export interface BoardModalProps {
 	theme: Theme;
@@ -261,6 +261,17 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 
 	const [showWorkers, setShowWorkers] = useState(false);
 	const [workers, setWorkers] = useState<StoredBoardWorker[]>([]);
+	const sessionById = useMemo(() => {
+		const index = new Map<string, (typeof allSessions)[number]>();
+		for (const session of allSessions) if (!index.has(session.id)) index.set(session.id, session);
+		return index;
+	}, [allSessions]);
+	const workersByAgent = useMemo(() => {
+		const index = new Map<string, StoredBoardWorker>();
+		for (const worker of workers) if (!index.has(worker.agentId)) index.set(worker.agentId, worker);
+		return index;
+	}, [workers]);
+	const observedRuns = useMemo(() => observedWorkerRuns(boards), [boards]);
 	const workersRevision = useRef(0);
 	const [workerBusy, setWorkerBusy] = useState(false);
 	const creatorOpen = useModalStore(selectModalOpen('newInstance'));
@@ -1527,7 +1538,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							<div>
 								<p>
 									Agent awaiting worker registration:{' '}
-									{allSessions.find((s) => s.id === pendingWorkerId)?.name ?? pendingWorkerId}
+									{sessionById.get(pendingWorkerId)?.name ?? pendingWorkerId}
 								</p>
 								<button
 									disabled={workerBusy}
@@ -1538,7 +1549,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							</div>
 						)}
 						{workers
-							.filter((worker) => !allSessions.some((session) => session.id === worker.agentId))
+							.filter((worker) => !sessionById.has(worker.agentId))
 							.map((worker) => (
 								<div key={worker.agentId} className="py-2">
 									{worker.agentId} — agent missing; {worker.enabled ? 'enabled' : 'disabled'}
@@ -1546,8 +1557,8 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 								</div>
 							))}
 						{liveSessions.map((session) => {
-							const worker = workers.find((entry) => entry.agentId === session.id);
-							const observedRun = observedWorkerRun(boards, session.id);
+							const worker = workersByAgent.get(session.id);
+							const observedRun = observedRuns.get(session.id);
 							const roles = worker?.payload.roleRefs;
 							const repos = worker?.payload.allowedRepositoryIds;
 							const validAccess =

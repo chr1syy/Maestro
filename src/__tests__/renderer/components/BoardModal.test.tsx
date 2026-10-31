@@ -11,6 +11,7 @@ import { act, fireEvent, render, screen, waitFor, cleanup, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useModalStore, selectModalData } from '../../../renderer/stores/modalStore';
 import { BoardModal } from '../../../renderer/components/BoardModal';
+import { observedWorkerRuns } from '../../../renderer/utils/boardWorkerStatus';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { notifyToast } from '../../../renderer/stores/notificationStore';
 import { openUrl } from '../../../renderer/utils/openUrl';
@@ -1482,6 +1483,39 @@ it('shows the handler message without Electron IPC plumbing on load failure', as
 	);
 });
 
+describe('observed worker runs', () => {
+	it('uses the first active latest run in board order and drops stale observations on refresh', () => {
+		const running = (id: string, title: string, workerAgentId: string) =>
+			makeCard({
+				id,
+				title,
+				status: 'running',
+				runs: [{ attempt: 1, startedAt: '2026-10-31T00:00:00Z', workerAgentId }],
+			});
+		const first = running('a', 'First', 's1');
+		const second = running('b', 'Second', 's1');
+		const ended = makeCard({
+			...running('c', 'Ended', 's2'),
+			runs: [
+				{
+					attempt: 1,
+					startedAt: '2026-10-31T00:00:00Z',
+					endedAt: '2026-10-31T01:00:00Z',
+					workerAgentId: 's2',
+				},
+			],
+		});
+		const boards: Board[] = [
+			{ id: 'one', name: 'One', cards: [first, ended] },
+			{ id: 'two', name: 'Two', cards: [second] },
+		];
+		expect(observedWorkerRuns(boards).get('s1')).toBe('First');
+		expect(observedWorkerRuns(boards).has('s2')).toBe(false);
+		expect(observedWorkerRuns(boards.slice(1)).get('s1')).toBe('Second');
+		expect(observedWorkerRuns([]).has('s1')).toBe(false);
+	});
+});
+
 describe('Board worker registry interactions', () => {
 	it('shows session changes, missing agents and observed runs without asserting a reservation', async () => {
 		const card = makeCard({
@@ -1524,6 +1558,15 @@ describe('Board worker registry interactions', () => {
 			}))
 		);
 		expect(screen.getByText(/Agent state: busy; global occupancy unknown/)).toBeInTheDocument();
+		boardApi.list.mockResolvedValue([{ id: 'b1', name: 'Board', cards: [] }]);
+		act(() => emitBoardChanged());
+		await waitFor(() =>
+			expect(screen.queryByText(/observed running card in loaded boards/)).not.toBeInTheDocument()
+		);
+		expect(screen.getByText(/Agent state: busy; global occupancy unknown/)).toBeInTheDocument();
+		expect(
+			screen.getByText(/gone — agent missing; disabled, intake paused; occupancy unknown/)
+		).toBeInTheDocument();
 	});
 	it('registers an agent and updates role, repository, pause and enabled state visibly', async () => {
 		installApis([{ id: 'b1', name: 'Board', cards: [] }]);
