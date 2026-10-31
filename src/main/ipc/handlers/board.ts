@@ -15,6 +15,8 @@ import { getLiveSessions } from '../../stores/getters';
 import { withIpcErrorLogging, type CreateHandlerOptions } from '../../utils/ipcHandler';
 import {
 	listBoards,
+	queryBoardWorkspace,
+	BoardStorageError,
 	getBoard,
 	createBoard,
 	renameBoard,
@@ -35,7 +37,13 @@ import {
 import { applyCardCancel } from '../../board/board-dispatcher';
 import { startCardPr } from '../../board/board-pr';
 import type { BoardCardToastPayload } from '../../board/board-toast';
-import type { Board, BoardCard, CardStatus } from '../../../shared/board/types';
+import type {
+	Board,
+	BoardCard,
+	CardStatus,
+	BoardWorkspaceQuery,
+	BoardWorkspaceQueryResponse,
+} from '../../../shared/board/types';
 import type { CueEngine } from '../../cue/cue-engine';
 
 const LOG_CONTEXT = '[Board]';
@@ -66,6 +74,21 @@ export interface BoardHandlerDependencies {
  * dispatcher so the in-flight process is actually killed.
  */
 export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
+	ipcMain.handle(
+		'board:queryWorkspace',
+		withIpcErrorLogging(
+			handlerOpts('queryWorkspace'),
+			async (query?: BoardWorkspaceQuery): Promise<BoardWorkspaceQueryResponse> => {
+				try {
+					return { ok: true, value: queryBoardWorkspace(query) };
+				} catch (error) {
+					if (!(error instanceof BoardStorageError)) throw error;
+					return { ok: false, error: { code: error.code, message: error.message } };
+				}
+			}
+		)
+	);
+
 	ipcMain.handle(
 		'board:listWorkers',
 		withIpcErrorLogging(handlerOpts('listWorkers'), async () => listBoardWorkers())

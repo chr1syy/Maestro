@@ -12,6 +12,8 @@ import {
 	type BoardCard,
 	type CardStatus,
 	type BoardStorageRef,
+	type BoardWorkspaceQuery,
+	type BoardWorkspaceQueryResult,
 	type CardRun,
 } from '../../shared/board/types';
 import { validateCapture } from '../../shared/board/domain';
@@ -91,6 +93,72 @@ export class BoardStorageFacade {
 				'No registered or imported central source for this project'
 			);
 		return keys;
+	}
+
+	/** Filters are views of the same central snapshot; they never open another DB. */
+	query(query: BoardWorkspaceQuery = {}): BoardWorkspaceQueryResult {
+		if (
+			!query ||
+			typeof query !== 'object' ||
+			Array.isArray(query) ||
+			Object.keys(query).some((key) => !['sourceKey', 'projectRef', 'projectRoot'].includes(key))
+		)
+			throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board query');
+		for (const key of ['sourceKey', 'projectRoot'] as const) {
+			if (
+				query[key] !== undefined &&
+				(typeof query[key] !== 'string' || !query[key]!.trim() || query[key]!.includes('\0'))
+			)
+				throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board query filter');
+		}
+		if (
+			query.projectRef !== undefined &&
+			(!query.projectRef ||
+				typeof query.projectRef.sourceKey !== 'string' ||
+				!query.projectRef.sourceKey.trim() ||
+				query.projectRef.sourceKey.includes('\0') ||
+				Object.keys(query.projectRef).some((key) => key !== 'sourceKey'))
+		)
+			throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board project reference');
+		return this.db.transaction(() => {
+			const snapshot = this.workspace.readWorkspace();
+			let projectSource: string | undefined;
+			if (query.projectRoot !== undefined) {
+				const keys = [...new Set(this.resolveSourceKeys(query.projectRoot))];
+				if (!keys.length)
+					throw new BoardWorkspaceStorageError(
+						'legacy-mapping-missing',
+						'No Board source for project'
+					);
+				if (keys.length !== 1)
+					throw new BoardWorkspaceStorageError(
+						'legacy-mapping-ambiguous',
+						'Project resolves to multiple Board sources'
+					);
+				projectSource = keys[0];
+			}
+			const filters = [query.sourceKey, query.projectRef?.sourceKey, projectSource].filter(
+				(key): key is string => key !== undefined
+			);
+			if (filters.some((key) => !snapshot.sourceKeys.includes(key)))
+				throw new BoardWorkspaceStorageError(
+					'legacy-mapping-missing',
+					'Board source is not registered'
+				);
+			return {
+				revision: snapshot.revision,
+				sources: snapshot.sourceKeys.map((sourceKey) => ({ sourceKey, projectRef: { sourceKey } })),
+				collections: snapshot.collections
+					.filter((entry) => filters.every((key) => key === entry.sourceKey))
+					.map((entry) => ({
+						sourceKey: entry.sourceKey,
+						collectionKey: entry.collectionKey,
+						revision: entry.revision,
+						projectRef: { sourceKey: entry.sourceKey },
+						board: this.project(entry),
+					})),
+			};
+		})();
 	}
 
 	read(projectRoot: string, boardId: string): Board {
@@ -378,6 +446,9 @@ function nowIso(): string {
 }
 export function loadBoards(projectRoot: string): Board[] {
 	return storage().list(projectRoot);
+}
+export function queryBoardWorkspace(query?: BoardWorkspaceQuery): BoardWorkspaceQueryResult {
+	return storage().query(query);
 }
 export function listBoards(projectRoot: string): Board[] {
 	return loadBoards(projectRoot);

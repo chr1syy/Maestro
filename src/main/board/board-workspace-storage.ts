@@ -460,6 +460,36 @@ export class BoardWorkspaceStorage {
 		};
 	}
 
+	/** Catalog comes only from persisted source registrations and migration ledgers. */
+	listSourceKeys(): string[] {
+		return (
+			this.db
+				.prepare(
+					'SELECT source_key FROM board_sources UNION SELECT source_key FROM migrations ORDER BY source_key'
+				)
+				.all() as { source_key: string }[]
+		).map((row) => row.source_key);
+	}
+
+	/** All collections and card revisions share one read transaction. */
+	readWorkspace(): {
+		revision: number;
+		sourceKeys: string[];
+		collections: BoardCollectionSnapshot[];
+	} {
+		return this.db.transaction(() => ({
+			revision: (
+				this.db.prepare('SELECT revision FROM workspace WHERE id = 1').get() as { revision: number }
+			).revision,
+			sourceKeys: this.listSourceKeys(),
+			collections: this.listSourceKeys().flatMap((sourceKey) =>
+				this.listCollections(sourceKey)
+					.filter((entry) => !entry.archived)
+					.map((entry) => this.readCollection(entry)!)
+			),
+		}))();
+	}
+
 	listCollections(sourceKey: string): StoredBoardCollection[] {
 		requireKey(sourceKey);
 		const rows = this.db

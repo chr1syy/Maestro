@@ -8,7 +8,13 @@
 
 import { ipcRenderer } from 'electron';
 import type { StoredBoardWorker } from '../board/board-workspace-storage';
-import type { Board, BoardCard, CardStatus } from '../../shared/board/types';
+import type {
+	Board,
+	BoardCard,
+	CardStatus,
+	BoardWorkspaceQuery,
+	BoardWorkspaceQueryResponse,
+} from '../../shared/board/types';
 
 export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
 
@@ -17,6 +23,8 @@ export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
  */
 export function createBoardApi() {
 	return {
+		queryWorkspace: (query?: BoardWorkspaceQuery): Promise<BoardWorkspaceQueryResponse> =>
+			ipcRenderer.invoke('board:queryWorkspace', query),
 		listWorkerAccessOptions: (): Promise<
 			ReturnType<typeof import('../board/board-workspace-storage').listBoardWorkerAccessOptions>
 		> => ipcRenderer.invoke('board:listWorkerAccessOptions'),

@@ -4907,6 +4907,9 @@ interface MaestroAPI {
 
 	// Board API (persistent task DAG stored in .maestro/board.yaml)
 	board: {
+		queryWorkspace: (
+			query?: import('../shared/board/types').BoardWorkspaceQuery
+		) => Promise<import('../shared/board/types').BoardWorkspaceQueryResponse>;
 		listWorkerAccessOptions: () => Promise<
 			ReturnType<
 				typeof import('../main/board/board-workspace-storage').listBoardWorkerAccessOptions

@@ -242,6 +242,43 @@ export interface BoardCard extends BoardCaptureOptions {
 	updatedAt: string;
 }
 
+/** A project is addressed by its registered canonical source, never a display name. */
+export interface BoardProjectRef {
+	sourceKey: string;
+}
+
+export interface BoardSourceCatalogEntry {
+	sourceKey: string;
+	projectRef: BoardProjectRef;
+}
+
+export interface BoardWorkspaceQuery {
+	/** Omitted filters include every registered/imported source in this workspace. */
+	sourceKey?: string;
+	projectRef?: BoardProjectRef;
+	/** Compatibility lookup; must resolve to exactly one registered source. */
+	projectRoot?: string;
+}
+
+export interface BoardWorkspaceCollection {
+	sourceKey: string;
+	collectionKey: string;
+	revision: number;
+	projectRef: BoardProjectRef;
+	board: Board;
+}
+
+export interface BoardWorkspaceQueryResult {
+	revision: number;
+	sources: BoardSourceCatalogEntry[];
+	collections: BoardWorkspaceCollection[];
+}
+
+/** Explicit envelope preserves expected error codes across Electron serialization. */
+export type BoardWorkspaceQueryResponse =
+	| { ok: true; value: BoardWorkspaceQueryResult }
+	| { ok: false; error: { code: string; message: string } };
+
 /** Explicit central identity and optimistic concurrency token, carried across transports. */
 export interface BoardStorageRef {
 	sourceKey: string;
