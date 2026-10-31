@@ -104,13 +104,12 @@ At spawn time each field resolves as **profile value, then base agent value, the
 
 ## Dispatcher lifecycle
 
-On each Maestro Cue engine tick, the Board dispatcher runs one pass per board (gated on both the Cue and Board Encore flags, read fresh each tick):
+The desktop Cue bootstrap installs the central Board runtime behind the same host entry used by desktop controls and authenticated CLI commands. On each existing heartbeat, it scans every registered collection, including sources without an open project agent. Both Cue and Board feature flags must be enabled.
 
-1. **Reclaim** stale `running` cards. A card left `running` with no live process (for example after the app restarted mid-run) is returned to `ready` and its open run is closed as `reclaimed`.
-2. **Auto-decompose** (optional, see below).
-3. **Promote** every `todo` card whose parents are all `done` to `ready`, skipping any card you have stopped and not yet resumed.
-4. **Claim** `ready` cards up to the work-in-progress cap, mark each `running`, open a run record, and spawn its assignee. The board is persisted _before_ any spawn resolves, so a crash or the next tick sees the cards as `running` and never double-dispatches them.
-5. **Apply** each finished run's outcome (see completion markers).
+1. Re-read current group membership, registered worker availability, role and pin requirements, repository evidence, approval, holds, dependencies and global/collection WIP limits.
+2. Claim each eligible card and worker atomically in SQLite. A pin outside its scope, an empty pool, disabled/paused worker or another active reservation produces a waiting reason in Cue's log; execution never falls back outside the scope.
+3. Start the fenced attempt through the existing Cue run service. Persisted claims, native process start and completed work are separate states. Native runs participate in Cue's drain/stop accounting.
+4. Apply a result only to its matching owner, attempt and run token. Reconciliation retains uncertain starts and reservations until native termination evidence exists; elapsed time or a missing in-memory process alone cannot release capacity.
 
 A card that fails repeatedly is force-blocked by a circuit breaker (two consecutive non-completing runs by default), so a broken card cannot spin forever.
 
@@ -259,4 +258,4 @@ A few behaviors worth knowing:
 - `board set-status` accepts manual statuses (`triage`, `todo`, `review`, `blocked`, `done`), but cannot approve a human review or grant required dispatch approval. For a qualifying card carrying `prOnDone`, this command opens the pull request and waits for the result. `board tick` never opens a pull request.
 - `board tick` and `board watch` request the existing host runtime through the authenticated command socket. They never open a Board DB, spawn an agent, reclaim a run by age or start a scheduler locally. `watch` polls that same host entry (default 30 seconds, minimum 5) until Ctrl-C. Concurrent desktop/CLI requests share fenced claims and attempts. Missing host/owner and conflicts return machine-readable errors or per-card waiting reasons. A successful intake reports `accepted` and a run token; it does not establish process execution or task success.
 - CLI `board approve` cannot grant required human approval. The native `board.runtimeCommand` IPC endpoint derives that authority from the actual desktop main-frame sender, with grants bound to the captured specification revision. Hold/Resume and ordinary status changes preserve required approval.
-- The transport requires the owning Cue/bootstrap context to install `configureBoardRuntimeHost` with its existing `BoardRuntime`. The global Cue wiring is a separate integration step; an unconfigured host returns `runtime-unavailable`.
+- The desktop Cue/bootstrap context installs `configureBoardRuntimeHost` with the central owner and existing Cue lock/run service. CLI requests attach to this owner; they do not create one. An unavailable owner returns `runtime-unavailable`. Legacy `boardWorker` session markers no longer participate in active dispatch; the migrated central registry and migration holds remain authoritative.

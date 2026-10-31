@@ -5,25 +5,29 @@ import type { BoardRuntime } from './board-runtime';
 import { listBoardWorkers, type BoardCardKey } from './board-workspace-storage';
 import type {
 	BoardRuntimeCommand,
+	BoardCommandTarget,
 	BoardCommandResult,
 	BoardTickResult,
 } from '../../shared/board/commands';
 import { BoardStorageError, queryBoardWorkspace } from './board-storage';
 import { canonicalJson } from '../../shared/canonicalJson';
 
-let runtimeFor: (key: BoardCardKey) => BoardRuntime | null = () => null;
+let runtimeFor: (key: BoardCardKey) => BoardRuntime | null | Promise<BoardRuntime | null> = () =>
+	null;
 export function configureBoardRuntimeHost(provider: typeof runtimeFor): void {
 	runtimeFor = provider;
 }
 
 export async function executeBoardRuntimeCommand(
-	command: BoardRuntimeCommand,
+	command:
+		| BoardRuntimeCommand
+		| { action: 'tick'; target: Omit<BoardCommandTarget, 'projectRoot'>; operationId: string },
 	/** Only a validated native main-frame IPC action supplies this principal. */
 	principal?: string
 ): Promise<BoardCommandResult> {
 	const { target } = command;
 	const entry = queryBoardWorkspace({
-		projectRoot: target.projectRoot,
+		projectRoot: 'projectRoot' in target ? target.projectRoot : undefined,
 		sourceKey: target.sourceKey,
 	}).collections.find(
 		(c) => c.collectionKey === target.collectionKey && c.sourceKey === target.sourceKey
@@ -48,7 +52,10 @@ export async function executeBoardRuntimeCommand(
 				collectionKey: target.collectionKey,
 				cardId: card.id,
 			};
-			const runtime = runtimeFor(key);
+			const beforePrepare = queryBoardWorkspace({ sourceKey: key.sourceKey }).collections.find(
+				(c) => c.collectionKey === key.collectionKey
+			)?.revision;
+			const runtime = await runtimeFor(key);
 			if (!runtime) return failed('runtime-unavailable');
 			const storage = runtime.storage;
 			const collection = storage.workspace.readCollection(key);
@@ -57,11 +64,16 @@ export async function executeBoardRuntimeCommand(
 				results.push({ cardId: card.id, ok: false, reason: 'not-found' });
 				continue;
 			}
+			if (collection.revision !== beforePrepare) {
+				results.push({ cardId: card.id, ok: false, reason: 'stale-revision' });
+				continue;
+			}
 			const workers = listBoardWorkers(storage.db);
 			// A foreign pin must fail through claim validation, never fall back to the pool.
-			const candidates = card.assigneeAgentId
-				? [card.assigneeAgentId]
-				: workers.map((w) => w.agentId);
+			const candidates =
+				typeof fresh.payload.assigneeAgentId === 'string'
+					? [fresh.payload.assigneeAgentId]
+					: workers.map((w) => w.agentId);
 			let result: BoardTickResult = { cardId: card.id, ok: false, reason: 'no-workers' };
 			for (const workerAgentId of candidates) {
 				const claim = runtime.dispatch({
@@ -89,7 +101,7 @@ export async function executeBoardRuntimeCommand(
 		collectionKey: target.collectionKey,
 		cardId: command.cardId,
 	};
-	const runtime = runtimeFor(key);
+	const runtime = await runtimeFor(key);
 	if (!runtime) return failed('runtime-unavailable');
 	const card = runtime.storage.workspace
 		.readCollection(key)
@@ -131,7 +143,7 @@ export async function controlBoardRuntimeCard(
 		throw new BoardStorageError('identity-mismatch', 'Ambiguous or missing Board identity');
 	const entry = entries[0];
 	const key = { sourceKey: entry.sourceKey, collectionKey: entry.collectionKey, cardId };
-	const runtime = runtimeFor(key);
+	const runtime = await runtimeFor(key);
 	if (!runtime) throw new BoardStorageError('runtime-unavailable', 'Board runtime is unavailable');
 	const row = runtime.storage.db
 		.prepare(

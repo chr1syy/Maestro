@@ -58,7 +58,8 @@ export class BoardRuntime {
 		private readonly host: () => Omit<BoardClaimHostContext, 'owner'>,
 		private readonly service: BoardRunService,
 		/** Must prove death of the exact boot/start identity, never heartbeat age. */
-		private readonly ownerLiveness: (identity: string) => 'alive' | 'dead' | 'unknown'
+		private readonly ownerLiveness: (identity: string) => 'alive' | 'dead' | 'unknown',
+		private readonly onChanged: () => void = () => {}
 	) {
 		const { pid, startedAt, bootTime } = lock.info;
 		this.processIdentity = canonicalJson({ pid, startedAt, bootTime: bootTime ?? null });
@@ -110,10 +111,13 @@ export class BoardRuntime {
 		if (!claim.ok) return claim;
 		const current = this.read(claim.runToken);
 		if (current?.life.phase === 'prepared') {
-			void this.start(claim.runToken).catch(() => {
-				this.uncertain(claim.runToken, 'launch-or-result-uncertain');
-			});
+			void this.start(claim.runToken)
+				.catch(() => {
+					this.uncertain(claim.runToken, 'launch-or-result-uncertain');
+				})
+				.finally(() => this.onChanged());
 		}
+		this.onChanged();
 		return claim;
 	}
 
@@ -287,6 +291,7 @@ export class BoardRuntime {
 				});
 			})
 			.immediate();
+		this.onChanged();
 	}
 
 	/** Hold is durable before Stop. A stop request is never an acknowledgement. */

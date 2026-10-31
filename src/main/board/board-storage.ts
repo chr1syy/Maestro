@@ -603,6 +603,9 @@ function storage(): BoardStorageFacade {
 		openBoardDb(path.join(resolveUserDataDir(), 'board', 'board.sqlite'))
 	));
 }
+/** Share the current facade with the owning Cue adapter without another DB. */
+export { storage as getBoardStorage };
+
 export function closeBoardStorage(): void {
 	defaultFacade?.db.close();
 	defaultFacade = null;
