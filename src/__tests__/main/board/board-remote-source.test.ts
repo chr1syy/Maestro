@@ -148,7 +148,7 @@ it('imports two remote hosts with the same path separately, retains immutable sn
 			},
 			true
 		);
-		expect(storage.captureReadiness(captured)['remote-card']).not.toContain(
+		expect((await storage.captureReadinessAsync(captured))['remote-card']).not.toContain(
 			'repository-unresolved'
 		);
 		expect(read.mock.calls.some((args) => String(args[0]).startsWith(root))).toBe(false);

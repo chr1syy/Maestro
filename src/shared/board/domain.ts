@@ -166,7 +166,8 @@ export type BoardCaptureWaitReason =
 	| 'target-missing'
 	| 'group-missing'
 	| 'role-missing'
-	| 'repository-unresolved';
+	| 'repository-unresolved'
+	| 'repository-unknown';
 
 /** Capture readiness only; dispatch must additionally check membership, workers and all runtime gates. */
 export function evaluateCaptureReadiness(

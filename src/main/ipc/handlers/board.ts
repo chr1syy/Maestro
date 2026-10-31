@@ -19,7 +19,7 @@ import {
 	getBoardCaptureCatalog,
 	getBoardStorage,
 	listBoards,
-	queryBoardWorkspace,
+	queryBoardWorkspaceAsync,
 	BoardStorageError,
 	getBoard,
 	createBoard,
@@ -259,7 +259,7 @@ export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
 			async (query?: BoardWorkspaceQuery): Promise<BoardWorkspaceQueryResponse> => {
 				try {
 					await refreshBoardSources();
-					return { ok: true, value: queryBoardWorkspace(query) };
+					return { ok: true, value: await queryBoardWorkspaceAsync(query) };
 				} catch (error) {
 					if (!(error instanceof BoardStorageError)) throw error;
 					return { ok: false, error: { code: error.code, message: error.message } };

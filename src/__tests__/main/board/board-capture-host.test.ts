@@ -21,6 +21,11 @@ import {
 import { canonicalJson } from '../../../shared/canonicalJson';
 import type { BoardCaptureCommand, BoardCard } from '../../../shared/board/types';
 
+// Preserve real IO while making native ESM exports spyable at the diagnostic boundary.
+vi.mock('node:fs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('node:fs')>()),
+}));
+
 const transport = vi.hoisted(() => ({
 	handlers: new Map<string, (...args: any[]) => any>(),
 	event: {} as any,
@@ -480,9 +485,13 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 	it('reports a later membership conflict and deleted role pin from current host state', async () => {
 		expect((await api.captureCard(command())).ok).toBe(true);
 		agents = [{ id: 'a', groupId: 'other' }];
-		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toContain('scope-conflict');
+		expect((await facade.captureReadinessAsync(facade.read(dir, 'b'))).c).toContain(
+			'scope-conflict'
+		);
 		agents = [];
-		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toContain('target-missing');
+		expect((await facade.captureReadinessAsync(facade.read(dir, 'b'))).c).toContain(
+			'target-missing'
+		);
 	});
 	it('keeps explicitly approved direct intent on ordinary edits but allows a human to tighten it', async () => {
 		expect((await api.captureCard(command(card({ startModeOverride: 'direct' })))).ok).toBe(true);
@@ -806,19 +815,23 @@ describe('read-only current host diagnosis across capture and global reload', ()
 		registerBoardWorker(db, 'a');
 		setBoardWorkerAccess(db, 'a', [{ namespace, profileId: 'role' }], ['repo']);
 		configureBoardReadinessHost(() => ({ dispatchEnabled: true, agentStates: {} }));
-		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toEqual(['occupancy-unknown']);
+		expect((await facade.captureReadinessAsync(facade.read(dir, 'b'))).c).toEqual([
+			'occupancy-unknown',
+		]);
 		configureBoardReadinessHost(() => ({
 			dispatchEnabled: true,
 			agentStates: {
 				a: { live: true, busy: false, location: { kind: 'ssh', remoteId: 'other-host' } },
 			},
 		}));
-		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toEqual(['worker-location-mismatch']);
+		expect((await facade.captureReadinessAsync(facade.read(dir, 'b'))).c).toEqual([
+			'worker-location-mismatch',
+		]);
 		configureBoardReadinessHost(() => ({
 			dispatchEnabled: true,
 			agentStates: { a: { live: true, busy: false, location: { kind: 'local' } } },
 		}));
-		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toEqual(['awaiting-cue']);
+		expect((await facade.captureReadinessAsync(facade.read(dir, 'b'))).c).toEqual(['awaiting-cue']);
 		expect(db.prepare('SELECT * FROM runtime_owner').all()).toEqual([]);
 		expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
 	});
@@ -894,5 +907,118 @@ describe('read-only current host diagnosis across capture and global reload', ()
 			'worker-busy',
 			'runtime-unknown',
 		]);
+	});
+});
+
+describe('asynchronous revision-bound read diagnostics', () => {
+	it.each(['card', 'collection', 'source', 'repository'])(
+		'yields without holding a SQLite snapshot and rejects changed %s evidence during await',
+		async (changed) => {
+			await api.captureCard(command(card({ heldByUser: true })));
+			const stat = fs.promises.stat.bind(fs.promises);
+			const realpath = fs.promises.realpath.bind(fs.promises);
+			const realpathSpy = vi.spyOn(fs.promises, 'realpath').mockImplementation(async (...args) => {
+				expect(db.inTransaction).toBe(false);
+				return realpath(...args);
+			});
+			let entered!: () => void;
+			let resume!: () => void;
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			const blocked = new Promise<void>((resolve) => {
+				resume = resolve;
+			});
+			const spy = vi.spyOn(fs.promises, 'stat').mockImplementation(async (...args) => {
+				expect(db.inTransaction).toBe(false);
+				entered();
+				await blocked;
+				return stat(...args);
+			});
+			try {
+				const reading = facade.queryAsync();
+				await started;
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect(db.inTransaction).toBe(false);
+				// Another real writer can commit while path IO is pending.
+				const board = facade.read(dir, 'b');
+				if (changed === 'card')
+					updateCard(dir, 'b', { ...board.cards[0], body: 'Changed during IO' });
+				else if (changed === 'collection')
+					facade.save(dir, [{ ...board, name: 'Changed during IO' }]);
+				else if (changed === 'source')
+					db.prepare('UPDATE board_source_locations SET payload_json=? WHERE source_key=?').run(
+						canonicalJson({ location: { kind: 'local' }, path: dir + '/other' }),
+						board.storage!.sourceKey
+					);
+				else
+					db.prepare('UPDATE repositories SET payload_json=? WHERE id=?').run(
+						canonicalJson({ id: 'repo', workingDirectory: dir + '/other', validated: true }),
+						'repo'
+					);
+				resume();
+				const view = await reading;
+				expect(view.collections[0].board.cards[0].heldByUser).toBe(true);
+				expect(view.collections[0].readiness!.c).toEqual(
+					expect.arrayContaining(['repository-unknown', 'held', 'approval-required'])
+				);
+				expect(view.collections[0].readiness!.c).not.toContain('awaiting-cue');
+				expect(db.prepare('SELECT * FROM runtime_owner').all()).toEqual([]);
+				expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
+			} finally {
+				resume();
+				spy.mockRestore();
+				realpathSpy.mockRestore();
+			}
+		}
+	);
+
+	it.each(['ENOENT', 'ENOTDIR', 'EACCES'])(
+		'retains unresolved repository diagnostics for %s',
+		async (code) => {
+			await api.captureCard(command());
+			const spy = vi
+				.spyOn(fs.promises, 'stat')
+				.mockRejectedValue(Object.assign(new Error(code), { code }));
+			try {
+				const result = await api.queryWorkspace();
+				if (!result.ok) throw new Error(result.error.message);
+				expect(result.value.collections[0].readiness!.c).toContain('repository-unresolved');
+				expect(result.value.collections[0].readiness!.c).not.toContain('awaiting-cue');
+			} finally {
+				spy.mockRestore();
+			}
+		}
+	);
+
+	it('has no synchronous path fallback and keeps missing observations unknown', async () => {
+		await api.captureCard(command());
+		const stat = vi.spyOn(fs, 'statSync').mockImplementation(() => {
+			throw new Error('sync stat');
+		});
+		const realpath = vi.spyOn(fs, 'realpathSync').mockImplementation(() => {
+			throw new Error('sync realpath');
+		});
+		try {
+			const view = facade.query({ projectRoot: dir });
+			expect(view.collections[0].readiness!.c).toContain('repository-unknown');
+			const asyncView = await facade.queryAsync({ projectRoot: dir });
+			expect(asyncView.collections[0].readiness!.c).not.toContain('repository-unknown');
+			expect(stat).not.toHaveBeenCalled();
+			expect(realpath).not.toHaveBeenCalled();
+		} finally {
+			stat.mockRestore();
+			realpath.mockRestore();
+		}
+	});
+
+	it('refuses asynchronous preparation under a caller-owned transaction', async () => {
+		await api.captureCard(command());
+		const board = facade.read(dir, 'b');
+		let result!: Promise<unknown>;
+		db.transaction(() => {
+			result = facade.prepareDiagnosticObservations([board]);
+		})();
+		await expect(result).rejects.toThrow('no open transaction');
 	});
 });

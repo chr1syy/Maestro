@@ -128,6 +128,22 @@ export function configureBoardReadinessHost(provider: typeof readinessHost): voi
 	readinessHost = provider;
 }
 
+/** Ephemeral read evidence, never an authorization or a persisted cache. */
+export interface PreparedDiagnosticObservations {
+	workspaceRevision: number;
+	cards: {
+		sourceKey: string;
+		collectionKey: string;
+		cardId: string;
+		collectionRevision: number | null;
+		cardRevision: number | undefined;
+		cardIdentity: string;
+		sourceIdentity: string;
+		repositoryIdentity: string;
+		repositoryResolved: boolean;
+	}[];
+}
+
 /** Injectable facade: fixtures and host share the same SQLite adapter and source resolver. */
 export class BoardStorageFacade {
 	readonly workspace: BoardWorkspaceStorage;
@@ -187,7 +203,76 @@ export class BoardStorageFacade {
 		};
 	}
 
-	captureReadiness(board: Board) {
+	private diagnosticSourceIdentity(sourceKey: string): string {
+		return canonicalJson({
+			location:
+				this.db
+					.prepare('SELECT payload_json FROM board_source_locations WHERE source_key=?')
+					.get(sourceKey) ?? null,
+		});
+	}
+
+	/** All filesystem observations finish before the fresh, synchronous projection begins. */
+	async prepareDiagnosticObservations(boards: Board[]): Promise<PreparedDiagnosticObservations> {
+		if (this.db.inTransaction)
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
+				'Diagnostics require no open transaction'
+			);
+		const workspaceRevision = this.workspace.readWorkspace().revision;
+		const catalog = this.captureCatalog();
+		// Capture every identity/revision before yielding, including the original repository reference.
+		const inputs = structuredClone(boards).flatMap((board) =>
+			board.cards.map((card) => ({
+				board,
+				card,
+				repository: catalog.repositories.find(
+					(repo) => repo.id === card.repositoryId && repo.validated
+				),
+				sourceIdentity: this.diagnosticSourceIdentity(board.storage!.sourceKey),
+			}))
+		);
+		const cards = await Promise.all(
+			inputs.map(async ({ board, card, repository, sourceIdentity }) => {
+				let repositoryResolved = false;
+				try {
+					if (repository && card.workingDirectory) {
+						repositoryResolved =
+							repository.location?.kind === 'ssh'
+								? isPathAtOrUnderRoot(card.workingDirectory, repository.workingDirectory)
+								: (await fs.promises.stat(card.workingDirectory)).isDirectory() &&
+									isPathWithin(
+										foldPathCase(await fs.promises.realpath(card.workingDirectory)),
+										foldPathCase(await fs.promises.realpath(repository.workingDirectory))
+									);
+					}
+				} catch (error) {
+					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+						void captureException(error, { operation: 'board:captureRepository' });
+				}
+				return {
+					sourceKey: board.storage!.sourceKey,
+					collectionKey: board.storage!.collectionKey,
+					cardId: card.id,
+					collectionRevision: board.storage!.expectedRevision,
+					cardRevision: card.storageRevision,
+					cardIdentity: canonicalJson(card),
+					sourceIdentity,
+					repositoryIdentity: canonicalJson(repository ?? null),
+					repositoryResolved,
+				};
+			})
+		);
+		return { workspaceRevision, cards };
+	}
+
+	async captureReadinessAsync(board: Board) {
+		const observations = await this.prepareDiagnosticObservations([board]);
+		return this.db.transaction(() => this.captureReadiness(board, observations))();
+	}
+
+	/** Pure path projection; absent or stale observations cannot assert repository readiness. */
+	captureReadiness(board: Board, observations?: PreparedDiagnosticObservations) {
 		const catalog = this.captureCatalog();
 		const host = readinessHost();
 		const workers = listStoredBoardWorkers(this.db).map((worker) => ({
@@ -202,31 +287,42 @@ export class BoardStorageFacade {
 			workers,
 			repositoryIds: catalog.repositories.filter((repo) => repo.validated).map((repo) => repo.id),
 		};
+		const ref = board.storage;
+		const current = ref && this.workspace.readCollection(ref);
+		const workspaceRevision = (
+			this.db.prepare('SELECT revision FROM workspace WHERE id=1').get() as { revision: number }
+		).revision;
+		const sourceIdentity = ref && this.diagnosticSourceIdentity(ref.sourceKey);
+
 		return Object.fromEntries(
 			board.cards.map((card) => {
 				const reasons: BoardReadinessReason[] = evaluateCaptureReadiness(card, context);
 				const repository = catalog.repositories.find(
 					(repo) => repo.id === card.repositoryId && repo.validated
 				);
-				try {
-					if (
-						!repository ||
-						!card.workingDirectory ||
-						(repository.location?.kind === 'ssh'
-							? !isPathAtOrUnderRoot(card.workingDirectory, repository.workingDirectory)
-							: !fs.statSync(card.workingDirectory).isDirectory() ||
-								!isPathWithin(
-									foldPathCase(fs.realpathSync(card.workingDirectory)),
-									foldPathCase(fs.realpathSync(repository.workingDirectory))
-								))
-					) {
-						if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
-					}
-				} catch (error) {
-					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
-						void captureException(error, { operation: 'board:captureRepository' });
-					if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
-				}
+				const observation =
+					observations?.workspaceRevision === workspaceRevision &&
+					current?.revision === ref?.expectedRevision
+						? observations.cards.find(
+								(entry) =>
+									entry.sourceKey === ref?.sourceKey &&
+									entry.collectionKey === ref?.collectionKey &&
+									entry.cardId === card.id &&
+									entry.collectionRevision === ref?.expectedRevision &&
+									entry.cardRevision === card.storageRevision &&
+									entry.cardIdentity === canonicalJson(card) &&
+									entry.sourceIdentity === sourceIdentity &&
+									entry.repositoryIdentity === canonicalJson(repository ?? null)
+							)
+						: undefined;
+				if (!observation && repository && !reasons.includes('repository-unknown'))
+					reasons.push('repository-unknown');
+				else if (
+					observation &&
+					!observation.repositoryResolved &&
+					!reasons.includes('repository-unresolved')
+				)
+					reasons.push('repository-unresolved');
 				if (card.kind === 'review' && !card.reviewHandoff)
 					reasons.push('review-artifact-unresolved');
 				if (card.capturePolicy?.dispatchApproval === 'required') reasons.push('approval-required');
@@ -510,7 +606,10 @@ export class BoardStorageFacade {
 	}
 
 	/** Filters are views of the same central snapshot; they never open another DB. */
-	query(query: BoardWorkspaceQuery = {}): BoardWorkspaceQueryResult {
+	query(
+		query: BoardWorkspaceQuery = {},
+		observations?: PreparedDiagnosticObservations
+	): BoardWorkspaceQueryResult {
 		if (
 			!query ||
 			typeof query !== 'object' ||
@@ -534,23 +633,30 @@ export class BoardStorageFacade {
 				Object.keys(query.projectRef).some((key) => key !== 'sourceKey'))
 		)
 			throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board project reference');
+		let projectSource: string | undefined;
+		if (query.projectRoot !== undefined) {
+			const keys = [
+				...new Set(
+					this.resolveSourceKeys === resolveLocalBoardSourceKeys &&
+						!query.projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)
+						? [boardMigrationSourceKey({ location: { kind: 'local' }, path: query.projectRoot })]
+						: this.resolveSourceKeys(query.projectRoot)
+				),
+			];
+			if (!keys.length)
+				throw new BoardWorkspaceStorageError(
+					'legacy-mapping-missing',
+					'No Board source for project'
+				);
+			if (keys.length !== 1)
+				throw new BoardWorkspaceStorageError(
+					'legacy-mapping-ambiguous',
+					'Project resolves to multiple Board sources'
+				);
+			projectSource = keys[0];
+		}
 		return this.db.transaction(() => {
 			const snapshot = this.workspace.readWorkspace();
-			let projectSource: string | undefined;
-			if (query.projectRoot !== undefined) {
-				const keys = [...new Set(this.resolveSourceKeys(query.projectRoot))];
-				if (!keys.length)
-					throw new BoardWorkspaceStorageError(
-						'legacy-mapping-missing',
-						'No Board source for project'
-					);
-				if (keys.length !== 1)
-					throw new BoardWorkspaceStorageError(
-						'legacy-mapping-ambiguous',
-						'Project resolves to multiple Board sources'
-					);
-				projectSource = keys[0];
-			}
 			const filters = [query.sourceKey, query.projectRef?.sourceKey, projectSource].filter(
 				(key): key is string => key !== undefined
 			);
@@ -592,10 +698,38 @@ export class BoardStorageFacade {
 						revision: entry.revision,
 						projectRef: { sourceKey: entry.sourceKey },
 						board: this.project(entry),
-						readiness: this.captureReadiness(this.project(entry)),
+						readiness: this.captureReadiness(this.project(entry), observations),
 					})),
 			};
 		})();
+	}
+
+	async queryAsync(query: BoardWorkspaceQuery = {}): Promise<BoardWorkspaceQueryResult> {
+		if (this.db.inTransaction)
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
+				'Diagnostics require no open transaction'
+			);
+		// Canonical local mapping is asynchronous; custom/remote adapters keep their explicit identity.
+		if (
+			typeof query?.projectRoot === 'string' &&
+			this.resolveSourceKeys === resolveLocalBoardSourceKeys &&
+			!query.projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)
+		) {
+			try {
+				query = { ...query, projectRoot: await fs.promises.realpath(query.projectRoot) };
+			} catch {
+				throw new BoardWorkspaceStorageError(
+					'legacy-mapping-missing',
+					'Canonical local Board source unavailable'
+				);
+			}
+		}
+		const snapshot = this.query(query);
+		const observations = await this.prepareDiagnosticObservations(
+			snapshot.collections.map((entry) => entry.board)
+		);
+		return this.query(query, observations);
 	}
 
 	read(projectRoot: string, boardId: string): Board {
@@ -927,14 +1061,18 @@ export function closeBoardStorage(): void {
 export function getBoardCaptureCatalog(): BoardCaptureCatalog {
 	return storage().captureCatalog();
 }
-export function captureBoardCard(
+export async function captureBoardCard(
 	command: BoardCaptureCommand,
 	human = false,
 	recordHostState?: () => void
 ) {
 	const board = storage().capture(command, human, recordHostState);
 	announce(command.projectRoot);
-	return { ok: true as const, value: board, readiness: storage().captureReadiness(board) };
+	return {
+		ok: true as const,
+		value: board,
+		readiness: await storage().captureReadinessAsync(board),
+	};
 }
 
 /** Machine-local registry shared by every Board collection. */
@@ -978,6 +1116,11 @@ export function loadBoards(projectRoot: string): Board[] {
 }
 export function queryBoardWorkspace(query?: BoardWorkspaceQuery): BoardWorkspaceQueryResult {
 	return storage().query(query);
+}
+export function queryBoardWorkspaceAsync(
+	query?: BoardWorkspaceQuery
+): Promise<BoardWorkspaceQueryResult> {
+	return storage().queryAsync(query);
 }
 export function listBoards(projectRoot: string): Board[] {
 	return loadBoards(projectRoot);
