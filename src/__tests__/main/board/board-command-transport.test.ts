@@ -362,6 +362,30 @@ describe('Board through native runtime/WebSocket and real SQLite', () => {
 		});
 	});
 
+	it('bootstraps the first collection over the real host and native IPC without a migration fixture', async () => {
+		const root = path.join(dir, 'fresh');
+		fs.mkdirSync(root);
+		const [sourceKey] = facade.resolveSourceKeys(root);
+		expect(
+			db.prepare('SELECT 1 FROM board_sources WHERE source_key=?').get(sourceKey)
+		).toBeUndefined();
+		const first = result<Board>(
+			await send({ action: 'create', projectRoot: root, sourceKey, name: 'First' })
+		);
+		expect(facade.read(root, first.id).name).toBe('First');
+		const nativeRoot = path.join(dir, 'fresh-native');
+		fs.mkdirSync(nativeRoot);
+		registerBoardHandlers({ getCueEngine: () => null });
+		const second = await ipcHandlers.get('board:create')!(
+			{},
+			{ projectRoot: nativeRoot, name: 'Native first' }
+		);
+		expect(facade.read(nativeRoot, second.id).name).toBe('Native first');
+		expect(db.prepare('SELECT count(*) AS n FROM migrations').get()).toEqual({ n: 2 });
+		expect(first.defaultStartMode ?? 'approval').toBe('approval');
+		expect(second.defaultStartMode ?? 'approval').toBe('approval');
+	});
+
 	it('runs revision-bound CRUD on the same persisted facade and refuses wrong create sources', async () => {
 		expect(
 			await send({

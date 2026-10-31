@@ -247,6 +247,40 @@ describe('durable Board runtime over SQLite and the existing run-service seam', 
 		expect(persisted()).toBe(before);
 	});
 
+	it('stamps PR receipts on the completed fenced run without changing its specification or result', async () => {
+		const token = claim();
+		const pending = runtime.start(token);
+		settle(good);
+		expect(await pending).toEqual({ ok: true });
+		const before = runtime.read(token)!;
+		const board = storage.read(roots[0], 'board');
+		const run = board.cards[0].runs![0];
+		const input = {
+			...before.spec.key,
+			expectedRevision: board.storage!.expectedRevision!,
+			expectedCardRevision: board.cards[0].storageRevision!,
+			run: { attempt: run.attempt, startedAt: run.startedAt },
+			result: { prUrl: 'https://example.test/pull/1' },
+			updatedAt: new Date().toISOString(),
+		};
+		const unchanged = persisted();
+		expect(() =>
+			storage.workspace.stampRunPr({ ...input, run: { ...input.run, startedAt: 'wrong' } })
+		).toThrow();
+		expect(persisted()).toBe(unchanged);
+		storage.workspace.stampRunPr(input);
+		expect(storage.read(roots[0], 'board').cards[0].runs![0].prUrl).toBe(input.result.prUrl);
+		const after = runtime.read(token)!;
+		expect(after.spec).toEqual(before.spec);
+		expect(after.outcome).toEqual({
+			...before.outcome,
+			cardOutcome: {
+				...(before.outcome!.cardOutcome as Record<string, unknown>),
+				run: { ...run, prUrl: input.result.prUrl },
+			},
+		});
+	});
+
 	it.each(['alive', 'unknown'] as const)(
 		'refuses owner takeover with %s proof despite an ancient heartbeat and the same PID',
 		(proof) => {

@@ -627,7 +627,15 @@ export class BoardWorkspaceStorage {
 				if (rows.length !== 1 || rows[0].outcome_json === null)
 					throw new BoardWorkspaceStorageError('protected-field', 'Completed central run missing');
 				const outcome = readPayload(rows[0].outcome_json);
-				if (outcome.startedAt !== input.run.startedAt)
+				// Fenced runtime outcomes wrap the card run; migrated outcomes retain
+				// the original flat run. Validate and stamp the same identity in both.
+				const cardOutcome = isRecord(outcome.cardOutcome) ? outcome.cardOutcome : null;
+				const completedRun = cardOutcome ? cardOutcome.run : outcome;
+				if (
+					!isRecord(completedRun) ||
+					completedRun.startedAt !== input.run.startedAt ||
+					completedRun.attempt !== input.run.attempt
+				)
 					throw new BoardWorkspaceStorageError('identity-mismatch', 'PR run changed');
 				const patch = (run: Record<string, unknown>) => {
 					const next: Record<string, unknown> = { ...run, ...input.result };
@@ -646,7 +654,14 @@ export class BoardWorkspaceStorage {
 					.run(canonicalJson(next), input.collectionKey, input.cardId);
 				this.db
 					.prepare('UPDATE runs SET outcome_json = ? WHERE run_id = ?')
-					.run(canonicalJson(patch(outcome)), rows[0].run_id);
+					.run(
+						canonicalJson(
+							cardOutcome
+								? { ...outcome, cardOutcome: { ...cardOutcome, run: patch(completedRun) } }
+								: patch(outcome)
+						),
+						rows[0].run_id
+					);
 				this.db
 					.prepare('UPDATE collections SET revision = revision + 1 WHERE collection_key = ?')
 					.run(input.collectionKey);

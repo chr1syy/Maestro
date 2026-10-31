@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { openBoardDb } from '../../../main/board/board-db';
+import { applyBoardMigration, planBoardMigration } from '../../../main/board/board-migration';
 import { BoardStorageFacade, configureBoardCaptureHost } from '../../../main/board/board-storage';
 import {
 	registerBoardWorker,
@@ -345,6 +346,50 @@ describe('global Cue intake on the shared persistent runtime', () => {
 		await tick();
 		expect(waits).toContainEqual({ cardId: 'same', reason: 'repository-unresolved' });
 		expect(service.spawn).not.toHaveBeenCalled();
+	});
+	it('retains unfinished migrated runs and worker holds through Cue tick and stop', async () => {
+		edit({ heldByUser: true });
+		edit({ heldByUser: true }, 1);
+		const migration = applyBoardMigration(
+			db,
+			planBoardMigration({
+				source: { location: { kind: 'local' }, path: dir },
+				repository: null,
+				boardBytes: Buffer.from(
+					JSON.stringify({
+						boards: [
+							{
+								id: 'legacy',
+								name: 'Legacy',
+								cards: [
+									{
+										id: 'unfinished',
+										title: 'Uncertain legacy work',
+										body: '',
+										parents: [],
+										status: 'running',
+										runs: [{ attempt: 1, workerAgentId: 'legacy-worker', startedAt: 'then' }],
+									},
+								],
+							},
+						],
+					})
+				),
+				profileBytes: null,
+				workers: [],
+			})
+		);
+		const runId = migration.mapping.boards[0].cards[0].runIds[0];
+		const before = db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId);
+		const holds = db.prepare('SELECT * FROM migration_worker_holds').all();
+		await expect(tick()).resolves.toBeUndefined();
+		expect(() => cue.stop()).not.toThrow();
+		expect(db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId)).toEqual(before);
+		expect(db.prepare('SELECT * FROM migration_worker_holds').all()).toEqual(holds);
+		expect(holds).toHaveLength(1);
+		expect(service.spawn).not.toHaveBeenCalled();
+		expect(service.stop).not.toHaveBeenCalled();
+		expect(service.probe).not.toHaveBeenCalled();
 	});
 	it('preserves collection WIP', async () => {
 		edit({ heldByUser: true }, 1);

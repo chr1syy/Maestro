@@ -648,7 +648,9 @@ const boardWriteQueue = createKeyedWriteQueue();
 /** Advisory in-process queue only. SQLite revisions protect across desktop/CLI processes. */
 export function enqueueBoardWrite<T>(projectRoot: string, work: () => T | Promise<T>): Promise<T> {
 	const facade = storage();
-	const sources = facade.sourceKeys(projectRoot).sort();
+	// Queue identity is canonical even before first collection creation registers
+	// the source. Each mutation still validates its own source/revision in SQLite.
+	const sources = [...new Set(facade.resolveSourceKeys(projectRoot))].sort();
 	return boardWriteQueue.enqueue(canonicalJson(sources), async () => work());
 }
 function nowIso(): string {

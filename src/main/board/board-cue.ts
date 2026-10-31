@@ -86,8 +86,14 @@ export class BoardCueHost {
 				}
 			}
 		}
+		// Legacy uncertain runs have migration_worker_holds, not runtime tokens.
+		// Only the durable reservation identifies attempts owned by this runtime.
 		for (const row of storage.db
-			.prepare('SELECT specification_json FROM runs WHERE outcome_json IS NULL')
+			.prepare(
+				`SELECT runs.specification_json FROM runs
+          JOIN reservations ON reservations.run_id = runs.run_id
+          WHERE runs.outcome_json IS NULL`
+			)
 			.all() as { specification_json: string }[]) {
 			const spec = JSON.parse(row.specification_json) as BoardRunSpecification;
 			const runtime = await this.runtimeFor(spec.key);
@@ -102,7 +108,11 @@ export class BoardCueHost {
 		const stopped = new Set<string>();
 		for (const runtime of this.runtimes.values()) {
 			for (const row of runtime.storage.db
-				.prepare('SELECT specification_json FROM runs WHERE outcome_json IS NULL')
+				.prepare(
+					`SELECT runs.specification_json FROM runs
+          JOIN reservations ON reservations.run_id = runs.run_id
+          WHERE runs.outcome_json IS NULL`
+				)
 				.all() as { specification_json: string }[]) {
 				const spec = JSON.parse(row.specification_json) as BoardRunSpecification;
 				if (
