@@ -462,3 +462,28 @@ export function validateBoard(raw: unknown, nowIso?: string): Board | null {
 	}
 	return board;
 }
+
+/** Explicit execution boundary for a global Board card. */
+export type BoardExecutionScope =
+	| { kind: 'agent'; agentId: string }
+	| { kind: 'group'; groupId: string };
+
+export type BoardStartMode = 'approval' | 'direct';
+export type BoardCardKind = 'work' | 'review' | 'test' | 'documentation';
+
+/** Namespaces prevent profiles with the same id in different imports from colliding. */
+export interface BoardRoleRef {
+	namespace: string;
+	profileId: string;
+}
+
+/** Capture-time fields for the global Board; missing fields represent an incomplete draft. */
+export interface BoardCaptureOptions {
+	kind?: BoardCardKind;
+	executionScope?: BoardExecutionScope;
+	assigneeAgentId?: string;
+	role?: BoardRoleRef;
+	repositoryId?: string;
+	workingDirectory?: string;
+	startModeOverride?: BoardStartMode;
+}
