@@ -18,6 +18,11 @@ import type {
 	Board,
 	BoardCard,
 	BoardCardKind,
+	BoardCaptureCatalog,
+	BoardCaptureResponse,
+	BoardExecutionScope,
+	BoardRoleRef,
+	BoardStartMode,
 	BoardWorkspaceCollection,
 	BoardSourceCatalogEntry,
 	CardPriority,
@@ -112,7 +117,12 @@ interface CardDraft {
 	id: string | null; // null = new card
 	title: string;
 	body: string;
-	assigneeProfileId: string; // '' = no role (float to pool, or pin an agent below)
+	assigneeProfileId: string; // Preserves unresolved legacy role IDs until explicitly replaced.
+	role?: BoardRoleRef;
+	executionScope?: BoardExecutionScope;
+	repositoryId: string;
+	workingDirectory: string;
+	startModeOverride?: BoardStartMode;
 	assigneeAgentId: string; // '' = not pinned; else a specific agent runs this card
 	parents: string[];
 	priority: CardPriority;
@@ -294,7 +304,32 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		}
 	}, []);
 
-	const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+	const [catalog, setCatalog] = useState<BoardCaptureCatalog | null>(null);
+	const [catalogError, setCatalogError] = useState<string | null>(null);
+	const catalogGeneration = useRef(0);
+	const createdProfileIds = useRef(new Set<string>());
+	const refreshCaptureCatalog = useCallback(async () => {
+		const generation = ++catalogGeneration.current;
+		try {
+			const value = await window.maestro.board.captureCatalog();
+			if (generation === catalogGeneration.current) {
+				setCatalog(value);
+				setCatalogError(null);
+			}
+			return value;
+		} catch (error) {
+			if (generation === catalogGeneration.current) setCatalogError(ipcErrorMessage(error));
+			throw error;
+		}
+	}, []);
+	const [saveError, setSaveError] = useState<
+		Extract<BoardCaptureResponse, { ok: false }>['error'] | null
+	>(null);
+	const [captureResult, setCaptureResult] = useState<{
+		collectionKey: string;
+		cardId: string;
+		response: Extract<BoardCaptureResponse, { ok: true }>;
+	} | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [creatingBoard, setCreatingBoard] = useState(false);
 	const [dragCardId, setDragCardId] = useState<string | null>(null);
@@ -331,8 +366,11 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	selectedBoardIdRef.current = selectedBoardId;
 
 	const profileName = useCallback(
-		(id: string) => profiles.find((p) => p.id === id)?.name ?? id,
-		[profiles]
+		(id: string) => {
+			const matches = catalog?.profiles.filter((entry) => entry.profile.id === id) ?? [];
+			return matches.length === 1 ? matches[0].profile.name : id;
+		},
+		[catalog]
 	);
 
 	// Read the central workspace; resolve only explicit session project roots through
@@ -405,23 +443,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	}, [load]);
 
 	useEffect(() => {
-		let current = true;
-		if (!projectRoot || !selectedCollection) {
-			setProfiles([]);
-			return;
-		}
-		void window.maestro.profiles
-			.list(projectRoot)
-			.then((items) => {
-				if (current) setProfiles(items);
-			})
-			.catch((error) => {
-				if (current) notifyToast({ color: 'red', title: 'Roles', message: ipcErrorMessage(error) });
-			});
+		if (loading) return;
+		void refreshCaptureCatalog().catch(() => {}); // The editor displays the failure and offers retry.
 		return () => {
-			current = false;
+			catalogGeneration.current++;
 		};
-	}, [projectRoot, collections, selectedCollection]);
+	}, [collections, allSessions, groups, loading, refreshCaptureCatalog]);
 
 	// Remember the collection key, since legacy board IDs can collide across sources.
 	useEffect(() => {
@@ -439,17 +466,13 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		});
 	}, [load]);
 
-	// Live updates: profile creation happens in the Profiles modal, which the
-	// card-create gate opens ON TOP of this modal, so the profile list must
-	// refresh here too or the gate never clears (G1). Reusing load(false) keeps
-	// one code path and preserves board-selection reconciliation.
+	// Roles belong to explicit host namespaces across every source. Refresh choices
+	// after any profile change, without replacing the open card's read snapshot.
 	useEffect(() => {
-		if (!projectRoot) return;
-		return window.maestro.profiles.onProfilesChanged?.((payload) => {
-			if (payload?.projectRoot !== projectRoot) return;
-			void load(false);
+		return window.maestro.profiles.onProfilesChanged?.(() => {
+			void refreshCaptureCatalog().catch(() => {});
 		});
-	}, [projectRoot, load]);
+	}, [refreshCaptureCatalog]);
 
 	const handleCreateBoard = useCallback(async () => {
 		if (!projectRoot || creatingBoard) return;
@@ -528,6 +551,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 
 	const openNewCard = useCallback(() => {
 		setCycleError(null);
+		setSaveError(null);
 		setFocusMovePicker(false);
 		if (!selectedCollection) return;
 		const fresh: CardDraft = {
@@ -536,7 +560,9 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			id: null,
 			title: '',
 			body: '',
-			assigneeProfileId: profiles[0]?.id ?? '',
+			assigneeProfileId: '',
+			repositoryId: '',
+			workingDirectory: '',
 			assigneeAgentId: '',
 			parents: [],
 			priority: 'normal',
@@ -549,11 +575,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		};
 		draftBaselineRef.current = fresh;
 		setDraft(fresh);
-	}, [profiles, selectedCollection, projectRoot]);
+	}, [selectedCollection, projectRoot]);
 
 	const openEditCard = useCallback(
 		(card: BoardCard, focusMove = false) => {
 			setCycleError(null);
+			setSaveError(null);
 			setFocusMovePicker(focusMove);
 			if (!selectedCollection) return;
 			const existing: CardDraft = {
@@ -563,6 +590,19 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				title: card.title,
 				body: card.body,
 				assigneeProfileId: card.assigneeProfileId ?? '',
+				role:
+					card.role ??
+					(typeof (card as BoardCard & { profileNamespace?: string }).profileNamespace ===
+						'string' && card.assigneeProfileId
+						? {
+								namespace: (card as BoardCard & { profileNamespace: string }).profileNamespace,
+								profileId: card.assigneeProfileId,
+							}
+						: undefined),
+				executionScope: card.executionScope ?? undefined,
+				repositoryId: card.repositoryId ?? '',
+				workingDirectory: card.workingDirectory ?? '',
+				startModeOverride: card.startModeOverride,
 				assigneeAgentId: card.assigneeAgentId ?? '',
 				parents: [...card.parents],
 				priority: card.priority ?? 'normal',
@@ -584,6 +624,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const closeEditor = useCallback(() => {
 		setShowNewRole(false);
 		setDraft(null);
+		setSaveError(null);
 		setCycleError(null);
 		setFocusMovePicker(false);
 		draftBaselineRef.current = null;
@@ -657,10 +698,11 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			!!projectRoot &&
 			!!board &&
 			draft.title.trim().length > 0 &&
-			// Phase 6: a card needs an assignee - a role (profile) and/or a pinned agent.
-			(draft.assigneeProfileId.length > 0 || draft.assigneeAgentId.length > 0) &&
+			!!catalog &&
+			!catalogError &&
+			(!draft.worktreeEnabled || !!draft.workingDirectory.trim() || !!draft.worktreePath.trim()) &&
 			!saving,
-		[draft, projectRoot, board, saving]
+		[draft, projectRoot, board, catalog, catalogError, saving]
 	);
 
 	/** Replace one board in the list (every card mutation returns the whole board). */
@@ -689,11 +731,10 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			(entry) => entry.collectionKey === draft.collection.collectionKey
 		);
 		if (!current || current.revision !== draft.collection.revision) {
-			notifyToast({
-				color: 'red',
-				title: 'Board',
-				message: 'This collection changed while you were editing. Reopen the card before saving.',
-			});
+			const message =
+				'This collection changed while you were editing. Reopen the card before saving.';
+			setSaveError({ code: 'stale-revision', message });
+			notifyToast({ color: 'red', title: 'Board', message });
 			return;
 		}
 		const now = new Date().toISOString();
@@ -701,8 +742,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		// Phase 4: the toggle expresses intent; blank path/branch fields fall back
 		// to the conventional `board/<board>/<card>` naming the CLI and dispatcher
 		// derive from the same helper, so an isolated card is predictable.
-		const autoWorktree = buildCardWorktreeRef(projectRoot, board.id, cardId);
+		const autoWorktree = draft.workingDirectory.trim()
+			? buildCardWorktreeRef(draft.workingDirectory.trim(), board.id, cardId)
+			: undefined;
+		const original = board.cards.find((entry) => entry.id === draft.id);
 		const card: BoardCard = {
+			...original, // Retain host policy, hold, runs, migration metadata and unknown fields.
 			id: cardId,
 			title: draft.title.trim(),
 			body: draft.body,
@@ -712,20 +757,22 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			updatedAt: now,
 			...(draft.storageRevision !== undefined ? { storageRevision: draft.storageRevision } : {}),
 			// Assignee: a role (profile) and/or a pinned agent. Omit blank fields so
-			// a role-only card floats to the worker pool and a pinned card carries
+			// a role-only card retains its explicit scope and a pinned card carries
 			// no stale profile id.
-			...(draft.assigneeProfileId ? { assigneeProfileId: draft.assigneeProfileId } : {}),
-			...(draft.assigneeAgentId ? { assigneeAgentId: draft.assigneeAgentId } : {}),
+			assigneeProfileId: draft.assigneeProfileId || undefined,
+			assigneeAgentId: draft.assigneeAgentId || undefined,
 			// `normal` is the default and is never serialized.
-			...(draft.priority !== 'normal' ? { priority: draft.priority } : {}),
+			priority: draft.priority !== 'normal' ? draft.priority : undefined,
 			...(draft.worktreeEnabled
 				? {
 						worktree: {
-							path: draft.worktreePath.trim() || autoWorktree.path,
-							branch: draft.worktreeBranch.trim() || autoWorktree.branch,
+							path: draft.worktreePath.trim() || autoWorktree!.path,
+							...(draft.worktreeBranch.trim() || autoWorktree?.branch
+								? { branch: draft.worktreeBranch.trim() || autoWorktree?.branch }
+								: {}),
 						},
 					}
-				: {}),
+				: { worktree: undefined }),
 			// F3: absent = feature off, so the field is only written when the toggle
 			// is on AND the card is worktree-isolated (a PR needs a branch to open
 			// from). A blank target branch stays absent, which means "resolve the
@@ -736,8 +783,31 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							? { targetBranch: draft.prTargetBranch.trim() }
 							: {},
 					}
-				: {}),
+				: { prOnDone: undefined }),
 		};
+		// Explicit unsets repair bindings; untouched legacy nulls remain lossless.
+		for (const [key, value] of Object.entries({
+			executionScope: draft.executionScope,
+			repositoryId: draft.repositoryId || undefined,
+			workingDirectory: draft.workingDirectory.trim() || undefined,
+			startModeOverride: draft.startModeOverride,
+		})) {
+			if (
+				!original ||
+				canonicalJson({ value }) !==
+					canonicalJson({
+						value: (original as unknown as Record<string, unknown>)[key] ?? undefined,
+					})
+			)
+				Object.assign(card, { [key]: value });
+		}
+		if (
+			!original ||
+			canonicalJson(draft.role ?? null) !== canonicalJson(draftBaselineRef.current?.role ?? null) ||
+			draft.assigneeProfileId !== draftBaselineRef.current?.assigneeProfileId
+		) {
+			Object.assign(card, { role: draft.role, profileNamespace: draft.role?.namespace });
+		}
 
 		// Client-side cycle guard: build the prospective board and reject before
 		// the IPC round-trip so the user gets an immediate inline error (the
@@ -752,12 +822,26 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		}
 
 		setSaving(true);
+		setSaveError(null);
 		try {
 			const isNew = draft.id === null;
-			const updated = isNew
-				? await window.maestro.board.addCard(projectRoot, board.id, card)
-				: await window.maestro.board.updateCard(projectRoot, board.id, card);
-			applyBoard(updated);
+			const response = await window.maestro.board.captureCard({
+				projectRoot: draft.projectRoot,
+				boardId: draft.collection.board.id,
+				expectedRevision: draft.collection.revision,
+				card,
+			});
+			if (!response.ok) {
+				setSaveError(response.error);
+				if (response.error.code === 'stale-revision') await load(false);
+				return;
+			}
+			applyBoard(response.value);
+			setCaptureResult({
+				collectionKey: draft.collection.collectionKey,
+				cardId: card.id,
+				response,
+			});
 			closeEditor();
 			notifyToast({
 				color: 'green',
@@ -766,6 +850,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			});
 		} catch (err) {
 			const message = ipcErrorMessage(err);
+			setSaveError({ code: 'transport-error', message });
 			logger.error(`Failed to save card: ${message}`);
 			captureException(err, { tags: { operation: 'board:saveCard' } });
 			// The storage layer rejects cycles too - surface that inline rather than
@@ -867,7 +952,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	 * used to carry. Returns true when the card actually moved.
 	 */
 	const moveCard = useCallback(
-		async (cardId: string, status: CardStatus): Promise<boolean> => {
+		async (cardId: string, status: CardStatus): Promise<Board | false> => {
 			if (!board || !projectRoot) return false;
 			const card = board.cards.find((c) => c.id === cardId);
 			// No-op when it is already there.
@@ -910,7 +995,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 					status
 				);
 				applyBoard(updated);
-				return true;
+				return updated;
 			} catch (err) {
 				logger.error(`Failed to move card: ${String(err)}`);
 				captureException(err, { tags: { operation: 'board:setCardStatus' } });
@@ -939,11 +1024,35 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			if (!draft?.id) return;
 			const moved = await moveCard(draft.id, status);
 			if (!moved) return;
-			// Keep the draft (and its dirty baseline) in step so the picker shows the
-			// new column and the move does not read as an unsaved edit.
-			setDraft((prev) => (prev ? { ...prev, status } : prev));
+			// Adopt the host read tokens from our own status command without rebasing
+			// unsaved specification edits onto an unrelated background refresh.
+			const saved = moved.cards.find((card) => card.id === draft.id);
+			setDraft((prev) =>
+				prev
+					? {
+							...prev,
+							status,
+							storageRevision: saved?.storageRevision,
+							collection: {
+								...prev.collection,
+								board: moved,
+								revision: moved.storage?.expectedRevision ?? prev.collection.revision,
+							},
+						}
+					: prev
+			);
 			if (draftBaselineRef.current) {
-				draftBaselineRef.current = { ...draftBaselineRef.current, status };
+				const baseline = draftBaselineRef.current;
+				draftBaselineRef.current = {
+					...baseline,
+					status,
+					storageRevision: saved?.storageRevision,
+					collection: {
+						...baseline.collection,
+						board: moved,
+						revision: moved.storage?.expectedRevision ?? baseline.collection.revision,
+					},
+				};
 			}
 		},
 		[draft?.id, moveCard]
@@ -1430,6 +1539,30 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						</label>
 					)}
 
+					{captureResult && captureResult.collectionKey === editorCollection?.collectionKey && (
+						<div
+							role="status"
+							className="px-5 py-2 text-xs"
+							style={{ color: theme.colors.textMain }}
+						>
+							Saved{' '}
+							{
+								captureResult.response.value.cards.find((card) => card.id === captureResult.cardId)
+									?.title
+							}
+							.
+							{captureResult.response.readiness[captureResult.cardId] === undefined
+								? ' Host readiness unavailable.'
+								: captureResult.response.readiness[captureResult.cardId].length > 0
+									? ` Waiting: ${captureResult.response.readiness[captureResult.cardId].join(', ')}.`
+									: ' Host capture checks passed.'}
+							{' Start approval: '}
+							{captureResult.response.value.cards.find((card) => card.id === captureResult.cardId)
+								?.capturePolicy?.dispatchApproval ?? 'unknown'}
+							.
+						</div>
+					)}
+
 					{/* Card editor (create/edit) */}
 					{board && draft && (
 						<CardEditor
@@ -1438,7 +1571,24 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							theme={theme}
 							draft={draft}
 							setDraft={setDraft}
-							profiles={profiles}
+							catalog={catalog}
+							catalogError={catalogError}
+							saveError={saveError}
+							onRefreshCatalog={() => void refreshCaptureCatalog().catch(() => {})}
+							onCreateRole={async (profile) => {
+								if (!createdProfileIds.current.has(profile.id)) {
+									await window.maestro.profiles.upsert(projectRoot, profile);
+									createdProfileIds.current.add(profile.id);
+								}
+								const updated = await refreshCaptureCatalog();
+								const matches = updated.profiles.filter((entry) => entry.profile.id === profile.id);
+								if (matches.length !== 1)
+									throw new Error(
+										'Role created, but its Board namespace is not available in the host catalog. Select a catalog role once registered.'
+									);
+								const role = { namespace: matches[0].namespace, profileId: profile.id };
+								setDraft((p) => (p ? { ...p, role, assigneeProfileId: profile.id } : p));
+							}}
 							board={board}
 							cycleError={cycleError}
 							saving={saving}
@@ -1450,16 +1600,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							onMove={(status) => void handleMoveDraft(status)}
 							autoFocusMove={focusMovePicker}
 							profileName={profileName}
-							projectAgents={projectAgents}
-							projectRoot={projectRoot}
+							projectAgents={allSessions.map((session) => ({
+								id: session.id,
+								name: session.name,
+								isWorker: workers.some((worker) => worker.agentId === session.id && worker.enabled),
+							}))}
 							activeAgentId={activeSession?.id ?? ''}
-							onProfilesUpdated={(updatedList, newProfileId) => {
-								// Sync the Board's own profiles state from the upsert return value
-								// (the profiles:changed push covers every other surface) and select
-								// the freshly created role on the open draft.
-								setProfiles(updatedList);
-								setDraft((p) => (p ? { ...p, assigneeProfileId: newProfileId } : p));
-							}}
 						/>
 					)}
 
@@ -2154,7 +2300,11 @@ interface CardEditorProps {
 	theme: Theme;
 	draft: CardDraft;
 	setDraft: React.Dispatch<React.SetStateAction<CardDraft | null>>;
-	profiles: AgentProfile[];
+	catalog: BoardCaptureCatalog | null;
+	catalogError: string | null;
+	saveError: Extract<BoardCaptureResponse, { ok: false }>['error'] | null;
+	onRefreshCatalog: () => void;
+	onCreateRole: (profile: AgentProfile) => Promise<void>;
 	board: Board;
 	cycleError: string | null;
 	saving: boolean;
@@ -2169,15 +2319,8 @@ interface CardEditorProps {
 	autoFocusMove: boolean;
 	profileName: (id: string) => string;
 	projectAgents: { id: string; name: string; isWorker: boolean }[];
-	/** Project root, forwarded to `window.maestro.profiles.upsert` for inline role create. */
-	projectRoot: string;
 	/** Active Left Bar agent id; seeds the inline "+ New role" base-agent default. */
 	activeAgentId: string;
-	/**
-	 * Called after an inline "+ New role" upsert. `updatedList` is the full list
-	 * returned by the upsert; `newProfileId` is the profile to select on the draft.
-	 */
-	onProfilesUpdated: (updatedList: AgentProfile[], newProfileId: string) => void;
 }
 
 /** Inline create/edit form for a card. Replaces the board view while open, the
@@ -2189,7 +2332,11 @@ function CardEditor({
 	theme,
 	draft,
 	setDraft,
-	profiles,
+	catalog,
+	catalogError,
+	saveError,
+	onRefreshCatalog,
+	onCreateRole,
 	board,
 	cycleError,
 	saving,
@@ -2202,13 +2349,21 @@ function CardEditor({
 	autoFocusMove,
 	profileName,
 	projectAgents,
-	projectRoot,
 	activeAgentId,
-	onProfilesUpdated,
 }: CardEditorProps) {
 	// Candidate parents are every other card (a card cannot depend on itself).
 	const candidateParents = board.cards.filter((c) => c.id !== draft.id);
 	const isExisting = draft.id !== null;
+	const scope = draft.executionScope;
+	const agents = catalog?.agents ?? [];
+	const agentLabel = (id: string) => projectAgents.find((entry) => entry.id === id)?.name ?? id;
+	const roles = catalog?.profiles ?? [];
+	const selectedRole = draft.role
+		? canonicalJson(draft.role)
+		: draft.assigneeProfileId
+			? 'legacy-unresolved'
+			: '';
+	const scopeValue = scope ? canonicalJson(scope) : '';
 	const moveRef = useRef<HTMLSelectElement>(null);
 	// One-shot, like the dialog's initial focus: without it every later render
 	// (a `board:changed` push, a keystroke) would yank focus back to the picker.
@@ -2222,35 +2377,40 @@ function CardEditor({
 	// Escape; the editor keeps scratch values local so the mini-form's
 	// name/base-agent scratch state and its async saving flag never touch the card
 	// `draft` (and so never trip the dirty-check). Only a successful create mutates
-	// the draft, via `onProfilesUpdated` selecting the new role.
+	// the draft, via the host catalog selecting its explicit role namespace.
 	const [newRoleName, setNewRoleName] = useState('');
 	const [newRoleBaseAgent, setNewRoleBaseAgent] = useState('');
 	const [creatingRole, setCreatingRole] = useState(false);
+	const pendingRole = useRef<AgentProfile | null>(null);
+	const [roleError, setRoleError] = useState<string | null>(null);
 	const newRoleNameRef = useRef<HTMLInputElement>(null);
 	useFocusAfterRender(newRoleNameRef, showNewRole);
 
 	const openNewRole = useCallback(() => {
 		// Default the base agent to the active agent (mirrors ProfilesModal's one-shot
-		// default), but only when it is a real pin candidate for this project.
-		setNewRoleBaseAgent(projectAgents.some((a) => a.id === activeAgentId) ? activeAgentId : '');
+		// default), but only when it is a known agent in the host catalog.
+		setNewRoleBaseAgent(agents.some((a) => a.id === activeAgentId) ? activeAgentId : '');
 		setNewRoleName('');
+		setRoleError(null);
+		pendingRole.current = null;
 		setShowNewRole(true);
-	}, [projectAgents, activeAgentId]);
+	}, [catalog, activeAgentId]);
 
 	const handleCreateRole = useCallback(async () => {
 		const name = newRoleName.trim();
 		if (!name || creatingRole) return;
-		const profile: AgentProfile = {
+		const profile: AgentProfile = pendingRole.current ?? {
 			id: generateUUID(),
 			name,
 			// Omit baseAgentId entirely for a pool role ("None") so it floats to any
 			// free opt-in worker at spawn time.
 			...(newRoleBaseAgent ? { baseAgentId: newRoleBaseAgent } : {}),
 		};
+		pendingRole.current = profile;
 		setCreatingRole(true);
+		setRoleError(null);
 		try {
-			const updated = await window.maestro.profiles.upsert(projectRoot, profile);
-			onProfilesUpdated(updated, profile.id);
+			await onCreateRole(profile);
 			setShowNewRole(false);
 			setNewRoleName('');
 		} catch (err) {
@@ -2258,11 +2418,12 @@ function CardEditor({
 			// so the user can retry without losing their typed name.
 			logger.error(`Failed to create role inline: ${String(err)}`);
 			captureException(err, { tags: { operation: 'profiles:upsert' } });
-			notifyToast({ color: 'red', title: 'Roles', message: 'Failed to create role.' });
+			setRoleError(ipcErrorMessage(err));
+			notifyToast({ color: 'red', title: 'Roles', message: ipcErrorMessage(err) });
 		} finally {
 			setCreatingRole(false);
 		}
-	}, [newRoleName, newRoleBaseAgent, creatingRole, projectRoot, onProfilesUpdated]);
+	}, [newRoleName, newRoleBaseAgent, creatingRole, onCreateRole]);
 
 	return (
 		<div className="flex-1 overflow-y-auto p-5 space-y-4 select-text">
@@ -2279,373 +2440,596 @@ function CardEditor({
 				{draft.id === null ? 'New card' : 'Edit card'}
 			</div>
 
-			<label className="block space-y-1">
-				<span className="text-xs" style={{ color: theme.colors.textDim }}>
-					Title
-				</span>
-				<input
-					value={draft.title}
-					onChange={(e) => setDraft((p) => (p ? { ...p, title: e.target.value } : p))}
-					placeholder="e.g. Design the schema"
-					className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-					style={inputStyle}
-				/>
-			</label>
-
-			<label className="block space-y-1">
-				<span className="text-xs" style={{ color: theme.colors.textDim }}>
-					Body / instructions
-				</span>
-				<textarea
-					value={draft.body}
-					onChange={(e) => setDraft((p) => (p ? { ...p, body: e.target.value } : p))}
-					placeholder="Instructions handed to the assignee agent."
-					rows={4}
-					className="w-full rounded-md px-2 py-1.5 text-sm outline-none resize-y"
-					style={inputStyle}
-				/>
-			</label>
-
-			<div className="flex gap-3 flex-wrap">
-				<div className="block space-y-1 flex-1 min-w-[180px]">
-					<div className="flex items-center justify-between gap-2">
-						<span className="text-xs" style={{ color: theme.colors.textDim }}>
-							Role (profile)
-						</span>
-						{!showNewRole && (
-							<div className="flex items-center gap-2">
-								{/* Advanced editing (model / effort / role prompt) stays in the
-								    ProfilesModal; the inline mini-form is name + base agent only. */}
-								<button
-									type="button"
-									onClick={() => getModalActions().setProfilesModalOpen(true)}
-									className="text-xs opacity-60 hover:opacity-100 underline"
-									style={{ color: theme.colors.textDim }}
-								>
-									Manage roles
-								</button>
-								<button
-									type="button"
-									onClick={openNewRole}
-									className="flex items-center gap-0.5 text-xs opacity-70 hover:opacity-100"
-									style={{ color: theme.colors.accent }}
-								>
-									<Plus className="w-3 h-3" /> New role
-								</button>
-							</div>
-						)}
-					</div>
-					{showNewRole ? (
-						// Inline quick-create: name + base agent only. Advanced fields
-						// (model / effort / role prompt) live in the ProfilesModal.
-						<div
-							className="space-y-1.5 rounded-md p-2"
-							style={{ border: `1px solid ${theme.colors.border}` }}
+			{saveError && (
+				<div role="alert" style={{ color: theme.colors.error }}>
+					{saveError.code}: {saveError.message}
+					{saveError.captureErrors?.length ? ` (${saveError.captureErrors.join(', ')})` : ''}
+				</div>
+			)}
+			{catalogError ? (
+				<div role="alert" style={{ color: theme.colors.error }}>
+					Capture catalog unavailable: {catalogError}{' '}
+					<button type="button" onClick={onRefreshCatalog}>
+						Retry catalog
+					</button>
+				</div>
+			) : (
+				!catalog && <div role="status">Loading capture choices...</div>
+			)}
+			<fieldset disabled={saving} className="space-y-4">
+				<div className="flex gap-3 flex-wrap">
+					<label
+						className="block space-y-1 flex-1 min-w-[180px]"
+						style={{ color: theme.colors.textDim }}
+					>
+						<span className="text-xs">Execution scope</span>
+						<select
+							aria-label="Execution scope"
+							value={scopeValue}
+							style={inputStyle}
+							className="w-full rounded-md px-2 py-1.5 text-sm"
+							onChange={(e) => {
+								const choices: BoardExecutionScope[] = [
+									...agents.map(
+										(agent): BoardExecutionScope => ({ kind: 'agent', agentId: agent.id })
+									),
+									...(catalog?.groups ?? []).map(
+										(group): BoardExecutionScope => ({ kind: 'group', groupId: group.id })
+									),
+								];
+								setDraft((p) =>
+									p
+										? {
+												...p,
+												executionScope: choices.find(
+													(choice) => canonicalJson(choice) === e.target.value
+												),
+											}
+										: p
+								);
+							}}
 						>
-							<input
-								ref={newRoleNameRef}
-								value={newRoleName}
-								onChange={(e) => setNewRoleName(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === 'Enter') {
-										e.preventDefault();
-										void handleCreateRole();
-									} else if (e.key === 'Escape') {
-										e.preventDefault();
-										setShowNewRole(false);
-									}
-								}}
-								placeholder="Role name, e.g. Reviewer"
-								className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-								style={inputStyle}
-							/>
+							<option value="">Unassigned (waits for scope)</option>
+							{scope &&
+								((scope.kind === 'agent' && !agents.some((agent) => agent.id === scope.agentId)) ||
+									(scope.kind === 'group' &&
+										!catalog?.groups.some((group) => group.id === scope.groupId))) && (
+									<option value={scopeValue}>
+										Missing {scope.kind}: {scope.kind === 'agent' ? scope.agentId : scope.groupId}
+									</option>
+								)}
+							<optgroup label="Agents">
+								{agents.map((agent) => (
+									<option
+										key={agent.id}
+										value={canonicalJson({ kind: 'agent', agentId: agent.id })}
+									>
+										Agent: {agentLabel(agent.id)}
+									</option>
+								))}
+							</optgroup>
+							<optgroup label="Groups">
+								{catalog?.groups.map((group) => (
+									<option
+										key={group.id}
+										value={canonicalJson({ kind: 'group', groupId: group.id })}
+									>
+										Group:{' '}
+										{useSessionStore.getState().groups.find((entry) => entry.id === group.id)
+											?.name ?? group.id}
+									</option>
+								))}
+							</optgroup>
+						</select>
+					</label>
+					<label
+						className="block space-y-1 flex-1 min-w-[180px]"
+						style={{ color: theme.colors.textDim }}
+					>
+						<span className="text-xs">Repository</span>
+						<select
+							aria-label="Repository"
+							value={draft.repositoryId}
+							style={inputStyle}
+							className="w-full rounded-md px-2 py-1.5 text-sm"
+							onChange={(e) => setDraft((p) => (p ? { ...p, repositoryId: e.target.value } : p))}
+						>
+							<option value="">Unresolved repository</option>
+							{draft.repositoryId &&
+								!catalog?.repositories.some((repo) => repo.id === draft.repositoryId) && (
+									<option value={draft.repositoryId}>
+										Missing repository: {draft.repositoryId}
+									</option>
+								)}
+							{catalog?.repositories.map((repo) => (
+								<option key={repo.id} value={repo.id}>
+									{repo.id}: {repo.workingDirectory}
+									{repo.validated ? '' : ' (unvalidated)'}
+								</option>
+							))}
+						</select>
+					</label>
+					<label
+						className="block space-y-1 flex-1 min-w-[180px]"
+						style={{ color: theme.colors.textDim }}
+					>
+						<span className="text-xs">Working directory</span>
+						<input
+							aria-label="Working directory"
+							value={draft.workingDirectory}
+							placeholder="Explicit absolute execution directory"
+							style={inputStyle}
+							className="w-full rounded-md px-2 py-1.5 text-sm"
+							onChange={(e) =>
+								setDraft((p) => (p ? { ...p, workingDirectory: e.target.value } : p))
+							}
+						/>
+					</label>
+					<label
+						className="block space-y-1 flex-1 min-w-[180px]"
+						style={{ color: theme.colors.textDim }}
+					>
+						<span className="text-xs">Start mode</span>
+						<select
+							aria-label="Start mode"
+							value={draft.startModeOverride ?? ''}
+							style={inputStyle}
+							className="w-full rounded-md px-2 py-1.5 text-sm"
+							onChange={(e) =>
+								setDraft((p) =>
+									p
+										? {
+												...p,
+												startModeOverride:
+													e.target.value === 'direct'
+														? 'direct'
+														: e.target.value === 'approval'
+															? 'approval'
+															: undefined,
+											}
+										: p
+								)
+							}
+						>
+							<option value="">
+								{isExisting
+									? `Keep saved policy (${board.cards.find((card) => card.id === draft.id)?.capturePolicy?.effectiveStartMode ?? 'host decides'})`
+									: `Board default (${board.defaultStartMode ?? catalog?.defaultStartMode ?? 'approval'})`}
+							</option>
+							<option value="approval">Require approval</option>
+							<option value="direct">Direct scheduling</option>
+						</select>
+					</label>
+				</div>
+				<p className="text-xs" style={{ color: theme.colors.textDim }}>
+					Incomplete assignments can be saved. The host reports missing references; scope and
+					working directory are never inferred.
+				</p>
+				{draft.worktreeEnabled && !draft.workingDirectory.trim() && !draft.worktreePath.trim() && (
+					<div role="alert" style={{ color: theme.colors.error }}>
+						Choose a working directory before enabling worktree isolation.
+					</div>
+				)}
+
+				<label className="block space-y-1">
+					<span className="text-xs" style={{ color: theme.colors.textDim }}>
+						Title
+					</span>
+					<input
+						value={draft.title}
+						onChange={(e) => setDraft((p) => (p ? { ...p, title: e.target.value } : p))}
+						placeholder="e.g. Design the schema"
+						className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+						style={inputStyle}
+					/>
+				</label>
+
+				<label className="block space-y-1">
+					<span className="text-xs" style={{ color: theme.colors.textDim }}>
+						Body / instructions
+					</span>
+					<textarea
+						value={draft.body}
+						onChange={(e) => setDraft((p) => (p ? { ...p, body: e.target.value } : p))}
+						placeholder="Instructions handed to the assignee agent."
+						rows={4}
+						className="w-full rounded-md px-2 py-1.5 text-sm outline-none resize-y"
+						style={inputStyle}
+					/>
+				</label>
+
+				<div className="flex gap-3 flex-wrap">
+					<div className="block space-y-1 flex-1 min-w-[180px]">
+						<div className="flex items-center justify-between gap-2">
+							<span className="text-xs" style={{ color: theme.colors.textDim }}>
+								Role (profile)
+							</span>
+							{!showNewRole && (
+								<div className="flex items-center gap-2">
+									{/* Advanced editing (model / effort / role prompt) stays in the
+								    ProfilesModal; the inline mini-form is name + base agent only. */}
+									<button
+										type="button"
+										onClick={() => getModalActions().setProfilesModalOpen(true)}
+										className="text-xs opacity-60 hover:opacity-100 underline"
+										style={{ color: theme.colors.textDim }}
+									>
+										Manage roles
+									</button>
+									<button
+										type="button"
+										onClick={openNewRole}
+										className="flex items-center gap-0.5 text-xs opacity-70 hover:opacity-100"
+										style={{ color: theme.colors.accent }}
+									>
+										<Plus className="w-3 h-3" /> New role
+									</button>
+								</div>
+							)}
+						</div>
+						{showNewRole ? (
+							// Inline quick-create: name + base agent only. Advanced fields
+							// (model / effort / role prompt) live in the ProfilesModal.
+							<div
+								className="space-y-1.5 rounded-md p-2"
+								style={{ border: `1px solid ${theme.colors.border}` }}
+							>
+								{roleError && (
+									<div role="alert" style={{ color: theme.colors.error }}>
+										{roleError}
+									</div>
+								)}
+								<input
+									ref={newRoleNameRef}
+									value={newRoleName}
+									onChange={(e) => setNewRoleName(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === 'Enter') {
+											e.preventDefault();
+											void handleCreateRole();
+										} else if (e.key === 'Escape') {
+											e.preventDefault();
+											setShowNewRole(false);
+										}
+									}}
+									placeholder="Role name, e.g. Reviewer"
+									className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+									style={inputStyle}
+								/>
+								<select
+									value={newRoleBaseAgent}
+									onChange={(e) => setNewRoleBaseAgent(e.target.value)}
+									className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+									style={inputStyle}
+								>
+									{/* Empty = a pool role that floats to any free opt-in worker. */}
+									<option value="">None (pool role - any free worker)</option>
+									{agents.map((a) => (
+										<option key={a.id} value={a.id}>
+											{agentLabel(a.id)}
+										</option>
+									))}
+								</select>
+								<div className="flex items-center gap-2">
+									<button
+										type="button"
+										onClick={() => void handleCreateRole()}
+										disabled={!newRoleName.trim() || creatingRole}
+										className="rounded-md px-2 py-1 text-xs font-medium transition-opacity disabled:opacity-40"
+										style={{ backgroundColor: theme.colors.accent, color: theme.colors.bgMain }}
+									>
+										{creatingRole ? 'Creating...' : 'Create'}
+									</button>
+									<button
+										type="button"
+										onClick={() => setShowNewRole(false)}
+										disabled={creatingRole}
+										className="rounded-md px-2 py-1 text-xs opacity-70 hover:opacity-100 disabled:opacity-40"
+										style={{ color: theme.colors.textMain }}
+									>
+										Cancel
+									</button>
+								</div>
+							</div>
+						) : (
 							<select
-								value={newRoleBaseAgent}
-								onChange={(e) => setNewRoleBaseAgent(e.target.value)}
+								aria-label="Role (profile)"
+								value={selectedRole}
+								onChange={(e) => {
+									const role = roles.find(
+										(entry) =>
+											canonicalJson({ namespace: entry.namespace, profileId: entry.profile.id }) ===
+											e.target.value
+									);
+									setDraft((p) =>
+										p
+											? {
+													...p,
+													role: role
+														? { namespace: role.namespace, profileId: role.profile.id }
+														: undefined,
+													assigneeProfileId: role?.profile.id ?? '',
+												}
+											: p
+									);
+								}}
 								className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
 								style={inputStyle}
 							>
-								{/* Empty = a pool role that floats to any free opt-in worker. */}
-								<option value="">None (pool role - any free worker)</option>
-								{projectAgents.map((a) => (
-									<option key={a.id} value={a.id}>
-										{a.name}
+								<option value="">No role</option>
+								{draft.assigneeProfileId && !draft.role && (
+									<option value="legacy-unresolved">
+										Unresolved legacy role: {draft.assigneeProfileId}
+									</option>
+								)}
+								{draft.role &&
+									!roles.some(
+										(entry) =>
+											entry.namespace === draft.role!.namespace &&
+											entry.profile.id === draft.role!.profileId
+									) && (
+										<option value={selectedRole}>
+											Missing role: {draft.role.namespace} / {draft.role.profileId}
+										</option>
+									)}
+								{roles.map(({ namespace, profile }) => (
+									<option
+										key={canonicalJson({ namespace, profileId: profile.id })}
+										value={canonicalJson({ namespace, profileId: profile.id })}
+									>
+										{profile.name} ({namespace})
 									</option>
 								))}
 							</select>
-							<div className="flex items-center gap-2">
-								<button
-									type="button"
-									onClick={() => void handleCreateRole()}
-									disabled={!newRoleName.trim() || creatingRole}
-									className="rounded-md px-2 py-1 text-xs font-medium transition-opacity disabled:opacity-40"
-									style={{ backgroundColor: theme.colors.accent, color: theme.colors.bgMain }}
-								>
-									{creatingRole ? 'Creating...' : 'Create'}
-								</button>
-								<button
-									type="button"
-									onClick={() => setShowNewRole(false)}
-									disabled={creatingRole}
-									className="rounded-md px-2 py-1 text-xs opacity-70 hover:opacity-100 disabled:opacity-40"
-									style={{ color: theme.colors.textMain }}
-								>
-									Cancel
-								</button>
-							</div>
-						</div>
-					) : (
+						)}
+						{!showNewRole && roles.length === 0 && (
+							// First-run helper: both valid paths (inline role, or pin to an
+							// existing agent) satisfy the assignee model, so spell them out.
+							<span className="block text-xs" style={{ color: theme.colors.textDim }}>
+								No roles yet. Scope and repository can be saved independently; missing references
+								wait for repair.
+							</span>
+						)}
+					</div>
+					<label className="block space-y-1 flex-1 min-w-[180px]">
+						<span className="text-xs" style={{ color: theme.colors.textDim }}>
+							Pin to agent (optional)
+						</span>
 						<select
-							value={draft.assigneeProfileId}
+							value={draft.assigneeAgentId}
+							onChange={(e) => setDraft((p) => (p ? { ...p, assigneeAgentId: e.target.value } : p))}
+							className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+							style={inputStyle}
+						>
+							{/* Empty = not pinned: a role-only card is auto-assigned to any free
+						    opt-in worker. Pinning runs the card on exactly this agent. */}
+							<option value="">Any worker within scope</option>
+							{draft.assigneeAgentId &&
+								!agents.some((agent) => agent.id === draft.assigneeAgentId) && (
+									<option value={draft.assigneeAgentId}>
+										Missing agent: {draft.assigneeAgentId}
+									</option>
+								)}
+							{agents.map((a) => (
+								<option key={a.id} value={a.id}>
+									{agentLabel(a.id)}
+								</option>
+							))}
+						</select>
+					</label>
+					<label className="block space-y-1 w-40">
+						<span className="text-xs" style={{ color: theme.colors.textDim }}>
+							Priority
+						</span>
+						<select
+							value={draft.priority}
 							onChange={(e) =>
-								setDraft((p) => (p ? { ...p, assigneeProfileId: e.target.value } : p))
+								setDraft((p) => (p ? { ...p, priority: e.target.value as CardPriority } : p))
 							}
 							className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
 							style={inputStyle}
 						>
-							{/* Empty = no role: the card floats to the free worker pool (or runs
-							    on the pinned agent below with its own settings). */}
-							<option value="">No role (free worker pool)</option>
-							{profiles.map((p) => (
-								<option key={p.id} value={p.id}>
-									{p.name}
+							{/* Dispatch order: high before normal before low, oldest first within
+						    each. `normal` is the default and is not persisted. */}
+							{CARD_PRIORITIES.map((p) => (
+								<option key={p} value={p}>
+									{PRIORITY_META[p].label}
 								</option>
 							))}
 						</select>
-					)}
-					{!showNewRole && profiles.length === 0 && (
-						// First-run helper: both valid paths (inline role, or pin to an
-						// existing agent) satisfy the assignee model, so spell them out.
-						<span className="block text-xs" style={{ color: theme.colors.textDim }}>
-							No roles yet: create one inline, or pin the card to an agent.
+					</label>
+					<label className="block space-y-1 w-40">
+						<span className="text-xs" style={{ color: theme.colors.textDim }}>
+							{isExisting ? 'Move to' : 'Status'}
 						</span>
-					)}
-				</div>
-				<label className="block space-y-1 flex-1 min-w-[180px]">
-					<span className="text-xs" style={{ color: theme.colors.textDim }}>
-						Pin to agent (optional)
-					</span>
-					<select
-						value={draft.assigneeAgentId}
-						onChange={(e) => setDraft((p) => (p ? { ...p, assigneeAgentId: e.target.value } : p))}
-						className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-						style={inputStyle}
-					>
-						{/* Empty = not pinned: a role-only card is auto-assigned to any free
-						    opt-in worker. Pinning runs the card on exactly this agent. */}
-						<option value="">Any free worker</option>
-						{projectAgents.map((a) => (
-							<option key={a.id} value={a.id}>
-								{a.name}
-								{a.isWorker ? '' : ' (not a board worker)'}
-							</option>
-						))}
-					</select>
-				</label>
-				<label className="block space-y-1 w-40">
-					<span className="text-xs" style={{ color: theme.colors.textDim }}>
-						Priority
-					</span>
-					<select
-						value={draft.priority}
-						onChange={(e) =>
-							setDraft((p) => (p ? { ...p, priority: e.target.value as CardPriority } : p))
-						}
-						className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-						style={inputStyle}
-					>
-						{/* Dispatch order: high before normal before low, oldest first within
-						    each. `normal` is the default and is not persisted. */}
-						{CARD_PRIORITIES.map((p) => (
-							<option key={p} value={p}>
-								{PRIORITY_META[p].label}
-							</option>
-						))}
-					</select>
-				</label>
-				<label className="block space-y-1 w-40">
-					<span className="text-xs" style={{ color: theme.colors.textDim }}>
-						{isExisting ? 'Move to' : 'Status'}
-					</span>
-					{/* On an existing card this is the keyboard route for what drag-and-drop
+						{/* On an existing card this is the keyboard route for what drag-and-drop
 					    does with a mouse: it persists immediately (setCardStatus), with the
 					    same dispatcher guards. On a NEW card there is nothing to move yet,
 					    so it just seeds the draft's starting column. */}
-					<select
-						ref={moveRef}
-						value={draft.status}
-						onChange={(e) => {
-							const status = e.target.value as CardStatus;
-							if (isExisting) onMove(status);
-							else setDraft((p) => (p ? { ...p, status } : p));
-						}}
-						aria-label={isExisting ? 'Move to' : 'Status'}
-						className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-						style={inputStyle}
-					>
-						{CARD_STATUSES.filter((s) => isExisting || (s !== 'ready' && s !== 'running')).map(
-							(s) => (
-								<option key={s} value={s}>
-									{STATUS_META[s].label}
-								</option>
-							)
-						)}
-					</select>
-				</label>
-			</div>
+						<select
+							ref={moveRef}
+							value={draft.status}
+							onChange={(e) => {
+								const status = e.target.value as CardStatus;
+								if (isExisting) onMove(status);
+								else setDraft((p) => (p ? { ...p, status } : p));
+							}}
+							aria-label={isExisting ? 'Move to' : 'Status'}
+							className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+							style={inputStyle}
+						>
+							{CARD_STATUSES.filter((s) => isExisting || (s !== 'ready' && s !== 'running')).map(
+								(s) => (
+									<option key={s} value={s}>
+										{STATUS_META[s].label}
+									</option>
+								)
+							)}
+						</select>
+					</label>
+				</div>
 
-			{/* Worktree isolation (Phase 4). Opt-in: the card runs in its own git
+				{/* Worktree isolation (Phase 4). Opt-in: the card runs in its own git
 			    checkout so parallel cards never share a working tree. The path and
 			    branch fields are optional overrides of the conventional naming. */}
-			<div className="space-y-2">
-				<label className="flex items-center gap-2 cursor-pointer">
-					<input
-						type="checkbox"
-						checked={draft.worktreeEnabled}
-						onChange={(e) => setDraft((p) => (p ? { ...p, worktreeEnabled: e.target.checked } : p))}
-						className="cursor-pointer"
-					/>
-					<span className="text-xs" style={{ color: theme.colors.textMain }}>
-						Run in isolated worktree
-					</span>
-					<span className="text-xs-plus" style={{ color: theme.colors.textDim }}>
-						(branch is created on first run and never auto-merged)
-					</span>
-				</label>
-				{draft.worktreeEnabled && (
-					<div className="flex gap-3 flex-wrap">
-						<label className="block space-y-1 flex-1 min-w-[180px]">
-							<span className="text-xs" style={{ color: theme.colors.textDim }}>
-								Worktree path (optional)
-							</span>
-							<input
-								value={draft.worktreePath}
-								onChange={(e) => setDraft((p) => (p ? { ...p, worktreePath: e.target.value } : p))}
-								placeholder="auto: sibling worktrees/ folder"
-								className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-								style={inputStyle}
-							/>
-						</label>
-						<label className="block space-y-1 w-48">
-							<span className="text-xs" style={{ color: theme.colors.textDim }}>
-								Worktree branch (optional)
-							</span>
-							<input
-								value={draft.worktreeBranch}
-								onChange={(e) =>
-									setDraft((p) => (p ? { ...p, worktreeBranch: e.target.value } : p))
-								}
-								placeholder="auto: board/<board>/<card>"
-								className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
-								style={inputStyle}
-							/>
-						</label>
-					</div>
-				)}
-				{/* F3: open a PR when the card lands in Done. Only offered for isolated
-				    cards - a PR needs a branch of its own to open from. The branch is
-				    still never auto-merged; the PR is where a human reviews it. */}
-				{draft.worktreeEnabled && (
-					<div className="space-y-2">
-						<label className="flex items-center gap-2 cursor-pointer">
-							<input
-								type="checkbox"
-								checked={draft.prOnDoneEnabled}
-								onChange={(e) =>
-									setDraft((p) => (p ? { ...p, prOnDoneEnabled: e.target.checked } : p))
-								}
-								className="cursor-pointer"
-							/>
-							<span className="text-xs" style={{ color: theme.colors.textMain }}>
-								Open PR when done
-							</span>
-							<span className="text-xs-plus" style={{ color: theme.colors.textDim }}>
-								(the branch is still not merged - a pull request is opened for review)
-							</span>
-						</label>
-						{draft.prOnDoneEnabled && (
-							<label className="block space-y-1 w-64">
+				<div className="space-y-2">
+					<label className="flex items-center gap-2 cursor-pointer">
+						<input
+							type="checkbox"
+							checked={draft.worktreeEnabled}
+							onChange={(e) =>
+								setDraft((p) => (p ? { ...p, worktreeEnabled: e.target.checked } : p))
+							}
+							className="cursor-pointer"
+						/>
+						<span className="text-xs" style={{ color: theme.colors.textMain }}>
+							Run in isolated worktree
+						</span>
+						<span className="text-xs-plus" style={{ color: theme.colors.textDim }}>
+							(branch is created on first run and never auto-merged)
+						</span>
+					</label>
+					{draft.worktreeEnabled && (
+						<div className="flex gap-3 flex-wrap">
+							<label className="block space-y-1 flex-1 min-w-[180px]">
 								<span className="text-xs" style={{ color: theme.colors.textDim }}>
-									PR target branch (optional)
+									Worktree path (optional)
 								</span>
 								<input
-									value={draft.prTargetBranch}
+									value={draft.worktreePath}
 									onChange={(e) =>
-										setDraft((p) => (p ? { ...p, prTargetBranch: e.target.value } : p))
+										setDraft((p) => (p ? { ...p, worktreePath: e.target.value } : p))
 									}
-									placeholder="repo default branch"
+									placeholder="auto: sibling worktrees/ folder"
 									className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
 									style={inputStyle}
 								/>
 							</label>
-						)}
-					</div>
-				)}
-			</div>
-
-			{/* Parent cards (multi-select). Selecting a set that would create a
-			    dependency cycle is rejected on save with an inline error. */}
-			<div className="space-y-1">
-				<span className="text-xs" style={{ color: theme.colors.textDim }}>
-					Parent cards (must be done before this card is eligible)
-				</span>
-				{candidateParents.length === 0 ? (
-					<div className="text-xs" style={{ color: theme.colors.textDim }}>
-						No other cards to depend on yet.
-					</div>
-				) : (
-					<div
-						className="rounded-md p-2 space-y-1 max-h-48 overflow-y-auto"
-						style={{ border: `1px solid ${theme.colors.border}` }}
-					>
-						{candidateParents.map((c) => {
-							const checked = draft.parents.includes(c.id);
-							return (
-								<label
-									key={c.id}
-									className="flex items-center gap-2 text-xs cursor-pointer rounded px-1.5 py-1 hover:bg-white/5"
-									style={{ color: theme.colors.textMain }}
-								>
-									<input type="checkbox" checked={checked} onChange={() => onToggleParent(c.id)} />
-									<span className="truncate">{c.title}</span>
-									<span className="ml-auto shrink-0" style={{ color: theme.colors.textDim }}>
-										{c.assigneeProfileId ? profileName(c.assigneeProfileId) : 'pool'}
+							<label className="block space-y-1 w-48">
+								<span className="text-xs" style={{ color: theme.colors.textDim }}>
+									Worktree branch (optional)
+								</span>
+								<input
+									value={draft.worktreeBranch}
+									onChange={(e) =>
+										setDraft((p) => (p ? { ...p, worktreeBranch: e.target.value } : p))
+									}
+									placeholder="auto: board/<board>/<card>"
+									className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+									style={inputStyle}
+								/>
+							</label>
+						</div>
+					)}
+					{/* F3: open a PR when the card lands in Done. Only offered for isolated
+				    cards - a PR needs a branch of its own to open from. The branch is
+				    still never auto-merged; the PR is where a human reviews it. */}
+					{draft.worktreeEnabled && (
+						<div className="space-y-2">
+							<label className="flex items-center gap-2 cursor-pointer">
+								<input
+									type="checkbox"
+									checked={draft.prOnDoneEnabled}
+									onChange={(e) =>
+										setDraft((p) => (p ? { ...p, prOnDoneEnabled: e.target.checked } : p))
+									}
+									className="cursor-pointer"
+								/>
+								<span className="text-xs" style={{ color: theme.colors.textMain }}>
+									Open PR when done
+								</span>
+								<span className="text-xs-plus" style={{ color: theme.colors.textDim }}>
+									(the branch is still not merged - a pull request is opened for review)
+								</span>
+							</label>
+							{draft.prOnDoneEnabled && (
+								<label className="block space-y-1 w-64">
+									<span className="text-xs" style={{ color: theme.colors.textDim }}>
+										PR target branch (optional)
 									</span>
+									<input
+										value={draft.prTargetBranch}
+										onChange={(e) =>
+											setDraft((p) => (p ? { ...p, prTargetBranch: e.target.value } : p))
+										}
+										placeholder="repo default branch"
+										className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+										style={inputStyle}
+									/>
 								</label>
-							);
-						})}
+							)}
+						</div>
+					)}
+				</div>
+
+				{/* Parent cards (multi-select). Selecting a set that would create a
+			    dependency cycle is rejected on save with an inline error. */}
+				<div className="space-y-1">
+					<span className="text-xs" style={{ color: theme.colors.textDim }}>
+						Parent cards (must be done before this card is eligible)
+					</span>
+					{candidateParents.length === 0 ? (
+						<div className="text-xs" style={{ color: theme.colors.textDim }}>
+							No other cards to depend on yet.
+						</div>
+					) : (
+						<div
+							className="rounded-md p-2 space-y-1 max-h-48 overflow-y-auto"
+							style={{ border: `1px solid ${theme.colors.border}` }}
+						>
+							{candidateParents.map((c) => {
+								const checked = draft.parents.includes(c.id);
+								return (
+									<label
+										key={c.id}
+										className="flex items-center gap-2 text-xs cursor-pointer rounded px-1.5 py-1 hover:bg-white/5"
+										style={{ color: theme.colors.textMain }}
+									>
+										<input
+											type="checkbox"
+											checked={checked}
+											onChange={() => onToggleParent(c.id)}
+										/>
+										<span className="truncate">{c.title}</span>
+										<span className="ml-auto shrink-0" style={{ color: theme.colors.textDim }}>
+											{c.assigneeProfileId ? profileName(c.assigneeProfileId) : 'pool'}
+										</span>
+									</label>
+								);
+							})}
+						</div>
+					)}
+				</div>
+
+				{cycleError && (
+					<div
+						className="text-xs rounded-md px-3 py-2"
+						style={{ backgroundColor: theme.colors.error + '22', color: theme.colors.error }}
+					>
+						{cycleError}
 					</div>
 				)}
-			</div>
 
-			{cycleError && (
-				<div
-					className="text-xs rounded-md px-3 py-2"
-					style={{ backgroundColor: theme.colors.error + '22', color: theme.colors.error }}
-				>
-					{cycleError}
+				<div className="flex items-center gap-2">
+					<button
+						onClick={onSave}
+						disabled={!canSave}
+						className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-opacity disabled:opacity-40"
+						style={{ backgroundColor: theme.colors.accent, color: theme.colors.bgMain }}
+					>
+						<Plus className="w-4 h-4" />
+						{draft.id === null ? 'Create card' : 'Save changes'}
+					</button>
+					<button
+						onClick={onCancel}
+						disabled={saving}
+						className="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-white/5"
+						style={{ border: `1px solid ${theme.colors.border}`, color: theme.colors.textMain }}
+					>
+						Cancel
+					</button>
 				</div>
-			)}
-
-			<div className="flex items-center gap-2">
-				<button
-					onClick={onSave}
-					disabled={!canSave}
-					className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-opacity disabled:opacity-40"
-					style={{ backgroundColor: theme.colors.accent, color: theme.colors.bgMain }}
-				>
-					<Plus className="w-4 h-4" />
-					{draft.id === null ? 'Create card' : 'Save changes'}
-				</button>
-				<button
-					onClick={onCancel}
-					disabled={saving}
-					className="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-white/5"
-					style={{ border: `1px solid ${theme.colors.border}`, color: theme.colors.textMain }}
-				>
-					Cancel
-				</button>
-			</div>
+			</fieldset>
 		</div>
 	);
 }

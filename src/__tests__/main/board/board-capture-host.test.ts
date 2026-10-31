@@ -110,6 +110,122 @@ afterEach(() => {
 });
 
 describe('authoritative host capture over real SQLite and preload/IPC', () => {
+	it('captures colliding legacy IDs in the explicitly selected source and adopts returned revisions', async () => {
+		const first = await api.captureCard(command());
+		if (!first.ok) throw new Error(first.error.message);
+		const before = facade.read(dir, 'b');
+		const other = path.join(dir, 'second-source');
+		fs.mkdirSync(other);
+		const plan = planBoardMigration({
+			source: { location: { kind: 'local' }, path: other },
+			repository: { id: 'second-repo', workingDirectory: other, validated: true },
+			profileBytes: Buffer.from(
+				JSON.stringify({
+					profiles: [{ id: 'role', name: 'Same ID, another role', baseAgentId: 'a' }],
+				})
+			),
+			workers: [],
+			boardBytes: Buffer.from(
+				JSON.stringify({
+					boards: [
+						{
+							id: 'b',
+							name: 'Second board',
+							cards: [
+								{
+									...card(),
+									role: undefined,
+									repositoryId: undefined,
+									workingDirectory: undefined,
+									title: 'Second source card',
+								},
+							],
+						},
+					],
+				})
+			),
+		});
+		applyBoardMigration(db, plan);
+		const selected = await api.queryWorkspace({ projectRoot: other });
+		if (!selected.ok) throw new Error(selected.error.message);
+		const collection = selected.value.collections[0];
+		const current = collection.board.cards[0];
+		const result = await api.captureCard({
+			projectRoot: other,
+			boardId: collection.board.id,
+			expectedRevision: collection.revision,
+			card: {
+				...current,
+				title: 'Edited second source',
+				role: { namespace: plan.profileNamespace, profileId: 'role' },
+				profileNamespace: plan.profileNamespace,
+				assigneeProfileId: 'role',
+				repositoryId: 'second-repo',
+				workingDirectory: other,
+				startModeOverride: 'approval',
+			} as BoardCard,
+		});
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(result.value.storage).toMatchObject({
+			sourceKey: collection.sourceKey,
+			collectionKey: collection.collectionKey,
+			expectedRevision: collection.revision + 1,
+		});
+		expect(result.value.cards[0]).toMatchObject({
+			id: 'c',
+			title: 'Edited second source',
+			role: { namespace: plan.profileNamespace, profileId: 'role' },
+			storageRevision: current.storageRevision! + 1,
+			capturePolicy: { dispatchApproval: 'required' },
+		});
+		expect(facade.read(dir, 'b')).toEqual(before);
+		expect(result.readiness.c).toEqual([]);
+		expect(
+			await api.captureCard({
+				projectRoot: other,
+				boardId: 'b',
+				expectedRevision: collection.revision,
+				card: current,
+			})
+		).toMatchObject({ ok: false, error: { code: 'stale-revision' } });
+	});
+
+	it('accepts a full editor snapshot with retained host fields and explicit assignment unsets', async () => {
+		const initial = await api.captureCard(command(card({ startModeOverride: 'direct' })));
+		if (!initial.ok) throw new Error(initial.error.message);
+		const saved = initial.value.cards[0];
+		const captured = await api.captureCard(
+			command({
+				...saved,
+				body: 'Edited body with unchanged policy',
+				executionScope: { kind: 'agent', agentId: 'a' },
+				role: undefined,
+				assigneeProfileId: undefined,
+				profileNamespace: undefined,
+				assigneeAgentId: undefined,
+			} as BoardCard)
+		);
+		expect(captured).toMatchObject({
+			ok: true,
+			readiness: { c: [] },
+			value: {
+				cards: [
+					expect.objectContaining({
+						capturePolicy: expect.objectContaining({
+							effectiveStartMode: 'direct',
+							dispatchApproval: 'not-required',
+						}),
+					}),
+				],
+			},
+		});
+		const value = facade.read(dir, 'b').cards[0];
+		expect(value.role).toBeUndefined();
+		expect(value.assigneeAgentId).toBeUndefined();
+		expect(value.storageRevision).toBe(saved.storageRevision! + 1);
+	});
+
 	it('reads current host/catalog data and persists direct intent with revisions across reopen', async () => {
 		const catalog = await api.captureCatalog();
 		expect(catalog.agents).toEqual(agents);
