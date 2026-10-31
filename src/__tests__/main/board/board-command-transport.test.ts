@@ -1013,3 +1013,187 @@ it('invalidates native grants on specification edits and rejects stale approvals
 	expect(fixture.service.spawn).not.toHaveBeenCalled();
 	expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
 });
+
+describe('source-owned canonical alias compatibility', () => {
+	it.each(['canonical', 'trailingSlash', 'symlink', 'relative'])(
+		'%s list/get and subsequent CLI mutations/control/tick keep the same source',
+		async (kind) => {
+			const foreign = facade.read(roots[1], 'b');
+			const link = path.join(dir, 'alias');
+			fs.symlinkSync(roots[0], link, 'junction');
+			const root =
+				kind === 'canonical'
+					? roots[0]
+					: kind === 'trailingSlash'
+						? roots[0] + path.sep
+						: kind === 'symlink'
+							? link
+							: path.relative(process.cwd(), roots[0]);
+			const common = [
+				'--project-root',
+				root,
+				'--source',
+				target().sourceKey,
+				'--collection',
+				target().collectionKey,
+				'--json',
+			];
+			expect((await cli('list', ...common)).code).toBe(0);
+			expect((await cli('show', 'b', ...common)).code).toBe(0);
+			expect(
+				(
+					await cli(
+						'add-card',
+						'b',
+						'--title',
+						'Alias work',
+						'--scope-agent',
+						'a',
+						'--repository',
+						'repo0',
+						'--working-directory',
+						roots[0],
+						...common
+					)
+				).code
+			).toBe(0);
+			let board = facade.read(roots[0], 'b');
+			const id = board.cards[0].id;
+			expect(board.storage!.sourceKey).toBe(target().sourceKey);
+			expect((await cli('update-card', id, '--title', 'Updated alias', ...common)).code).toBe(0);
+			expect((await cli('rename', 'b', 'Alias board', ...common)).code).toBe(0);
+			expect((await cli('set-status', id, 'todo', ...common)).code).toBe(0);
+			// Install the existing real owner without changing this captured card.
+			const fixture = installBoardOwner(false);
+			expect((await cli('hold', id, ...common)).code).toBe(0);
+			expect((await cli('resume', id, ...common)).code).toBe(0);
+			const sessionsFile = path.join(dir, 'maestro-sessions.json');
+			const sessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
+			sessions.sessions[0].projectRoot = root;
+			sessions.sessions[0].cwd = root;
+			fs.writeFileSync(sessionsFile, JSON.stringify(sessions));
+			expect(await cli('tick', '--agent', 'creator', ...common.slice(2))).toMatchObject({
+				code: 0,
+			});
+			expect(fixture.service.spawn).not.toHaveBeenCalled();
+			board = facade.read(roots[0], 'b');
+			expect(board.name).toBe('Alias board');
+			expect(board.cards.find((c) => c.id === id)).toMatchObject({
+				title: 'Updated alias',
+				capturePolicy: { dispatchApproval: 'required' },
+			});
+			expect(facade.read(roots[1], 'b')).toEqual(foreign);
+			expect(
+				await send({
+					action: 'rename',
+					target: { ...target(), projectRoot: roots[1] },
+					name: 'Wrong',
+				})
+			).toMatchObject({ ok: false });
+			expect(facade.read(roots[1], 'b')).toEqual(foreign);
+		}
+	);
+});
+
+it.each(['alias', 'source', 'collection', 'card'])(
+	'rejects changed %s evidence during host canonical await without touching a foreign source',
+	async (change) => {
+		const saved = result<Board>(await send(capture()));
+		const foreign = facade.read(roots[1], 'b');
+		const link = path.join(dir, 'changing-alias');
+		fs.symlinkSync(roots[0], link, 'junction');
+		const selected = { ...target(), projectRoot: link };
+		const realpath = fs.promises.realpath.bind(fs.promises);
+		let entered!: () => void;
+		let resume!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			resume = resolve;
+		});
+		let first = true;
+		const spy = vi.spyOn(fs.promises, 'realpath').mockImplementation(async (...args) => {
+			expect(db.inTransaction).toBe(false);
+			const resolved = await realpath(...args);
+			if (first) {
+				first = false;
+				entered();
+				await blocked;
+			}
+			return resolved;
+		});
+		try {
+			const pending = executeBoardCommand({
+				action: 'rename',
+				target: selected,
+				name: 'Must not land',
+			});
+			await started;
+			if (change === 'alias') {
+				fs.unlinkSync(link);
+				fs.symlinkSync(roots[1], link, 'junction');
+			} else if (change === 'source') {
+				db.prepare('UPDATE board_source_locations SET payload_json=? WHERE source_key=?').run(
+					JSON.stringify({ location: { kind: 'local' }, path: roots[1] }),
+					selected.sourceKey
+				);
+			} else if (change === 'collection') {
+				facade.save(roots[0], [{ ...saved, name: 'Concurrent writer' }]);
+			} else {
+				const concurrent = capture({ ...saved.cards[0], body: 'Concurrent writer' });
+				if (concurrent.action !== 'capture') throw new Error('capture fixture');
+				facade.capture(concurrent.capture);
+			}
+			resume();
+			expect(await pending).toMatchObject({ ok: false, error: { code: 'stale-revision' } });
+			expect(facade.read(roots[1], 'b')).toEqual(foreign);
+			expect(facade.read(roots[0], 'b').name).not.toBe('Must not land');
+		} finally {
+			resume();
+			spy.mockRestore();
+		}
+	}
+);
+
+it.each(['alias', 'source'])(
+	'rejects changed %s during runtime provider await before hold or dispatch',
+	async (change) => {
+		const fixture = installBoardOwner(false);
+		const foreign = facade.read(roots[1], 'b');
+		const link = path.join(dir, 'runtime-alias');
+		fs.symlinkSync(roots[0], link, 'junction');
+		let entered!: () => void;
+		let resume!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			resume = resolve;
+		});
+		configureBoardRuntimeHost(async () => {
+			entered();
+			await blocked;
+			return fixture.owner;
+		});
+		const request = control('hold');
+		request.target.projectRoot = link;
+		const pending = executeBoardCommand(request);
+		await started;
+		if (change === 'alias') {
+			fs.unlinkSync(link);
+			fs.symlinkSync(roots[1], link, 'junction');
+		} else {
+			db.prepare('UPDATE board_source_locations SET payload_json=? WHERE source_key=?').run(
+				JSON.stringify({ location: { kind: 'local' }, path: roots[1] }),
+				request.target.sourceKey
+			);
+		}
+		resume();
+		expect(await pending).toMatchObject({ ok: false, error: { code: 'stale-revision' } });
+		expect(facade.read(roots[0], 'b').cards[0].heldByUser).not.toBe(true);
+		expect(facade.read(roots[1], 'b')).toEqual(foreign);
+		expect(fixture.service.spawn).not.toHaveBeenCalled();
+		expect(fixture.service.stop).not.toHaveBeenCalled();
+	}
+);

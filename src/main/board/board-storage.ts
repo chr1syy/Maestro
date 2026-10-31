@@ -203,7 +203,7 @@ export class BoardStorageFacade {
 		};
 	}
 
-	private diagnosticSourceIdentity(sourceKey: string): string {
+	sourceIdentity(sourceKey: string): string {
 		return canonicalJson({
 			location:
 				this.db
@@ -229,7 +229,7 @@ export class BoardStorageFacade {
 				repository: catalog.repositories.find(
 					(repo) => repo.id === card.repositoryId && repo.validated
 				),
-				sourceIdentity: this.diagnosticSourceIdentity(board.storage!.sourceKey),
+				sourceIdentity: this.sourceIdentity(board.storage!.sourceKey),
 			}))
 		);
 		const cards = await Promise.all(
@@ -292,7 +292,7 @@ export class BoardStorageFacade {
 		const workspaceRevision = (
 			this.db.prepare('SELECT revision FROM workspace WHERE id=1').get() as { revision: number }
 		).revision;
-		const sourceIdentity = ref && this.diagnosticSourceIdentity(ref.sourceKey);
+		const sourceIdentity = ref && this.sourceIdentity(ref.sourceKey);
 
 		return Object.fromEntries(
 			board.cards.map((card) => {
@@ -704,32 +704,66 @@ export class BoardStorageFacade {
 		})();
 	}
 
-	async queryAsync(query: BoardWorkspaceQuery = {}): Promise<BoardWorkspaceQueryResult> {
+	/** Resolve host-owned local identity before any SQL snapshot or queued mutation.
+	 * Explicit source references and custom (including remote) resolvers stay explicit.
+	 */
+	async prepareQuery(query: BoardWorkspaceQuery = {}): Promise<BoardWorkspaceQuery> {
 		if (this.db.inTransaction)
 			throw new BoardWorkspaceStorageError(
 				'invalid-input',
-				'Diagnostics require no open transaction'
+				'Identity preparation requires no open transaction'
 			);
-		// Canonical local mapping is asynchronous; custom/remote adapters keep their explicit identity.
 		if (
-			typeof query?.projectRoot === 'string' &&
-			this.resolveSourceKeys === resolveLocalBoardSourceKeys &&
-			!query.projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)
-		) {
-			try {
-				query = { ...query, projectRoot: await fs.promises.realpath(query.projectRoot) };
-			} catch {
+			typeof query?.projectRoot !== 'string' ||
+			this.resolveSourceKeys !== resolveLocalBoardSourceKeys ||
+			query.projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)
+		)
+			return query;
+		const before = this.db
+			.prepare('SELECT source_key, payload_json FROM board_source_locations')
+			.all() as { source_key: string; payload_json: string }[];
+		let root: string;
+		try {
+			root = await fs.promises.realpath(query.projectRoot);
+			if ((await fs.promises.realpath(query.projectRoot)) !== root)
 				throw new BoardWorkspaceStorageError(
-					'legacy-mapping-missing',
-					'Canonical local Board source unavailable'
+					'stale-revision',
+					'Board project alias changed during identity preparation'
 				);
-			}
+		} catch (error) {
+			if (error instanceof BoardWorkspaceStorageError) throw error;
+			throw new BoardWorkspaceStorageError(
+				'legacy-mapping-missing',
+				'Canonical local Board source unavailable'
+			);
 		}
-		const snapshot = this.query(query);
+		const sourceKey = boardMigrationSourceKey({ location: { kind: 'local' }, path: root });
+		const after =
+			this.db
+				.prepare('SELECT source_key, payload_json FROM board_source_locations WHERE source_key=?')
+				.get(sourceKey) ?? null;
+		if (
+			canonicalJson(before.find((s) => s.source_key === sourceKey) ?? null) !== canonicalJson(after)
+		)
+			throw new BoardWorkspaceStorageError(
+				'stale-revision',
+				'Board source changed during identity preparation'
+			);
+		return { ...query, projectRoot: root };
+	}
+
+	async queryAsync(query: BoardWorkspaceQuery = {}): Promise<BoardWorkspaceQueryResult> {
+		const prepared = await this.prepareQuery(query);
+		const snapshot = this.query(prepared);
 		const observations = await this.prepareDiagnosticObservations(
 			snapshot.collections.map((entry) => entry.board)
 		);
-		return this.query(query, observations);
+		if (canonicalJson(await this.prepareQuery(query)) !== canonicalJson(prepared))
+			throw new BoardWorkspaceStorageError(
+				'stale-revision',
+				'Board project alias changed during diagnostics'
+			);
+		return this.query(prepared, observations);
 	}
 
 	read(projectRoot: string, boardId: string): Board {
@@ -1116,6 +1150,11 @@ export function loadBoards(projectRoot: string): Board[] {
 }
 export function queryBoardWorkspace(query?: BoardWorkspaceQuery): BoardWorkspaceQueryResult {
 	return storage().query(query);
+}
+export function prepareBoardWorkspaceQuery(
+	query: BoardWorkspaceQuery
+): Promise<BoardWorkspaceQuery> {
+	return storage().prepareQuery(query);
 }
 export function queryBoardWorkspaceAsync(
 	query?: BoardWorkspaceQuery

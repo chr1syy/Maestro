@@ -13,8 +13,10 @@ import {
 	deleteCard,
 	enqueueBoardWrite,
 	getBoardCaptureCatalog,
+	getBoardStorage,
 	queryBoardWorkspace,
 	queryBoardWorkspaceAsync,
+	prepareBoardWorkspaceQuery,
 	renameBoard,
 	updateCardStatus,
 } from './board-storage';
@@ -27,8 +29,19 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 		if (command.action === 'query')
 			return { ok: true, value: await queryBoardWorkspaceAsync(command.query) };
 		if (command.action === 'catalog') return { ok: true, value: getBoardCaptureCatalog() };
+		const sourceIdentity =
+			command.action === 'create'
+				? undefined
+				: getBoardStorage().sourceIdentity(command.target.sourceKey);
 		const projectRoot =
-			command.action === 'create' ? command.projectRoot : command.target.projectRoot;
+			command.action === 'create'
+				? command.projectRoot
+				: (
+						await prepareBoardWorkspaceQuery({
+							projectRoot: command.target.projectRoot,
+							sourceKey: command.target.sourceKey,
+						})
+					).projectRoot!;
 		const result = await enqueueBoardWrite(projectRoot, async () => {
 			if (command.action === 'create') {
 				return {
@@ -41,6 +54,15 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 				};
 			}
 			const target = command.target;
+			const current = await prepareBoardWorkspaceQuery({
+				projectRoot: target.projectRoot,
+				sourceKey: target.sourceKey,
+			});
+			if (
+				current.projectRoot !== projectRoot ||
+				getBoardStorage().sourceIdentity(target.sourceKey) !== sourceIdentity
+			)
+				throw new BoardStorageError('stale-revision', 'Board project alias changed while queued');
 			const snapshot = queryBoardWorkspace({ projectRoot, sourceKey: target.sourceKey });
 			const entry = snapshot.collections.find(
 				(collection) =>
@@ -88,7 +110,7 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 						'identity-mismatch',
 						'Board legacy identity does not match collection'
 					);
-				return captureBoardCardFromHost(command.capture, false);
+				return captureBoardCardFromHost({ ...command.capture, projectRoot }, false);
 			}
 			if (command.action === 'rename')
 				return {

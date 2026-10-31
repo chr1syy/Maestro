@@ -9,7 +9,12 @@ import type {
 	BoardCommandResult,
 	BoardTickResult,
 } from '../../shared/board/commands';
-import { BoardStorageError, queryBoardWorkspace } from './board-storage';
+import {
+	BoardStorageError,
+	queryBoardWorkspace,
+	prepareBoardWorkspaceQuery,
+	getBoardStorage,
+} from './board-storage';
 import { canonicalJson } from '../../shared/canonicalJson';
 
 let runtimeFor: (key: BoardCardKey) => BoardRuntime | null | Promise<BoardRuntime | null> = () =>
@@ -26,10 +31,13 @@ export async function executeBoardRuntimeCommand(
 	principal?: string
 ): Promise<BoardCommandResult> {
 	const { target } = command;
-	const entry = queryBoardWorkspace({
+	const sourceIdentity = getBoardStorage().sourceIdentity(target.sourceKey);
+	const requestedQuery = {
 		projectRoot: 'projectRoot' in target ? target.projectRoot : undefined,
 		sourceKey: target.sourceKey,
-	}).collections.find(
+	};
+	const query = await prepareBoardWorkspaceQuery(requestedQuery);
+	const entry = queryBoardWorkspace(query).collections.find(
 		(c) => c.collectionKey === target.collectionKey && c.sourceKey === target.sourceKey
 	);
 	if (!entry) throw new BoardStorageError('not-found', 'Board collection not found');
@@ -56,6 +64,14 @@ export async function executeBoardRuntimeCommand(
 				(c) => c.collectionKey === key.collectionKey
 			)?.revision;
 			const runtime = await runtimeFor(key);
+			if (
+				canonicalJson(await prepareBoardWorkspaceQuery(requestedQuery)) !== canonicalJson(query) ||
+				getBoardStorage().sourceIdentity(target.sourceKey) !== sourceIdentity
+			)
+				throw new BoardStorageError(
+					'stale-revision',
+					'Board project alias changed during runtime preparation'
+				);
 			if (!runtime) return failed('runtime-unavailable');
 			const storage = runtime.storage;
 			const collection = storage.workspace.readCollection(key);
@@ -102,6 +118,14 @@ export async function executeBoardRuntimeCommand(
 		cardId: command.cardId,
 	};
 	const runtime = await runtimeFor(key);
+	if (
+		canonicalJson(await prepareBoardWorkspaceQuery(requestedQuery)) !== canonicalJson(query) ||
+		getBoardStorage().sourceIdentity(target.sourceKey) !== sourceIdentity
+	)
+		throw new BoardStorageError(
+			'stale-revision',
+			'Board project alias changed during runtime preparation'
+		);
 	if (!runtime) return failed('runtime-unavailable');
 	const card = runtime.storage.workspace
 		.readCollection(key)
@@ -145,9 +169,8 @@ export async function controlBoardRuntimeCard(
 	cardId: string,
 	operation: 'hold' | 'resume' = 'hold'
 ) {
-	const entries = queryBoardWorkspace({ projectRoot }).collections.filter(
-		(e) => e.board.id === boardId
-	);
+	const query = await prepareBoardWorkspaceQuery({ projectRoot });
+	const entries = queryBoardWorkspace(query).collections.filter((e) => e.board.id === boardId);
 	if (entries.length !== 1)
 		throw new BoardStorageError('identity-mismatch', 'Ambiguous or missing Board identity');
 	const entry = entries[0];
@@ -177,9 +200,8 @@ export async function controlBoardRuntimeCard(
 		runToken: token,
 	});
 	if (!result.ok) throw new BoardStorageError('runtime-unavailable', result.error.message);
-	return queryBoardWorkspace({ projectRoot, sourceKey: key.sourceKey }).collections.find(
-		(e) => e.collectionKey === key.collectionKey
-	)!.board;
+	return queryBoardWorkspace(query).collections.find((e) => e.collectionKey === key.collectionKey)!
+		.board;
 }
 
 export { controlBoardRuntimeCard as cancelBoardRuntimeCard };
