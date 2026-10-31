@@ -155,6 +155,23 @@ afterEach(() => {
 });
 
 describe('BoardModal card creation', () => {
+	it('saves an edited card with the revision read when editing began', async () => {
+		const original = makeCard({ id: 'c1', title: 'Original', storageRevision: 4 });
+		const board: Board = { id: 'b1', name: 'My Board', cards: [original] };
+		installApis([board]);
+		boardApi.updateCard.mockImplementation(async (_root, _id, card: BoardCard) => {
+			if (card.storageRevision !== 4) throw new Error('stale revision');
+			return { ...board, cards: [{ ...card, storageRevision: 5 }] };
+		});
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Original'));
+		fireEvent.change(screen.getByPlaceholderText('e.g. Design the schema'), {
+			target: { value: 'Edited' },
+		});
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/i }));
+		expect(await screen.findByText('Edited')).toBeInTheDocument();
+		expect(boardApi.updateCard.mock.calls[0][2].storageRevision).toBe(4);
+	});
 	it('creates a card through the editor and persists it via addCard', async () => {
 		const board: Board = { id: 'b1', name: 'My Board', cards: [] };
 		installApis([board]);

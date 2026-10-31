@@ -119,6 +119,7 @@ interface CardDraft {
 	prTargetBranch: string;
 	status: CardStatus;
 	createdAt?: string;
+	storageRevision?: number;
 }
 
 /**
@@ -498,6 +499,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			prTargetBranch: card.prOnDone?.targetBranch ?? '',
 			status: card.status,
 			createdAt: card.createdAt,
+			storageRevision: card.storageRevision,
 		};
 		draftBaselineRef.current = existing;
 		setDraft(existing);
@@ -611,6 +613,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			status: draft.status,
 			createdAt: draft.createdAt ?? now,
 			updatedAt: now,
+			...(draft.storageRevision !== undefined ? { storageRevision: draft.storageRevision } : {}),
 			// Assignee: a role (profile) and/or a pinned agent. Omit blank fields so
 			// a role-only card floats to the worker pool and a pinned card carries
 			// no stale profile id.
