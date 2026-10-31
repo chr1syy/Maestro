@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-export const BOARD_SCHEMA_VERSION = 4;
+export const BOARD_SCHEMA_VERSION = 5;
 
 const SCHEMA = `
 CREATE TABLE workspace (
@@ -112,6 +112,7 @@ export function openBoardDb(
 			}
 			if (current < 3) db.exec(ARCHIVE_SCHEMA);
 			if (current < 4) db.exec(SOURCES_SCHEMA);
+			if (current < 5) db.exec('ALTER TABLE runs ADD COLUMN lifecycle_json TEXT');
 			db.pragma(`user_version = ${BOARD_SCHEMA_VERSION}`);
 		}).immediate();
 		return db;

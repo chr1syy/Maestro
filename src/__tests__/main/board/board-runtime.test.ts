@@ -1,0 +1,540 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { openBoardDb } from '../../../main/board/board-db';
+import { BoardStorageFacade, configureBoardCaptureHost } from '../../../main/board/board-storage';
+import {
+	registerBoardWorker,
+	setBoardWorkerAccess,
+	setBoardWorkerPaused,
+} from '../../../main/board/board-workspace-storage';
+import {
+	BoardRuntime,
+	type BoardRunHooks,
+	type BoardRunService,
+} from '../../../main/board/board-runtime';
+import type { BoardClaimHostContext } from '../../../main/board/board-claims';
+import type { CardSpawnResult } from '../../../main/board/board-dispatcher';
+import { canonicalJson } from '../../../shared/canonicalJson';
+import { generateUUID } from '../../../shared/uuid';
+import { runProcess, stopProcess } from '../../../main/cue/cue-process-lifecycle';
+import { fakeAgentSpec } from '../../shared/maestro-lib/run/fakeAgent';
+
+vi.mock('../../../main/utils/sentry', () => ({ captureException: vi.fn() }));
+
+let dir: string;
+let db: ReturnType<typeof openBoardDb>;
+let storage: BoardStorageFacade;
+let runtime: BoardRuntime;
+let roots: string[];
+let host: Omit<BoardClaimHostContext, 'owner'>;
+let agents: { id: string; groupId: string }[];
+let service: BoardRunService;
+let hooks: BoardRunHooks;
+let settle: (result: CardSpawnResult) => void;
+let lockValid: boolean;
+const good: CardSpawnResult = {
+	output: '<!-- maestro:card-complete -->',
+	exitCode: 0,
+	executionStarted: true,
+	terminationConfirmed: true,
+};
+
+function newRuntime(
+	start = 1,
+	liveness: 'alive' | 'dead' | 'unknown' = 'unknown',
+	facade = storage
+) {
+	return new BoardRuntime(
+		facade,
+		{
+			info: { pid: 101, mode: 'desktop', bootTime: 1, startedAt: new Date(start).toISOString() },
+			verify: () => (lockValid ? { ok: true } : { ok: false, reason: 'lost' }),
+		},
+		() => host,
+		service,
+		() => liveness
+	);
+}
+beforeEach(() => {
+	dir = fs.mkdtempSync(path.resolve('.maestro/board-global-workers-20261031/lifecycle-'));
+	db = openBoardDb(path.join(dir, 'fixture.sqlite'));
+	storage = new BoardStorageFacade(db, (root) => [root]);
+	roots = [path.join(dir, 'a'), path.join(dir, 'b')];
+	agents = [{ id: 'worker', groupId: 'group' }];
+	configureBoardCaptureHost(() => ({ agents, groups: [{ id: 'group' }] }));
+	for (let i = 0; i < roots.length; i++) {
+		fs.mkdirSync(roots[i]);
+		const key = storage.workspace.createCollection({
+			sourceKey: roots[i],
+			collectionKey: `collection${i}`,
+			legacyBoardId: 'board',
+			expectedRevision: null,
+			set: {
+				name: 'Board',
+				maxInProgress: 2,
+			},
+		});
+		db.prepare(
+			"UPDATE collections SET payload_json=json_set(payload_json, '$.defaultStartMode', 'direct') WHERE collection_key=?"
+		).run(key.collectionKey);
+		db.prepare('INSERT INTO repositories VALUES (?, ?)').run(
+			`repo${i}`,
+			canonicalJson({ id: `repo${i}`, workingDirectory: roots[i], validated: true })
+		);
+		storage.capture({
+			projectRoot: roots[i],
+			boardId: 'board',
+			expectedRevision: 0,
+			card: {
+				id: 'same',
+				title: 'Work',
+				body: 'Do it',
+				parents: [],
+				status: 'todo',
+				createdAt: '2026-10-31',
+				updatedAt: '2026-10-31',
+				repositoryId: `repo${i}`,
+				workingDirectory: roots[i],
+				executionScope: { kind: 'group', groupId: 'group' },
+			},
+		});
+	}
+	registerBoardWorker(db, 'worker');
+	setBoardWorkerAccess(db, 'worker', [], ['repo0', 'repo1']);
+	host = {
+		dispatchEnabled: true,
+		registryRevision: 1,
+		agentStates: { worker: { live: true, busy: false, location: { kind: 'local' } } },
+		repository: {
+			id: 'repo0',
+			workingDirectory: roots[0],
+			record: { id: 'repo0', workingDirectory: roots[0], validated: true },
+			location: { kind: 'local' },
+			identity: 'git:fixture0',
+		},
+	};
+	service = {
+		spawn: vi.fn(async (_spec, callbacks) => {
+			hooks = callbacks;
+			if (!hooks.beforeLaunch()) return { output: '', exitCode: null, executionStarted: false };
+			hooks.onStarted(202);
+			return new Promise<CardSpawnResult>((resolve) => {
+				settle = resolve;
+			});
+		}),
+		stop: vi.fn(),
+		probe: vi.fn<BoardRunService['probe']>(() => 'unknown'),
+	};
+	lockValid = true;
+	runtime = newRuntime();
+	expect(runtime.acquire()).toEqual({ ok: true });
+});
+afterEach(() => {
+	configureBoardCaptureHost(() => ({ agents: [], groups: [] }));
+	db.close();
+	fs.rmSync(dir, { recursive: true, force: true });
+	vi.restoreAllMocks();
+});
+function command(index = 0) {
+	const key = storage.workspace.listCollections(roots[index])[0];
+	const collection = storage.workspace.readCollection(key)!;
+	return {
+		sourceKey: key.sourceKey,
+		collectionKey: key.collectionKey,
+		cardId: 'same',
+		requestId: generateUUID(),
+		workerAgentId: 'worker',
+		readRevision: {
+			workspace: storage.workspace.readWorkspace().revision,
+			collection: collection.revision,
+			card: collection.cards[0].revision,
+			registry: host.registryRevision,
+		},
+	};
+}
+function claim() {
+	const result = runtime.claim(command());
+	if (!result.ok) throw new Error(result.reason);
+	return result.runToken;
+}
+function card(index = 0) {
+	return storage.workspace.readCollection(storage.workspace.listCollections(roots[index])[0])!
+		.cards[0].payload;
+}
+function reservations() {
+	return db.prepare('SELECT * FROM reservations').all();
+}
+function persisted() {
+	return canonicalJson(
+		['runtime_owner', 'runs', 'reservations', 'cards', 'collections', 'workspace'].map((table) =>
+			db.prepare(`SELECT * FROM ${table}`).all()
+		)
+	);
+}
+
+describe('durable Board runtime over SQLite and the existing run-service seam', () => {
+	it('persists the real native Cue process identity and its completion in the same SQLite lifecycle', async () => {
+		vi.mocked(service.spawn).mockImplementation(async (specification, callbacks) => {
+			const spec = fakeAgentSpec(dir, {
+				chunks: ['native fixture complete'],
+				close: { code: 0, signal: null },
+			});
+			const result = await runProcess(
+				specification.runToken.runId,
+				{
+					command: spec.command,
+					args: spec.args,
+					cwd: spec.cwd,
+					env: spec.env as Record<string, string>,
+				},
+				{
+					toolType: 'opencode',
+					timeoutMs: 5000,
+					onLog: vi.fn(),
+					beforeLaunch: callbacks.beforeLaunch,
+					onStarted: (pid) => {
+						callbacks.onStarted(pid);
+						expect(runtime.read(specification.runToken)!.life.process).toMatchObject({
+							pid,
+							cueRunId: specification.runToken.runId,
+						});
+						expect(card().status).toBe('running');
+					},
+				}
+			);
+			return {
+				output: result.stdout,
+				exitCode: result.exitCode,
+				executionStarted: result.executionStarted,
+				terminationConfirmed: result.terminationConfirmed,
+			};
+		});
+		vi.mocked(service.stop).mockImplementation((spec) => {
+			stopProcess(spec.runToken.runId);
+		});
+		const token = claim();
+		expect(await runtime.start(token)).toEqual({ ok: true });
+		expect(runtime.read(token)!.life.process!.pid).toBeGreaterThan(0);
+		expect(card().status).toBe('done');
+		expect(reservations()).toHaveLength(0);
+	});
+	it('keeps a prepared claim distinct from a process and starts exactly once, even across adapter instances', async () => {
+		const token = claim();
+		expect(card().status).toBe('todo');
+		expect(card().runs ?? []).toEqual([]);
+		const initial = runtime.read(token)!.spec;
+		const pending = runtime.start(token);
+		expect(runtime.read(token)!.life).toMatchObject({
+			phase: 'running',
+			process: { cueRunId: token.runId, pid: 202 },
+		});
+		expect(card().status).toBe('running');
+		const other = newRuntime();
+		expect(other.acquire()).toEqual({ ok: true });
+		expect(await other.start(token)).toMatchObject({ ok: false, reason: 'already-started' });
+		expect(service.spawn).toHaveBeenCalledTimes(1);
+		expect(runtime.claim(command(1))).toMatchObject({ ok: false, reason: 'worker-busy' });
+		hooks.onStarted(202);
+		expect(card().runs as unknown[]).toHaveLength(1);
+		settle(good);
+		expect(await pending).toEqual({ ok: true });
+		expect(reservations()).toEqual([]);
+		expect(card().status).toBe('done');
+		expect(runtime.read(token)!.spec).toEqual(initial);
+		const before = persisted();
+		expect(runtime.complete(token, good)).toEqual({ ok: true, duplicate: true });
+		expect(persisted()).toBe(before);
+	});
+
+	it.each(['alive', 'unknown'] as const)(
+		'refuses owner takeover with %s proof despite an ancient heartbeat and the same PID',
+		(proof) => {
+			claim();
+			db.prepare('UPDATE runtime_owner SET heartbeat=0').run();
+			const before = persisted();
+			expect(newRuntime(2, proof).acquire()).toEqual({ ok: false, reason: 'owner-conflict' });
+			expect(persisted()).toBe(before);
+		}
+	);
+	it('requires the native lock and full boot/start identity', () => {
+		const incomplete = new BoardRuntime(
+			storage,
+			{
+				info: { pid: 101, mode: 'desktop', startedAt: '2026-10-31' },
+				verify: () => ({ ok: true }),
+			},
+			() => host,
+			service,
+			() => 'dead'
+		);
+		expect(incomplete.acquire()).toEqual({ ok: false, reason: 'owner-identity-unavailable' });
+		lockValid = false;
+		expect(runtime.acquire()).toEqual({ ok: false, reason: 'runtime-unavailable' });
+		expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'owner-conflict' });
+	});
+	it('cannot manufacture a result before the native launch gate', () => {
+		const token = claim();
+		const before = persisted();
+		expect(runtime.complete(token, good)).toEqual({ ok: false, reason: 'launch-proof-missing' });
+		expect(persisted()).toBe(before);
+	});
+	it('invalidates a prepared claim after fresh membership changes without launching', async () => {
+		const token = claim();
+		agents[0].groupId = 'elsewhere';
+		expect(await runtime.start(token)).toMatchObject({ ok: false });
+		expect(service.spawn).not.toHaveBeenCalled();
+		expect(reservations()).toEqual([]);
+		expect(runtime.read(token)!.life.phase).toBe('finished');
+	});
+	it.each([
+		'pause',
+		'membership',
+		'busy',
+		'registry',
+		'repository',
+		'disabled',
+		'overrides',
+		'approval',
+	] as const)('rechecks %s after async preparation at the final native gate', async (change) => {
+		vi.mocked(service.spawn).mockImplementation(async (_spec, callbacks) => {
+			await Promise.resolve();
+			if (change === 'pause') setBoardWorkerPaused(db, 'worker', true);
+			if (change === 'membership') agents[0].groupId = 'elsewhere';
+			if (change === 'busy') host.agentStates.worker.busy = true;
+			if (change === 'registry') host.registryRevision++;
+			if (change === 'repository') host.repository!.identity = 'different-repository';
+			if (change === 'disabled') host.dispatchEnabled = false;
+			if (change === 'overrides') host.agentStates.worker.baseValues = { customModel: 'changed' };
+			if (change === 'approval')
+				db.prepare(
+					"UPDATE cards SET payload_json=json_set(payload_json, '$.capturePolicy.dispatchApproval', 'required') WHERE collection_key=?"
+				).run(command().collectionKey);
+			expect(callbacks.beforeLaunch()).toBe(false);
+			return { output: '', exitCode: null, executionStarted: false };
+		});
+		const token = claim();
+		await runtime.start(token);
+		expect(reservations()).toEqual([]);
+		expect(card().status).toBe('todo');
+		expect((card().runs as { outcome: string }[])[0].outcome).toBe('reclaimed');
+	});
+	it('cannot authorize the launch twice', async () => {
+		const token = claim();
+		const pending = runtime.start(token);
+		expect(hooks.beforeLaunch()).toBe(false);
+		settle(good);
+		await pending;
+	});
+	it('records nonstart failure and releases only that attempt, never accepting its success marker', async () => {
+		vi.mocked(service.spawn).mockResolvedValue({
+			...good,
+			executionStarted: false,
+			terminationConfirmed: false,
+		});
+		const token = claim();
+		expect(await runtime.start(token)).toEqual({ ok: true });
+		expect(card().status).toBe('ready');
+		expect((card().runs as { outcome: string }[])[0].outcome).toBe('error');
+		expect(reservations()).toEqual([]);
+	});
+	it('holds before requesting Stop, retains reservation until acknowledgement and preserves policy on Resume', async () => {
+		const token = claim();
+		const policy = card().capturePolicy;
+		const pending = runtime.start(token);
+		vi.mocked(service.stop).mockImplementation(() => {
+			expect(card().heldByUser).toBe(true);
+			expect(runtime.read(token)!.life.phase).toBe('stopping');
+			expect(reservations()).toHaveLength(1);
+		});
+		expect(runtime.hold(token)).toEqual({ ok: true });
+		expect(runtime.resume(token)).toMatchObject({ ok: false, reason: 'termination-unconfirmed' });
+		settle(good); // A completion racing with Stop cannot override the hold.
+		await pending;
+		expect(card()).toMatchObject({ heldByUser: true, status: 'todo' });
+		expect((card().runs as { outcome: string }[])[0].outcome).toBe('canceled');
+		expect(runtime.resume(token)).toEqual({ ok: true });
+		expect(card().heldByUser).toBe(false);
+		expect(card().capturePolicy).toEqual(policy);
+	});
+	it('cancels a prepared claim without invoking Stop or a process', async () => {
+		const token = claim();
+		expect(runtime.hold(token)).toEqual({ ok: true });
+		expect(service.stop).not.toHaveBeenCalled();
+		expect(await runtime.start(token)).toMatchObject({ ok: false });
+		expect(service.spawn).not.toHaveBeenCalled();
+		expect(card()).toMatchObject({ heldByUser: true, status: 'todo' });
+	});
+	it('stops during pending launch without allowing its later launch gate', async () => {
+		let gate!: BoardRunHooks;
+		vi.mocked(service.spawn).mockImplementation(async (_spec, callbacks) => {
+			gate = callbacks;
+			await Promise.resolve();
+			expect(gate.beforeLaunch()).toBe(false);
+			return { output: '', exitCode: null, executionStarted: false };
+		});
+		const token = claim();
+		const pending = runtime.start(token);
+		runtime.hold(token);
+		await pending;
+		expect(reservations()).toEqual([]);
+		expect(card().heldByUser).toBe(true);
+	});
+	it('keeps an exception at an uncertain start reserved instead of guessing nonstart', async () => {
+		vi.mocked(service.spawn).mockRejectedValue(new Error('exception after syscall'));
+		const token = claim();
+		expect(await runtime.start(token)).toMatchObject({
+			ok: false,
+			reason: 'launch-or-result-uncertain',
+		});
+		expect(reservations()).toHaveLength(1);
+		expect(runtime.read(token)!.outcome).toBeNull();
+		expect(await runtime.start(token)).toMatchObject({ ok: false, reason: 'already-started' });
+	});
+	it.each(['alive', 'unknown'] as const)(
+		'keeps a restarted uncertain launch reserved when native liveness is %s',
+		async (proof) => {
+			const token = claim();
+			vi.mocked(service.spawn).mockRejectedValue(new Error('crash window'));
+			await runtime.start(token);
+			vi.mocked(service.probe).mockReturnValue(proof);
+			const secondDb = openBoardDb(path.join(dir, 'fixture.sqlite'));
+			try {
+				const successor = newRuntime(2, 'dead', new BoardStorageFacade(secondDb, (root) => [root]));
+				expect(successor.acquire()).toEqual({ ok: true });
+				expect(successor.reconcile(token)).toMatchObject({
+					ok: false,
+					reason: 'reconciliation-required',
+				});
+				expect(reservations()).toHaveLength(1);
+				expect(await successor.start(token)).toMatchObject({ ok: false, reason: 'owner-conflict' });
+				expect(runtime.complete(token, good)).toMatchObject({
+					ok: false,
+					reason: 'owner-conflict',
+				});
+			} finally {
+				secondDb.close();
+			}
+		}
+	);
+	it('recovers prepared work safely after proven owner death and rejects old-owner callbacks', () => {
+		const token = claim();
+		const successor = newRuntime(2, 'dead');
+		expect(successor.acquire()).toEqual({ ok: true });
+		expect(successor.reconcile(token)).toEqual({ ok: true });
+		expect(service.probe).not.toHaveBeenCalled();
+		expect(reservations()).toEqual([]);
+		expect(runtime.complete(token, good)).toMatchObject({ ok: false, reason: 'owner-conflict' });
+	});
+	it.each(['starting', 'running', 'stopping'] as const)(
+		'reopens persistent %s state conservatively and releases only on native termination proof',
+		async (phase) => {
+			if (phase === 'starting')
+				vi.mocked(service.spawn).mockImplementation(
+					() =>
+						new Promise<CardSpawnResult>((resolve) => {
+							settle = resolve;
+						})
+				);
+			const token = claim();
+			const pending = runtime.start(token);
+			if (phase === 'stopping') runtime.hold(token);
+			expect(runtime.read(token)!.life.phase).toBe(phase);
+			const successorDb = openBoardDb(path.join(dir, 'fixture.sqlite'));
+			try {
+				const successor = newRuntime(
+					2,
+					'dead',
+					new BoardStorageFacade(successorDb, (root) => [root])
+				);
+				expect(successor.acquire()).toEqual({ ok: true });
+				expect(successor.reconcile(token)).toMatchObject({
+					ok: false,
+					reason: 'reconciliation-required',
+				});
+				expect(reservations()).toHaveLength(1);
+				expect(successor.hold(token)).toEqual({ ok: true });
+				expect(successor.resume(token)).toMatchObject({
+					ok: false,
+					reason: 'termination-unconfirmed',
+				});
+				vi.mocked(service.probe).mockReturnValue('terminated');
+				expect(successor.reconcile(token)).toEqual({ ok: true });
+				expect(card()).toMatchObject({ status: 'todo', heldByUser: true });
+				const before = persisted();
+				settle(good);
+				expect(await pending).toMatchObject({ ok: false, reason: 'owner-conflict' });
+				expect(persisted()).toBe(before);
+			} finally {
+				successorDb.close();
+			}
+		}
+	);
+	it('keeps agent review separate from human approval and records native result separately from card outcome', async () => {
+		const token = claim();
+		const pending = runtime.start(token);
+		settle({ ...good, output: '<!-- maestro:card-review: Verify artifact -->' });
+		await pending;
+		expect(card().status).toBe('review');
+		expect(runtime.read(token)!.outcome).toMatchObject({
+			result: { exitCode: 0 },
+			cardOutcome: { status: 'review', run: { outcome: 'review' } },
+		});
+		expect(runtime.resume(token)).toEqual({ ok: true });
+		expect(card().status).toBe('review');
+	});
+	it('reclaims uncertain terminated work on native proof and fences late results after a newer attempt', async () => {
+		const old = claim();
+		vi.mocked(service.spawn).mockRejectedValueOnce(new Error('uncertain'));
+		await runtime.start(old);
+		vi.mocked(service.probe).mockReturnValue('terminated');
+		expect(runtime.reconcile(old)).toEqual({ ok: true });
+		const current = claim();
+		expect(current.generation).toBe(2);
+		const pending = runtime.start(current);
+		const before = persisted();
+		expect(runtime.complete(old, good)).toEqual({ ok: true, duplicate: true });
+		expect(runtime.hold(old)).toMatchObject({ ok: false, reason: 'attempt-conflict' });
+		expect(runtime.resume(old)).toMatchObject({ ok: false, reason: 'attempt-conflict' });
+		expect(persisted()).toBe(before);
+		settle(good);
+		await pending;
+		expect(card().status).toBe('done');
+	});
+	it('fences forged generation and epoch without partial writes', async () => {
+		const token = claim();
+		const before = persisted();
+		for (const forged of [
+			{ ...token, generation: 200 },
+			{ ...token, ownerEpoch: 200 },
+		]) {
+			expect(await runtime.start(forged)).toMatchObject({ ok: false });
+			expect(runtime.complete(forged, good)).toMatchObject({ ok: false });
+			expect(runtime.hold(forged)).toMatchObject({ ok: false });
+		}
+		expect(persisted()).toBe(before);
+	});
+	it('rolls back card/outcome/release together when a storage write fails', async () => {
+		const token = claim();
+		const pending = runtime.start(token);
+		db.exec(
+			"CREATE TRIGGER fail_release BEFORE DELETE ON reservations BEGIN SELECT RAISE(ABORT, 'injected'); END"
+		);
+		const before = persisted();
+		expect(() => runtime.complete(token, good)).toThrow('injected');
+		expect(persisted()).toBe(before);
+		db.exec('DROP TRIGGER fail_release');
+		settle(good);
+		await pending;
+	});
+	it('keeps an unconfirmed remote/local result reserved, regardless of success output', async () => {
+		vi.mocked(service.spawn).mockResolvedValue({ ...good, terminationConfirmed: false });
+		const token = claim();
+		expect(await runtime.start(token)).toMatchObject({
+			ok: false,
+			reason: 'termination-unconfirmed',
+		});
+		expect(card().status).toBe('todo');
+		expect(reservations()).toHaveLength(1);
+	});
+});

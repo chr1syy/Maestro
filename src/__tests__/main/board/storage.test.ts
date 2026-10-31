@@ -174,9 +174,11 @@ describe('central bootstrap and revision boundaries', () => {
 		const before = loadBoards(projectRoot);
 		const ledger = db.prepare('SELECT * FROM migrations').all();
 		const runs = db.prepare('SELECT * FROM runs').all();
-		db.exec('DROP TABLE board_sources; PRAGMA user_version = 3');
+		db.exec(
+			'DROP TABLE board_sources; ALTER TABLE runs DROP COLUMN lifecycle_json; PRAGMA user_version = 3'
+		);
 		reopen();
-		expect(db.pragma('user_version', { simple: true })).toBe(4);
+		expect(db.pragma('user_version', { simple: true })).toBe(5);
 		expect(loadBoards(projectRoot)).toEqual(before);
 		expect(db.prepare('SELECT * FROM migrations').all()).toEqual(ledger);
 		expect(db.prepare('SELECT * FROM runs').all()).toEqual(runs);

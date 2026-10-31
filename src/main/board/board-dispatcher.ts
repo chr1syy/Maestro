@@ -52,6 +52,9 @@ export const DEFAULT_STALE_RUNNING_MS = 30 * 60 * 1000;
 
 /** The result of running a card's assignee to completion. */
 export interface CardSpawnResult {
+	/** Native runner proof. Omitted means launch/termination is uncertain. */
+	executionStarted?: boolean;
+	terminationConfirmed?: boolean;
 	/** Combined agent output, scanned for `<!-- maestro:card-* -->` markers. */
 	output: string;
 	/** Process exit code; `null` when unknown (killed / spawn failure). */
@@ -70,6 +73,13 @@ export interface CardSpawnResult {
 
 /** A claimed card plus the resolved profile overrides used to spawn it. */
 export interface CardSpawnRequest {
+	/** Trusted host lifecycle hooks, never populated by a transport payload. */
+	lifecycle?: {
+		runId: string;
+		canPrepare: () => boolean;
+		beforeLaunch: () => boolean;
+		onStarted: (pid: number | undefined) => void;
+	};
 	card: BoardCard;
 	overrides: ProfileSpawnOverrides;
 	/**

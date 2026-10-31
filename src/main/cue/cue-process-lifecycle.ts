@@ -88,6 +88,8 @@ export interface CueProcessInfo {
 
 /** Result of a process execution */
 export interface ProcessRunResult {
+	/** The native local child settled; remote descendants need their own proof. */
+	terminationConfirmed?: boolean;
 	executionStarted?: boolean;
 	stdout: string;
 	stderr: string;
@@ -101,6 +103,8 @@ export interface ProcessRunResult {
 
 /** Options controlling process execution */
 export interface ProcessRunOptions {
+	beforeLaunch?: () => boolean;
+	onStarted?: (pid: number | undefined) => void;
 	toolType: string;
 	timeoutMs: number;
 	sshRemoteEnabled?: boolean;
@@ -456,7 +460,7 @@ export async function runProcess(
 
 	// The last check before the spawn; nothing below awaits until the child
 	// is started and registered, so a stop cannot slip in between.
-	if (isLaunchCancelled(options.signal)) {
+	if (isLaunchCancelled(options.signal) || options.beforeLaunch?.() === false) {
 		return {
 			stdout: '',
 			stderr: '',
@@ -573,6 +577,13 @@ export async function runProcess(
 		},
 	};
 	const untrack = trackCueProcess(runId, entry);
+	// Registration must survive an observer/persistence failure after spawn.
+	try {
+		options.onStarted?.(turn.child.pid);
+	} catch (error) {
+		onLog('error', `Could not persist Cue launch identity: ${String(error)}`);
+		turn.terminate();
+	}
 
 	// Enforce timeout - use platform-appropriate kill
 	const timeoutTimer =
@@ -605,6 +616,7 @@ export async function runProcess(
 			exitCode,
 			status,
 			executionStarted: typeof turn.child.pid === 'number' || !exit.spawnError,
+			terminationConfirmed: !sshRemoteEnabled,
 			providerSessionId: capture.providerSessionId,
 			usage: capture.usage,
 		};

@@ -18,6 +18,7 @@ import {
 } from '../../shared/board/types';
 import {
 	resolveProfileSpawnOverrides,
+	type AgentProfile,
 	type ProfileBaseAgentValues,
 } from '../../shared/profiles/types';
 import { DEFAULT_MAX_IN_PROGRESS } from './board-dispatcher';
@@ -43,6 +44,19 @@ export interface BoardRunToken {
 	runId: string;
 	ownerEpoch: number;
 	generation: number;
+}
+/** Immutable preparation, also consumed by the fenced runtime. */
+export interface BoardRunSpecification {
+	key: BoardCardKey;
+	card: Record<string, unknown>;
+	readRevision: BoardClaimReadRevision;
+	runToken: BoardRunToken;
+	attempt: number;
+	workerAgentId: string;
+	owner: BoardClaimHostContext['owner'];
+	repository: NonNullable<BoardClaimHostContext['repository']>;
+	overrides: ProfileBaseAgentValues;
+	profile?: AgentProfile;
 }
 type ExecutionLocation = { kind: 'local' } | { kind: 'ssh'; remoteId: string };
 
@@ -146,9 +160,11 @@ function approvedPolicy(
 export function claimBoardCard(
 	db: Database.Database,
 	command: BoardClaimCommand,
-	currentHost: () => BoardClaimHostContext & { catalog: BoardCaptureCatalog }
+	currentHost: () => BoardClaimHostContext & { catalog: BoardCaptureCatalog },
+	/** Internal revalidation only. Never allocates, replays a receipt or grants a spawn. */
+	prepared?: BoardRunSpecification
 ): BoardClaimResult {
-	if (db.inTransaction)
+	if (db.inTransaction && !prepared)
 		throw new BoardWorkspaceStorageError('invalid-input', 'Claim requires its own transaction');
 	if (
 		[
@@ -186,7 +202,7 @@ export function claimBoardCard(
 				const receipt = db
 					.prepare('SELECT principal, result_json FROM commands WHERE request_id = ?')
 					.get(command.requestId) as { principal: string; result_json: string } | undefined;
-				if (receipt) {
+				if (receipt && !prepared) {
 					const stored = JSON.parse(receipt.result_json) as {
 						command: BoardClaimCommand;
 						result: BoardClaimResult;
@@ -203,14 +219,16 @@ export function claimBoardCard(
 					return waiting('not-found');
 				if (
 					db
-						.prepare('SELECT 1 FROM reservations WHERE collection_key = ? AND card_id = ?')
-						.get(command.collectionKey, command.cardId)
+						.prepare(
+							'SELECT 1 FROM reservations WHERE collection_key = ? AND card_id = ? AND run_id != ?'
+						)
+						.get(command.collectionKey, command.cardId, prepared?.runToken.runId ?? '')
 				)
 					return waiting('card-claimed');
 				if (
 					db
-						.prepare('SELECT 1 FROM reservations WHERE worker_agent_id = ?')
-						.get(command.workerAgentId)
+						.prepare('SELECT 1 FROM reservations WHERE worker_agent_id = ? AND run_id != ?')
+						.get(command.workerAgentId, prepared?.runToken.runId ?? '')
 				)
 					return waiting('worker-busy');
 				const state = db
@@ -222,7 +240,27 @@ export function claimBoardCard(
 					card: card.revision,
 					registry: host.registryRevision,
 				};
-				if (canonicalJson(readRevision) !== canonicalJson(command.readRevision))
+				if (prepared) {
+					const reservation = db
+						.prepare('SELECT * FROM reservations WHERE run_id = ?')
+						.get(prepared.runToken.runId) as
+						| { owner_epoch: number; generation: number; phase: string; worker_agent_id: string }
+						| undefined;
+					if (
+						!reservation ||
+						reservation.owner_epoch !== host.owner.epoch ||
+						reservation.generation !== prepared.runToken.generation ||
+						reservation.worker_agent_id !== command.workerAgentId ||
+						!['prepared', 'starting'].includes(reservation.phase)
+					)
+						return waiting('card-claimed');
+					if (
+						card.revision !== prepared.readRevision.card + 1 ||
+						host.registryRevision !== prepared.readRevision.registry ||
+						canonicalJson(card.payload) !== canonicalJson(prepared.card)
+					)
+						return waiting('stale-revision');
+				} else if (canonicalJson(readRevision) !== canonicalJson(command.readRevision))
 					return waiting('stale-revision');
 				const migration = card.payload.migration as
 					| { blockers?: unknown[]; sourceKey?: string }
@@ -300,6 +338,8 @@ export function claimBoardCard(
 					return waiting('repository-unresolved');
 				if (canonicalJson(agent.location) !== canonicalJson(repository.location))
 					return waiting('worker-location-mismatch');
+				if (prepared && canonicalJson(repository) !== canonicalJson(prepared.repository))
+					return waiting('stale-revision');
 				// Every reserved phase counts, including preparation, stopping and uncertainty.
 				// Legacy running cards without a reservation also occupy capacity.
 				const capacity = db
@@ -308,6 +348,13 @@ export function claimBoardCard(
 				UNION SELECT collection_key, id AS card_id FROM cards WHERE json_extract(payload_json, '$.status') = 'running'`
 					)
 					.all() as { collection_key: string; card_id: string }[];
+				if (prepared) {
+					const own = capacity.findIndex(
+						(entry) =>
+							entry.collection_key === command.collectionKey && entry.card_id === command.cardId
+					);
+					if (own >= 0) capacity.splice(own, 1);
+				}
 				if (state.global_wip_limit !== null && capacity.length >= state.global_wip_limit)
 					return waiting('global-wip');
 				if (
@@ -333,6 +380,17 @@ export function claimBoardCard(
 					host.catalog.profiles.find(
 						(entry) => entry.namespace === role.namespace && entry.profile.id === role.profileId
 					)?.profile;
+				const overrides = profile
+					? resolveProfileSpawnOverrides(profile, agent.baseValues)
+					: (agent.baseValues ?? {});
+				if (prepared) {
+					if (
+						canonicalJson({ profile, overrides }) !==
+						canonicalJson({ profile: prepared.profile, overrides: prepared.overrides })
+					)
+						return waiting('stale-revision');
+					return { ok: true, runToken: prepared.runToken, attempt: prepared.attempt, readRevision };
+				}
 				const now = new Date().toISOString();
 				const specification = {
 					key: {
@@ -352,9 +410,7 @@ export function claimBoardCard(
 					repository,
 					role,
 					profile,
-					overrides: profile
-						? resolveProfileSpawnOverrides(profile, agent.baseValues)
-						: (agent.baseValues ?? {}),
+					overrides,
 				};
 				db.prepare(
 					'INSERT INTO runs (run_id, collection_key, card_id, attempt, specification_json) VALUES (?, ?, ?, ?, ?)'
