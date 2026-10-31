@@ -6,7 +6,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { BOARD_CONFIG_PATH } from '../../../shared/maestro-paths';
@@ -26,6 +25,10 @@ import {
 	BoardStorageError,
 } from '../../../main/board/board-storage';
 import type { Board, BoardCard, CardStatus } from '../../../shared/board/types';
+import { openBoardDb } from '../../../main/board/board-db';
+import { applyBoardMigration, planBoardMigration } from '../../../main/board/board-migration';
+import { BoardStorageFacade, configureBoardStorage } from '../../../main/board/board-storage';
+import { BoardWorkspaceStorageError } from '../../../main/board/board-workspace-storage';
 import { BoardDispatcher, type CardSpawnResult } from '../../../main/board/board-dispatcher';
 
 const renameFailure = vi.hoisted(() => ({ active: false }));
@@ -58,7 +61,9 @@ vi.mock('../../../main/utils/logger', () => ({
 let projectRoot: string;
 
 beforeEach(() => {
-	projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-board-'));
+	projectRoot = fs.mkdtempSync(
+		path.resolve('.maestro/board-global-workers-20261031/storage-test-')
+	);
 });
 
 afterEach(() => {
@@ -744,5 +749,73 @@ describe('deleteCard referential integrity', () => {
 		const before = fs.readFileSync(path.join(projectRoot, BOARD_CONFIG_PATH), 'utf-8');
 		deleteCard(projectRoot, 'b1', 'ghost');
 		expect(fs.readFileSync(path.join(projectRoot, BOARD_CONFIG_PATH), 'utf-8')).toBe(before);
+	});
+});
+
+describe('central storage fixture', () => {
+	it('shares revisioned CRUD across sources without changing YAML or referenced runs', () => {
+		const dbPath = path.join(projectRoot, 'board.sqlite');
+		let db = openBoardDb(dbPath);
+		const inputs = ['a', 'b'].map((name) => {
+			const project = path.join(projectRoot, name);
+			fs.mkdirSync(path.join(project, '.maestro'), { recursive: true });
+			const bytes = Buffer.from(
+				JSON.stringify({
+					boards: [
+						{
+							id: 'board',
+							name,
+							cards: [
+								card({
+									id: 'same',
+									heldByUser: true,
+									runs: [{ attempt: 1, startedAt: 'then', outcome: 'done' }],
+								}),
+							],
+						},
+					],
+				})
+			);
+			const file = path.join(project, '.maestro', 'board.yaml');
+			fs.writeFileSync(file, bytes);
+			const plan = planBoardMigration({
+				source: { location: { kind: 'local' }, path: project },
+				repository: { id: name, workingDirectory: project, validated: true },
+				boardBytes: bytes,
+				profileBytes: null,
+				workers: [],
+			});
+			applyBoardMigration(db, plan);
+			return { project, file, bytes, plan };
+		});
+		try {
+			configureBoardStorage(new BoardStorageFacade(db));
+			const [a, b] = inputs;
+			const old = getBoard(a.project, 'board')!;
+			const stale = structuredClone(old);
+			const runs = db.prepare('SELECT * FROM runs ORDER BY run_id').all();
+			renameBoard(a.project, 'board', 'Edited');
+			stale.name = 'Stale';
+			expect(() => saveBoards(a.project, [stale])).toThrow(BoardWorkspaceStorageError);
+			const edit = getBoard(a.project, 'board')!.cards[0];
+			edit.title = 'Updated';
+			updateCard(a.project, 'board', edit);
+			addCard(a.project, 'board', card({ id: 'child', parents: ['same'] }));
+			expect(getBoard(a.project, 'board')!.cards).toHaveLength(2);
+			expect(getBoard(b.project, 'board')!.name).toBe('b');
+			expect(getBoard(a.project, 'board')!.cards[0].heldByUser).toBe(true);
+			expect(db.prepare('SELECT * FROM runs ORDER BY run_id').all()).toEqual(runs);
+			expect(db.pragma('foreign_key_check')).toEqual([]);
+			for (const item of inputs) expect(fs.readFileSync(item.file)).toEqual(item.bytes);
+			configureBoardStorage(null);
+			db.close();
+			db = openBoardDb(dbPath);
+			configureBoardStorage(new BoardStorageFacade(db));
+			expect(getBoard(a.project, 'board')!.cards[0].title).toBe('Updated');
+			expect(applyBoardMigration(db, a.plan).status).toBe('already-imported');
+		} finally {
+			configureBoardStorage(null);
+			db.close();
+		}
 	});
 });
