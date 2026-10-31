@@ -2305,3 +2305,41 @@ describe('BoardModal host capture editor', () => {
 		expect(screen.getByLabelText('Title')).toHaveValue('Explicit capture');
 	});
 });
+
+describe('separate review card', () => {
+	it('creates a dependent review with its own assignment and explicit artifact, leaving work unchanged', async () => {
+		const work = makeCard({
+			id: 'work',
+			title: 'Implement',
+			kind: 'work',
+			status: 'done',
+			runs: [
+				{
+					attempt: 1,
+					startedAt: '2026-01-01',
+					worktreeBranch: 'feature/x',
+					worktreePath: '/repo/tree',
+					summary: 'tests passed',
+				},
+			],
+		});
+		installApis([{ id: 'b1', name: 'Board', cards: [work] }]);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Implement'));
+		fireEvent.click(screen.getByRole('button', { name: 'Add review' }));
+		expect(screen.getByLabelText('Task type')).toHaveValue('review');
+		expect(screen.getByLabelText('Review branch')).toHaveValue('feature/x');
+		expect(screen.getByRole('button', { name: 'Create card' })).toBeDisabled();
+		fireEvent.change(screen.getByLabelText('Review commit'), { target: { value: 'a'.repeat(40) } });
+		fireEvent.change(screen.getByLabelText('Review checks'), { target: { value: 'tests passed' } });
+		fireEvent.click(screen.getByRole('button', { name: 'Create card' }));
+		await waitFor(() => expect(boardApi.captureCard).toHaveBeenCalledTimes(1));
+		const card = boardApi.captureCard.mock.calls[0][0].card;
+		expect(card).toMatchObject({ kind: 'review', parents: ['work'], status: 'todo' });
+		expect(card.id).not.toBe(work.id);
+		expect(card.assigneeAgentId).toBeUndefined();
+		expect(card.body).toContain('Commit: ' + 'a'.repeat(40));
+		expect(card.body).toContain('Checks: tests passed');
+		expect(work.status).toBe('done');
+	});
+});

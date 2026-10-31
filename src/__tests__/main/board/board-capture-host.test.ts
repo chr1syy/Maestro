@@ -110,6 +110,34 @@ afterEach(() => {
 });
 
 describe('authoritative host capture over real SQLite and preload/IPC', () => {
+	it('persists a separate dependent review and leaves work and human review unchanged', async () => {
+		const work = await api.captureCard(command(card({ kind: 'work' })));
+		if (!work.ok) throw new Error(work.error.message);
+		const review = await api.captureCard(
+			command(
+				card({
+					id: 'review',
+					kind: 'review',
+					parents: ['c'],
+					assigneeAgentId: undefined,
+					body: 'Branch: topic\nCommit: ' + 'a'.repeat(40) + '\nChecks: passed',
+				})
+			)
+		);
+		if (!review.ok) throw new Error(review.error.message);
+		const reopened = new BoardStorageFacade(db).read(dir, 'b');
+		expect(reopened.cards).toHaveLength(2);
+		expect(reopened.cards.find((entry) => entry.id === 'review')).toMatchObject({
+			kind: 'review',
+			parents: ['c'],
+			status: 'todo',
+		});
+		expect(reopened.cards.find((entry) => entry.id === 'c')).toMatchObject({
+			kind: 'work',
+			status: 'todo',
+		});
+	});
+
 	it('captures colliding legacy IDs in the explicitly selected source and adopts returned revisions', async () => {
 		const first = await api.captureCard(command());
 		if (!first.ok) throw new Error(first.error.message);

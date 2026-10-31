@@ -114,6 +114,8 @@ const PRIORITY_META: Record<
 
 /** Draft shape for the card editor (before it becomes a persisted BoardCard). */
 interface CardDraft {
+	kind?: BoardCardKind;
+	reviewContext?: { branch: string; worktree: string; commit: string; checks: string };
 	id: string | null; // null = new card
 	title: string;
 	body: string;
@@ -586,6 +588,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			const existing: CardDraft = {
 				collection: structuredClone(selectedCollection),
 				projectRoot,
+				kind: card.kind,
 				id: card.id,
 				title: card.title,
 				body: card.body,
@@ -620,6 +623,40 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		},
 		[selectedCollection, projectRoot]
 	);
+
+	const openReview = useCallback(() => {
+		if (!draft?.id || !board || isDraftDirty) return;
+		const work = board.cards.find((card) => card.id === draft.id);
+		if (!work) return;
+		const run = work.runs?.[work.runs.length - 1];
+		const review: CardDraft = {
+			...draft,
+			id: null,
+			kind: 'review',
+			title: `Review: ${work.title}`,
+			body: '',
+			parents: [work.id],
+			status: 'todo',
+			createdAt: undefined,
+			storageRevision: undefined,
+			assigneeProfileId: '',
+			role: undefined,
+			assigneeAgentId: '',
+			executionScope: undefined,
+			startModeOverride: undefined,
+			worktreeEnabled: false,
+			prOnDoneEnabled: false,
+			reviewContext: {
+				branch: run?.worktreeBranch ?? '',
+				worktree: run?.worktreePath ?? '',
+				commit: '',
+				checks: '',
+			},
+		};
+		draftBaselineRef.current = review;
+		setDraft(review);
+		setSaveError(null);
+	}, [draft, board, isDraftDirty]);
 
 	const closeEditor = useCallback(() => {
 		setShowNewRole(false);
@@ -698,6 +735,11 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			!!projectRoot &&
 			!!board &&
 			draft.title.trim().length > 0 &&
+			(!draft.reviewContext ||
+				(!!draft.reviewContext.branch.trim() &&
+					!!draft.reviewContext.worktree.trim() &&
+					/^[a-f0-9]{40}$/i.test(draft.reviewContext.commit.trim()) &&
+					!!draft.reviewContext.checks.trim())) &&
 			!!catalog &&
 			!catalogError &&
 			(!draft.worktreeEnabled || !!draft.workingDirectory.trim() || !!draft.worktreePath.trim()) &&
@@ -750,7 +792,10 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			...original, // Retain host policy, hold, runs, migration metadata and unknown fields.
 			id: cardId,
 			title: draft.title.trim(),
-			body: draft.body,
+			body: draft.reviewContext
+				? `${draft.body}\n\nReview artifact:\nBranch: ${draft.reviewContext.branch.trim()}\nWorktree: ${draft.reviewContext.worktree.trim()}\nCommit: ${draft.reviewContext.commit.trim()}\nChecks: ${draft.reviewContext.checks.trim()}`.trim()
+				: draft.body,
+			kind: draft.kind,
 			parents: draft.parents,
 			status: draft.status,
 			createdAt: draft.createdAt ?? now,
@@ -1595,6 +1640,8 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							canSave={canSaveDraft}
 							inputStyle={inputStyle}
 							onToggleParent={toggleParent}
+							onAddReview={openReview}
+							canAddReview={!isDraftDirty}
 							onSave={() => void handleSaveCard()}
 							onCancel={requestCloseEditor}
 							onMove={(status) => void handleMoveDraft(status)}
@@ -2311,6 +2358,8 @@ interface CardEditorProps {
 	canSave: boolean;
 	inputStyle: React.CSSProperties;
 	onToggleParent: (parentId: string) => void;
+	onAddReview: () => void;
+	canAddReview: boolean;
 	onSave: () => void;
 	onCancel: () => void;
 	/** Persist a column change immediately (existing cards only). */
@@ -2343,6 +2392,8 @@ function CardEditor({
 	canSave,
 	inputStyle,
 	onToggleParent,
+	onAddReview,
+	canAddReview,
 	onSave,
 	onCancel,
 	onMove,
@@ -2456,7 +2507,58 @@ function CardEditor({
 			) : (
 				!catalog && <div role="status">Loading capture choices...</div>
 			)}
+			{isExisting && (draft.kind === 'work' || draft.kind === undefined) && (
+				<button type="button" disabled={!canAddReview || saving} onClick={onAddReview}>
+					Add review
+				</button>
+			)}
 			<fieldset disabled={saving} className="space-y-4">
+				<label>
+					Task type{' '}
+					<select
+						aria-label="Task type"
+						disabled={!!draft.reviewContext}
+						value={draft.kind ?? ''}
+						onChange={(e) =>
+							setDraft((p) =>
+								p ? { ...p, kind: (e.target.value || undefined) as BoardCardKind | undefined } : p
+							)
+						}
+						style={inputStyle}
+					>
+						<option value="">Unspecified</option>
+						<option value="work">Work</option>
+						<option value="review">Review</option>
+						<option value="test">Test</option>
+						<option value="documentation">Documentation</option>
+					</select>
+				</label>
+				{draft.reviewContext && (
+					<div>
+						<p>
+							Review depends on the work card. Enter the exact artifact and checks; human approval
+							remains separate.
+						</p>
+						{(['branch', 'worktree', 'commit', 'checks'] as const).map((field) => (
+							<label key={field} className="block">
+								Review {field}
+								<input
+									aria-label={`Review ${field}`}
+									value={draft.reviewContext![field]}
+									onChange={(e) =>
+										setDraft((p) =>
+											p?.reviewContext
+												? { ...p, reviewContext: { ...p.reviewContext, [field]: e.target.value } }
+												: p
+										)
+									}
+									style={inputStyle}
+								/>
+							</label>
+						))}
+						<p>Commit must be the full 40-character SHA.</p>
+					</div>
+				)}
 				<div className="flex gap-3 flex-wrap">
 					<label
 						className="block space-y-1 flex-1 min-w-[180px]"
@@ -2988,6 +3090,7 @@ function CardEditor({
 										<input
 											type="checkbox"
 											checked={checked}
+											disabled={!!draft.reviewContext && draft.parents[0] === c.id}
 											onChange={() => onToggleParent(c.id)}
 										/>
 										<span className="truncate">{c.title}</span>
