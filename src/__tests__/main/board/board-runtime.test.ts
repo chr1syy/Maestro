@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+	readBoardRunArtifact,
+	captureBoardCardFromHost,
+	prepareBoardReviewHandoff,
+} from '../../../main/board/board-review';
+import { configureBoardStorage } from '../../../main/board/board-storage';
 import * as path from 'node:path';
 import { openBoardDb } from '../../../main/board/board-db';
 import { BoardStorageFacade, configureBoardCaptureHost } from '../../../main/board/board-storage';
@@ -13,6 +20,13 @@ import {
 	type BoardRunHooks,
 	type BoardRunService,
 } from '../../../main/board/board-runtime';
+import { boardWorkerCanStart } from '../../../main/board/board-claims';
+import {
+	configureAgentAdmission,
+	hasHeadlessAgentActivity,
+} from '../../../main/utils/headless-agent-activity';
+import { isAgentBusy } from '../../../main/utils/agent-busy';
+import { ProcessManager } from '../../../main/process-manager';
 import type { BoardClaimHostContext } from '../../../main/board/board-claims';
 import type { CardSpawnResult } from '../../../main/board/board-dispatcher';
 import { canonicalJson } from '../../../shared/canonicalJson';
@@ -20,6 +34,7 @@ import { generateUUID } from '../../../shared/uuid';
 import { runProcess, stopProcess } from '../../../main/cue/cue-process-lifecycle';
 import { fakeAgentSpec } from '../../shared/maestro-lib/run/fakeAgent';
 
+vi.mock('node-pty', () => ({ spawn: vi.fn() }));
 vi.mock('../../../main/utils/sentry', () => ({ captureException: vi.fn() }));
 
 let dir: string;
@@ -131,6 +146,8 @@ beforeEach(() => {
 	expect(runtime.acquire()).toEqual({ ok: true });
 });
 afterEach(() => {
+	configureBoardStorage(null);
+	configureAgentAdmission(() => true);
 	configureBoardCaptureHost(() => ({ agents: [], groups: [] }));
 	db.close();
 	fs.rmSync(dir, { recursive: true, force: true });
@@ -174,6 +191,183 @@ function persisted() {
 }
 
 describe('durable Board runtime over SQLite and the existing run-service seam', () => {
+	it('binds a separate review to a real clean source commit and refuses dirty or forged handoffs', async () => {
+		const git = (...args: string[]) =>
+			execFileSync('git', args, { cwd: roots[0], encoding: 'utf8' });
+		git('init', '--quiet');
+		fs.writeFileSync(path.join(roots[0], 'work.txt'), 'source work');
+		git('add', 'work.txt');
+		git(
+			'-c',
+			'user.name=Fixture',
+			'-c',
+			'user.email=fixture@example.test',
+			'commit',
+			'--quiet',
+			'-m',
+			'fixture'
+		);
+		const artifact = await readBoardRunArtifact(roots[0]);
+		expect(artifact?.commit).toMatch(/^[a-f0-9]{40}$/);
+		const token = claim();
+		const pending = runtime.start(token);
+		settle({
+			...good,
+			output: '<!-- maestro:card-complete | scoped checks passed -->',
+			artifact: artifact!,
+		});
+		await pending;
+		configureBoardStorage(storage);
+		const board = storage.read(roots[0], 'board');
+		const command = {
+			projectRoot: roots[0],
+			boardId: board.id,
+			expectedRevision: board.storage!.expectedRevision!,
+			reviewSource: { cardId: 'same', attempt: 1 },
+			card: {
+				id: 'review',
+				title: 'Review work',
+				body: '',
+				kind: 'review' as const,
+				parents: ['same'],
+				status: 'todo' as const,
+				createdAt: 'now',
+				updatedAt: 'now',
+				repositoryId: 'repo0',
+				workingDirectory: roots[0],
+				executionScope: { kind: 'group' as const, groupId: 'group' },
+			},
+		};
+		fs.writeFileSync(path.join(roots[0], 'work.txt'), 'dirty source');
+		await expect(captureBoardCardFromHost(command)).rejects.toThrow('changed');
+		expect(storage.read(roots[0], 'board').cards).toHaveLength(1);
+		git('checkout', '--', 'work.txt');
+		const response = await captureBoardCardFromHost(command);
+		const review = response.value.cards.find((card) => card.id === 'review')!;
+		expect(review.reviewHandoff).toMatchObject({
+			runId: token.runId,
+			attempt: 1,
+			artifact,
+			checks: 'scoped checks passed',
+		});
+		expect(await prepareBoardReviewHandoff(storage, review.reviewHandoff!)).toBe(
+			canonicalJson(review.reviewHandoff)
+		);
+		const changed = {
+			...review,
+			reviewHandoff: {
+				...review.reviewHandoff!,
+				artifact: { ...artifact!, commit: 'a'.repeat(40) },
+			},
+		};
+		expect(() =>
+			storage.capture({
+				...command,
+				reviewSource: undefined,
+				expectedRevision: response.value.storage!.expectedRevision!,
+				card: changed,
+			})
+		).toThrow(expect.objectContaining({ code: 'protected-field' }));
+		fs.writeFileSync(path.join(roots[0], 'work.txt'), 'later dirt');
+		expect(await prepareBoardReviewHandoff(storage, review.reviewHandoff!)).toBeNull();
+	});
+	it('will not dispatch an unbound review even with otherwise valid scope and direct policy', () => {
+		const row = storage.workspace.readCollection(storage.workspace.listCollections(roots[0])[0])!
+			.cards[0];
+		db.prepare('UPDATE cards SET payload_json=? WHERE collection_key=? AND id=?').run(
+			canonicalJson({ ...row.payload, kind: 'review' }),
+			'collection0',
+			'same'
+		);
+		expect(runtime.claim(command())).toMatchObject({
+			ok: false,
+			reason: 'review-artifact-unresolved',
+		});
+	});
+	it('arbitrates a real desktop child and Board reservation in both start orders', async () => {
+		configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+		const manager = new ProcessManager(() => false, { isCoworkingEnabled: () => false });
+		const fake = fakeAgentSpec(
+			dir,
+			{ chunks: [], close: { code: 0, signal: null } },
+			{ hold: true }
+		);
+		const config = {
+			sessionId: 'worker-ai-fresh-tab',
+			toolType: 'opencode',
+			cwd: fake.cwd,
+			command: fake.command,
+			args: fake.args,
+			customEnvVars: fake.env as Record<string, string>,
+		};
+		try {
+			const token = claim();
+			expect(manager.spawn(config)).toMatchObject({
+				success: false,
+				error: expect.stringContaining('reserved'),
+			});
+			expect(manager.getAll()).toHaveLength(0);
+			expect(boardWorkerCanStart(db, 'worker', token.runId)).toBe(true);
+			expect(boardWorkerCanStart(db, 'worker', 'unrelated-cue')).toBe(false);
+			expect(runtime.hold(token)).toEqual({ ok: true });
+			expect(runtime.resume(token)).toEqual({ ok: true });
+			expect(manager.spawn(config)).toMatchObject({ success: true, pid: expect.any(Number) });
+			host.agentStates = {
+				worker: { ...host.agentStates.worker, busy: isAgentBusy({ id: 'worker' }, manager) },
+			};
+			expect(host.agentStates.worker.busy).toBe(true);
+			expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'worker-busy' });
+		} finally {
+			manager.killAll({ shutdown: true });
+			await vi.waitFor(() => expect(manager.getAll()).toHaveLength(0));
+		}
+	});
+	it('keeps a real non-Board Cue turn busy until its native process settles', async () => {
+		const fake = fakeAgentSpec(
+			dir,
+			{ chunks: [], close: { code: 0, signal: null } },
+			{ hold: true }
+		);
+		const pending = runProcess(
+			'non-board-real',
+			{ ...fake, env: fake.env as Record<string, string> },
+			{
+				agentId: 'worker',
+				toolType: 'opencode',
+				timeoutMs: 5000,
+				onLog: vi.fn(),
+			}
+		);
+		try {
+			expect(hasHeadlessAgentActivity('worker')).toBe(true);
+			host.agentStates = {
+				worker: { ...host.agentStates.worker, busy: isAgentBusy({ id: 'worker' }, null) },
+			};
+			expect(runtime.claim(command())).toMatchObject({ ok: false, reason: 'worker-busy' });
+		} finally {
+			stopProcess('non-board-real');
+			await pending;
+		}
+		expect(hasHeadlessAgentActivity('worker')).toBe(false);
+	});
+	it('fences unrelated native Cue starts while a Board reservation exists', async () => {
+		configureAgentAdmission((id, runId) => boardWorkerCanStart(db, id, runId));
+		const token = claim();
+		const fake = fakeAgentSpec(dir, { chunks: [], close: { code: 0, signal: null } });
+		const result = await runProcess(
+			'unrelated-cue',
+			{ ...fake, env: fake.env as Record<string, string> },
+			{
+				agentId: 'worker',
+				toolType: 'opencode',
+				timeoutMs: 5000,
+				onLog: vi.fn(),
+			}
+		);
+		expect(result.executionStarted).toBe(false);
+		expect(reservations()).toHaveLength(1);
+		expect(runtime.hold(token)).toEqual({ ok: true });
+	});
 	it('persists the real native Cue process identity and its completion in the same SQLite lifecycle', async () => {
 		vi.mocked(service.spawn).mockImplementation(async (specification, callbacks) => {
 			const spec = fakeAgentSpec(dir, {

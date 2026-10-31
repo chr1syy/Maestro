@@ -183,9 +183,11 @@ describe('maestro-cli board', () => {
 	let facade: BoardStorageFacade;
 	let logSpy: MockInstance;
 	let exitSpy: MockInstance;
+	let runTasks: Promise<unknown>[];
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		runTasks = [];
 		projectRoot = fs.mkdtempSync(path.resolve('.maestro/board-global-workers-20261031/cli-'));
 		db = openBoardDb(path.join(projectRoot, 'board.sqlite'));
 		const plan = planBoardMigration({
@@ -218,7 +220,8 @@ describe('maestro-cli board', () => {
 		});
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.allSettled(runTasks);
 		vi.restoreAllMocks();
 		configureBoardRuntimeHost(() => null);
 		configureBoardStorage(null);
@@ -490,6 +493,81 @@ describe('maestro-cli board', () => {
 		});
 	});
 
+	it.each(['work', 'test', 'documentation'] as const)(
+		'captures a separate %s task through the shared host',
+		async (kind) => {
+			const board = createBoard(projectRoot, 'Kinds');
+			await boardAddCard(board.id, { agent: 'Alpha', title: kind, kind, json: true });
+			expect(exitSpy).not.toHaveBeenCalled();
+			expect(loadBoards(projectRoot)[0].cards[0].kind).toBe(kind);
+		}
+	);
+	it('routes an exact review-source request through the CLI transport and host Git verification', async () => {
+		const git = (...args: string[]) =>
+			execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8' });
+		git('init', '--quiet');
+		fs.writeFileSync(path.join(projectRoot, '.gitignore'), 'board.sqlite*\n');
+		git('add', '.gitignore');
+		git(
+			'-c',
+			'user.name=Fixture',
+			'-c',
+			'user.email=fixture@example.test',
+			'commit',
+			'--quiet',
+			'-m',
+			'fixture'
+		);
+		const artifact = {
+			worktreePath: projectRoot,
+			branch: git('symbolic-ref', '--short', 'HEAD').trim(),
+			commit: git('rev-parse', 'HEAD').trim(),
+		};
+		const board = createBoard(projectRoot, 'Reviews');
+		const run = {
+			attempt: 1,
+			startedAt: 'start',
+			endedAt: 'end',
+			outcome: 'done' as const,
+			summary: 'reported tests passed',
+			artifact,
+		};
+		seedCard(
+			db,
+			projectRoot,
+			board.id,
+			card('work', { status: 'done', runs: [run], repositoryId: 'repo' })
+		);
+		const stored = loadBoards(projectRoot)[0];
+		db.prepare(
+			'UPDATE runs SET specification_json=?, outcome_json=? WHERE collection_key=? AND card_id=?'
+		).run(
+			JSON.stringify({
+				key: { sourceKey: stored.storage!.sourceKey },
+				card: { repositoryId: 'repo' },
+			}),
+			JSON.stringify({ cardOutcome: { run } }),
+			stored.storage!.collectionKey,
+			'work'
+		);
+		await boardAddCard(board.id, {
+			agent: 'Alpha',
+			title: 'Review source',
+			reviewOf: 'work',
+			reviewAttempt: '1',
+			repository: 'repo',
+			json: true,
+		});
+		expect(exitSpy).not.toHaveBeenCalled();
+		const review = loadBoards(projectRoot)[0].cards.find(
+			(entry) => entry.title === 'Review source'
+		)!;
+		expect(review).toMatchObject({
+			kind: 'review',
+			parents: ['work'],
+			reviewHandoff: { cardId: 'work', attempt: 1, artifact },
+		});
+	});
 	it('board add-card wires comma-separated parents', async () => {
 		const b = createBoard(projectRoot, 'B');
 		addCard(projectRoot, b.id, card('a'));
@@ -858,6 +936,12 @@ describe('maestro-cli board', () => {
 			.prepare('SELECT payload_json FROM repositories WHERE id=?')
 			.get(root === projectRoot ? 'repo' : 'native-repo') as { payload_json: string };
 		const record = JSON.parse(row.payload_json);
+		const nativeService = createBoardRunService({
+			getStoredSessions: () => mockReadSessions(),
+			getAgentConfig: () => ({}),
+			getSshStore: () => ({}),
+			nowMs: () => 1,
+		});
 		const owner = new BoardRuntime(
 			facade,
 			{
@@ -889,12 +973,14 @@ describe('maestro-cli board', () => {
 						: { kind: 'local' },
 				},
 			}),
-			createBoardRunService({
-				getStoredSessions: () => mockReadSessions(),
-				getAgentConfig: () => ({}),
-				getSshStore: () => ({}),
-				nowMs: () => 1,
-			}),
+			{
+				...nativeService,
+				spawn: (spec, hooks) => {
+					const task = nativeService.spawn(spec, hooks);
+					runTasks.push(task);
+					return task;
+				},
+			},
 			() => 'unknown'
 		);
 		expect(owner.acquire()).toMatchObject({ ok: true });

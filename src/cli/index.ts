@@ -1691,6 +1691,9 @@ for (const command of board.commands) {
 		.option('--card-revision <n>', 'Expected card revision');
 	if (['add-card', 'update-card'].includes(command.name())) {
 		command
+			.option('--kind <kind>', 'work, review, test, or documentation')
+			.option('--review-of <cardId>', 'Bind a new review to this exact source card id')
+			.option('--review-attempt <n>', 'Exact completed source attempt for --review-of')
 			.option('--scope-agent <id>', 'Execute only on this agent')
 			.option('--scope-group <id>', 'Execute only within this group')
 			.option('--profile-namespace <key>', 'Namespace for --assignee role')

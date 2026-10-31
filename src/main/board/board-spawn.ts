@@ -43,6 +43,8 @@
  * with a clear reason instead of silently running in the project root.
  */
 
+import { readBoardRunArtifact } from './board-review';
+import { captureException } from '../utils/sentry';
 import { listProfiles } from '../profiles/profile-storage';
 import {
 	resolveProfileSpawnOverrides,
@@ -288,7 +290,7 @@ export async function spawnBoardCard(
 		// metadata). model/effort/args flow through the native override fields below.
 		const roleLine = overrides.appendSystemPrompt ? `${overrides.appendSystemPrompt}\n\n` : '';
 		const promptText =
-			`${roleLine}${CARD_HANDOFF_REMINDER}\n\n---\n\n${card.title}\n\n${card.body}`.trim();
+			`${roleLine}${card.reviewHandoff ? `Review the host-bound artifact: ${canonicalJson(card.reviewHandoff)}\n\n` : ''}${CARD_HANDOFF_REMINDER}\n\n---\n\n${card.title}\n\n${card.body}`.trim();
 
 		// Phase 4: a card that opted into isolation runs in its own checkout. The
 		// worktree is created on first claim and reused by every retry.
@@ -503,6 +505,14 @@ async function runCardPrompt(
 		runId,
 		signal: run?.controller.signal,
 		beforeLaunch: lifecycle?.beforeLaunch,
+		prepareLaunch: card.reviewHandoff
+			? async () => {
+					const artifact = await readBoardRunArtifact(card.reviewHandoff!.artifact.worktreePath);
+					return (
+						!!artifact && canonicalJson(artifact) === canonicalJson(card.reviewHandoff!.artifact)
+					);
+				}
+			: undefined,
 		onStarted: lifecycle?.onStarted,
 		appendSystemPrompt,
 		session: {
@@ -548,7 +558,22 @@ async function runCardPrompt(
 		agentConfigValues,
 	});
 
+	let artifact;
+	if (
+		lifecycle &&
+		result.executionStarted &&
+		result.terminationConfirmed &&
+		!baseSession.sessionSshRemoteConfig?.enabled
+	) {
+		try {
+			artifact = (await readBoardRunArtifact(runCwd)) ?? undefined;
+		} catch (error) {
+			void captureException(error, { operation: 'board:completionArtifact' });
+		}
+	}
+
 	return {
+		artifact,
 		output: result.stdout,
 		exitCode: result.exitCode,
 		...(lifecycle

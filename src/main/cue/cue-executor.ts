@@ -96,6 +96,8 @@ export interface CueExecutionConfig {
 	signal?: AbortSignal;
 	/** Host-owned synchronous gate at the existing native spawn boundary. */
 	beforeLaunch?: () => boolean;
+	/** Host IO proof after asynchronous launch preparation, before the synchronous fence. */
+	prepareLaunch?: () => Promise<boolean>;
 	onStarted?: (pid: number | undefined) => void;
 	/**
 	 * Called once with the run's raw transcript after an agent process has run
@@ -257,7 +259,10 @@ export async function executeCuePrompt(config: CueExecutionConfig): Promise<CueR
 	let rawStdout = '';
 	let processResult;
 	try {
+		if (config.prepareLaunch && !(await config.prepareLaunch()))
+			return failedResult('Host launch artifact changed during preparation');
 		processResult = await runProcess(runId, spec, {
+			agentId: session.id,
 			toolType: config.toolType,
 			timeoutMs,
 			sshRemoteEnabled: sshActuallyUsed,

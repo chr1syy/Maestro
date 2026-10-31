@@ -1,3 +1,4 @@
+import { captureException } from '../utils/sentry';
 import { parseCardMarkers } from '../../shared/board/cardMarkers';
 /** Durable Board lifecycle around the existing Cue runner. No queue, timer,
  * lockfile algorithm or process controller. Transport/Cue hosts inject their
@@ -59,7 +60,8 @@ export class BoardRuntime {
 		private readonly service: BoardRunService,
 		/** Must prove death of the exact boot/start identity, never heartbeat age. */
 		private readonly ownerLiveness: (identity: string) => 'alive' | 'dead' | 'unknown',
-		private readonly onChanged: () => void = () => {}
+		private readonly onChanged: () => void = () => {},
+		private readonly onCompleted: (spec: BoardRunSpecification) => void = () => {}
 	) {
 		const { pid, startedAt, bootTime } = lock.info;
 		this.processIdentity = canonicalJson({ pid, startedAt, bootTime: bootTime ?? null });
@@ -112,7 +114,8 @@ export class BoardRuntime {
 		const current = this.read(claim.runToken);
 		if (current?.life.phase === 'prepared') {
 			void this.start(claim.runToken)
-				.catch(() => {
+				.catch((error) => {
+					void captureException(error, { operation: 'board:dispatch' });
 					this.uncertain(claim.runToken, 'launch-or-result-uncertain');
 				})
 				.finally(() => this.onChanged());
@@ -235,7 +238,8 @@ export class BoardRuntime {
 			if (result.executionStarted === false || result.terminationConfirmed === true)
 				return this.finish(token, result);
 			return this.uncertain(token, 'termination-unconfirmed');
-		} catch {
+		} catch (error) {
+			void captureException(error, { operation: 'board:start' });
 			// A throw after a syscall is not proof of nonstart, even without a PID.
 			return this.uncertain(token, 'launch-or-result-uncertain');
 		}
@@ -317,7 +321,8 @@ export class BoardRuntime {
 		if (result.ok && this.current(token)) {
 			try {
 				this.service.stop(this.read(token)!.spec);
-			} catch {
+			} catch (error) {
+				void captureException(error, { operation: 'board:stop' });
 				return this.uncertain(token, 'stop-unconfirmed', true);
 			}
 		}
@@ -515,6 +520,7 @@ export class BoardRuntime {
 							new Date().toISOString(),
 							DEFAULT_MAX_FAILURES
 						);
+					if (result.artifact && !cause) run.artifact = result.artifact;
 					cardOutcome = {
 						status: card.status,
 						heldByUser: card.heldByUser === true,
@@ -534,6 +540,14 @@ export class BoardRuntime {
 				this.storage.db
 					.prepare('DELETE FROM reservations WHERE run_id=? AND owner_epoch=? AND generation=?')
 					.run(token.runId, token.ownerEpoch, token.generation);
+				queueMicrotask(() => {
+					// Re-read the committed outcome: a surrounding transaction may have rolled back.
+					try {
+						if (this.read(token)?.outcome) this.onCompleted(row.spec);
+					} catch (error) {
+						void captureException(error, { operation: 'board:completion' });
+					}
+				});
 				return { ok: true };
 			})
 			.immediate();

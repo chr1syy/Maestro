@@ -273,7 +273,7 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		);
 		expect(response.ok).toBe(true);
 		if (!response.ok) throw Error(response.error.message);
-		expect(response.readiness.c).toEqual([]);
+		expect(response.readiness.c).toEqual(['review-artifact-unresolved']);
 		const saved = response.value.cards[0];
 		expect(saved).toMatchObject({
 			kind: 'review',

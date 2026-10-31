@@ -1,5 +1,6 @@
 // src/main/process-manager/ProcessManager.ts
 
+import { canStartAgentTurn } from '../utils/headless-agent-activity';
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import type {
@@ -118,6 +119,16 @@ export class ProcessManager extends EventEmitter {
 	 * creation attaches to a live handle; generic terminal spawn can still replace it.
 	 */
 	spawn(config: ProcessConfig): SpawnResult {
+		if (
+			config.toolType !== 'terminal' &&
+			!canStartAgentTurn(resolveOwningMaestroSessionId(config.sessionId))
+		) {
+			return {
+				pid: -1,
+				success: false,
+				error: 'Board worker is reserved; wait for its current attempt to settle',
+			};
+		}
 		const existing = this.processes.get(config.sessionId);
 		if (
 			config.reuseTerminal &&

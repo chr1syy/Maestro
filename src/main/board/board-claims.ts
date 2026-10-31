@@ -69,6 +69,8 @@ export interface BoardClaimHostContext {
 	owner: { processIdentity: string; epoch: number };
 	registryRevision: number;
 	dispatchEnabled: boolean;
+	/** Canonical handoff most recently verified against native Git by this host. */
+	reviewArtifact?: string | null;
 	agentStates: Readonly<
 		Record<
 			string,
@@ -288,6 +290,11 @@ export function claimBoardCard(
 					return waiting('invalid-specification');
 				const selected = board.cards.find((entry) => entry.id === command.cardId);
 				if (!selected) return waiting('invalid-specification');
+				if (
+					selected.kind === 'review' &&
+					(!selected.reviewHandoff || host.reviewArtifact !== canonicalJson(selected.reviewHandoff))
+				)
+					return waiting('review-artifact-unresolved');
 				if (selected.heldByUser) return waiting('held');
 				if (selected.status !== 'todo' && selected.status !== 'ready')
 					return waiting('card-not-ready');
@@ -449,4 +456,19 @@ export function claimBoardCard(
 		if ((error as { code?: string }).code === 'SQLITE_BUSY') return waiting('storage-busy');
 		throw error; // Unexpected storage/corruption failures roll back, never become an empty success.
 	}
+}
+
+/** Native non-Board intake observes the same durable capacity fences as claims.
+ * Only the Board Cue service supplies its exact run id to enter its reservation. */
+export function boardWorkerCanStart(
+	db: Database.Database,
+	agentId: string,
+	runId?: string
+): boolean {
+	if (db.prepare('SELECT 1 FROM migration_worker_holds WHERE worker_agent_id=?').get(agentId))
+		return false;
+	const reservation = db
+		.prepare('SELECT run_id FROM reservations WHERE worker_agent_id=?')
+		.get(agentId) as { run_id: string } | undefined;
+	return !reservation || (runId !== undefined && reservation.run_id === runId);
 }

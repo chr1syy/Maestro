@@ -2354,6 +2354,7 @@ describe('separate review card', () => {
 					worktreeBranch: 'feature/x',
 					worktreePath: '/repo/tree',
 					summary: 'tests passed',
+					artifact: { worktreePath: '/repo/tree', branch: 'feature/x', commit: 'a'.repeat(40) },
 				},
 			],
 		});
@@ -2363,11 +2364,15 @@ describe('separate review card', () => {
 		fireEvent.click(screen.getByRole('button', { name: 'Add review' }));
 		expect(screen.getByLabelText('Task type')).toHaveValue('review');
 		expect(screen.getByLabelText('Review branch')).toHaveValue('feature/x');
-		expect(screen.getByRole('button', { name: 'Create card' })).toBeDisabled();
-		fireEvent.change(screen.getByLabelText('Review commit'), { target: { value: 'a'.repeat(40) } });
-		fireEvent.change(screen.getByLabelText('Review checks'), { target: { value: 'tests passed' } });
+		expect(screen.getByLabelText('Review commit')).toHaveValue('a'.repeat(40));
+		expect(screen.getByLabelText('Review commit')).toHaveAttribute('readonly');
+		expect(screen.getByLabelText('Review checks')).toHaveAttribute('readonly');
 		fireEvent.click(screen.getByRole('button', { name: 'Create card' }));
 		await waitFor(() => expect(boardApi.captureCard).toHaveBeenCalledTimes(1));
+		expect(boardApi.captureCard.mock.calls[0][0].reviewSource).toEqual({
+			cardId: 'work',
+			attempt: 1,
+		});
 		const card = boardApi.captureCard.mock.calls[0][0].card;
 		expect(card).toMatchObject({ kind: 'review', parents: ['work'], status: 'todo' });
 		expect(card.id).not.toBe(work.id);

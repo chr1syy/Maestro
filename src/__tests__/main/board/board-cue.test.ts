@@ -17,6 +17,11 @@ import {
 import type { BoardClaimHostContext } from '../../../main/board/board-claims';
 import type { CardSpawnResult } from '../../../main/board/board-dispatcher';
 import { canonicalJson } from '../../../shared/canonicalJson';
+import {
+	startBoardRunPr,
+	type CardPrRequest,
+	type CardPrResult,
+} from '../../../main/board/board-pr';
 import { BoardCueHost } from '../../../main/board/board-cue';
 import {
 	configureBoardRuntimeHost,
@@ -40,6 +45,8 @@ let service: BoardRunService;
 let hooks: BoardRunHooks;
 let settle: (result: CardSpawnResult) => void;
 let lockValid: boolean;
+let createPr: ReturnType<typeof vi.fn<(request: CardPrRequest) => Promise<CardPrResult>>>;
+let completionTasks: Promise<unknown>[];
 const good: CardSpawnResult = {
 	output: '<!-- maestro:card-complete -->',
 	exitCode: 0,
@@ -138,6 +145,8 @@ beforeEach(() => {
 	expect(runtime.acquire()).toEqual({ ok: true });
 	configureBoardStorage(storage);
 	waits = [];
+	createPr = vi.fn(async () => ({ success: true, prUrl: 'https://example.test/pr/1' }));
+	completionTasks = [];
 	changed = [];
 	cue = new BoardCueHost({
 		storage: () => storage,
@@ -162,6 +171,9 @@ beforeEach(() => {
 		service,
 		ownerLiveness: () => 'unknown',
 		onChanged: () => changed.push(storage.query().collections.map((c) => c.board.cards[0].status)),
+		onCompleted: (spec) => {
+			completionTasks.push(startBoardRunPr(spec, { createPr }));
+		},
 		onWait: (key, reason) => waits.push({ cardId: key.cardId, reason }),
 	});
 	configureBoardRuntimeHost(cue.runtimeFor);
@@ -212,6 +224,42 @@ describe('global Cue intake on the shared persistent runtime', () => {
 		settle(good);
 		await cue.settle();
 		expect(reserved()).toHaveLength(0);
+	});
+	it('opens an opted-in global PR once for the exact completed run and source', async () => {
+		edit({ prOnDone: {} });
+		edit({ heldByUser: true }, 1);
+		await tick();
+		const spec = vi.mocked(service.spawn).mock.calls[0][0];
+		settle({ ...good, worktreePath: roots[0], worktreeBranch: 'board/completed' });
+		await cue.settle();
+		await vi.waitFor(() => expect(createPr).toHaveBeenCalledOnce());
+		await Promise.all(completionTasks);
+		expect(createPr.mock.calls[0][0]).toMatchObject({
+			worktreePath: roots[0],
+			worktreeBranch: 'board/completed',
+		});
+		const first = storage.query({ sourceKey: roots[0] }).collections[0].board.cards[0];
+		expect(first.runs?.[0].prUrl).toBe('https://example.test/pr/1');
+		expect(
+			storage.query({ sourceKey: roots[1] }).collections[0].board.cards[0].runs
+		).toBeUndefined();
+		expect(runtime.complete(spec.runToken, good)).toMatchObject({ ok: true, duplicate: true });
+		await startBoardRunPr(spec, { createPr });
+		expect(createPr).toHaveBeenCalledOnce();
+	});
+	it('contains a failed global PR and records a retryable error without changing done', async () => {
+		edit({ prOnDone: {} });
+		edit({ heldByUser: true }, 1);
+		createPr.mockRejectedValue(new Error('synthetic offline'));
+		await tick();
+		settle({ ...good, worktreePath: roots[0], worktreeBranch: 'board/completed' });
+		await cue.settle();
+		await vi.waitFor(() => expect(createPr).toHaveBeenCalledOnce());
+		await Promise.all(completionTasks);
+		const card = storage.query({ sourceKey: roots[0] }).collections[0].board.cards[0];
+		expect(card.status).toBe('done');
+		expect(card.runs?.[0].prError).toBe('synthetic offline');
+		expect(card.runs?.[0].prUrl).toBeUndefined();
 	});
 	it.each([
 		['paused', () => setBoardWorkerPaused(db, 'worker', true), 'worker-paused'],

@@ -244,7 +244,10 @@ import { isAgentDormant } from '../shared/agentVisibility';
 
 import { autoDecomposeBoard } from './board/board-decompose';
 import { buildBoardCardToastPayload } from './board/board-toast';
-import { startCardPr } from './board/board-pr';
+import { prepareBoardReviewHandoff } from './board/board-review';
+import { boardWorkerCanStart } from './board/board-claims';
+import { configureAgentAdmission } from './utils/headless-agent-activity';
+import { startBoardRunPr, startCardPr } from './board/board-pr';
 import { PROMPT_IDS } from '../shared/promptDefinitions';
 import { stopSessionCleanup } from './group-chat/group-chat-moderator';
 import { initializePrompts, getPrompt, savePrompt } from './prompt-manager';
@@ -1524,6 +1527,7 @@ app
 
 		// One central owner, using Cue's already-held lock and existing process service.
 		const repositoryProofs = new Map<string, NonNullable<BoardClaimHostContext['repository']>>();
+		const reviewProofs = new Map<string, string>();
 		let registryFingerprint = '';
 		let registryRevision = 0;
 		const boardContext = (key: BoardCardKey): Omit<BoardClaimHostContext, 'owner'> => {
@@ -1546,12 +1550,15 @@ app
 						stat.ino,
 					]);
 					if (!repository.identity.startsWith(identity + '\n')) repository = null;
-				} catch {
+				} catch (error) {
+					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+						void captureException(error, { operation: 'board:repositoryIdentity' });
 					repository = null;
 				}
 			}
 			return {
 				registryRevision,
+				reviewArtifact: reviewProofs.get(canonicalJson(key)) ?? null,
 				dispatchEnabled:
 					cueEngine?.isEnabled() === true && flags.maestroCue === true && flags.board === true,
 				agentStates: Object.fromEntries(
@@ -1609,6 +1616,13 @@ app
 					?.cards.find((c) => c.cardId === key.cardId);
 				const id = canonicalJson(key);
 				repositoryProofs.delete(id);
+				reviewProofs.delete(id);
+				if (card?.payload.kind === 'review' && card.payload.reviewHandoff) {
+					const handoff = card.payload
+						.reviewHandoff as import('../shared/board/types').BoardReviewHandoff;
+					const proof = await prepareBoardReviewHandoff(storage, handoff);
+					if (proof) reviewProofs.set(id, proof);
+				}
 				if (!card || typeof card.payload.repositoryId !== 'string') return;
 				const row = storage.db
 					.prepare('SELECT payload_json FROM repositories WHERE id=?')
@@ -1635,12 +1649,21 @@ app
 						location: { kind: 'local' },
 						identity: canonicalJson([physical, stat.dev, stat.ino]) + '\n' + git.stdout.trim(),
 					});
-				} catch {
+				} catch (error) {
+					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+						void captureException(error, { operation: 'board:prepareRepository' });
 					/* Missing native paths leave the repository unresolved. */
 				}
 			},
 			// An empty root invalidates the central view, whose listener refetches all sources.
 			onChanged: () => safeSend('board:changed', { projectRoot: '' }),
+			onCompleted: (spec) => {
+				const task = startBoardRunPr(spec, {
+					notify: (payload) => safeSend('remote:notifyToast', payload),
+					onLog: (_level, message) => logger.cue(message, 'Board'),
+				}).finally(() => safeSend('board:changed', { projectRoot: '' }));
+				cueEngine?.trackBoardTask(task);
+			},
 			onTask: (task) => cueEngine?.trackBoardTask(task),
 			service: createBoardRunService(boardSpawnContext),
 			// Only native PID death or a different boot proves the old local owner gone.
@@ -1661,6 +1684,9 @@ app
 			onWait: (key, reason) =>
 				logger.cue(`[Board] ${key.collectionKey}/${key.cardId}: ${reason}`, 'Cue'),
 		});
+		configureAgentAdmission((agentId, runId) =>
+			boardWorkerCanStart(getBoardStorage().db, agentId, runId)
+		);
 		configureBoardRuntimeHost(globalBoardHost.runtimeFor);
 
 		// Warm any provider the strict startup pass left cold (no auto-refresh

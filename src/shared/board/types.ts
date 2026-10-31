@@ -38,6 +38,24 @@
  */
 export type CardStatus = 'triage' | 'todo' | 'ready' | 'running' | 'review' | 'blocked' | 'done';
 
+/** Host-observed clean Git artifact at native completion. */
+export interface BoardRunArtifact {
+	worktreePath: string;
+	branch: string;
+	commit: string;
+}
+/** Immutable reference to a completed source attempt, with reported check evidence. */
+export interface BoardReviewHandoff {
+	repositoryId: string;
+	sourceKey: string;
+	collectionKey: string;
+	cardId: string;
+	runId: string;
+	attempt: number;
+	artifact: BoardRunArtifact;
+	checks: string;
+}
+
 /**
  * Reference to the git worktree a card's run happens in. Minimal by design:
  * Phase 3 fills this when it dispatches a card. Kept structural and local to
@@ -125,6 +143,7 @@ export function cardPriorityRank(card: Pick<BoardCard, 'priority'>): number {
  * {@link CardRun} per attempt so retries after a `blocked`/`error` are auditable.
  */
 export interface CardRun {
+	artifact?: BoardRunArtifact;
 	/** 1-based attempt counter for this card. */
 	attempt: number;
 	/** ISO timestamp when the agent was spawned. */
@@ -189,6 +208,8 @@ export interface CardRun {
  * single worker; otherwise the free project pool is used.
  */
 export interface BoardCard extends BoardCaptureOptions {
+	/** Host-owned. CRUD may retain this snapshot but never replace it. */
+	reviewHandoff?: BoardReviewHandoff;
 	/** Host-owned snapshot; CRUD cannot create or change grants. */
 	capturePolicy?: BoardCapturePolicy;
 	/** Central read token; transport metadata only, never persisted in card payload. */
@@ -565,6 +586,8 @@ export interface BoardCaptureCatalog {
 	defaultStartMode: BoardStartMode;
 }
 export interface BoardCaptureCommand {
+	/** Request a host-resolved handoff; never an artifact supplied by a caller. */
+	reviewSource?: { cardId: string; attempt: number };
 	projectRoot: string;
 	boardId: string;
 	expectedRevision: number;

@@ -14,6 +14,7 @@ import type { ChildProcess } from 'child_process';
 import type { CueRunStatus } from './cue-types';
 import type { SpawnSpec } from './cue-spawn-builder';
 import type { AgentError, ToolType, UsageStats } from '../../shared/types';
+import { canStartAgentTurn, trackHeadlessAgentActivity } from '../utils/headless-agent-activity';
 import { createOutputParser } from '../parsers';
 import type {
 	AgentOutputParser,
@@ -103,6 +104,7 @@ export interface ProcessRunResult {
 
 /** Options controlling process execution */
 export interface ProcessRunOptions {
+	agentId?: string;
 	beforeLaunch?: () => boolean;
 	onStarted?: (pid: number | undefined) => void;
 	toolType: string;
@@ -460,7 +462,11 @@ export async function runProcess(
 
 	// The last check before the spawn; nothing below awaits until the child
 	// is started and registered, so a stop cannot slip in between.
-	if (isLaunchCancelled(options.signal) || options.beforeLaunch?.() === false) {
+	if (
+		isLaunchCancelled(options.signal) ||
+		(options.agentId && !canStartAgentTurn(options.agentId, runId)) ||
+		options.beforeLaunch?.() === false
+	) {
 		return {
 			stdout: '',
 			stderr: '',
@@ -577,6 +583,7 @@ export async function runProcess(
 		},
 	};
 	const untrack = trackCueProcess(runId, entry);
+	const releaseActivity = options.agentId ? trackHeadlessAgentActivity(options.agentId) : undefined;
 	// Registration must survive an observer/persistence failure after spawn.
 	try {
 		options.onStarted?.(turn.child.pid);
@@ -600,6 +607,9 @@ export async function runProcess(
 	const exit = await turn.done;
 	settled = true;
 	untrack();
+	// This registry describes the live native transport. Board remote uncertainty
+	// remains fenced by its durable reservation after the local client exits.
+	releaseActivity?.();
 	if (timeoutTimer) clearTimeout(timeoutTimer);
 
 	const finish = (status: CueRunStatus, exitCode: number | null): ProcessRunResult => {

@@ -5,6 +5,16 @@ const runs = new Map<symbol, string>();
 const changes = new EventEmitter();
 let revision = 0;
 
+/** Native hosts can fence new turns against durable ownership without adding a queue.
+ * Only Cue's internal run service supplies an exact reserved run id. */
+let admission: (agentId: string, runId?: string) => boolean = () => true;
+export function configureAgentAdmission(provider: typeof admission): void {
+	admission = provider;
+}
+export function canStartAgentTurn(agentId: string, runId?: string): boolean {
+	return admission(agentId, runId);
+}
+
 export function getHeadlessAgentActivity(): HeadlessAgentActivity {
 	const counts: Record<string, number> = Object.create(null);
 	for (const agentId of runs.values()) counts[agentId] = (counts[agentId] ?? 0) + 1;

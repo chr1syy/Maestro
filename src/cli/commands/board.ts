@@ -22,6 +22,9 @@ import { formatError, formatSuccess, formatWarning } from '../output/formatter';
 import type { SessionInfo } from '../../shared/types';
 
 interface BoardCommonOptions {
+	kind?: string;
+	reviewOf?: string;
+	reviewAttempt?: string;
 	agent?: string;
 	projectRoot?: string;
 	source?: string;
@@ -368,6 +371,11 @@ export async function boardAddCard(boardId: string, options: BoardAddCardOptions
 		const assigneeAgent = (options.assigneeAgent ?? '').trim();
 
 		const parents = parseParents(options.parents);
+		if (options.reviewOf) {
+			if (options.kind && options.kind !== 'review')
+				throw new Error('--review-of requires --kind review.');
+			if (!parents.includes(options.reviewOf)) parents.push(options.reviewOf);
+		}
 
 		// Priority is optional and validated up front: a typo must not silently
 		// become a normal-priority card the user thinks is high.
@@ -1004,6 +1012,14 @@ async function captureHost(
 			boardId: board.id,
 			expectedRevision: target.expectedRevision,
 			card,
+			...(options.reviewOf
+				? {
+						reviewSource: {
+							cardId: options.reviewOf,
+							attempt: readRevision(options.reviewAttempt),
+						},
+					}
+				: {}),
 		},
 	});
 }
@@ -1012,6 +1028,15 @@ function applyCaptureOptions(
 	options: BoardCommonOptions & { assignee?: string }
 ): boolean {
 	let changed = false;
+	if (options.kind !== undefined || options.reviewOf) {
+		const kind = options.kind ?? 'review';
+		if (!['work', 'review', 'test', 'documentation'].includes(kind))
+			throw new Error('Invalid --kind.');
+		card.kind = kind as BoardCard['kind'];
+		changed = true;
+	}
+	if (options.reviewAttempt && !options.reviewOf)
+		throw new Error('--review-attempt requires --review-of.');
 	if (options.scopeAgent !== undefined && options.scopeGroup !== undefined)
 		throw new Error('Choose exactly one of --scope-agent or --scope-group.');
 	if (options.scopeAgent !== undefined || options.scopeGroup !== undefined) {

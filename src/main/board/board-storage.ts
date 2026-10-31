@@ -30,6 +30,7 @@ import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
 import { resolveUserDataDir } from '../../shared/userDataDir';
 import { createKeyedWriteQueue } from '../../shared/keyedWriteQueue';
+import { captureException } from '../utils/sentry';
 import { logger } from '../utils/logger';
 import { isPathWithin, foldPathCase } from '../utils/real-path-containment';
 import { openBoardDb } from './board-db';
@@ -187,16 +188,20 @@ export class BoardStorageFacade {
 					) {
 						if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
 					}
-				} catch {
+				} catch (error) {
+					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+						void captureException(error, { operation: 'board:captureRepository' });
 					if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
 				}
+				if (card.kind === 'review' && !card.reviewHandoff)
+					reasons.push('review-artifact-unresolved');
 				return [card.id, reasons];
 			})
 		);
 	}
 
 	/** Atomic host mutation using the caller's collection AND card read revisions. */
-	capture(command: BoardCaptureCommand, human = false): Board {
+	capture(command: BoardCaptureCommand, human = false, recordHostState?: () => void): Board {
 		return (() => {
 			const board = this.read(command.projectRoot, command.boardId);
 			if (board.storage!.expectedRevision !== command.expectedRevision)
@@ -221,7 +226,7 @@ export class BoardStorageFacade {
 			board.cards = previous
 				? board.cards.map((entry) => (entry.id === card.id ? card : entry))
 				: [...board.cards, card];
-			return this.save(command.projectRoot, [board], human)[0];
+			return this.save(command.projectRoot, [board], human, recordHostState)[0];
 		})();
 	}
 
@@ -547,6 +552,18 @@ export class BoardStorageFacade {
 					'Clearing a hold requires an explicit resume command'
 				);
 
+			const handoff = original?.payload.reviewHandoff as BoardCard['reviewHandoff'];
+			if (
+				handoff &&
+				(card.kind !== 'review' ||
+					!card.parents.includes(handoff.cardId) ||
+					card.repositoryId !== handoff.repositoryId ||
+					card.worktree)
+			)
+				throw new BoardWorkspaceStorageError(
+					'protected-field',
+					'A bound review must retain its source dependency, repository and artifact'
+				);
 			const captureChanged =
 				!original ||
 				BOARD_CAPTURE_SPEC_FIELDS.some(
@@ -679,7 +696,7 @@ export class BoardStorageFacade {
 		return { set, unset };
 	}
 
-	save(projectRoot: string, boards: Board[], human = false): Board[] {
+	save(projectRoot: string, boards: Board[], human = false, recordHostState?: () => void): Board[] {
 		const saved = (() => {
 			const plans = boards.map((board) => this.plan(projectRoot, board, human));
 			const before = plans.map((plan) => this.workspace.readCollection(plan));
@@ -713,6 +730,7 @@ export class BoardStorageFacade {
 						}
 					})
 				);
+				recordHostState?.();
 			});
 			return snapshots.map((snapshot) => this.project(snapshot));
 		})();
@@ -744,8 +762,12 @@ export function closeBoardStorage(): void {
 export function getBoardCaptureCatalog(): BoardCaptureCatalog {
 	return storage().captureCatalog();
 }
-export function captureBoardCard(command: BoardCaptureCommand, human = false) {
-	const board = storage().capture(command, human);
+export function captureBoardCard(
+	command: BoardCaptureCommand,
+	human = false,
+	recordHostState?: () => void
+) {
+	const board = storage().capture(command, human, recordHostState);
 	announce(command.projectRoot);
 	return { ok: true as const, value: board, readiness: storage().captureReadiness(board) };
 }

@@ -19,6 +19,7 @@ export interface BoardCueHostDeps {
 	service: BoardRunService;
 	ownerLiveness: (identity: string) => 'alive' | 'dead' | 'unknown';
 	onChanged?: () => void;
+	onCompleted?: (spec: BoardRunSpecification) => void;
 	onTask?: (task: Promise<unknown>) => void;
 	onWait: (key: BoardCardKey, reason: string) => void;
 }
@@ -53,7 +54,8 @@ export class BoardCueHost {
 				() => this.deps.context(key),
 				service,
 				this.deps.ownerLiveness,
-				this.deps.onChanged
+				this.deps.onChanged,
+				this.deps.onCompleted
 			);
 			if (!runtime.acquire().ok) return null;
 			this.runtimes.set(id, runtime);

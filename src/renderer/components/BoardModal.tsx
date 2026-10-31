@@ -115,7 +115,14 @@ const PRIORITY_META: Record<
 /** Draft shape for the card editor (before it becomes a persisted BoardCard). */
 interface CardDraft {
 	kind?: BoardCardKind;
-	reviewContext?: { branch: string; worktree: string; commit: string; checks: string };
+	reviewContext?: {
+		sourceCardId: string;
+		attempt: number;
+		branch: string;
+		worktree: string;
+		commit: string;
+		checks: string;
+	};
 	id: string | null; // null = new card
 	title: string;
 	body: string;
@@ -633,6 +640,15 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		const work = board.cards.find((card) => card.id === draft.id);
 		if (!work) return;
 		const run = work.runs?.[work.runs.length - 1];
+		if (!run?.artifact || !run.summary?.trim()) {
+			notifyToast({
+				color: 'red',
+				title: 'Review artifact unavailable',
+				message:
+					'The source attempt needs a host-observed clean commit and reported checks before a review can be added.',
+			});
+			return;
+		}
 		const review: CardDraft = {
 			...draft,
 			id: null,
@@ -651,10 +667,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			worktreeEnabled: false,
 			prOnDoneEnabled: false,
 			reviewContext: {
-				branch: run?.worktreeBranch ?? '',
-				worktree: run?.worktreePath ?? '',
-				commit: '',
-				checks: '',
+				sourceCardId: work.id,
+				attempt: run.attempt,
+				branch: run.artifact.branch,
+				worktree: run.artifact.worktreePath,
+				commit: run.artifact.commit,
+				checks: run.summary,
 			},
 		};
 		draftBaselineRef.current = review;
@@ -879,6 +897,14 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				boardId: draft.collection.board.id,
 				expectedRevision: draft.collection.revision,
 				card,
+				...(draft.reviewContext
+					? {
+							reviewSource: {
+								cardId: draft.reviewContext.sourceCardId,
+								attempt: draft.reviewContext.attempt,
+							},
+						}
+					: {}),
 			});
 			if (!response.ok) {
 				setSaveError(response.error);
@@ -2564,13 +2590,14 @@ function CardEditor({
 				{draft.reviewContext && (
 					<div>
 						<p>
-							Review depends on the work card. Enter the exact artifact and checks; human approval
-							remains separate.
+							Review depends on the work card. The host verifies the source artifact and reported
+							checks; human approval remains separate.
 						</p>
 						{(['branch', 'worktree', 'commit', 'checks'] as const).map((field) => (
 							<label key={field} className="block">
 								Review {field}
 								<input
+									readOnly
 									aria-label={`Review ${field}`}
 									value={draft.reviewContext![field]}
 									onChange={(e) =>

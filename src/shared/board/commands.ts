@@ -172,7 +172,7 @@ export function parseBoardCommand(message: Record<string, unknown>): BoardComman
 		const command = message.capture;
 		if (
 			!record(command) ||
-			!keys(command, ['projectRoot', 'boardId', 'expectedRevision', 'card']) ||
+			!keys(command, ['projectRoot', 'boardId', 'expectedRevision', 'card', 'reviewSource']) ||
 			command.projectRoot !== target.projectRoot ||
 			!text(command.boardId) ||
 			command.expectedRevision !== target.expectedRevision ||

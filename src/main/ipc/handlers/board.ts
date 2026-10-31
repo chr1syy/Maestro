@@ -10,6 +10,7 @@
  * handler is a 1-line delegation, mirroring the Cue and Profiles IPC handlers.
  */
 
+import { captureBoardCardFromHost } from '../../board/board-review';
 import { refreshBoardSources } from '../../board/board-source-host';
 import { ipcMain, type BrowserWindow } from 'electron';
 import { getLiveSessions } from '../../stores/getters';
@@ -17,7 +18,6 @@ import { withIpcErrorLogging, type CreateHandlerOptions } from '../../utils/ipcH
 import {
 	getBoardCaptureCatalog,
 	getBoardStorage,
-	captureBoardCard,
 	listBoards,
 	queryBoardWorkspace,
 	BoardStorageError,
@@ -214,7 +214,9 @@ export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
 					)
 				)
 					throw new BoardStorageError('invalid-input', 'Invalid capture command');
-				return await enqueueBoardWrite(command.projectRoot, () => captureBoardCard(command, true));
+				return await enqueueBoardWrite(command.projectRoot, () =>
+					captureBoardCardFromHost(command, true)
+				);
 			} catch (error) {
 				if (!(error instanceof BoardStorageError)) throw error;
 				return {

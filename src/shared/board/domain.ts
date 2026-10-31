@@ -160,6 +160,7 @@ function findProfile(role: BoardRoleRef, context: BoardCaptureContext): AgentPro
 }
 
 export type BoardCaptureWaitReason =
+	| 'review-artifact-unresolved'
 	| 'scope-conflict'
 	| 'missing-scope'
 	| 'target-missing'

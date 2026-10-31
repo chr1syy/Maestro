@@ -1,3 +1,4 @@
+import { captureBoardCardFromHost } from './board-review';
 import { refreshBoardSources } from './board-source-host';
 import { executeBoardRuntimeCommand } from './board-runtime-host';
 /** Ordinary (non-human) commands share the desktop's current facade and host registers. */
@@ -7,7 +8,6 @@ import { getBoard, stampBoardRunPr } from './board-storage';
 import type { BoardCommandHost } from '../../shared/board/commands';
 import {
 	BoardStorageError,
-	captureBoardCard,
 	createBoard,
 	deleteBoard,
 	deleteCard,
@@ -27,7 +27,7 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 		if (command.action === 'catalog') return { ok: true, value: getBoardCaptureCatalog() };
 		const projectRoot =
 			command.action === 'create' ? command.projectRoot : command.target.projectRoot;
-		const result = await enqueueBoardWrite(projectRoot, () => {
+		const result = await enqueueBoardWrite(projectRoot, async () => {
 			if (command.action === 'create') {
 				return {
 					ok: true as const,
@@ -80,7 +80,7 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 						'identity-mismatch',
 						'Board legacy identity does not match collection'
 					);
-				return captureBoardCard(command.capture, false);
+				return captureBoardCardFromHost(command.capture, false);
 			}
 			if (command.action === 'rename')
 				return {
