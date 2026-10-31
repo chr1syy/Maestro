@@ -4,6 +4,8 @@ import * as yaml from 'js-yaml';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { validateBoard, validateBoardCard } from '../../shared/board/types';
 import { validateAgentProfile } from '../../shared/profiles/types';
+import type Database from 'better-sqlite3';
+import { selectPoolAgentIds } from '../../shared/board/pool';
 
 export interface BoardMigrationInput {
 	/** Canonical location and source path supplied by the caller, never inferred from a worker. */
@@ -222,4 +224,253 @@ export function planBoardMigration(input: BoardMigrationInput): BoardMigrationPl
 			...(duplicateProfiles.size ? ['duplicate-profile-id'] : []),
 		],
 	};
+}
+
+/** Null keys identify archived conflicts, never silently renamed active entities. */
+export interface BoardMigrationMapping {
+	sourceKey: string;
+	profileNamespace: string;
+	boards: {
+		index: number;
+		legacyId: string | null;
+		collectionKey: string | null;
+		cards: { index: number; legacyId: string | null; id: string | null; runIds: string[] }[];
+	}[];
+	profiles: { index: number; legacyId: string | null; id: string | null }[];
+}
+
+export type BoardMigrationResult =
+	| { status: 'imported' | 'already-imported'; mapping: BoardMigrationMapping }
+	| { status: 'source-changed'; mapping: BoardMigrationMapping };
+
+/**
+ * Apply only to an explicitly opened workspace. No source/session writes or discovery.
+ * The caller must honor migration blockers/worker holds before enabling dispatch;
+ * these are reconciliation fences, not proof that a legacy process has stopped.
+ */
+export function applyBoardMigration(
+	db: Database.Database,
+	plan: BoardMigrationPlan,
+	options: { now?: () => number; beforeCommit?: () => void } = {}
+): BoardMigrationResult {
+	// Hash the complete plan as well: changed repository validation or import semantics
+	// must not masquerade as an identical import just because YAML bytes are unchanged.
+	const serialized = canonicalJson(plan);
+	const hashesJson = canonicalJson({ ...plan.hashes, plan: hash(serialized) });
+	if (db.inTransaction) throw new Error('Board migration requires its own IMMEDIATE transaction');
+	return db
+		.transaction((): BoardMigrationResult => {
+			const previous = db
+				.prepare('SELECT hashes_json, mapping_json FROM migrations WHERE source_key = ?')
+				.get(plan.sourceKey) as { hashes_json: string; mapping_json: string } | undefined;
+			if (previous) {
+				return {
+					status: previous.hashes_json === hashesJson ? 'already-imported' : 'source-changed',
+					mapping: JSON.parse(previous.mapping_json) as BoardMigrationMapping,
+				};
+			}
+
+			const mapping: BoardMigrationMapping = {
+				sourceKey: plan.sourceKey,
+				profileNamespace: plan.profileNamespace,
+				boards: [],
+				profiles: [],
+			};
+			const blockers: unknown[] = [...plan.conflicts];
+			const insertCollection = db.prepare(
+				'INSERT INTO collections (collection_key, source_key, legacy_board_id, payload_json) VALUES (?, ?, ?, ?)'
+			);
+			const insertCard = db.prepare(
+				'INSERT INTO cards (collection_key, id, payload_json) VALUES (?, ?, ?)'
+			);
+			const insertRun = db.prepare(
+				'INSERT INTO runs (run_id, collection_key, card_id, attempt, specification_json, outcome_json) VALUES (?, ?, ?, ?, ?, ?)'
+			);
+			const holdWorker = db.prepare(
+				'INSERT INTO migration_worker_holds (worker_agent_id, claims_json) VALUES (?, ?) ON CONFLICT (worker_agent_id) DO UPDATE SET claims_json = excluded.claims_json'
+			);
+			const readHold = db.prepare(
+				'SELECT claims_json FROM migration_worker_holds WHERE worker_agent_id = ?'
+			);
+			for (const board of plan.boards) {
+				// A duplicate collection/card key cannot represent an unambiguous DAG.
+				// Archive the entire collection in the ledger instead of selecting a winner.
+				const collectionKey = board.conflicts.length ? null : board.collectionKey;
+				const boardMapping: BoardMigrationMapping['boards'][number] = {
+					index: board.index,
+					legacyId: board.legacyId,
+					collectionKey,
+					cards: [],
+				};
+				mapping.boards.push(boardMapping);
+				if (!collectionKey) blockers.push({ board: board.index, reasons: board.conflicts });
+				if (collectionKey) {
+					insertCollection.run(
+						collectionKey,
+						plan.sourceKey,
+						board.legacyId,
+						canonicalJson({ ...record(board.raw), cards: [], migration: { raw: board.raw } })
+					);
+				}
+				for (const card of board.cards) {
+					const raw = record(card.raw);
+					const runs = Array.isArray(raw?.runs) ? raw.runs : [];
+					const attempts = runs.map((run) => record(run)?.attempt);
+					const validRuns =
+						attempts.every(
+							(attempt) =>
+								typeof attempt === 'number' && Number.isSafeInteger(attempt) && attempt > 0
+						) && new Set(attempts).size === attempts.length;
+					const unfinished = runs.filter((run) => !record(run)?.endedAt);
+					const cardBlockers = [
+						...card.blockers,
+						...(!validRuns ? ['invalid-run-history'] : []),
+						...(unfinished.length ? ['reconciliation-required'] : []),
+						...(unfinished.some(
+							(run) => typeof record(run)?.workerAgentId !== 'string' || !record(run)?.workerAgentId
+						)
+							? ['running-worker-unknown']
+							: []),
+					];
+					const cardId = collectionKey ? card.legacyId : null;
+					const cardMapping = {
+						index: card.index,
+						legacyId: card.legacyId,
+						id: cardId,
+						runIds: [] as string[],
+					};
+					boardMapping.cards.push(cardMapping);
+					if (cardBlockers.length)
+						blockers.push({ board: board.index, card: card.index, reasons: cardBlockers });
+					if (collectionKey && cardId) {
+						insertCard.run(
+							collectionKey,
+							cardId,
+							canonicalJson({
+								...raw,
+								executionScope: card.executionScope,
+								profileNamespace: card.profileNamespace,
+								repositoryId: plan.repository?.validated ? plan.repository.id : null,
+								workingDirectory: plan.repository?.workingDirectory ?? null,
+								migration: {
+									raw: card.raw,
+									intent: card.intent,
+									blockers: cardBlockers,
+									sourceKey: plan.sourceKey,
+								},
+							})
+						);
+						if (validRuns)
+							for (const run of runs) {
+								const runId = `legacy:${hash(canonicalJson([collectionKey, cardId, record(run)?.attempt]))}`;
+								insertRun.run(
+									runId,
+									collectionKey,
+									cardId,
+									record(run)?.attempt,
+									canonicalJson({
+										raw: run,
+										executionScope: card.executionScope,
+										repository: plan.repository,
+									}),
+									record(run)?.endedAt ? canonicalJson(run) : null
+								);
+								cardMapping.runIds.push(runId);
+							}
+					}
+					// Preserve every uncertain claim, including archived duplicate/invalid cards.
+					for (const run of unfinished) {
+						const worker = record(run)?.workerAgentId;
+						if (typeof worker !== 'string' || !worker) continue;
+						const existing = readHold.get(worker) as { claims_json: string } | undefined;
+						const claims = existing ? (JSON.parse(existing.claims_json) as unknown[]) : [];
+						claims.push({
+							sourceKey: plan.sourceKey,
+							board: board.index,
+							card: card.index,
+							raw: run,
+						});
+						holdWorker.run(worker, canonicalJson(claims));
+					}
+				}
+			}
+			for (const profile of plan.profiles) {
+				const profileId = profile.conflicts.length ? null : profile.legacyId;
+				mapping.profiles.push({ index: profile.index, legacyId: profile.legacyId, id: profileId });
+				if (profileId)
+					db.prepare(
+						'INSERT INTO profiles (profile_namespace, id, payload_json, source_key) VALUES (?, ?, ?, ?)'
+					).run(plan.profileNamespace, profileId, canonicalJson(profile.raw), plan.sourceKey);
+				else blockers.push({ profile: profile.index, reasons: profile.conflicts });
+			}
+			if (plan.repository?.validated) {
+				const existing = db
+					.prepare('SELECT payload_json FROM repositories WHERE id = ?')
+					.get(plan.repository.id) as { payload_json: string } | undefined;
+				const payload = canonicalJson(plan.repository);
+				if (existing && existing.payload_json !== payload)
+					throw new Error('Board migration repository conflict');
+				if (!existing)
+					db.prepare('INSERT INTO repositories VALUES (?, ?)').run(plan.repository.id, payload);
+			}
+			const candidates = plan.snapshot.workers.flatMap((worker) => {
+				const raw = record(worker);
+				return raw && typeof raw.id === 'string'
+					? [
+							{
+								id: raw.id,
+								dir: typeof raw.dir === 'string' ? raw.dir : null,
+								boardWorker: raw.boardWorker === true,
+							},
+						]
+					: [];
+			});
+			const allowed = new Set(
+				plan.repository?.validated
+					? selectPoolAgentIds(plan.repository.workingDirectory, candidates)
+					: []
+			);
+			for (const worker of plan.snapshot.workers) {
+				const raw = record(worker);
+				if (!raw || raw.boardWorker !== true || typeof raw.id !== 'string' || !raw.id) continue;
+				// Existing central restrictions win, including an empty role/repository list.
+				db.prepare(
+					'INSERT INTO workers (agent_id, enabled, paused, payload_json) VALUES (?, 1, 0, ?) ON CONFLICT (agent_id) DO NOTHING'
+				).run(
+					raw.id,
+					canonicalJson({
+						roleRefs: allowed.has(raw.id)
+							? plan.profiles
+									.filter(
+										(p) =>
+											!p.conflicts.length &&
+											(!record(p.raw)?.baseAgentId || record(p.raw)?.baseAgentId === raw.id)
+									)
+									.map((p) => ({ namespace: plan.profileNamespace, profileId: p.legacyId }))
+							: [],
+						allowedRepositoryIds: allowed.has(raw.id) ? [plan.repository!.id] : [],
+						migration: {
+							sourceKey: plan.sourceKey,
+							raw: worker,
+							blockers: allowed.has(raw.id) ? [] : ['repository-unresolved'],
+						},
+					})
+				);
+			}
+			db.prepare('INSERT INTO migrations VALUES (?, ?, ?, ?, ?)').run(
+				plan.sourceKey,
+				hashesJson,
+				Buffer.from(serialized),
+				canonicalJson(mapping),
+				(options.now ?? Date.now)()
+			);
+			db.prepare('INSERT INTO migration_blockers VALUES (?, ?)').run(
+				plan.sourceKey,
+				canonicalJson(blockers)
+			);
+			db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+			options.beforeCommit?.();
+			return { status: 'imported', mapping };
+		})
+		.immediate();
 }

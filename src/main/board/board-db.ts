@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-export const BOARD_SCHEMA_VERSION = 1;
+export const BOARD_SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE workspace (
@@ -56,6 +56,16 @@ CREATE TABLE commands (
 );
 `;
 
+/** Imported uncertainty fences workers without inventing an active runtime owner/run. */
+const MIGRATION_HOLDS_SCHEMA = `
+CREATE TABLE migration_worker_holds (
+  worker_agent_id TEXT PRIMARY KEY, claims_json TEXT NOT NULL
+);
+CREATE TABLE migration_blockers (
+  source_key TEXT PRIMARY KEY REFERENCES migrations(source_key), payload_json TEXT NOT NULL
+);
+`;
+
 /** Explicit path prevents tests or callers from accidentally opening the live workspace. */
 export function openBoardDb(
 	dbPath: string,
@@ -80,6 +90,9 @@ export function openBoardDb(
 			}
 			if (current === 0) {
 				db.exec(SCHEMA);
+			}
+			if (current < 2) {
+				db.exec(MIGRATION_HOLDS_SCHEMA);
 				db.pragma(`user_version = ${BOARD_SCHEMA_VERSION}`);
 			}
 		}).immediate();
