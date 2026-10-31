@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
 	evaluateCaptureReadiness,
+	persistedCaptureInput,
 	validateCapture,
 	type BoardCaptureContext,
 } from '../../../shared/board/domain';
+import type { BoardCaptureOptions } from '../../../shared/board/types';
 
 const context: BoardCaptureContext = {
 	agents: [
@@ -19,6 +21,24 @@ const context: BoardCaptureContext = {
 };
 
 describe('global Board capture', () => {
+	it('accepts only unchanged persisted unresolved nulls for validation without changing storage or public capture rules', () => {
+		const stored = {
+			executionScope: null,
+			profileNamespace: null,
+			repositoryId: null,
+			workingDirectory: null,
+		};
+		const input = stored as unknown as BoardCaptureOptions;
+		expect(validateCapture(input, context).ok).toBe(false);
+		expect(validateCapture(persistedCaptureInput(input, {}), context).ok).toBe(false);
+		expect(validateCapture(persistedCaptureInput(input, stored), context).ok).toBe(true);
+		expect(stored).toEqual({
+			executionScope: null,
+			profileNamespace: null,
+			repositoryId: null,
+			workingDirectory: null,
+		});
+	});
 	it('accepts a scoped role and snapshots the effective policy', () => {
 		expect(
 			validateCapture(

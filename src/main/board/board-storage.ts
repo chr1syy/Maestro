@@ -20,6 +20,7 @@ import {
 } from '../../shared/board/types';
 import {
 	evaluateCaptureReadiness,
+	persistedCaptureInput,
 	validateCapture,
 	type BoardCaptureContext,
 } from '../../shared/board/domain';
@@ -31,6 +32,7 @@ import { createKeyedWriteQueue } from '../../shared/keyedWriteQueue';
 import { logger } from '../utils/logger';
 import { isPathWithin, foldPathCase } from '../utils/real-path-containment';
 import { openBoardDb } from './board-db';
+import { claimBoardCard, type BoardClaimCommand, type BoardClaimHostContext } from './board-claims';
 import { boardMigrationSourceKey } from './board-migration';
 import {
 	BoardWorkspaceStorage,
@@ -103,6 +105,13 @@ export function configureBoardCaptureHost(provider: typeof hostRegisters): void 
 /** Injectable facade: fixtures and host share the same SQLite adapter and source resolver. */
 export class BoardStorageFacade {
 	readonly workspace: BoardWorkspaceStorage;
+	/** No transport authority is accepted here; runtime liveness/owner evidence is injected. */
+	claim(command: BoardClaimCommand, currentHost: () => BoardClaimHostContext) {
+		return claimBoardCard(this.db, command, () => ({
+			...currentHost(),
+			catalog: this.captureCatalog(),
+		}));
+	}
 	constructor(
 		readonly db: Database.Database,
 		readonly resolveSourceKeys: (
@@ -416,18 +425,7 @@ export class BoardStorageFacade {
 						canonicalJson({ value: (card as unknown as Record<string, unknown>)[field] })
 				);
 			if (captureChanged) {
-				const captureInput = { ...card } as unknown as Record<string, unknown>;
-				// Migration persisted explicit nulls for unresolved bindings. Retain those bytes;
-				// only an unchanged, already persisted null is treated as missing for validation.
-				for (const field of [
-					'executionScope',
-					'profileNamespace',
-					'repositoryId',
-					'workingDirectory',
-				]) {
-					if (original?.payload[field] === null && captureInput[field] === null)
-						delete captureInput[field];
-				}
+				const captureInput = persistedCaptureInput(card, original?.payload ?? {});
 				const result = validateCapture(captureInput, {
 					...this.captureContext(board, human),
 					canRelaxStartPolicy:

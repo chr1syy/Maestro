@@ -37,6 +37,20 @@ function nonBlank(value: unknown): value is string {
 	return typeof value === 'string' && value.trim().length > 0 && !value.includes('\0');
 }
 
+/** Migration preserves explicit nulls for unresolved bindings. For validation
+ * only, treat an unchanged stored null as missing; public capture still rejects
+ * new null input and persistence keeps the original bytes. */
+export function persistedCaptureInput(
+	input: BoardCaptureOptions,
+	stored: Record<string, unknown>
+): BoardCaptureOptions {
+	const result = { ...input } as Record<string, unknown>;
+	for (const field of ['executionScope', 'profileNamespace', 'repositoryId', 'workingDirectory']) {
+		if (stored[field] === null && result[field] === null) delete result[field];
+	}
+	return result;
+}
+
 /** Reject malformed or contradictory input while retaining missing/deleted references for repair. */
 export function validateCapture(raw: unknown, context: BoardCaptureContext): BoardCaptureResult {
 	if (!record(raw)) return { ok: false, errors: ['invalid-options'] };
@@ -194,4 +208,63 @@ export function evaluateCaptureReadiness(
 	)
 		reasons.push('repository-unresolved');
 	return reasons;
+}
+
+export type BoardWorkerWaitReason =
+	| BoardCaptureWaitReason
+	| 'worker-outside-scope'
+	| 'worker-unregistered'
+	| 'worker-disabled'
+	| 'worker-paused'
+	| 'worker-role-mismatch'
+	| 'worker-repository-mismatch';
+
+/** Recheck the selected worker against CURRENT membership and Board-owned access.
+ * A failed pin/role/scope never substitutes another worker. Runtime availability
+ * and durable reservation checks belong to the host transaction. */
+export function evaluateClaimWorker(
+	options: BoardCaptureOptions,
+	workerAgentId: string,
+	context: BoardCaptureContext & {
+		repositoryIds: readonly string[];
+		workers: readonly {
+			agentId: string;
+			enabled: boolean;
+			paused: boolean;
+			roleRefs: readonly BoardRoleRef[];
+			allowedRepositoryIds: readonly string[];
+		}[];
+	}
+): BoardWorkerWaitReason | null {
+	const reason = evaluateCaptureReadiness(options, context)[0];
+	if (reason) return reason;
+	const normalized = validateCapture(options, { ...context, canRelaxStartPolicy: true });
+	if (!normalized.ok) return 'scope-conflict';
+	options = normalized.options;
+	const agent = context.agents.find((entry) => entry.id === workerAgentId);
+	if (!agent) return 'target-missing';
+	const scope = options.executionScope!;
+	const rolePin = options.role && findProfile(options.role, context)?.baseAgentId;
+	if (
+		(scope.kind === 'agent' && scope.agentId !== workerAgentId) ||
+		(scope.kind === 'group' && agent.groupId !== scope.groupId) ||
+		(options.assigneeAgentId && options.assigneeAgentId !== workerAgentId) ||
+		(rolePin && rolePin !== workerAgentId)
+	)
+		return 'worker-outside-scope';
+	const worker = context.workers.find((entry) => entry.agentId === workerAgentId);
+	if (!worker) return 'worker-unregistered';
+	if (!worker.enabled) return 'worker-disabled';
+	if (worker.paused) return 'worker-paused';
+	if (
+		options.role &&
+		!worker.roleRefs.some(
+			(role) =>
+				role?.namespace === options.role!.namespace && role.profileId === options.role!.profileId
+		)
+	)
+		return 'worker-role-mismatch';
+	if (!worker.allowedRepositoryIds.includes(options.repositoryId!))
+		return 'worker-repository-mismatch';
+	return null;
 }

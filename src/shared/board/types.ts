@@ -588,4 +588,6 @@ export interface BoardCapturePolicy {
 	effectiveStartMode: BoardStartMode;
 	specificationRevision: number;
 	dispatchApproval: 'required' | 'granted' | 'not-required';
+	/** Host-owned human grant, bound to the captured specification, never CRUD input. */
+	grant?: { specificationRevision: number; principal: string; grantedAt: string };
 }
