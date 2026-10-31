@@ -11,7 +11,7 @@
  */
 
 import { captureBoardCardFromHost } from '../../board/board-review';
-import { refreshBoardSources } from '../../board/board-source-host';
+import { refreshBoardSources, executeBoardSourceCommand } from '../../board/board-source-host';
 import { ipcMain, type BrowserWindow } from 'electron';
 import { getLiveSessions } from '../../stores/getters';
 import { withIpcErrorLogging, type CreateHandlerOptions } from '../../utils/ipcHandler';
@@ -153,6 +153,27 @@ export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
 				if (!(error instanceof BoardStorageError)) throw error;
 				return { ok: false, error: { code: error.code, message: error.message } };
 			}
+		}
+	);
+
+	ipcMain.handle(
+		'board:sourceCommand',
+		async (event, command: import('../../../shared/board/types').BoardSourceCommand) => {
+			const window = deps.getMainWindow?.();
+			if (
+				!window ||
+				window.isDestroyed() ||
+				event?.sender !== window.webContents ||
+				event.senderFrame !== window.webContents.mainFrame
+			)
+				return {
+					ok: false,
+					error: {
+						code: 'protected-field',
+						message: 'Source management requires the desktop main frame',
+					},
+				};
+			return executeBoardSourceCommand(command);
 		}
 	);
 

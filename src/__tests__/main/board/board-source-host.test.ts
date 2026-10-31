@@ -101,3 +101,84 @@ it('completes repository discovery when the first collection was created before 
 		db.close();
 	}
 });
+
+it('explicitly revalidates unresolved imported sources without rewriting original bytes, blockers, holds or runs', async () => {
+	dir = fs.mkdtempSync(path.resolve('.maestro/board-global-workers-20261031/source-repair-'));
+	const db = openBoardDb(path.join(dir, 'board.sqlite'));
+	try {
+		const storage = new BoardStorageFacade(db);
+		fs.mkdirSync(path.join(dir, '.maestro'));
+		fs.writeFileSync(
+			path.join(dir, '.maestro/board.yaml'),
+			JSON.stringify({
+				boards: [
+					{
+						id: 'b',
+						name: 'Imported',
+						cards: [
+							{
+								id: 'c',
+								title: 'Uncertain',
+								body: '',
+								parents: [],
+								status: 'running',
+								runs: [{ attempt: 1, workerAgentId: 'worker', startedAt: '2026-10-01' }],
+							},
+						],
+					},
+				],
+			})
+		);
+		await discoverBoardSources(storage, [{ id: 'worker', dir, boardWorker: true }]);
+		const sourceKey = storage.query().sources[0].sourceKey;
+		db.prepare('INSERT INTO runtime_owner VALUES (1, ?, 31, 100)').run('unproven-owner');
+		const run = db.prepare('SELECT run_id, collection_key, card_id FROM runs').get() as {
+			run_id: string;
+			collection_key: string;
+			card_id: string;
+		};
+		db.prepare('INSERT INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+			'worker',
+			run.collection_key,
+			run.card_id,
+			run.run_id,
+			31,
+			12,
+			'uncertain'
+		);
+
+		const frozen = () =>
+			[
+				'migrations',
+				'migration_blockers',
+				'migration_worker_holds',
+				'runs',
+				'cards',
+				'runtime_owner',
+				'reservations',
+			].map((table) => db.prepare(`SELECT * FROM ${table}`).all());
+		const original = frozen();
+		const { executeBoardSourceCommand } = await import('../../../main/board/board-source-host');
+		expect(
+			await executeBoardSourceCommand({ action: 'revalidate', sourceKey }, storage)
+		).toMatchObject({ ok: false, error: { code: 'invalid-input' } });
+		execFileSync('git', ['init', '--quiet', dir]);
+		// Changed legacy files are never a repair source and never silently reimported.
+		fs.writeFileSync(path.join(dir, '.maestro/board.yaml'), 'broken: [');
+		expect(await executeBoardSourceCommand({ action: 'revalidate', sourceKey }, storage)).toEqual({
+			ok: true,
+		});
+		expect(new BoardStorageFacade(db).captureCatalog().repositories).toEqual([
+			{ id: `source:${sourceKey}`, workingDirectory: dir, validated: true },
+		]);
+		expect(frozen()).toEqual(original);
+		fs.renameSync(path.join(dir, '.git'), path.join(dir, 'old-git'));
+		expect(
+			await executeBoardSourceCommand({ action: 'revalidate', sourceKey }, storage)
+		).toMatchObject({ ok: false });
+		expect(storage.captureCatalog().repositories[0].validated).toBe(false);
+		expect(frozen()).toEqual(original);
+	} finally {
+		db.close();
+	}
+});

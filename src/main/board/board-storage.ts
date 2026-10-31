@@ -323,18 +323,98 @@ export class BoardStorageFacade {
 			throw new BoardWorkspaceStorageError('identity-mismatch', 'Role requires one source');
 		const sourceKey = sources[0];
 		const namespace = `legacy:${sourceKey}`;
+		this.editSourceRole({ action: 'save-role', sourceKey, namespace, profile });
+		boardSavedListener?.(projectRoot, this.list(projectRoot));
+		return { namespace, profileId: profile.id };
+	}
+
+	/** Central editor pins source and namespace, independently of any active agent. */
+	editSourceRole(
+		command: Exclude<
+			import('../../shared/board/types').BoardSourceCommand,
+			{ action: 'revalidate' }
+		>
+	): void {
+		const source = this.query({ sourceKey: command.sourceKey }).sources.find(
+			(s) => s.sourceKey === command.sourceKey
+		);
+		if (!source || command.namespace !== `legacy:${source.sourceKey}`)
+			throw new BoardWorkspaceStorageError(
+				'identity-mismatch',
+				'Role namespace does not belong to selected source'
+			);
 		this.db
 			.transaction(() => {
-				this.db
-					.prepare(
-						'INSERT INTO profiles VALUES (?, ?, ?, ?) ON CONFLICT (profile_namespace, id) DO UPDATE SET payload_json=excluded.payload_json'
+				if (command.action === 'delete-role') {
+					// Existing card and worker bindings must be repaired explicitly first.
+					if (typeof command.profileId !== 'string' || !command.profileId.trim())
+						throw new BoardWorkspaceStorageError('invalid-input', 'Role ID required');
+					const cards = this.db.prepare('SELECT payload_json FROM cards').all() as {
+						payload_json: string;
+					}[];
+					const referenced = cards.some((card) => {
+						const p = JSON.parse(card.payload_json);
+						const role = p.role as { namespace?: string; profileId?: string } | undefined;
+						return (
+							(role?.namespace === command.namespace && role.profileId === command.profileId) ||
+							(p.profileNamespace === command.namespace &&
+								p.assigneeProfileId === command.profileId)
+						);
+					});
+					if (
+						referenced ||
+						listStoredBoardWorkers(this.db).some(
+							(w) =>
+								Array.isArray(w.payload.roleRefs) &&
+								w.payload.roleRefs.some(
+									(r: { namespace: string; profileId: string }) =>
+										r.namespace === command.namespace && r.profileId === command.profileId
+								)
+						)
 					)
-					.run(namespace, profile.id, canonicalJson(profile), sourceKey);
+						throw new BoardWorkspaceStorageError(
+							'protected-field',
+							'Role is still referenced by a card or worker'
+						);
+					this.db
+						.prepare('DELETE FROM profiles WHERE profile_namespace=? AND id=? AND source_key=?')
+						.run(command.namespace, command.profileId, command.sourceKey);
+				} else {
+					const profile = validateAgentProfile(command.profile);
+					if (!profile) throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board role');
+					const previous = this.db
+						.prepare(
+							'SELECT payload_json, source_key FROM profiles WHERE profile_namespace=? AND id=?'
+						)
+						.get(command.namespace, profile.id) as
+						| { payload_json: string; source_key: string }
+						| undefined;
+					if (previous && previous.source_key !== command.sourceKey)
+						throw new BoardWorkspaceStorageError('identity-mismatch', 'Role source cannot change');
+					const retained = previous ? JSON.parse(previous.payload_json) : {};
+					for (const key of [
+						'name',
+						'baseAgentId',
+						'model',
+						'effort',
+						'appendSystemPrompt',
+						'customArgs',
+					])
+						delete retained[key];
+					this.db
+						.prepare(
+							'INSERT INTO profiles VALUES (?, ?, ?, ?) ON CONFLICT (profile_namespace, id) DO UPDATE SET payload_json=excluded.payload_json'
+						)
+						.run(
+							command.namespace,
+							profile.id,
+							canonicalJson({ ...retained, ...profile }),
+							command.sourceKey
+						);
+				}
 				this.db.prepare('UPDATE workspace SET revision=revision+1 WHERE id=1').run();
 			})
 			.immediate();
-		boardSavedListener?.(projectRoot, this.list(projectRoot));
-		return { namespace, profileId: profile.id };
 	}
 
 	sourceKeys(projectRoot: string): string[] {

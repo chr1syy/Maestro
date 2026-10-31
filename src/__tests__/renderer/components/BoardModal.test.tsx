@@ -70,43 +70,44 @@ function makeCard(overrides: Partial<BoardCard> & { id: string; title: string })
 // Board IPC stub, reassigned per test. The global test harness does not include
 // the board/profiles namespaces, so install them here.
 let boardApi: {
-	upsertRole: ReturnType<typeof vi.fn>;
-	setStartPolicy: ReturnType<typeof vi.fn>;
-	queryWorkspace: ReturnType<typeof vi.fn>;
-	captureCatalog: ReturnType<typeof vi.fn>;
-	captureCard: ReturnType<typeof vi.fn>;
-	list: ReturnType<typeof vi.fn>;
-	create: ReturnType<typeof vi.fn>;
-	rename: ReturnType<typeof vi.fn>;
-	delete: ReturnType<typeof vi.fn>;
-	addCard: ReturnType<typeof vi.fn>;
-	updateCard: ReturnType<typeof vi.fn>;
-	setCardStatus: ReturnType<typeof vi.fn>;
-	deleteCard: ReturnType<typeof vi.fn>;
-	cancelCard: ReturnType<typeof vi.fn>;
-	resumeCard: ReturnType<typeof vi.fn>;
-	onBoardChanged: ReturnType<typeof vi.fn>;
+	sourceCommand: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	upsertRole: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	setStartPolicy: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	queryWorkspace: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	captureCatalog: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	captureCard: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	list: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	create: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	rename: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	delete: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	addCard: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	updateCard: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	setCardStatus: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	deleteCard: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	cancelCard: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	resumeCard: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	onBoardChanged: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 };
 
 /** Profiles IPC stub, reassigned per test alongside `boardApi`. */
 let profilesApi: {
-	list: ReturnType<typeof vi.fn>;
-	upsert: ReturnType<typeof vi.fn>;
-	delete: ReturnType<typeof vi.fn>;
-	onProfilesChanged: ReturnType<typeof vi.fn>;
+	list: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	upsert: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	delete: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+	onProfilesChanged: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 };
 
 /** Captured `board:changed` subscribers, so a test can fire the push the main
  * process would send after a board.yaml write. */
 let boardChangedListeners: Array<(payload: { projectRoot: string }) => void>;
 /** Unsubscribe spy returned by the mocked subscription. */
-let unsubscribeBoardChanged: ReturnType<typeof vi.fn>;
+let unsubscribeBoardChanged: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
 /** Captured `profiles:changed` subscribers, so a test can fire the push the main
  * process would send after a profiles.yaml write from a desktop window. */
 let profilesChangedListeners: Array<(payload: { projectRoot: string }) => void>;
 /** Unsubscribe spy returned by the mocked profiles subscription. */
-let unsubscribeProfilesChanged: ReturnType<typeof vi.fn>;
+let unsubscribeProfilesChanged: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
 function emitBoardChanged(projectRoot = PROJECT_ROOT): void {
 	for (const listener of boardChangedListeners) listener({ projectRoot });
@@ -149,6 +150,7 @@ function installApis(initialBoards: Board[], profiles?: unknown[]): void {
 	profilesChangedListeners = [];
 	unsubscribeProfilesChanged = vi.fn();
 	boardApi = {
+		sourceCommand: vi.fn().mockResolvedValue({ ok: true }),
 		upsertRole: vi.fn(async (_root: string, profile: { id: string }) => ({
 			namespace: 'fixture-namespace',
 			profileId: profile.id,
@@ -1006,15 +1008,17 @@ describe('BoardModal multi-board management (Phase 6)', () => {
 		await waitFor(() => expect(boardApi.delete).toHaveBeenCalledWith(PROJECT_ROOT, 'b1', true));
 	});
 
-	it('still exposes the "Manage roles" escape hatch into the Profiles modal', async () => {
+	it('opens central Manage roles without an active agent', async () => {
 		installApis([{ id: 'b1', name: 'My Board', cards: [] }], []);
+		useSessionStore.setState({ sessions: [], activeSessionId: '' });
 
 		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
 		// The advanced link lives on the card editor now, not the board header.
 		fireEvent.click(await screen.findByRole('button', { name: /New card/i }));
 
 		fireEvent.click(screen.getByRole('button', { name: /Manage roles/i }));
-		expect(setProfilesModalOpen).toHaveBeenCalledWith(true);
+		expect(await screen.findByRole('dialog', { name: 'Agent Profiles' })).toBeInTheDocument();
+		expect(setProfilesModalOpen).not.toHaveBeenCalled();
 	});
 });
 
@@ -2393,4 +2397,25 @@ it('sends the displayed collection revision when a human changes its start polic
 	);
 	expect(boardApi.captureCard).not.toHaveBeenCalled();
 	expect(boardApi.setCardStatus).not.toHaveBeenCalled();
+});
+
+it('revalidates the pinned source and displays typed repair failures without saving a draft', async () => {
+	installApis([{ id: 'b1', name: 'My Board', cards: [] }], []);
+	useSessionStore.setState({ sessions: [], activeSessionId: '' });
+	boardApi.sourceCommand.mockResolvedValueOnce({
+		ok: false,
+		error: { code: 'identity-mismatch', message: 'Source changed' },
+	});
+	render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+	fireEvent.click(await screen.findByRole('button', { name: /New card/i }));
+	fireEvent.click(screen.getByRole('button', { name: 'Revalidate selected source' }));
+	expect(await screen.findByRole('status')).toHaveTextContent('identity-mismatch: Source changed');
+	expect(boardApi.sourceCommand).toHaveBeenCalledWith({
+		action: 'revalidate',
+		sourceKey: 'source-one',
+	});
+	expect(boardApi.captureCard).not.toHaveBeenCalled();
+	fireEvent.click(screen.getByRole('button', { name: 'Revalidate selected source' }));
+	await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Source revalidated'));
+	expect(boardApi.captureCard).not.toHaveBeenCalled();
 });

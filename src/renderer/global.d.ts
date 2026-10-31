@@ -4911,6 +4911,10 @@ interface MaestroAPI {
 		runtimeCommand: (
 			command: import('../shared/board/commands').BoardRuntimeCommand
 		) => Promise<import('../shared/board/commands').BoardCommandResult>;
+		sourceCommand: (
+			command: import('../shared/board/types').BoardSourceCommand
+		) => Promise<import('../shared/board/types').BoardSourceResponse>;
+
 		upsertRole: (
 			projectRoot: string,
 			profile: import('../shared/profiles/types').AgentProfile

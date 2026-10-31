@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { openBoardDb } from '../../../main/board/board-db';
 import { applyBoardMigration, planBoardMigration } from '../../../main/board/board-migration';
 import {
@@ -592,4 +593,117 @@ it('creates namespaced roles through native transport without touching legacy pr
 	expect((await api.captureCatalog()).profiles.some((p) => p.profile.id === 'forged-role')).toBe(
 		false
 	);
+});
+
+it('manages advanced roles through authorized central IPC with exact source namespace and reopen persistence', async () => {
+	const sourceKey = facade.query().sources[0].sourceKey;
+	const original = db.prepare('SELECT * FROM migrations').all();
+	const profile = {
+		id: 'advanced',
+		name: 'Advanced',
+		baseAgentId: 'a',
+		model: 'model',
+		effort: 'xhigh',
+		appendSystemPrompt: '  prompt\n',
+		customArgs: '--arg "two words"',
+	};
+	expect(await api.sourceCommand({ action: 'save-role', sourceKey, namespace, profile })).toEqual({
+		ok: true,
+	});
+	expect(
+		new BoardStorageFacade(db).captureCatalog().profiles.find((p) => p.profile.id === profile.id)
+	).toEqual({ namespace, profile });
+	expect(
+		await api.sourceCommand({
+			action: 'save-role',
+			sourceKey,
+			namespace: 'legacy:foreign',
+			profile,
+		})
+	).toMatchObject({ ok: false, error: { code: 'identity-mismatch' } });
+	transport.event.senderFrame = {};
+	expect(
+		await api.sourceCommand({
+			action: 'save-role',
+			sourceKey,
+			namespace,
+			profile: { ...profile, model: 'forged' },
+		})
+	).toMatchObject({ ok: false, error: { code: 'protected-field' } });
+	expect(
+		new BoardStorageFacade(db).captureCatalog().profiles.find((p) => p.profile.id === profile.id)
+			?.profile.model
+	).toBe('model');
+	expect(db.prepare('SELECT * FROM migrations').all()).toEqual(original);
+	db.close();
+	db = openBoardDb(path.join(dir, 'board.sqlite'));
+	facade = new BoardStorageFacade(db);
+	configureBoardStorage(facade);
+	expect(facade.captureCatalog().profiles.find((p) => p.profile.id === profile.id)).toEqual({
+		namespace,
+		profile,
+	});
+});
+
+it('repairs capture references only after native source validation and explicit capture, preserving provenance', async () => {
+	const sourceKey = facade.query().sources[0].sourceKey;
+	db.prepare('DELETE FROM repositories').run();
+	const input = command(card({ repositoryId: 'repo' }));
+	expect(await api.captureCard(input)).toMatchObject({
+		ok: true,
+		readiness: { c: expect.arrayContaining(['repository-unresolved']) },
+	});
+	const frozen = db.prepare('SELECT * FROM migrations').all();
+	expect(await api.sourceCommand({ action: 'revalidate', sourceKey })).toMatchObject({ ok: false });
+	execFileSync('git', ['init', '--quiet', dir]);
+	expect(await api.sourceCommand({ action: 'revalidate', sourceKey })).toEqual({ ok: true });
+	expect(await api.captureCard(command(facade.read(dir, 'b').cards[0]))).toMatchObject({
+		ok: true,
+		readiness: { c: expect.not.arrayContaining(['repository-unresolved']) },
+	});
+	expect(facade.read(dir, 'b').cards[0].repositoryId).toBe('repo');
+	expect(db.prepare('SELECT * FROM migrations').all()).toEqual(frozen);
+	db.close();
+	db = openBoardDb(path.join(dir, 'board.sqlite'));
+	facade = new BoardStorageFacade(db);
+	configureBoardStorage(facade);
+	expect(facade.read(dir, 'b').cards[0].repositoryId).toBe('repo');
+});
+
+it('preserves imported role provenance on edit and refuses deletion of a referenced role', async () => {
+	const sourceKey = facade.query().sources[0].sourceKey;
+	db.prepare('UPDATE profiles SET payload_json=? WHERE id=?').run(
+		JSON.stringify({ id: 'role', name: 'Role', model: 'old', futureField: { original: true } }),
+		'role'
+	);
+	expect(
+		await api.sourceCommand({
+			action: 'save-role',
+			sourceKey,
+			namespace,
+			profile: { id: 'role', name: 'Renamed', customArgs: '--new' },
+		})
+	).toEqual({ ok: true });
+	expect(facade.captureCatalog().profiles[0].profile).toEqual({
+		id: 'role',
+		name: 'Renamed',
+		customArgs: '--new',
+		futureField: { original: true },
+	});
+	expect(await api.captureCard(command())).toMatchObject({ ok: true });
+	expect(
+		await api.sourceCommand({ action: 'delete-role', sourceKey, namespace, profileId: 'role' })
+	).toMatchObject({ ok: false, error: { code: 'protected-field' } });
+	expect(
+		await api.sourceCommand({
+			action: 'save-role',
+			sourceKey,
+			namespace,
+			profile: { id: 'unused', name: 'Unused' },
+		})
+	).toEqual({ ok: true });
+	expect(
+		await api.sourceCommand({ action: 'delete-role', sourceKey, namespace, profileId: 'unused' })
+	).toEqual({ ok: true });
+	expect(facade.captureCatalog().profiles.map((p) => p.profile.id)).toEqual(['role']);
 });

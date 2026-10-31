@@ -616,3 +616,17 @@ export interface BoardCapturePolicy {
 	/** Host-owned human grant, bound to the captured specification, never CRUD input. */
 	grant?: { specificationRevision: number; principal: string; grantedAt: string };
 }
+
+/** Explicit central source management; transport callers never supply validation proof. */
+export type BoardSourceCommand =
+	| { action: 'revalidate'; sourceKey: string }
+	| {
+			action: 'save-role';
+			sourceKey: string;
+			namespace: string;
+			profile: import('../profiles/types').AgentProfile;
+	  }
+	| { action: 'delete-role'; sourceKey: string; namespace: string; profileId: string };
+export type BoardSourceResponse =
+	| { ok: true }
+	| { ok: false; error: { code: string; message: string } };

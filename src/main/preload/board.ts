@@ -27,6 +27,11 @@ export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
  */
 export function createBoardApi() {
 	return {
+		sourceCommand: (
+			command: import('../../shared/board/types').BoardSourceCommand
+		): Promise<import('../../shared/board/types').BoardSourceResponse> =>
+			ipcRenderer.invoke('board:sourceCommand', command),
+
 		upsertRole: (
 			projectRoot: string,
 			profile: import('../../shared/profiles/types').AgentProfile

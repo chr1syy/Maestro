@@ -37,12 +37,13 @@ import { useResizableModal } from '../hooks/ui/useResizableModal';
 import { ResizeHandles } from './ui/ResizeHandles';
 import { useModalLayer } from '../hooks/ui/useModalLayer';
 import { useFocusAfterRender } from '../hooks/utils/useFocusAfterRender';
+import { ProfilesModal } from './ProfilesModal/ProfilesModal';
 import { ConfirmModal } from './ConfirmModal';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { useSessionStore, selectActiveSession } from '../stores/sessionStore';
 import { useLiveSessions } from '../hooks/session/useLiveSessions';
 import { jumpToAgent } from '../services/agentNavigation';
-import { getModalActions, useModalStore, selectModalOpen } from '../stores/modalStore';
+import { useModalStore, selectModalOpen } from '../stores/modalStore';
 import { notifyToast } from '../stores/notificationStore';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
@@ -169,6 +170,9 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const activeSession = useSessionStore(selectActiveSession);
 	const activeProjectRoot = activeSession?.projectRoot ?? '';
 	const [collections, setCollections] = useState<BoardWorkspaceCollection[]>([]);
+	const [roleSource, setRoleSource] = useState<{ sourceKey: string; namespace: string } | null>(
+		null
+	);
 	const [sources, setSources] = useState<BoardSourceCatalogEntry[]>([]);
 	const [sourceRoots, setSourceRoots] = useState<Record<string, string>>({});
 	const [projectFilter, setProjectFilter] = useState('all');
@@ -1205,6 +1209,18 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				if (e.target === e.currentTarget) handleEscape();
 			}}
 		>
+			{roleSource && (
+				<ProfilesModal
+					key={roleSource.sourceKey}
+					theme={theme}
+					source={roleSource}
+					onClose={() => {
+						setRoleSource(null);
+						void refreshCaptureCatalog().catch(() => {});
+					}}
+				/>
+			)}
+
 			<div className="absolute inset-0 bg-black/50" />
 
 			<div
@@ -1661,6 +1677,20 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 					{/* Card editor (create/edit) */}
 					{board && draft && (
 						<CardEditor
+							onManageRoles={() =>
+								setRoleSource({
+									sourceKey: draft.collection.sourceKey,
+									namespace: `legacy:${draft.collection.sourceKey}`,
+								})
+							}
+							onRevalidateSource={async () => {
+								const result = await window.maestro.board.sourceCommand({
+									action: 'revalidate',
+									sourceKey: draft.collection.sourceKey,
+								});
+								await refreshCaptureCatalog();
+								if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+							}}
 							showNewRole={showNewRole}
 							setShowNewRole={setShowNewRole}
 							theme={theme}
@@ -2396,6 +2426,8 @@ function BoardCardTile({
 // ---------------------------------------------------------------------------
 
 interface CardEditorProps {
+	onManageRoles: () => void;
+	onRevalidateSource: () => Promise<void>;
 	showNewRole: boolean;
 	setShowNewRole: React.Dispatch<React.SetStateAction<boolean>>;
 	theme: Theme;
@@ -2430,6 +2462,8 @@ interface CardEditorProps {
  * same grid-vs-details pattern the Extensions pane uses. Content-driven, so its
  * root opts back into text selection. */
 function CardEditor({
+	onManageRoles,
+	onRevalidateSource,
 	showNewRole,
 	setShowNewRole,
 	theme,
@@ -2456,6 +2490,7 @@ function CardEditor({
 	projectAgents,
 	activeAgentId,
 }: CardEditorProps) {
+	const [repairMessage, setRepairMessage] = useState<string | null>(null);
 	// Candidate parents are every other card (a card cannot depend on itself).
 	const candidateParents = board.cards.filter((c) => c.id !== draft.id);
 	const isExisting = draft.id !== null;
@@ -2768,6 +2803,22 @@ function CardEditor({
 					</div>
 				)}
 
+				<button
+					type="button"
+					onClick={() => {
+						void onRevalidateSource()
+							.then(() =>
+								setRepairMessage(
+									'Source revalidated. Select the repository and save explicit card bindings.'
+								)
+							)
+							.catch((error) => setRepairMessage(String(error)));
+					}}
+				>
+					Revalidate selected source
+				</button>
+				{repairMessage && <div role="status">{repairMessage}</div>}
+
 				<label className="block space-y-1">
 					<span className="text-xs" style={{ color: theme.colors.textDim }}>
 						Title
@@ -2807,7 +2858,7 @@ function CardEditor({
 								    ProfilesModal; the inline mini-form is name + base agent only. */}
 									<button
 										type="button"
-										onClick={() => getModalActions().setProfilesModalOpen(true)}
+										onClick={onManageRoles}
 										className="text-xs opacity-60 hover:opacity-100 underline"
 										style={{ color: theme.colors.textDim }}
 									>
