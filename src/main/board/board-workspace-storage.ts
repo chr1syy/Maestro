@@ -433,6 +433,29 @@ export class BoardWorkspaceStorage {
 		return this.writeCollections([input])[0];
 	}
 
+	/** Explicit empty collection bootstrap, without forging migration or repository evidence. */
+	createCollection(input: BoardCollectionWrite): BoardCollectionSnapshot {
+		if (
+			this.db.inTransaction ||
+			input.expectedRevision !== null ||
+			input.delete ||
+			input.cards?.length
+		)
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
+				'Bootstrap requires a new empty collection'
+			);
+		requireKey(input.sourceKey);
+		return this.db
+			.transaction(() => {
+				this.db
+					.prepare('INSERT OR IGNORE INTO board_sources (source_key) VALUES (?)')
+					.run(input.sourceKey);
+				return this.applyCollection(input);
+			})
+			.immediate();
+	}
+
 	writeCollections(inputs: readonly BoardCollectionWrite[]): BoardCollectionSnapshot[] {
 		if (this.db.inTransaction) {
 			throw new BoardWorkspaceStorageError(

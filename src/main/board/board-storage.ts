@@ -1,4 +1,4 @@
-/** Central Board facade. Legacy project roots resolve only to proven imported sources.
+/** Central Board facade. Legacy project roots resolve only to explicitly registered or imported sources.
  * YAML is migration input only; no fallback reader or exporter exists here.
  */
 import * as fs from 'node:fs';
@@ -72,12 +72,17 @@ export class BoardStorageFacade {
 
 	sourceKeys(projectRoot: string): string[] {
 		const keys = [...new Set(this.resolveSourceKeys(projectRoot))].filter(
-			(key) => !!this.db.prepare('SELECT 1 FROM migrations WHERE source_key = ?').get(key)
+			(key) =>
+				!!this.db
+					.prepare(
+						'SELECT source_key FROM migrations WHERE source_key = ? UNION SELECT source_key FROM board_sources WHERE source_key = ?'
+					)
+					.get(key, key)
 		);
 		if (!keys.length)
 			throw new BoardWorkspaceStorageError(
 				'legacy-mapping-missing',
-				'No imported central source for this project'
+				'No registered or imported central source for this project'
 			);
 		return keys;
 	}
@@ -432,20 +437,27 @@ export function createBoard(
 	}
 	if (options.autoDecompose) board.autoDecompose = true;
 	const facade = storage();
-	const sources = facade.sourceKeys(projectRoot);
+	const sources = [...new Set(facade.resolveSourceKeys(projectRoot))];
 	if (sources.length !== 1)
 		throw new BoardWorkspaceStorageError(
-			'legacy-mapping-ambiguous',
+			sources.length ? 'legacy-mapping-ambiguous' : 'legacy-mapping-missing',
 			'Creating a collection requires exactly one explicit source'
 		);
-	board.storage = {
-		sourceKey: sources[0],
-		collectionKey: generateUUID(),
-		expectedRevision: null,
-		cardRevisions: {},
-	};
-	saveBoard(projectRoot, board, null);
-	return board;
+	const saved = facade.project(
+		facade.workspace.createCollection({
+			sourceKey: sources[0],
+			collectionKey: generateUUID(),
+			legacyBoardId: board.id,
+			expectedRevision: null,
+			set: {
+				name: board.name,
+				...(board.maxInProgress !== undefined ? { maxInProgress: board.maxInProgress } : {}),
+				...(board.autoDecompose ? { autoDecompose: true } : {}),
+			},
+		})
+	);
+	announce(projectRoot);
+	return saved;
 }
 
 /**
