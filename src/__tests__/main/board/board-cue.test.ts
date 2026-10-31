@@ -279,6 +279,44 @@ describe('global Cue intake on the shared persistent runtime', () => {
 		settle(good);
 		await cue.settle();
 	});
+	it('waits for native approval and then dispatches through the same global Cue runtime', async () => {
+		edit({ heldByUser: true }, 1);
+		edit({
+			capturePolicy: {
+				effectiveStartMode: 'approval',
+				dispatchApproval: 'required',
+				specificationRevision: 0,
+			},
+		});
+		await tick();
+		expect(waits).toContainEqual({ cardId: 'same', reason: 'approval-required' });
+		expect(service.spawn).not.toHaveBeenCalled();
+		const entry = storage.query().collections[0];
+		const command = {
+			action: 'control' as const,
+			operation: 'approve' as const,
+			target: {
+				projectRoot: roots[0],
+				sourceKey: entry.sourceKey,
+				collectionKey: entry.collectionKey,
+				expectedRevision: entry.revision,
+			},
+			cardId: 'same',
+			cardRevision: entry.board.cards[0].storageRevision!,
+		};
+		await expect(executeBoardRuntimeCommand(command)).rejects.toMatchObject({
+			code: 'protected-field',
+		});
+		expect(await executeBoardRuntimeCommand(command, 'native-fixture-main-frame')).toMatchObject({
+			ok: true,
+		});
+		await tick();
+		expect(service.spawn).toHaveBeenCalledOnce();
+		settle(good);
+		await cue.settle();
+		expect(reserved()).toHaveLength(0);
+		expect(storage.query().collections[0].board.cards[0].status).toBe('done');
+	});
 	it('rejects collection changes during asynchronous native preparation', async () => {
 		const entry = storage.query().collections[0];
 		const key = { sourceKey: entry.sourceKey, collectionKey: entry.collectionKey, cardId: 'same' };
