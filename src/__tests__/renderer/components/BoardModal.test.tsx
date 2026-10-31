@@ -155,6 +155,28 @@ afterEach(() => {
 });
 
 describe('BoardModal card creation', () => {
+	it('filters visible cards by type and status without changing the board', async () => {
+		const cards = [
+			makeCard({ id: 'a', title: 'Work item', kind: 'work', status: 'todo' }),
+			makeCard({ id: 'b', title: 'Review item', kind: 'review', status: 'done' }),
+			makeCard({ id: 'c', title: 'Old item', status: 'todo' }),
+		];
+		installApis([{ id: 'b1', name: 'Board', cards }]);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		expect(await screen.findByText('Review item')).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'work' } });
+		expect(screen.getByText('Work item')).toBeInTheDocument();
+		expect(screen.queryByText('Review item')).not.toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by status'), { target: { value: 'done' } });
+		expect(screen.queryByText('Work item')).not.toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by status'), { target: { value: 'all' } });
+		fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'unspecified' } });
+		expect(screen.getByText('Old item')).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'all' } });
+		expect(screen.getByText('Work item')).toBeInTheDocument();
+		expect(screen.getByText('Review item')).toBeInTheDocument();
+		expect(boardApi.updateCard).not.toHaveBeenCalled();
+	});
 	it('saves an edited card with the revision read when editing began', async () => {
 		const original = makeCard({ id: 'c1', title: 'Original', storageRevision: 4 });
 		const board: Board = { id: 'b1', name: 'My Board', cards: [original] };

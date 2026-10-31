@@ -14,7 +14,13 @@ import {
 } from 'lucide-react';
 import type { Theme } from '../types';
 import type { AgentProfile } from '../../shared/profiles/types';
-import type { Board, BoardCard, CardPriority, CardStatus } from '../../shared/board/types';
+import type {
+	Board,
+	BoardCard,
+	BoardCardKind,
+	CardPriority,
+	CardStatus,
+} from '../../shared/board/types';
 import type { StoredBoardWorker } from '../../main/board/board-workspace-storage';
 import { CARD_PRIORITIES, CARD_STATUSES } from '../../shared/board/types';
 import { getBlockers, hasCycle } from '../../shared/board/graph';
@@ -253,6 +259,8 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const [creatingBoard, setCreatingBoard] = useState(false);
 	const [dragCardId, setDragCardId] = useState<string | null>(null);
 	const [dragOverStatus, setDragOverStatus] = useState<CardStatus | null>(null);
+	const [kindFilter, setKindFilter] = useState<BoardCardKind | 'all' | 'unspecified'>('all');
+	const [statusFilter, setStatusFilter] = useState<CardStatus | 'all'>('all');
 
 	// Board lifecycle UI (Phase 6): inline rename + delete confirmation.
 	const [renaming, setRenaming] = useState(false);
@@ -862,10 +870,14 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		const map = new Map<CardStatus, BoardCard[]>();
 		for (const status of CARD_STATUSES) map.set(status, []);
 		for (const card of board?.cards ?? []) {
+			if (statusFilter !== 'all' && card.status !== statusFilter) continue;
+			if (kindFilter === 'unspecified' && card.kind !== undefined) continue;
+			if (kindFilter !== 'all' && kindFilter !== 'unspecified' && card.kind !== kindFilter)
+				continue;
 			map.get(card.status)?.push(card);
 		}
 		return map;
-	}, [board]);
+	}, [board, kindFilter, statusFilter]);
 
 	// --- Keyboard grid navigation -------------------------------------------
 
@@ -1328,6 +1340,42 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 					)}
 
 					{/* Kanban columns */}
+					{board && !draft && (
+						<div className="flex gap-3 px-4 pt-3">
+							<label>
+								Type{' '}
+								<select
+									aria-label="Filter by type"
+									style={inputStyle}
+									value={kindFilter}
+									onChange={(e) => setKindFilter(e.target.value as typeof kindFilter)}
+								>
+									<option value="all">All types</option>
+									<option value="unspecified">Unspecified</option>
+									<option value="work">Work</option>
+									<option value="review">Review</option>
+									<option value="test">Test</option>
+									<option value="documentation">Documentation</option>
+								</select>
+							</label>
+							<label>
+								Status{' '}
+								<select
+									aria-label="Filter by status"
+									style={inputStyle}
+									value={statusFilter}
+									onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+								>
+									<option value="all">All statuses</option>
+									{CARD_STATUSES.map((status) => (
+										<option key={status} value={status}>
+											{STATUS_META[status].label}
+										</option>
+									))}
+								</select>
+							</label>
+						</div>
+					)}
 					{board && !draft && (
 						<div className="flex-1 overflow-x-auto overflow-y-hidden p-4">
 							<div className="flex gap-3 h-full" style={{ minWidth: 'min-content' }}>
