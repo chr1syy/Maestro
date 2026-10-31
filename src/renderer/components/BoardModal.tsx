@@ -15,6 +15,7 @@ import {
 import type { Theme } from '../types';
 import type { AgentProfile } from '../../shared/profiles/types';
 import type { Board, BoardCard, CardPriority, CardStatus } from '../../shared/board/types';
+import type { StoredBoardWorker } from '../../main/board/board-workspace-storage';
 import { CARD_PRIORITIES, CARD_STATUSES } from '../../shared/board/types';
 import { getBlockers, hasCycle } from '../../shared/board/graph';
 import { isPathWithin } from '../../shared/board/pool';
@@ -137,9 +138,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const projectRoot = activeSession?.projectRoot ?? '';
 	const allSessions = useSessionStore((s) => s.sessions);
 
-	// Board Phase 6: agents living in this board's project dir (or a sub-folder)
-	// are pin candidates. A card may pin any of them; role-only cards float to
-	// the opt-in worker subset (the `boardWorker` toggle, enforced at dispatch).
+	// Legacy cards display the current project worker marker until dispatch is migrated.
 	const projectAgents = useMemo(
 		() =>
 			allSessions
@@ -168,6 +167,35 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		},
 		[onClose]
 	);
+
+	const [showWorkers, setShowWorkers] = useState(false);
+	const [workers, setWorkers] = useState<StoredBoardWorker[]>([]);
+	const [workerBusy, setWorkerBusy] = useState(false);
+	const [workerAccessOptions, setWorkerAccessOptions] = useState<
+		Awaited<ReturnType<typeof window.maestro.board.listWorkerAccessOptions>>
+	>({ roles: [], repositories: [] });
+	const refreshWorkers = useCallback(async () => {
+		try {
+			const [registered, options] = await Promise.all([
+				window.maestro.board.listWorkers(),
+				window.maestro.board.listWorkerAccessOptions(),
+			]);
+			setWorkers(registered);
+			setWorkerAccessOptions(options);
+		} catch (err) {
+			notifyToast({ color: 'red', title: 'Board workers', message: ipcErrorMessage(err) });
+		}
+	}, []);
+	const changeWorker = useCallback(async (action: () => Promise<StoredBoardWorker[]>) => {
+		setWorkerBusy(true);
+		try {
+			setWorkers(await action());
+		} catch (err) {
+			notifyToast({ color: 'red', title: 'Board workers', message: ipcErrorMessage(err) });
+		} finally {
+			setWorkerBusy(false);
+		}
+	}, []);
 
 	const [boards, setBoards] = useState<Board[]>([]);
 	const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
@@ -977,6 +1005,17 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							</button>
 						)}
 						<button
+							onClick={() => {
+								setShowWorkers((visible) => !visible);
+								if (!showWorkers) void refreshWorkers();
+							}}
+							className="rounded-md px-2.5 py-1.5 text-xs hover:bg-white/5"
+							style={{ border: `1px solid ${theme.colors.border}`, color: theme.colors.textMain }}
+							aria-expanded={showWorkers}
+						>
+							Workers
+						</button>
+						<button
 							onClick={() => void load(true)}
 							className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
 							style={{ color: theme.colors.textDim }}
@@ -997,6 +1036,149 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 					</div>
 				</div>
 
+				{showWorkers && (
+					<div
+						className="shrink-0 p-4 border-b max-h-64 overflow-auto text-sm"
+						style={{ borderColor: theme.colors.border, color: theme.colors.textMain }}
+					>
+						<p style={{ color: theme.colors.warning }}>
+							Worker settings are not yet enforced by dispatch. Do not rely on pause to stop work.
+						</p>
+						{allSessions.map((session) => {
+							const worker = workers.find((entry) => entry.agentId === session.id);
+							const roles = worker?.payload.roleRefs;
+							const repos = worker?.payload.allowedRepositoryIds;
+							const validAccess =
+								Array.isArray(roles) &&
+								roles.every(
+									(role) =>
+										role && typeof role.namespace === 'string' && typeof role.profileId === 'string'
+								) &&
+								Array.isArray(repos) &&
+								repos.every((id) => typeof id === 'string');
+							return (
+								<div key={session.id} className="flex flex-col gap-2 py-2">
+									<div className="flex items-center justify-between gap-2">
+										<span>
+											{session.name}
+											{worker
+												? ` — ${worker.enabled ? 'enabled' : 'disabled'}${worker.paused ? ', intake paused' : ''}`
+												: ''}
+										</span>
+										{worker ? (
+											<div className="flex gap-2">
+												<button
+													disabled={workerBusy}
+													onClick={() =>
+														void changeWorker(() =>
+															window.maestro.board.enableWorker(session.id, !worker.enabled)
+														)
+													}
+												>
+													{worker.enabled ? 'Disable' : 'Enable'}
+												</button>
+												<button
+													disabled={workerBusy}
+													onClick={() =>
+														void changeWorker(() =>
+															window.maestro.board.pauseWorker(session.id, !worker.paused)
+														)
+													}
+												>
+													{worker.paused ? 'Resume intake' : 'Pause intake'}
+												</button>
+											</div>
+										) : (
+											<button
+												disabled={workerBusy}
+												onClick={() =>
+													void changeWorker(() => window.maestro.board.registerWorker(session.id))
+												}
+											>
+												Add worker
+											</button>
+										)}
+									</div>
+									{worker && validAccess && (
+										<div>
+											<div>
+												Roles:{' '}
+												{workerAccessOptions.roles.map((role) => {
+													const selected = roles.some(
+														(entry) =>
+															entry.namespace === role.namespace &&
+															entry.profileId === role.profileId
+													);
+													return (
+														<label
+															key={JSON.stringify([role.namespace, role.profileId])}
+															className="ml-2"
+														>
+															<input
+																type="checkbox"
+																disabled={workerBusy}
+																checked={selected}
+																onChange={() =>
+																	void changeWorker(() =>
+																		window.maestro.board.setWorkerAccess(
+																			session.id,
+																			selected
+																				? roles.filter(
+																						(entry) =>
+																							entry.namespace !== role.namespace ||
+																							entry.profileId !== role.profileId
+																					)
+																				: [
+																						...roles,
+																						{
+																							namespace: role.namespace,
+																							profileId: role.profileId,
+																						},
+																					],
+																			repos
+																		)
+																	)
+																}
+															/>{' '}
+															{role.name} ({role.namespace})
+														</label>
+													);
+												})}
+											</div>
+											<div>
+												Repositories:{' '}
+												{workerAccessOptions.repositories.map((repo) => (
+													<label key={repo.id} className="ml-2">
+														<input
+															type="checkbox"
+															disabled={workerBusy}
+															checked={repos.includes(repo.id)}
+															onChange={() =>
+																void changeWorker(() =>
+																	window.maestro.board.setWorkerAccess(
+																		session.id,
+																		roles,
+																		repos.includes(repo.id)
+																			? repos.filter((id) => id !== repo.id)
+																			: [...repos, repo.id]
+																	)
+																)
+															}
+														/>{' '}
+														{repo.name}
+													</label>
+												))}
+											</div>
+										</div>
+									)}
+									{worker && !validAccess && (
+										<span>Access data needs repair; existing values are preserved.</span>
+									)}
+								</div>
+							);
+						})}
+					</div>
+				)}
 				{/* Body */}
 				<div className="flex-1 overflow-hidden flex flex-col">
 					{!projectRoot && (

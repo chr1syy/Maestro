@@ -25,6 +25,12 @@ import { openBoardDb } from './board-db';
 import { boardMigrationSourceKey } from './board-migration';
 import {
 	BoardWorkspaceStorage,
+	listBoardWorkers as listStoredBoardWorkers,
+	listBoardWorkerAccessOptions as listStoredBoardWorkerAccessOptions,
+	registerBoardWorker as registerStoredBoardWorker,
+	setBoardWorkerPaused as setStoredBoardWorkerPaused,
+	setBoardWorkerEnabled as setStoredBoardWorkerEnabled,
+	setBoardWorkerAccess as setStoredBoardWorkerAccess,
 	BoardWorkspaceStorageError,
 	BOARD_CARD_EDITABLE_FIELDS,
 	BOARD_COLLECTION_EDITABLE_FIELDS,
@@ -334,6 +340,30 @@ function storage(): BoardStorageFacade {
 export function closeBoardStorage(): void {
 	defaultFacade?.db.close();
 	defaultFacade = null;
+}
+
+/** Machine-local registry shared by every Board collection. */
+export function listBoardWorkers() {
+	return listStoredBoardWorkers(storage().db);
+}
+export function listBoardWorkerAccessOptions() {
+	return listStoredBoardWorkerAccessOptions(storage().db);
+}
+export function registerBoardWorker(agentId: string) {
+	return registerStoredBoardWorker(storage().db, agentId);
+}
+export function setBoardWorkerPaused(agentId: string, paused: boolean) {
+	return setStoredBoardWorkerPaused(storage().db, agentId, paused);
+}
+export function setBoardWorkerEnabled(agentId: string, enabled: boolean) {
+	return setStoredBoardWorkerEnabled(storage().db, agentId, enabled);
+}
+export function setBoardWorkerAccess(
+	agentId: string,
+	roleRefs: { namespace: string; profileId: string }[],
+	allowedRepositoryIds: string[]
+) {
+	return setStoredBoardWorkerAccess(storage().db, agentId, roleRefs, allowedRepositoryIds);
 }
 
 const boardWriteQueue = createKeyedWriteQueue();

@@ -6,6 +6,176 @@
 import type Database from 'better-sqlite3';
 import { canonicalJson } from '../../shared/canonicalJson';
 
+/** A Board-owned worker and its preserved migration metadata. */
+export interface StoredBoardWorker {
+	agentId: string;
+	enabled: boolean;
+	paused: boolean;
+	payload: Record<string, unknown>;
+}
+
+/** Read the machine-wide registry, including disabled and paused workers. */
+export function listBoardWorkers(db: Database.Database): StoredBoardWorker[] {
+	const rows = db
+		.prepare('SELECT agent_id, enabled, paused, payload_json FROM workers ORDER BY agent_id')
+		.all() as {
+		agent_id: string;
+		enabled: number;
+		paused: number;
+		payload_json: string;
+	}[];
+	return rows.map((row) => {
+		const payload: unknown = JSON.parse(row.payload_json);
+		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+			throw new Error(`Invalid Board worker payload: ${row.agent_id}`);
+		}
+		return {
+			agentId: row.agent_id,
+			enabled: row.enabled === 1,
+			paused: row.paused === 1,
+			payload: payload as Record<string, unknown>,
+		};
+	});
+}
+
+/** Available namespaced roles and validated repository bindings for worker access. */
+export function listBoardWorkerAccessOptions(db: Database.Database) {
+	const roles = db
+		.prepare(
+			'SELECT profile_namespace, id, payload_json FROM profiles ORDER BY profile_namespace, id'
+		)
+		.all() as { profile_namespace: string; id: string; payload_json: string }[];
+	const repositories = db
+		.prepare('SELECT id, payload_json FROM repositories ORDER BY id')
+		.all() as { id: string; payload_json: string }[];
+	return {
+		roles: roles.map((row) => ({
+			namespace: row.profile_namespace,
+			profileId: row.id,
+			name: String(JSON.parse(row.payload_json).name || row.id),
+		})),
+		repositories: repositories.map((row) => ({
+			id: row.id,
+			name: String(JSON.parse(row.payload_json).workingDirectory || row.id),
+		})),
+	};
+}
+
+/** Register once; repeated registration cannot reset a migrated pause or restrictions. */
+export function registerBoardWorker(db: Database.Database, agentId: string): boolean {
+	if (typeof agentId !== 'string' || !agentId.trim() || agentId.includes('\0'))
+		throw new Error('Board worker agent ID is required');
+	return db
+		.transaction(() => {
+			const result = db
+				.prepare(
+					'INSERT INTO workers (agent_id, enabled, paused, payload_json) VALUES (?, 1, 0, ?) ON CONFLICT (agent_id) DO NOTHING'
+				)
+				.run(agentId, canonicalJson({ roleRefs: [], allowedRepositoryIds: [] }));
+			if (result.changes)
+				db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+			return result.changes === 1;
+		})
+		.immediate();
+}
+
+/** Change intake without deleting reservations, provenance or authorization. */
+export function setBoardWorkerPaused(
+	db: Database.Database,
+	agentId: string,
+	paused: boolean
+): void {
+	if (typeof paused !== 'boolean') throw new Error('Invalid Board worker pause');
+	db.transaction(() => {
+		const worker = db.prepare('SELECT paused FROM workers WHERE agent_id = ?').get(agentId) as
+			| { paused: number }
+			| undefined;
+		if (!worker) throw new Error('Board worker not found');
+		if (worker.paused === Number(paused)) return;
+		db.prepare('UPDATE workers SET paused = ? WHERE agent_id = ?').run(Number(paused), agentId);
+		db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+	}).immediate();
+}
+
+/** Enable or disable future Board participation without changing intake or metadata. */
+export function setBoardWorkerEnabled(
+	db: Database.Database,
+	agentId: string,
+	enabled: boolean
+): void {
+	if (typeof enabled !== 'boolean') throw new Error('Invalid Board worker enabled state');
+	db.transaction(() => {
+		const worker = db.prepare('SELECT enabled FROM workers WHERE agent_id = ?').get(agentId) as
+			| { enabled: number }
+			| undefined;
+		if (!worker) throw new Error('Board worker not found');
+		if (worker.enabled === Number(enabled)) return;
+		db.prepare('UPDATE workers SET enabled = ? WHERE agent_id = ?').run(Number(enabled), agentId);
+		db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+	}).immediate();
+}
+
+/** Replace explicitly granted roles and repositories without losing provenance. */
+export function setBoardWorkerAccess(
+	db: Database.Database,
+	agentId: string,
+	roleRefs: { namespace: string; profileId: string }[],
+	allowedRepositoryIds: string[]
+): void {
+	if (
+		!Array.isArray(roleRefs) ||
+		!roleRefs.every(
+			(role) =>
+				role &&
+				typeof role.namespace === 'string' &&
+				role.namespace.trim() &&
+				typeof role.profileId === 'string' &&
+				role.profileId.trim()
+		) ||
+		!Array.isArray(allowedRepositoryIds) ||
+		!allowedRepositoryIds.every((id) => typeof id === 'string' && id.trim())
+	)
+		throw new Error('Invalid Board worker access');
+	db.transaction(() => {
+		const row = db.prepare('SELECT payload_json FROM workers WHERE agent_id = ?').get(agentId) as
+			| { payload_json: string }
+			| undefined;
+		if (!row) throw new Error('Board worker not found');
+		const payload: unknown = JSON.parse(row.payload_json);
+		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+			throw new Error(`Invalid Board worker payload: ${agentId}`);
+		}
+		const existing = payload as Record<string, unknown>;
+		const oldRoles = Array.isArray(existing.roleRefs) ? existing.roleRefs : [];
+		const oldRepositories = Array.isArray(existing.allowedRepositoryIds)
+			? existing.allowedRepositoryIds
+			: [];
+		for (const role of roleRefs) {
+			const preserved = oldRoles.some(
+				(old) => old && old.namespace === role.namespace && old.profileId === role.profileId
+			);
+			if (
+				!preserved &&
+				!db
+					.prepare('SELECT 1 FROM profiles WHERE profile_namespace = ? AND id = ?')
+					.get(role.namespace, role.profileId)
+			)
+				throw new Error('Board worker role not found');
+		}
+		for (const repository of allowedRepositoryIds) {
+			if (
+				!oldRepositories.includes(repository) &&
+				!db.prepare('SELECT 1 FROM repositories WHERE id = ?').get(repository)
+			)
+				throw new Error('Board worker repository not found');
+		}
+		const next = canonicalJson({ ...payload, roleRefs, allowedRepositoryIds });
+		if (canonicalJson(payload) === next) return;
+		db.prepare('UPDATE workers SET payload_json = ? WHERE agent_id = ?').run(next, agentId);
+		db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+	}).immediate();
+}
+
 export interface BoardCollectionKey {
 	sourceKey: string;
 	collectionKey: string;

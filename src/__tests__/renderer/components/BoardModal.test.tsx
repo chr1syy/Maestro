@@ -1286,3 +1286,81 @@ it('shows the handler message without Electron IPC plumbing on load failure', as
 		)
 	);
 });
+
+describe('Board worker registry interactions', () => {
+	it('registers an agent and updates role, repository, pause and enabled state visibly', async () => {
+		installApis([{ id: 'b1', name: 'Board', cards: [] }]);
+		let workers: Array<{
+			agentId: string;
+			enabled: boolean;
+			paused: boolean;
+			payload: {
+				roleRefs: Array<{ namespace: string; profileId: string }>;
+				allowedRepositoryIds: string[];
+			};
+		}> = [];
+		const api = {
+			listWorkers: vi.fn(async () => structuredClone(workers)),
+			listWorkerAccessOptions: vi.fn(async () => ({
+				roles: [{ namespace: 'project', profileId: 'review', name: 'Reviewer' }],
+				repositories: [{ id: 'repo', name: 'Repository' }],
+			})),
+			registerWorker: vi.fn(async (agentId: string) => {
+				workers = [
+					{
+						agentId,
+						enabled: true,
+						paused: false,
+						payload: { roleRefs: [], allowedRepositoryIds: [] },
+					},
+				];
+				return structuredClone(workers);
+			}),
+			setWorkerAccess: vi.fn(
+				async (
+					_id: string,
+					roleRefs: (typeof workers)[number]['payload']['roleRefs'],
+					allowedRepositoryIds: string[]
+				) => {
+					workers[0].payload = { roleRefs, allowedRepositoryIds };
+					return structuredClone(workers);
+				}
+			),
+			pauseWorker: vi.fn(async (_id: string, paused: boolean) => {
+				workers[0].paused = paused;
+				return structuredClone(workers);
+			}),
+			enableWorker: vi.fn(async (_id: string, enabled: boolean) => {
+				workers[0].enabled = enabled;
+				return structuredClone(workers);
+			}),
+		};
+		Object.assign(boardApi, api);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(screen.getByRole('button', { name: 'Workers' }));
+		fireEvent.click(await screen.findByRole('button', { name: 'Add worker' }));
+		await screen.findByText(/enabled/);
+		fireEvent.click(screen.getByRole('checkbox', { name: 'Reviewer (project)' }));
+		await waitFor(() =>
+			expect(screen.getByRole('checkbox', { name: 'Reviewer (project)' })).toBeChecked()
+		);
+		fireEvent.click(screen.getByRole('checkbox', { name: 'Repository' }));
+		await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Repository' })).toBeChecked());
+		fireEvent.click(screen.getByRole('button', { name: 'Pause intake' }));
+		await screen.findByText(/intake paused/);
+		fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+		await screen.findByText(/disabled, intake paused/);
+		api.setWorkerAccess.mockRejectedValueOnce(new Error('Board worker role not found'));
+		fireEvent.click(screen.getByRole('checkbox', { name: 'Reviewer (project)' }));
+		await waitFor(() =>
+			expect(notifyToast).toHaveBeenCalledWith(
+				expect.objectContaining({ message: expect.stringContaining('Board worker role not found') })
+			)
+		);
+		expect(screen.getByRole('checkbox', { name: 'Reviewer (project)' })).toBeChecked();
+		expect(workers[0].payload).toEqual({
+			roleRefs: [{ namespace: 'project', profileId: 'review' }],
+			allowedRepositoryIds: ['repo'],
+		});
+	});
+});

@@ -4907,6 +4907,28 @@ interface MaestroAPI {
 
 	// Board API (persistent task DAG stored in .maestro/board.yaml)
 	board: {
+		listWorkerAccessOptions: () => Promise<
+			ReturnType<
+				typeof import('../main/board/board-workspace-storage').listBoardWorkerAccessOptions
+			>
+		>;
+		listWorkers: () => Promise<import('../main/board/board-workspace-storage').StoredBoardWorker[]>;
+		registerWorker: (
+			agentId: string
+		) => Promise<import('../main/board/board-workspace-storage').StoredBoardWorker[]>;
+		pauseWorker: (
+			agentId: string,
+			paused: boolean
+		) => Promise<import('../main/board/board-workspace-storage').StoredBoardWorker[]>;
+		enableWorker: (
+			agentId: string,
+			enabled: boolean
+		) => Promise<import('../main/board/board-workspace-storage').StoredBoardWorker[]>;
+		setWorkerAccess: (
+			agentId: string,
+			roleRefs: { namespace: string; profileId: string }[],
+			allowedRepositoryIds: string[]
+		) => Promise<import('../main/board/board-workspace-storage').StoredBoardWorker[]>;
 		list: (projectRoot: string) => Promise<import('../shared/board/types').Board[]>;
 		get: (
 			projectRoot: string,

@@ -11,6 +11,7 @@
  */
 
 import { ipcMain } from 'electron';
+import { getLiveSessions } from '../../stores/getters';
 import { withIpcErrorLogging, type CreateHandlerOptions } from '../../utils/ipcHandler';
 import {
 	listBoards,
@@ -24,6 +25,12 @@ import {
 	deleteCard,
 	saveBoard,
 	enqueueBoardWrite,
+	listBoardWorkers,
+	listBoardWorkerAccessOptions,
+	registerBoardWorker,
+	setBoardWorkerPaused,
+	setBoardWorkerEnabled,
+	setBoardWorkerAccess,
 } from '../../board/board-storage';
 import { applyCardCancel } from '../../board/board-dispatcher';
 import { startCardPr } from '../../board/board-pr';
@@ -59,6 +66,74 @@ export interface BoardHandlerDependencies {
  * dispatcher so the in-flight process is actually killed.
  */
 export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
+	ipcMain.handle(
+		'board:listWorkers',
+		withIpcErrorLogging(handlerOpts('listWorkers'), async () => listBoardWorkers())
+	);
+	ipcMain.handle(
+		'board:listWorkerAccessOptions',
+		withIpcErrorLogging(handlerOpts('listWorkerAccessOptions'), async () =>
+			listBoardWorkerAccessOptions()
+		)
+	);
+	ipcMain.handle(
+		'board:registerWorker',
+		withIpcErrorLogging(handlerOpts('registerWorker'), async (options: { agentId: string }) => {
+			if (
+				!options ||
+				typeof options.agentId !== 'string' ||
+				!getLiveSessions().some((session) => session.id === options.agentId)
+			) {
+				throw new Error('Live agent not found');
+			}
+			registerBoardWorker(options.agentId);
+			return listBoardWorkers();
+		})
+	);
+	ipcMain.handle(
+		'board:setWorkerAccess',
+		withIpcErrorLogging(
+			handlerOpts('setWorkerAccess'),
+			async (options: {
+				agentId: string;
+				roleRefs: { namespace: string; profileId: string }[];
+				allowedRepositoryIds: string[];
+			}) => {
+				if (!options || typeof options.agentId !== 'string')
+					throw new Error('Invalid Board worker');
+				if (!getLiveSessions().some((session) => session.id === options.agentId))
+					throw new Error('Live agent not found');
+				setBoardWorkerAccess(options.agentId, options.roleRefs, options.allowedRepositoryIds);
+				return listBoardWorkers();
+			}
+		)
+	);
+
+	ipcMain.handle(
+		'board:enableWorker',
+		withIpcErrorLogging(
+			handlerOpts('enableWorker'),
+			async (options: { agentId: string; enabled: boolean }) => {
+				if (!options || typeof options.agentId !== 'string')
+					throw new Error('Invalid Board worker');
+				setBoardWorkerEnabled(options.agentId, options.enabled);
+				return listBoardWorkers();
+			}
+		)
+	);
+	ipcMain.handle(
+		'board:pauseWorker',
+		withIpcErrorLogging(
+			handlerOpts('pauseWorker'),
+			async (options: { agentId: string; paused: boolean }) => {
+				if (!options || typeof options.agentId !== 'string')
+					throw new Error('Invalid Board worker');
+				setBoardWorkerPaused(options.agentId, options.paused);
+				return listBoardWorkers();
+			}
+		)
+	);
+
 	// List all boards for a project.
 	ipcMain.handle(
 		'board:list',

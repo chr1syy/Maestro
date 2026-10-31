@@ -7,6 +7,7 @@
  */
 
 import { ipcRenderer } from 'electron';
+import type { StoredBoardWorker } from '../board/board-workspace-storage';
 import type { Board, BoardCard, CardStatus } from '../../shared/board/types';
 
 export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
@@ -16,6 +17,22 @@ export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
  */
 export function createBoardApi() {
 	return {
+		listWorkerAccessOptions: (): Promise<
+			ReturnType<typeof import('../board/board-workspace-storage').listBoardWorkerAccessOptions>
+		> => ipcRenderer.invoke('board:listWorkerAccessOptions'),
+		listWorkers: (): Promise<StoredBoardWorker[]> => ipcRenderer.invoke('board:listWorkers'),
+		registerWorker: (agentId: string): Promise<StoredBoardWorker[]> =>
+			ipcRenderer.invoke('board:registerWorker', { agentId }),
+		setWorkerAccess: (
+			agentId: string,
+			roleRefs: { namespace: string; profileId: string }[],
+			allowedRepositoryIds: string[]
+		): Promise<StoredBoardWorker[]> =>
+			ipcRenderer.invoke('board:setWorkerAccess', { agentId, roleRefs, allowedRepositoryIds }),
+		pauseWorker: (agentId: string, paused: boolean): Promise<StoredBoardWorker[]> =>
+			ipcRenderer.invoke('board:pauseWorker', { agentId, paused }),
+		enableWorker: (agentId: string, enabled: boolean): Promise<StoredBoardWorker[]> =>
+			ipcRenderer.invoke('board:enableWorker', { agentId, enabled }),
 		// List all boards for a project.
 		list: (projectRoot: string): Promise<Board[]> =>
 			ipcRenderer.invoke('board:list', { projectRoot }),
