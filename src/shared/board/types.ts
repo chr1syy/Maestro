@@ -290,6 +290,8 @@ export interface BoardWorkspaceCollection {
 	revision: number;
 	projectRef: BoardProjectRef;
 	board: Board;
+	/** Current read-only host diagnosis, keyed within this exact source/collection. */
+	readiness?: Record<string, import('./domain').BoardReadinessReason[]>;
 }
 
 export interface BoardWorkspaceQueryResult {
@@ -603,7 +605,7 @@ export type BoardCaptureResponse =
 	| {
 			ok: true;
 			value: Board;
-			readiness: Record<string, import('./domain').BoardCaptureWaitReason[]>;
+			readiness: Record<string, import('./domain').BoardReadinessReason[]>;
 	  }
 	| {
 			ok: false;

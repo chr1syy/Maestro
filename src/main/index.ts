@@ -216,6 +216,7 @@ import { initializeStatsDB, closeStatsDB } from './stats';
 import { createSshRemoteStoreAdapter } from './utils/ssh-remote-resolver';
 import {
 	configureBoardCaptureHost,
+	configureBoardReadinessHost,
 	listBoardWorkers,
 	getBoardStorage,
 	listBoards,
@@ -1532,39 +1533,10 @@ app
 		const reviewProofs = new Map<string, string>();
 		let registryFingerprint = '';
 		let registryRevision = 0;
-		const boardContext = (key: BoardCardKey): Omit<BoardClaimHostContext, 'owner'> => {
-			const storage = getBoardStorage();
-			const catalog = storage.captureCatalog();
+		const boardIntakeState = (): Pick<BoardClaimHostContext, 'agentStates' | 'dispatchEnabled'> => {
 			const sessions = boardSpawnContext.getStoredSessions();
-			const fingerprint = canonicalJson({
-				catalog,
-				workers: listBoardWorkers(),
-				sshRemotes: store.get('sshRemotes', []),
-			});
-			if (fingerprint !== registryFingerprint) {
-				registryFingerprint = fingerprint;
-				registryRevision++;
-			}
 			const flags = store.get('encoreFeatures', {}) as Record<string, boolean>;
-			let repository = repositoryProofs.get(canonicalJson(key)) ?? null;
-			if (repository?.location.kind === 'local') {
-				try {
-					const stat = lstatSync(realpathSync(repository.workingDirectory));
-					const identity = canonicalJson([
-						realpathSync(repository.workingDirectory),
-						stat.dev,
-						stat.ino,
-					]);
-					if (!repository.identity.startsWith(identity + '\n')) repository = null;
-				} catch (error) {
-					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
-						void captureException(error, { operation: 'board:repositoryIdentity' });
-					repository = null;
-				}
-			}
 			return {
-				registryRevision,
-				reviewArtifact: reviewProofs.get(canonicalJson(key)) ?? null,
 				dispatchEnabled:
 					cueEngine?.isEnabled() === true && flags.maestroCue === true && flags.board === true,
 				agentStates: Object.fromEntries(
@@ -1585,6 +1557,41 @@ app
 						},
 					])
 				),
+			};
+		};
+		configureBoardReadinessHost(boardIntakeState);
+		const boardContext = (key: BoardCardKey): Omit<BoardClaimHostContext, 'owner'> => {
+			const storage = getBoardStorage();
+			const catalog = storage.captureCatalog();
+			const fingerprint = canonicalJson({
+				catalog,
+				workers: listBoardWorkers(),
+				sshRemotes: store.get('sshRemotes', []),
+			});
+			if (fingerprint !== registryFingerprint) {
+				registryFingerprint = fingerprint;
+				registryRevision++;
+			}
+			let repository = repositoryProofs.get(canonicalJson(key)) ?? null;
+			if (repository?.location.kind === 'local') {
+				try {
+					const stat = lstatSync(realpathSync(repository.workingDirectory));
+					const identity = canonicalJson([
+						realpathSync(repository.workingDirectory),
+						stat.dev,
+						stat.ino,
+					]);
+					if (!repository.identity.startsWith(identity + '\n')) repository = null;
+				} catch (error) {
+					if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+						void captureException(error, { operation: 'board:repositoryIdentity' });
+					repository = null;
+				}
+			}
+			return {
+				registryRevision,
+				reviewArtifact: reviewProofs.get(canonicalJson(key)) ?? null,
+				...boardIntakeState(),
 				repository,
 			};
 		};

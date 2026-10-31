@@ -8,10 +8,17 @@ import {
 	BoardStorageFacade,
 	configureBoardStorage,
 	configureBoardCaptureHost,
+	configureBoardReadinessHost,
 	addCard,
 	updateCard,
 	updateCardStatus,
 } from '../../../main/board/board-storage';
+import {
+	registerBoardWorker,
+	setBoardWorkerAccess,
+	setBoardWorkerPaused,
+} from '../../../main/board/board-workspace-storage';
+import { canonicalJson } from '../../../shared/canonicalJson';
 import type { BoardCaptureCommand, BoardCard } from '../../../shared/board/types';
 
 const transport = vi.hoisted(() => ({
@@ -105,6 +112,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	configureBoardStorage(null);
+	configureBoardReadinessHost(() => null);
 	configureBoardCaptureHost(() => ({ agents: [], groups: [] }));
 	db.close();
 	fs.rmSync(dir, { recursive: true, force: true });
@@ -209,7 +217,12 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 			capturePolicy: { dispatchApproval: 'required' },
 		});
 		expect(facade.read(dir, 'b')).toEqual(before);
-		expect(result.readiness.c).toEqual([]);
+		expect(result.readiness.c).toEqual([
+			'approval-required',
+			'emptyEligibleWorkers',
+			'worker-unregistered',
+			'runtime-unknown',
+		]);
 		expect(
 			await api.captureCard({
 				projectRoot: other,
@@ -237,7 +250,7 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		);
 		expect(captured).toMatchObject({
 			ok: true,
-			readiness: { c: [] },
+			readiness: { c: ['emptyEligibleWorkers', 'worker-unregistered', 'runtime-unknown'] },
 			value: {
 				cards: [
 					expect.objectContaining({
@@ -274,7 +287,12 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		);
 		expect(response.ok).toBe(true);
 		if (!response.ok) throw Error(response.error.message);
-		expect(response.readiness.c).toEqual(['review-artifact-unresolved']);
+		expect(response.readiness.c).toEqual([
+			'review-artifact-unresolved',
+			'emptyEligibleWorkers',
+			'worker-unregistered',
+			'runtime-unknown',
+		]);
 		const saved = response.value.cards[0];
 		expect(saved).toMatchObject({
 			kind: 'review',
@@ -446,7 +464,18 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		const result = await api.captureCard(
 			command(card({ workingDirectory: path.join(dir, 'gone') }))
 		);
-		expect(result).toMatchObject({ ok: true, readiness: { c: ['repository-unresolved'] } });
+		expect(result).toMatchObject({
+			ok: true,
+			readiness: {
+				c: [
+					'repository-unresolved',
+					'approval-required',
+					'emptyEligibleWorkers',
+					'worker-unregistered',
+					'runtime-unknown',
+				],
+			},
+		});
 	});
 	it('reports a later membership conflict and deleted role pin from current host state', async () => {
 		expect((await api.captureCard(command())).ok).toBe(true);
@@ -706,4 +735,164 @@ it('preserves imported role provenance on edit and refuses deletion of a referen
 		await api.sourceCommand({ action: 'delete-role', sourceKey, namespace, profileId: 'unused' })
 	).toEqual({ ok: true });
 	expect(facade.captureCatalog().profiles.map((p) => p.profile.id)).toEqual(['role']);
+});
+
+describe('read-only current host diagnosis across capture and global reload', () => {
+	it('rechecks an empty group, registration, role/repository access and current membership without fallback', async () => {
+		const captured = await api.captureCard(
+			command(card({ assigneeAgentId: undefined, role: undefined }))
+		);
+		if (!captured.ok) throw new Error(captured.error.message);
+		expect(captured.readiness.c).toEqual([
+			'approval-required',
+			'emptyEligibleWorkers',
+			'worker-unregistered',
+			'runtime-unknown',
+		]);
+		const diagnosis = async () => {
+			const response = await api.queryWorkspace();
+			if (!response.ok) throw new Error(response.error.message);
+			const collection = response.value.collections.find((entry) => entry.board.id === 'b')!;
+			expect(collection.sourceKey).toBe(captured.value.storage!.sourceKey);
+			return collection.readiness!.c;
+		};
+		agents = [{ id: 'foreign', groupId: 'other' }];
+		expect(await diagnosis()).toEqual([
+			'approval-required',
+			'emptyEligibleWorkers',
+			'runtime-unknown',
+		]);
+		agents.push({ id: 'a', groupId: 'g' });
+		// A worker outside the allowed group never substitutes for its empty scope.
+		registerBoardWorker(db, 'foreign');
+		setBoardWorkerAccess(db, 'foreign', [], ['repo']);
+		expect(await diagnosis()).toContain('emptyEligibleWorkers');
+		registerBoardWorker(db, 'a');
+		expect(await diagnosis()).toContain('worker-repository-mismatch');
+		setBoardWorkerAccess(db, 'a', [], ['repo']);
+		expect(await diagnosis()).toEqual([
+			'approval-required',
+			'occupancy-unknown',
+			'runtime-unknown',
+		]);
+		setBoardWorkerPaused(db, 'a', true);
+		expect(await diagnosis()).toEqual([
+			'approval-required',
+			'emptyEligibleWorkers',
+			'worker-paused',
+			'runtime-unknown',
+		]);
+		setBoardWorkerPaused(db, 'a', false);
+		const saved = facade.read(dir, 'b').cards[0];
+		const roleCapture = await api.captureCard(
+			command({ ...saved, role: { namespace, profileId: 'role' } })
+		);
+		if (!roleCapture.ok) throw new Error(roleCapture.error.message);
+		expect(await diagnosis()).toContain('worker-role-mismatch');
+		setBoardWorkerAccess(db, 'a', [{ namespace, profileId: 'role' }], ['repo']);
+		expect(await diagnosis()).toEqual([
+			'approval-required',
+			'occupancy-unknown',
+			'runtime-unknown',
+		]);
+		agents = agents.map((agent) => ({ ...agent, groupId: 'other' }));
+		expect(await diagnosis()).toContain('scope-conflict');
+		expect(await diagnosis()).toContain('emptyEligibleWorkers');
+	});
+
+	it('keeps missing native occupancy unknown and leaves final start checks to Cue', async () => {
+		const captured = await api.captureCard(command(card({ startModeOverride: 'direct' })));
+		if (!captured.ok) throw new Error(captured.error.message);
+		registerBoardWorker(db, 'a');
+		setBoardWorkerAccess(db, 'a', [{ namespace, profileId: 'role' }], ['repo']);
+		configureBoardReadinessHost(() => ({ dispatchEnabled: true, agentStates: {} }));
+		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toEqual(['occupancy-unknown']);
+		configureBoardReadinessHost(() => ({
+			dispatchEnabled: true,
+			agentStates: {
+				a: { live: true, busy: false, location: { kind: 'ssh', remoteId: 'other-host' } },
+			},
+		}));
+		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toEqual(['worker-location-mismatch']);
+		configureBoardReadinessHost(() => ({
+			dispatchEnabled: true,
+			agentStates: { a: { live: true, busy: false, location: { kind: 'local' } } },
+		}));
+		expect(facade.captureReadiness(facade.read(dir, 'b')).c).toEqual(['awaiting-cue']);
+		expect(db.prepare('SELECT * FROM runtime_owner').all()).toEqual([]);
+		expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
+	});
+
+	it('reads native busy/dormant/Cue state, approval and Hold without acquiring runtime ownership or writing any SQLite row', async () => {
+		const captured = await api.captureCard(command(card({ heldByUser: true })));
+		if (!captured.ok) throw new Error(captured.error.message);
+		registerBoardWorker(db, 'a');
+		setBoardWorkerAccess(db, 'a', [{ namespace, profileId: 'role' }], ['repo']);
+		let busy = true;
+		let live = true;
+		let dispatchEnabled = true;
+		configureBoardReadinessHost(() => ({
+			dispatchEnabled,
+			agentStates: { a: { busy, live, location: { kind: 'local' } } },
+		}));
+		const snapshot = () =>
+			canonicalJson(
+				db
+					.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+					.all()
+					.map((row) => {
+						const table = (row as { name: string }).name;
+						return [
+							table,
+							db
+								.prepare(`SELECT * FROM "${table}" ORDER BY rowid`)
+								.all()
+								.map((record) =>
+									Object.fromEntries(
+										Object.entries(record as Record<string, unknown>).map(([key, value]) => [
+											key,
+											Buffer.isBuffer(value) ? { hex: value.toString('hex') } : value,
+										])
+									)
+								),
+						];
+					})
+			);
+		const diagnosis = async () => {
+			const before = snapshot();
+			const response = await api.queryWorkspace();
+			if (!response.ok) throw new Error(response.error.message);
+			expect(snapshot()).toBe(before);
+			return response.value.collections[0].readiness!.c;
+		};
+		expect(await diagnosis()).toEqual(['approval-required', 'held', 'worker-busy']);
+		busy = false;
+		expect(await diagnosis()).toEqual(['approval-required', 'held']);
+		live = false;
+		expect(await diagnosis()).toEqual(['approval-required', 'held', 'worker-dormant']);
+		live = true;
+		dispatchEnabled = false;
+		expect(await diagnosis()).toEqual(['approval-required', 'held', 'runtime-unavailable']);
+		const collection = captured.value.storage!.collectionKey;
+		db.prepare(
+			'INSERT INTO runs (run_id, collection_key, card_id, attempt, specification_json) VALUES (?, ?, ?, ?, ?)'
+		).run('uncertain-run', collection, 'c', 1, '{}');
+		db.prepare(
+			'INSERT INTO reservations (worker_agent_id, collection_key, card_id, run_id, owner_epoch, generation, phase) VALUES (?, ?, ?, ?, ?, ?, ?)'
+		).run('a', collection, 'c', 'uncertain-run', 7, 2, 'uncertain');
+		// Durable reservation wins even if the native process currently looks idle.
+		expect(await diagnosis()).toEqual([
+			'approval-required',
+			'held',
+			'worker-busy',
+			'runtime-unavailable',
+		]);
+		configureBoardReadinessHost(() => null);
+		expect(await diagnosis()).toEqual([
+			'approval-required',
+			'held',
+			'worker-busy',
+			'runtime-unknown',
+		]);
+	});
 });

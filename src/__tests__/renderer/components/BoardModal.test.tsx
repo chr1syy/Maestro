@@ -24,6 +24,7 @@ import type {
 	BoardCaptureCatalog,
 	BoardWorkspaceQueryResponse,
 } from '../../../shared/board/types';
+import type { BoardReadinessReason } from '../../../shared/board/domain';
 import { canonicalJson } from '../../../shared/canonicalJson';
 
 // The layer stack is exercised elsewhere; here it is a no-op so the modal can
@@ -2620,4 +2621,104 @@ it('revalidates the pinned source and displays typed repair failures without sav
 	fireEvent.click(screen.getByRole('button', { name: 'Revalidate selected source' }));
 	await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Source revalidated'));
 	expect(boardApi.captureCard).not.toHaveBeenCalled();
+});
+
+describe('Board host wait explanations', () => {
+	it('shows exact scopes and refreshed host reasons after reload and filtering, without sending runtime commands', async () => {
+		const board: Board = {
+			id: 'b1',
+			name: 'Global',
+			cards: [
+				makeCard({
+					id: 'group',
+					title: 'Group work',
+					kind: 'work',
+					assigneeProfileId: undefined,
+					executionScope: { kind: 'group', groupId: 'allowed-group' },
+				}),
+				makeCard({
+					id: 'agent',
+					title: 'Agent work',
+					assigneeProfileId: undefined,
+					executionScope: { kind: 'agent', agentId: 's1' },
+				}),
+			],
+		};
+		installApis([board]);
+		let groupReasons: BoardReadinessReason[] = [
+			'emptyEligibleWorkers',
+			'worker-paused',
+			'approval-required',
+		];
+		boardApi.queryWorkspace.mockImplementation(async () => {
+			const response = workspaceResponse([board]);
+			if (response.ok)
+				response.value.collections[0].readiness = {
+					group: groupReasons,
+					agent: ['occupancy-unknown'],
+				};
+			return response;
+		});
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		expect(await screen.findByText('Group: allowed-group')).toBeInTheDocument();
+		expect(screen.getByText(/Agent: .*s1/)).toBeInTheDocument();
+		expect(
+			screen.getByText('Waiting: emptyEligibleWorkers, worker-paused, approval-required')
+		).toBeInTheDocument();
+		expect(screen.getByText('Waiting: occupancy-unknown')).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'work' } });
+		expect(screen.queryByText('Agent work')).not.toBeInTheDocument();
+		expect(
+			screen.getByText('Waiting: emptyEligibleWorkers, worker-paused, approval-required')
+		).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'all' } });
+		groupReasons = ['worker-busy', 'held'];
+		fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+		expect(await screen.findByText('Waiting: worker-busy, held')).toBeInTheDocument();
+		expect(screen.queryByText(/Waiting: emptyEligibleWorkers/)).not.toBeInTheDocument();
+		fireEvent.click(screen.getByRole('button', { name: 'Workers' }));
+		expect(
+			await screen.findByText(
+				'Intake pause prevents new Board starts. Work already running continues.'
+			)
+		).toBeInTheDocument();
+		expect(screen.queryByText(/settings are not yet enforced/)).not.toBeInTheDocument();
+		expect(boardApi.runtimeCommand).not.toHaveBeenCalled();
+		expect(boardApi.captureCard).not.toHaveBeenCalled();
+	});
+	it('replaces capture-time waiting evidence on global reload instead of keeping a stale saved banner', async () => {
+		const board: Board = {
+			id: 'b1',
+			name: 'Board',
+			cards: [makeCard({ id: 'c', title: 'Captured' })],
+		};
+		installApis([board]);
+		const captured = { ...board.cards[0], storageRevision: 1 };
+		boardApi.captureCard.mockResolvedValue({
+			ok: true,
+			value: { ...board, cards: [captured] },
+			readiness: { c: ['emptyEligibleWorkers'] },
+		});
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Captured'));
+		fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Saved card' } });
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+		expect(await screen.findByRole('status')).toHaveTextContent('emptyEligibleWorkers');
+		expect(screen.getByText('Waiting: emptyEligibleWorkers')).toBeInTheDocument();
+		boardApi.queryWorkspace.mockImplementation(async () => {
+			const response = workspaceResponse([board]);
+			if (response.ok) response.value.collections[0].readiness = { c: ['worker-busy'] };
+			return response;
+		});
+		fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+		expect(await screen.findByText('Waiting: worker-busy')).toBeInTheDocument();
+		expect(screen.queryByRole('status')).not.toBeInTheDocument();
+		expect(screen.queryByText(/emptyEligibleWorkers/)).not.toBeInTheDocument();
+	});
+
+	it('retains an explicit unknown diagnosis when an older/unavailable host supplies no evidence', async () => {
+		installApis([{ id: 'b1', name: 'Board', cards: [makeCard({ id: 'c', title: 'Unknown' })] }]);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		expect(await screen.findByText('Waiting: host diagnosis unknown')).toBeInTheDocument();
+	});
 });

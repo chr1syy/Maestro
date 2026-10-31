@@ -23,9 +23,11 @@ import {
 } from '../../shared/board/types';
 import {
 	evaluateCaptureReadiness,
+	evaluateClaimWorker,
 	persistedCaptureInput,
 	validateCapture,
 	type BoardCaptureContext,
+	type BoardReadinessReason,
 } from '../../shared/board/domain';
 import { hasCycle } from '../../shared/board/graph';
 import { canonicalJson } from '../../shared/canonicalJson';
@@ -36,7 +38,12 @@ import { captureException } from '../utils/sentry';
 import { logger } from '../utils/logger';
 import { isPathWithin, foldPathCase } from '../utils/real-path-containment';
 import { openBoardDb } from './board-db';
-import { claimBoardCard, type BoardClaimCommand, type BoardClaimHostContext } from './board-claims';
+import {
+	claimBoardCard,
+	boardWorkerCanStart,
+	type BoardClaimCommand,
+	type BoardClaimHostContext,
+} from './board-claims';
 import { boardMigrationSourceKey } from './board-migration';
 import {
 	BoardWorkspaceStorage,
@@ -112,6 +119,15 @@ export function configureBoardCaptureHost(provider: typeof hostRegisters): void 
 	hostRegisters = provider;
 }
 
+/** Reads the same native intake evidence as Cue; never prepares or claims a run. */
+let readinessHost: () => Pick<
+	BoardClaimHostContext,
+	'agentStates' | 'dispatchEnabled'
+> | null = () => null;
+export function configureBoardReadinessHost(provider: typeof readinessHost): void {
+	readinessHost = provider;
+}
+
 /** Injectable facade: fixtures and host share the same SQLite adapter and source resolver. */
 export class BoardStorageFacade {
 	readonly workspace: BoardWorkspaceStorage;
@@ -173,14 +189,22 @@ export class BoardStorageFacade {
 
 	captureReadiness(board: Board) {
 		const catalog = this.captureCatalog();
+		const host = readinessHost();
+		const workers = listStoredBoardWorkers(this.db).map((worker) => ({
+			...worker,
+			roleRefs: Array.isArray(worker.payload.roleRefs) ? worker.payload.roleRefs : [],
+			allowedRepositoryIds: Array.isArray(worker.payload.allowedRepositoryIds)
+				? worker.payload.allowedRepositoryIds
+				: [],
+		}));
+		const context = {
+			...this.captureContext(board),
+			workers,
+			repositoryIds: catalog.repositories.filter((repo) => repo.validated).map((repo) => repo.id),
+		};
 		return Object.fromEntries(
 			board.cards.map((card) => {
-				const reasons = evaluateCaptureReadiness(card, {
-					...this.captureContext(board),
-					repositoryIds: catalog.repositories
-						.filter((repo) => repo.validated)
-						.map((repo) => repo.id),
-				});
+				const reasons: BoardReadinessReason[] = evaluateCaptureReadiness(card, context);
 				const repository = catalog.repositories.find(
 					(repo) => repo.id === card.repositoryId && repo.validated
 				);
@@ -205,6 +229,47 @@ export class BoardStorageFacade {
 				}
 				if (card.kind === 'review' && !card.reviewHandoff)
 					reasons.push('review-artifact-unresolved');
+				if (card.capturePolicy?.dispatchApproval === 'required') reasons.push('approval-required');
+				if (card.heldByUser) reasons.push('held');
+				const candidates = catalog.agents
+					.map((agent) => ({
+						agentId: agent.id,
+						reason: evaluateClaimWorker(
+							persistedCaptureInput(card, { ...card }),
+							agent.id,
+							context
+						),
+					}))
+					.filter((entry) => entry.reason !== 'worker-outside-scope');
+				const eligible = candidates.filter((entry) => entry.reason === null);
+				if (!eligible.length) {
+					reasons.push('emptyEligibleWorkers');
+					for (const candidate of candidates)
+						if (candidate.reason && !reasons.includes(candidate.reason))
+							reasons.push(candidate.reason);
+				} else {
+					const availability = eligible.map<BoardReadinessReason | null>(({ agentId }) => {
+						if (!boardWorkerCanStart(this.db, agentId)) return 'worker-busy';
+						const state = host?.agentStates[agentId];
+						if (!state) return 'occupancy-unknown';
+						if (!state.live) return 'worker-dormant';
+						if (state.busy) return 'worker-busy';
+						if (
+							repository &&
+							canonicalJson(state.location) !==
+								canonicalJson(repository.location ?? { kind: 'local' })
+						)
+							return 'worker-location-mismatch';
+						return null;
+					});
+					if (!availability.includes(null))
+						for (const reason of availability)
+							if (reason && !reasons.includes(reason)) reasons.push(reason);
+				}
+				if (!host) reasons.push('runtime-unknown');
+				else if (!host.dispatchEnabled) reasons.push('runtime-unavailable');
+				// Readiness is a snapshot, never a dispatch/claim receipt.
+				if (!reasons.length) reasons.push('awaiting-cue');
 				return [card.id, reasons];
 			})
 		);
@@ -527,6 +592,7 @@ export class BoardStorageFacade {
 						revision: entry.revision,
 						projectRef: { sourceKey: entry.sourceKey },
 						board: this.project(entry),
+						readiness: this.captureReadiness(this.project(entry)),
 					})),
 			};
 		})();

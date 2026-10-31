@@ -220,6 +220,20 @@ export type BoardWorkerWaitReason =
 	| 'worker-role-mismatch'
 	| 'worker-repository-mismatch';
 
+/** A read-only host observation; only Cue can turn it into a fenced claim. */
+export type BoardReadinessReason =
+	| BoardWorkerWaitReason
+	| 'emptyEligibleWorkers'
+	| 'approval-required'
+	| 'held'
+	| 'worker-busy'
+	| 'worker-dormant'
+	| 'worker-location-mismatch'
+	| 'occupancy-unknown'
+	| 'runtime-unknown'
+	| 'runtime-unavailable'
+	| 'awaiting-cue';
+
 /** Recheck the selected worker against CURRENT membership and Board-owned access.
  * A failed pin/role/scope never substitutes another worker. Runtime availability
  * and durable reservation checks belong to the host transaction. */

@@ -440,6 +440,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				setSourceRoots(roots);
 				setSources(response.value.sources);
 				setCollections(response.value.collections);
+				setCaptureResult(null);
 				const current = selectedBoardIdRef.current;
 				const remembered = readLastBoardId('workspace');
 				const next =
@@ -794,7 +795,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 
 	/** Replace one board in the list (every card mutation returns the whole board). */
 	const applyBoard = useCallback(
-		(updated: Board) => {
+		(updated: Board, readiness?: Extract<BoardCaptureResponse, { ok: true }>['readiness']) => {
 			const key = editorCollection?.collectionKey;
 			setCollections((prev) =>
 				prev.map((entry) =>
@@ -802,6 +803,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						? {
 								...entry,
 								board: updated,
+								readiness,
 								revision: updated.storage?.expectedRevision ?? entry.revision,
 							}
 						: entry
@@ -934,7 +936,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				if (response.error.code === 'stale-revision') await load(false);
 				return;
 			}
-			applyBoard(response.value);
+			applyBoard(response.value, response.readiness);
 			setCaptureResult({
 				collectionKey: draft.collection.collectionKey,
 				cardId: card.id,
@@ -1508,7 +1510,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						style={{ borderColor: theme.colors.border, color: theme.colors.textMain }}
 					>
 						<p style={{ color: theme.colors.warning }}>
-							Worker settings are not yet enforced by dispatch. Do not rely on pause to stop work.
+							Intake pause prevents new Board starts. Work already running continues.
 						</p>
 						<button
 							disabled={workerBusy || creatorOpen || pendingWorkerId !== null}
@@ -1747,7 +1749,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 								? ' Host readiness unavailable.'
 								: captureResult.response.readiness[captureResult.cardId].length > 0
 									? ` Waiting: ${captureResult.response.readiness[captureResult.cardId].join(', ')}.`
-									: ' Host capture checks passed.'}
+									: ' Dispatch checks pending Cue.'}
 							{' Start approval: '}
 							{captureResult.response.value.cards.find((card) => card.id === captureResult.cardId)
 								?.capturePolicy?.dispatchApproval ?? 'unknown'}
@@ -1953,6 +1955,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 														key={card.id}
 														theme={theme}
 														card={card}
+														readiness={selectedCollection?.readiness?.[card.id]}
 														board={board}
 														profileName={profileName}
 														agentName={agentName}
@@ -2072,6 +2075,7 @@ function RunElapsed({ startedAt, className, style }: RunElapsedProps) {
 // ---------------------------------------------------------------------------
 
 interface BoardCardTileProps {
+	readiness?: string[];
 	theme: Theme;
 	card: BoardCard;
 	board: Board;
@@ -2119,6 +2123,7 @@ function BoardCardTile({
 	onDelete,
 	onCancelRun,
 	onResume,
+	readiness,
 }: BoardCardTileProps) {
 	// Delete is armed by the first click and fires on the second, mirroring the
 	// "click again to confirm" idiom the browser tab's clear-data button uses.
@@ -2237,12 +2242,16 @@ function BoardCardTile({
 	const workerAgentExists = workerAgentId
 		? projectAgents.some((a) => a.id === workerAgentId)
 		: false;
-	// Assignee label: role (profile) and/or a 📌 pinned agent; "pool" when the
-	// card floats to any free worker.
+	// Keep the execution boundary visible even when a card has no pin or role.
 	const roleText = card.assigneeProfileId ? profileName(card.assigneeProfileId) : null;
 	const pinText = card.assigneeAgentId ? `📌 ${agentName(card.assigneeAgentId)}` : null;
-	const assigneeText =
-		roleText && pinText ? `${roleText} · ${pinText}` : (roleText ?? pinText ?? 'pool');
+	const scopeText =
+		card.executionScope?.kind === 'agent'
+			? `Agent: ${agentName(card.executionScope.agentId)} (${card.executionScope.agentId})`
+			: card.executionScope?.kind === 'group'
+				? `Group: ${card.executionScope.groupId}`
+				: 'Unassigned scope';
+	const assigneeText = [scopeText, roleText, pinText].filter(Boolean).join(' · ');
 	// The run details disclosure is available WHILE running too, not just after.
 	const showRunDetails = !!latestSummary || !!runBranch || (isRunning && !!latestRun);
 	return (
@@ -2340,6 +2349,11 @@ function BoardCardTile({
 				>
 					{assigneeText}
 				</span>
+				{(card.status === 'todo' || card.status === 'ready') && (
+					<div className="text-2xs" style={{ color: theme.colors.textDim }}>
+						Waiting: {readiness?.length ? readiness.join(', ') : 'host diagnosis unknown'}
+					</div>
+				)}
 				{isHeld && (
 					<span
 						className="text-2xs rounded px-1.5 py-0.5"
