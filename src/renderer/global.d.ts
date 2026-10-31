@@ -4908,6 +4908,9 @@ interface MaestroAPI {
 	// Board API (persistent task DAG stored in .maestro/board.yaml)
 	board: {
 		captureCatalog: () => Promise<import('../shared/board/types').BoardCaptureCatalog>;
+		runtimeCommand: (
+			command: import('../shared/board/commands').BoardRuntimeCommand
+		) => Promise<import('../shared/board/commands').BoardCommandResult>;
 		captureCard: (
 			command: import('../shared/board/types').BoardCaptureCommand
 		) => Promise<import('../shared/board/types').BoardCaptureResponse>;
@@ -4977,6 +4980,11 @@ interface MaestroAPI {
 		) => Promise<import('../shared/board/types').Board>;
 		// Cancel a running card: kills the agent process and returns the card to
 		// `todo` with a `canceled` run (excluded from the failure circuit breaker).
+		resumeCard: (
+			projectRoot: string,
+			boardId: string,
+			cardId: string
+		) => Promise<import('../shared/board/types').Board>;
 		cancelCard: (
 			projectRoot: string,
 			boardId: string,

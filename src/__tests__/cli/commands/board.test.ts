@@ -1,11 +1,19 @@
+import { BoardRuntime } from '../../../main/board/board-runtime';
+import { configureBoardRuntimeHost } from '../../../main/board/board-runtime-host';
+import {
+	registerBoardWorker,
+	setBoardWorkerAccess,
+} from '../../../main/board/board-workspace-storage';
+import { autoDecomposeBoard } from '../../../main/board/board-decompose';
+import { decomposeBoardCard, createBoardRunService } from '../../../main/board/board-spawn';
 /**
  * @file board.test.ts
  * @description Integration tests for `maestro-cli board` (Phase 5). Exercises
  * the storage-driven commands (list / show / add-card / set-status) end-to-end
  * against a real temp project root so the `.maestro/board.yaml` round-trip is
  * asserted on disk. Only the agent lookup (`storage`) is mocked; the board
- * storage module runs unmodified. `board tick`'s spawn path is covered by the
- * dispatcher/decompose unit tests, not re-driven here.
+ * storage module runs unmodified. Tick/watch use the real host entry and fenced
+ * runtime. Worktree tests inject only the native Cue process boundary.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
@@ -26,8 +34,7 @@ vi.mock('../../../cli/services/storage', () => ({
 	readSettingValue: () => mockReadSettingValue(),
 }));
 
-// `board tick` is the only command that spawns; the agent itself is faked so
-// the test asserts WHERE it was told to run (Phase 4 worktree isolation).
+// Only the host's native Cue process is faked; CLI never calls a spawner.
 const mockSpawnAgent = vi.fn();
 vi.mock('../../../cli/services/agent-spawner', () => ({
 	spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
@@ -38,6 +45,40 @@ vi.mock('../../../cli/services/system-prompt', () => ({
 		substituteTemplateVariables('Write only within {{AGENT_PATH}}\n{{ADDITIONAL_DIRECTORIES}}', {
 			session,
 		}),
+}));
+
+vi.mock('../../../main/cue/cue-executor', () => ({
+	executeCuePrompt: async (config: any) => {
+		if (config.beforeLaunch && !config.beforeLaunch())
+			return { stdout: '', exitCode: null, executionStarted: false };
+		config.onStarted?.(202);
+		const result = await mockSpawnAgent(
+			config.toolType,
+			config.projectRoot,
+			config.promptPath,
+			undefined,
+			{
+				appendSystemPrompt: config.appendSystemPrompt,
+				additionalDirectories: config.session.additionalDirectories,
+			}
+		);
+		return {
+			stdout: result.response,
+			exitCode: result.success ? 0 : 1,
+			executionStarted: true,
+			terminationConfirmed: true,
+		};
+	},
+	stopCueRun: vi.fn(),
+}));
+vi.mock('../../../main/utils/maestro-system-prompt', () => ({
+	buildMaestroSystemPromptForSession: async (session: any) =>
+		substituteTemplateVariables('Write only within {{AGENT_PATH}}\n{{ADDITIONAL_DIRECTORIES}}', {
+			session,
+		}),
+}));
+vi.mock('../../../main/utils/logger', () => ({
+	logger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn(), cue: vi.fn() },
 }));
 
 // X1 task 8: `set-status done` fires the PR-on-done flow. The gh/git plumbing is
@@ -123,7 +164,9 @@ function seedCard(
 		value.id
 	);
 	for (const run of runs ?? [])
-		db.prepare('INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)').run(
+		db.prepare(
+			'INSERT INTO runs (run_id, collection_key, card_id, attempt, specification_json, outcome_json) VALUES (?, ?, ?, ?, ?, ?)'
+		).run(
 			`${board.storage!.collectionKey}:${value.id}:${run.attempt}`,
 			board.storage!.collectionKey,
 			value.id,
@@ -137,6 +180,7 @@ describe('maestro-cli board', () => {
 	let projectRoot = '';
 	let db: ReturnType<typeof openBoardDb>;
 	let namespace: string;
+	let facade: BoardStorageFacade;
 	let logSpy: MockInstance;
 	let exitSpy: MockInstance;
 
@@ -155,9 +199,10 @@ describe('maestro-cli board', () => {
 		});
 		applyBoardMigration(db, plan);
 		namespace = plan.profileNamespace;
-		configureBoardStorage(new BoardStorageFacade(db));
+		facade = new BoardStorageFacade(db);
+		configureBoardStorage(facade);
 		configureBoardCaptureHost(() => ({
-			agents: [{ id: 'agent-1' }, { id: 'agent-2-0123456789abcdef' }],
+			agents: [{ id: 'agent-1' }, { id: 'agent-9' }, { id: 'agent-2-0123456789abcdef' }],
 			groups: [],
 		}));
 		logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -175,6 +220,7 @@ describe('maestro-cli board', () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		configureBoardRuntimeHost(() => null);
 		configureBoardStorage(null);
 		db.close();
 		if (projectRoot && fs.existsSync(projectRoot)) {
@@ -579,7 +625,7 @@ describe('maestro-cli board', () => {
 		expect(loadBoards(projectRoot)[0].cards[0].status).toBe('done');
 	});
 
-	it('keeps concurrent card edits while awaiting auto-decomposition', async () => {
+	it('keeps concurrent edits and refuses unfenced decomposition completion', async () => {
 		const session = {
 			...mockGetSessionById(),
 			additionalDirectories: [{ path: '/reference', read: true, write: false }],
@@ -613,7 +659,20 @@ describe('maestro-cli board', () => {
 			}
 			return { success: true, response: '<!-- maestro:card-complete -->' };
 		});
-		await boardTick({ agent: 'Alpha', json: true });
+		await expect(
+			autoDecomposeBoard(loadBoards(projectRoot)[0], {
+				spawn: (prompt, triage) =>
+					decomposeBoardCard(projectRoot, triage, prompt, {
+						getStoredSessions: () => mockReadSessions(),
+						getAgentConfig: () => ({}),
+						getSshStore: () => ({}),
+						nowMs: () => 1,
+					}),
+				reload: () => loadBoards(projectRoot)[0],
+				save: (board) => saveBoards(projectRoot, [board]),
+				now: () => new Date().toISOString(),
+			})
+		).rejects.toThrow('Run lifecycle requires the fenced runtime');
 		expect(mockSpawnAgent.mock.calls[0][4]).toMatchObject({
 			appendSystemPrompt: expect.stringContaining(`Write only within ${projectRoot}`),
 			additionalDirectories: session.additionalDirectories,
@@ -622,8 +681,8 @@ describe('maestro-cli board', () => {
 		const current = loadBoards(projectRoot)[0];
 		expect(current.cards.find((c) => c.id === 'new-during-llm')?.status).toBe('blocked');
 		expect(current.cards.find((c) => c.id === 'existing')?.title).toBe('Edited during LLM');
-		expect(current.cards.find((c) => c.id === 'triage')?.status).toBe('done');
-		expect(current.cards.some((c) => c.title === 'Child one')).toBe(true);
+		expect(current.cards.find((c) => c.id === 'triage')?.status).toBe('triage');
+		expect(current.cards.some((c) => c.title === 'Child one')).toBe(false);
 	});
 	it('does not resurrect a triage card deleted during the decomposition await', async () => {
 		const b = createBoard(projectRoot, 'B', { autoDecompose: true });
@@ -640,7 +699,18 @@ describe('maestro-cli board', () => {
 				response: JSON.stringify([{ title: 'Discarded child', body: 'Work' }]),
 			};
 		});
-		await boardTick({ agent: 'Alpha', json: true });
+		await autoDecomposeBoard(loadBoards(projectRoot)[0], {
+			spawn: (prompt, triage) =>
+				decomposeBoardCard(projectRoot, triage, prompt, {
+					getStoredSessions: () => mockReadSessions(),
+					getAgentConfig: () => ({}),
+					getSshStore: () => ({}),
+					nowMs: () => 1,
+				}),
+			reload: () => loadBoards(projectRoot)[0],
+			save: (board) => saveBoards(projectRoot, [board]),
+			now: () => new Date().toISOString(),
+		});
 		expect(loadBoards(projectRoot)[0].cards).toEqual([]);
 		expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
 	});
@@ -783,12 +853,61 @@ describe('maestro-cli board', () => {
 		});
 	});
 
+	function installOwner(root: string) {
+		const row = db
+			.prepare('SELECT payload_json FROM repositories WHERE id=?')
+			.get(root === projectRoot ? 'repo' : 'native-repo') as { payload_json: string };
+		const record = JSON.parse(row.payload_json);
+		const owner = new BoardRuntime(
+			facade,
+			{
+				info: { pid: 101, mode: 'desktop', startedAt: new Date(1).toISOString(), bootTime: 1 },
+				verify: () => ({ ok: true }),
+			},
+			() => ({
+				registryRevision: 1,
+				dispatchEnabled: true,
+				agentStates: Object.fromEntries(
+					mockReadSessions().map((agent: any) => [
+						agent.id,
+						{
+							live: true,
+							busy: false,
+							location: agent.sessionSshRemoteConfig?.enabled
+								? { kind: 'ssh', remoteId: 'r1' }
+								: { kind: 'local' },
+						},
+					])
+				),
+				repository: {
+					id: record.id,
+					workingDirectory: root,
+					record,
+					identity: 'fixture-git',
+					location: mockGetSessionById()?.sessionSshRemoteConfig?.enabled
+						? { kind: 'ssh', remoteId: 'r1' }
+						: { kind: 'local' },
+				},
+			}),
+			createBoardRunService({
+				getStoredSessions: () => mockReadSessions(),
+				getAgentConfig: () => ({}),
+				getSshStore: () => ({}),
+				nowMs: () => 1,
+			}),
+			() => 'unknown'
+		);
+		expect(owner.acquire()).toMatchObject({ ok: true });
+		configureBoardRuntimeHost(() => owner);
+	}
+
 	// `board watch` is a loop, so every test here drives exactly one iteration and
 	// then stops it: SIGINT both sets the stop flag and wakes the interval sleep,
 	// so no fake timers (and no 30-second test) are needed.
 	describe('board watch', () => {
 		beforeEach(() => {
 			mockReadSessions.mockReturnValue([]);
+			installOwner(projectRoot);
 		});
 
 		it('ticks once, prints a one-line summary, and stops on SIGINT', async () => {
@@ -807,9 +926,9 @@ describe('maestro-cli board', () => {
 			const tick = JSON.parse(
 				logSpy.mock.calls.map((c) => String(c[0])).find((l) => l.includes('watch-tick'))!
 			);
-			expect(tick.boards[0].promoted).toBe(1);
-			expect(tick.boards[0].blocked).toBe(1);
-			expect(loadBoards(projectRoot)[0].cards[0].status).toBe('blocked');
+			expect(tick.boards[0].accepted).toBe(0);
+			expect(tick.boards[0].results).toMatchObject([{ ok: false, reason: 'no-workers' }]);
+			expect(loadBoards(projectRoot)[0].cards[0].status).toBe('todo');
 			expect(exitSpy).not.toHaveBeenCalled();
 		});
 
@@ -849,6 +968,26 @@ describe('maestro-cli board', () => {
 
 		beforeEach(() => {
 			repoRoot = initRepo();
+			const migration = planBoardMigration({
+				source: { location: { kind: 'local' }, path: repoRoot },
+				boardBytes: Buffer.from('{"boards":[]}'),
+				workers: [],
+				repository: { id: 'native-repo', workingDirectory: repoRoot, validated: true },
+				profileBytes: Buffer.from('{"profiles":[{"id":"p1","name":"Builder"}]}'),
+			});
+			applyBoardMigration(db, migration);
+			configureBoardCaptureHost(() => ({
+				agents: mockReadSessions().map((agent: any) => ({ id: agent.id })),
+				groups: [],
+			}));
+			registerBoardWorker(db, 'agent-1');
+			setBoardWorkerAccess(
+				db,
+				'agent-1',
+				[{ namespace: migration.profileNamespace, profileId: 'p1' }],
+				['native-repo']
+			);
+
 			const session = {
 				id: 'agent-1',
 				name: 'Alpha',
@@ -867,25 +1006,31 @@ describe('maestro-cli board', () => {
 				success: true,
 				response: '<!-- maestro:card-complete | did it -->',
 			});
+			installOwner(repoRoot);
 		});
 
 		/** Create a board with one ready card pinned to the agent, optionally isolated. */
 		function seedBoard(worktree?: { path: string; branch: string }) {
 			const board = createBoard(repoRoot, 'Tick board');
 			const { assigneeProfileId: _role, ...pinned } = card('c1', {
-				status: 'ready',
+				status: 'todo',
 				assigneeAgentId: 'agent-1',
 			});
-			saveBoards(
-				repoRoot,
-				loadBoards(repoRoot).map((entry) =>
-					entry.id === board.id
-						? {
-								...entry,
-								cards: [...entry.cards, { ...pinned, ...(worktree ? { worktree } : {}) }],
-							}
-						: entry
-				)
+			facade.capture(
+				{
+					projectRoot: repoRoot,
+					boardId: board.id,
+					expectedRevision: board.storage!.expectedRevision!,
+					card: {
+						...pinned,
+						executionScope: { kind: 'agent', agentId: 'agent-1' },
+						repositoryId: 'native-repo',
+						workingDirectory: repoRoot,
+						startModeOverride: 'direct',
+						...(worktree ? { worktree } : {}),
+					},
+				},
+				true
 			);
 			return board;
 		}
@@ -896,6 +1041,9 @@ describe('maestro-cli board', () => {
 			seedBoard({ path: worktreePath, branch });
 
 			await boardTick({ agent: 'Alpha', json: true });
+			await vi.waitFor(() =>
+				expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0)
+			);
 
 			expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
 			// spawnAgent(toolType, cwd, prompt, ...) - the cwd is the checkout.
@@ -947,16 +1095,37 @@ describe('maestro-cli board', () => {
 						}
 			);
 			const board = createBoard(repoRoot, 'Pool board');
-			saveBoards(
-				repoRoot,
-				loadBoards(repoRoot).map((entry) =>
-					entry.id === board.id
-						? { ...entry, cards: [...entry.cards, card('c1', { status: 'ready' })] }
-						: entry
-				)
+			registerBoardWorker(db, 'agent-2');
+			const roleNamespace = facade
+				.captureCatalog()
+				.profiles.find((p) => p.profile.id === 'p1' && p.namespace !== namespace)!.namespace;
+			setBoardWorkerAccess(
+				db,
+				'agent-2',
+				[{ namespace: roleNamespace, profileId: 'p1' }],
+				['native-repo']
+			);
+			facade.capture(
+				{
+					projectRoot: repoRoot,
+					boardId: board.id,
+					expectedRevision: board.storage!.expectedRevision!,
+					card: {
+						...card('c1', { status: 'todo' }),
+						role: { namespace: roleNamespace, profileId: 'p1' },
+						executionScope: { kind: 'agent', agentId: 'agent-2' },
+						repositoryId: 'native-repo',
+						workingDirectory: repoRoot,
+						startModeOverride: 'direct',
+					},
+				},
+				true
 			);
 
 			await boardTick({ agent: 'Alpha', json: true });
+			await vi.waitFor(() =>
+				expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0)
+			);
 
 			expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
 			const stored = loadBoards(repoRoot).find((b) => b.id === board.id)?.cards[0];
@@ -980,6 +1149,9 @@ describe('maestro-cli board', () => {
 			seedBoard({ path: path.join(projectRoot, 'worktrees', branch), branch });
 
 			await boardTick({ agent: 'Alpha', json: true });
+			await vi.waitFor(() =>
+				expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0)
+			);
 
 			expect(mockSpawnAgent).not.toHaveBeenCalled();
 			const stored = loadBoards(repoRoot)[0].cards[0];

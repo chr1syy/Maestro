@@ -1,6 +1,6 @@
 import { requireEncore } from '../utils/encore-gate';
 /** Board capture/CRUD uses the running host's central workspace and validation.
- * Dispatch tick/watch remain separate until the fenced runtime integration lands.
+ * Dispatch and control use the same owning runtime as desktop.
  */
 
 import {
@@ -12,40 +12,14 @@ import { requestBoardCommand } from '../../shared/maestro-lib/client/board';
 import type { BoardCommand, BoardCommandTarget } from '../../shared/board/commands';
 import type { BoardWorkspaceQueryResult, BoardWorkspaceCollection } from '../../shared/board/types';
 import { generateUUID } from '../../shared/uuid';
-import { listBoards, getBoard, saveBoard, enqueueBoardWrite } from '../../main/board/board-storage';
 import { type CardPrResult } from '../../main/board/board-pr';
 import type { Board, BoardCard, CardPrOnDone, CardStatus } from '../../shared/board/types';
 import { CARD_PRIORITIES, CARD_STATUSES } from '../../shared/board/types';
-import { getBlockers } from '../../shared/board/graph';
-import { CARD_HANDOFF_REMINDER } from '../../shared/board/cardMarkers';
-import {
-	promoteEligibleCards,
-	claimReadyCardsPooled,
-	applyCardResult,
-	reclaimStaleRunning,
-	DEFAULT_MAX_IN_PROGRESS,
-	DEFAULT_MAX_FAILURES,
-	DEFAULT_STALE_RUNNING_MS,
-	type CardAssignment,
-	type CardSpawnResult,
-} from '../../main/board/board-dispatcher';
-import {
-	resolveProfileSpawnOverrides,
-	type ProfileBaseAgentValues,
-	type ProfileSpawnOverrides,
-} from '../../shared/profiles/types';
-import { selectPoolAgentIds } from '../../shared/board/pool';
 import { buildCardWorktreeRef } from '../../shared/board/worktree';
-import { ensureCardWorktree, WORKTREE_SSH_UNSUPPORTED } from '../../main/board/board-worktree';
-import { listProfiles } from '../../main/profiles/profile-storage';
-import { autoDecomposeBoard, type DecomposeSpawn } from '../../main/board/board-decompose';
-import { readSessions, getSessionById, resolveAgentId } from '../services/storage';
-import { spawnAgent } from '../services/agent-spawner';
-import { prepareMaestroSystemPromptCli } from '../services/system-prompt';
-import { getCliPrompt } from '../services/prompt-loader';
-import { PROMPT_IDS } from '../../shared/promptDefinitions';
+import { getBlockers } from '../../shared/board/graph';
+import { getSessionById, resolveAgentId } from '../services/storage';
 import { formatError, formatSuccess, formatWarning } from '../output/formatter';
-import type { SessionInfo, ToolType } from '../../shared/types';
+import type { SessionInfo } from '../../shared/types';
 
 interface BoardCommonOptions {
 	agent?: string;
@@ -128,6 +102,7 @@ interface BoardSetStatusOptions extends BoardCommonOptions {
 }
 
 interface BoardTickOptions extends BoardCommonOptions {
+	requestId?: string;
 	board?: string;
 }
 
@@ -668,7 +643,12 @@ export async function boardTick(options: BoardTickOptions): Promise<void> {
 	requireEncore('maestroCue', options.json);
 	try {
 		const session = resolveAgentSession(options.agent);
-		const summaries = await tickBoardsOnce(session.projectRoot, options.board, options.json);
+		const summaries = await tickBoardsOnce(
+			session.projectRoot,
+			options.board,
+			options.json,
+			options
+		);
 		if (summaries.length === 0) {
 			if (options.json) console.log(JSON.stringify({ type: 'tick', boards: [] }));
 			else console.log('No boards to tick.');
@@ -682,7 +662,7 @@ export async function boardTick(options: BoardTickOptions): Promise<void> {
 		for (const s of summaries) {
 			console.log(`Board "${s.name}" [${s.boardId.slice(0, 8)}]:`);
 			console.log(
-				`  promoted: ${s.promoted}  |  decomposed: ${s.decomposed}  |  ran: ${s.ran}  |  done: ${s.done}  |  blocked: ${s.blocked}`
+				`  accepted: ${s.accepted} (durable attempts; execution and outcome remain host-owned)`
 			);
 			for (const note of s.notes) console.log(`  - ${note}`);
 		}
@@ -696,7 +676,8 @@ export async function boardTick(options: BoardTickOptions): Promise<void> {
  *
  * A deliberately dumb loop over the same single-tick pass `board tick` runs: no
  * daemonization, no lock file, no PID file. It exists so a CI box or a headless
- * host can keep a board moving without the desktop app open. Stops on SIGINT.
+ * host can request passes from the existing owner. Stops on SIGINT. An absent
+ * host is an error; this command never starts a scheduler.
  *
  * A storage failure is fatal by design: after Phase 1, `loadBoards` throws
  * rather than silently returning `[]` for a damaged board.yaml, and a watcher
@@ -728,15 +709,14 @@ export async function boardWatch(options: BoardWatchOptions): Promise<void> {
 	if (!options.json) {
 		console.log(
 			`Watching board(s) every ${intervalMs / 1000}s. Press Ctrl-C to stop.\n` +
-				'Use one dispatcher per board. Desktop/CLI overlap is unsupported: ' +
-				'atomic writes prevent torn files, but process-local queues cannot prevent lost updates.'
+				'Requests use the existing host runtime; accepted runs remain owned by the host.'
 		);
 	}
 
 	try {
 		while (!stopped) {
 			try {
-				const summaries = await tickBoardsOnce(projectRoot, options.board, options.json);
+				const summaries = await tickBoardsOnce(projectRoot, options.board, options.json, options);
 				printWatchTick(summaries, options.json);
 			} catch (error) {
 				return reportError(error, options.json);
@@ -787,354 +767,87 @@ function printWatchTick(summaries: TickSummary[], json: boolean | undefined): vo
 		return;
 	}
 	for (const s of summaries) {
-		console.log(
-			`[${at}] ${s.name}: promoted ${s.promoted}  |  claimed ${s.ran}  |  done ${s.done}  |  blocked ${s.blocked}`
-		);
+		console.log(`[${at}] ${s.name}: accepted ${s.accepted}`);
 	}
 }
 
-// ─── Headless dispatch (reuses the Phase 3 pure helpers) ─────────────────────
-
-/**
- * Run one dispatch pass across every board in the project (or just `boardHint`).
- * Shared by `board tick` (one pass, then exit) and `board watch` (the same pass
- * on a timer) so the two can never drift. Returns an empty array when the
- * project has no boards. Storage failures propagate (fail-closed, Phase 1).
- */
+/** Request the owner; CLI never claims, reclaims, decomposes or spawns locally. */
 async function tickBoardsOnce(
 	projectRoot: string,
 	boardHint: string | undefined,
-	json: boolean | undefined
+	json: boolean | undefined,
+	options: BoardTickOptions = {}
 ): Promise<TickSummary[]> {
 	requireEncore('board', json);
 	requireEncore('maestroCue', json);
-	let boards = listBoards(projectRoot);
-	if (boardHint) {
-		boards = [resolveBoard(projectRoot, boardHint)];
-	}
-	if (boards.length === 0) return [];
-
-	const sessions = readSessions();
-	// Load the editable decompose template once; only used when a board opts in.
-	const decomposeTemplate = boards.some((b) => b.autoDecompose)
-		? await getCliPrompt(PROMPT_IDS.BOARD_DECOMPOSE).catch(() => undefined)
-		: undefined;
-
+	const selected = { ...options, projectRoot };
+	const entries = boardHint
+		? [await selectHostBoard(boardHint, selected)]
+		: (await queryHost(selected)).collections.filter(
+				(c) => !options.collection || c.collectionKey === options.collection
+			);
 	const summaries: TickSummary[] = [];
-	for (const board of boards) {
-		summaries.push(await tickBoard(projectRoot, board.id, sessions, decomposeTemplate, json));
+	for (const entry of entries) {
+		const results = await hostCommand<import('../../shared/board/commands').BoardTickResult[]>({
+			action: 'tick',
+			target: hostTarget(entry.board, selected),
+			operationId: options.requestId ?? generateUUID(),
+		});
+		summaries.push({
+			boardId: entry.board.id,
+			name: entry.board.name,
+			accepted: results.filter((r) => r.ok).length,
+			notes: results.map(
+				(r) => `${r.cardId}: ${r.ok ? `accepted ${r.runToken?.runId}` : r.reason}`
+			),
+			results,
+		});
 	}
 	return summaries;
 }
-
 interface TickSummary {
 	boardId: string;
 	name: string;
-	promoted: number;
-	decomposed: number;
-	ran: number;
-	done: number;
-	blocked: number;
+	accepted: number;
 	notes: string[];
+	results: import('../../shared/board/commands').BoardTickResult[];
 }
 
-/**
- * Run one headless dispatch pass for a single board: reclaim stale -> promote
- * -> (optional) auto-decompose -> claim up to the WIP cap -> spawn each claimed
- * card (awaited) -> apply markers/exit-status. Persists after each mutation so a
- * subsequent `board tick` observes the new state, mirroring the desktop engine.
- */
-async function tickBoard(
-	projectRoot: string,
-	boardId: string,
-	sessions: SessionInfo[],
-	decomposeTemplate: string | undefined,
-	json: boolean | undefined
-): Promise<TickSummary> {
-	const summary: TickSummary = {
-		boardId,
-		name: '',
-		promoted: 0,
-		decomposed: 0,
-		ran: 0,
-		done: 0,
-		blocked: 0,
-		notes: [],
-	};
-
-	const claimed = await enqueueBoardWrite(projectRoot, async () => {
-		let board = getBoard(projectRoot, boardId);
-		if (!board) {
-			summary.notes.push('board disappeared');
-			return [];
-		}
-		summary.name = board.name;
-
-		// 2. Optional auto-decompose (off by default; gated on board.autoDecompose).
-		const decomposed = await autoDecomposeBoard(board, {
-			spawn: makeDecomposeSpawn(projectRoot, sessions),
-			promptTemplate: decomposeTemplate,
-			reload: () => getBoard(projectRoot, boardId),
-			save: (fresh) => saveBoard(projectRoot, fresh, fresh.storage?.expectedRevision),
-			now: () => new Date().toISOString(),
-			onLog: (level, message) => {
-				if (!json && level !== 'info') console.error(`  [decompose] ${message}`);
-			},
-		});
-		summary.decomposed = decomposed;
-
-		// The LLM pass may have overlapped ordinary card edits/deletions.
-		board = getBoard(projectRoot, boardId);
-		if (!board) return [];
-		const nowIso = new Date().toISOString();
-		// 1. Reclaim stale running cards (no live CLI processes across ticks).
-		const reclaimed = reclaimStaleRunning(
-			board,
-			new Set<string>(),
-			DEFAULT_STALE_RUNNING_MS,
-			Date.now(),
-			nowIso
-		);
-
-		// 3. Promote eligible todo cards to ready.
-		const promoted = promoteEligibleCards(board, nowIso);
-		summary.promoted = promoted.length;
-
-		// 4. Claim ready cards to FREE pool workers up to the WIP cap (Phase 6).
-		const cap = board.maxInProgress ?? DEFAULT_MAX_IN_PROGRESS;
-		const { claimed, unresolvable } = claimReadyCardsPooled(board, cap, nowIso, (card, busy) =>
-			resolveCliAssignment(projectRoot, card, busy, sessions)
-		);
-
-		// Force-block cards that named a missing profile/agent (config error).
-		for (const { card, reason } of unresolvable) {
-			const target = board.cards.find((c) => c.id === card.id);
-			if (!target) continue;
-			target.status = 'blocked';
-			target.updatedAt = nowIso;
-			target.runs = [
-				...(target.runs ?? []),
-				{
-					attempt: (target.runs?.length ?? 0) + 1,
-					startedAt: nowIso,
-					endedAt: nowIso,
-					outcome: 'error',
-					summary: reason ?? 'Assignee could not be resolved.',
-				},
-			];
-			summary.blocked++;
-			summary.notes.push(
-				`${card.title} (${card.id.slice(0, 8)}) -> blocked (${reason ?? 'unresolvable'})`
-			);
-		}
-
-		// Persist BEFORE spawning so a crash / next tick sees the cards as running.
-		if (
-			reclaimed.length > 0 ||
-			decomposed > 0 ||
-			promoted.length > 0 ||
-			claimed.length > 0 ||
-			unresolvable.length > 0
-		) {
-			saveBoard(projectRoot, board, board.storage?.expectedRevision);
-		}
-
-		return claimed;
-	});
-
-	// 5. Spawn each claimed card on its chosen worker, await, and apply its result.
-	for (const { card, agentId, overrides } of claimed) {
-		summary.ran++;
-		const base = sessions.find((s) => s.id === agentId);
-		const result = base
-			? await spawnCard(projectRoot, card, base, overrides)
-			: {
-					output: '',
-					exitCode: null,
-					error: `Board card "${card.id}": worker agent "${agentId}" not found.`,
-				};
-		// Reload fresh so we don't clobber concurrent edits between claim and finish.
-		const fresh = getBoard(projectRoot, boardId);
-		if (!fresh) break;
-		const status = applyCardResult(
-			fresh,
-			card.id,
-			result,
-			new Date().toISOString(),
-			DEFAULT_MAX_FAILURES
-		);
-		saveBoard(projectRoot, fresh, fresh.storage?.expectedRevision);
-		if (status === 'done') summary.done++;
-		else if (status === 'blocked') summary.blocked++;
-		summary.notes.push(`${card.title} (${card.id.slice(0, 8)}) -> ${status}`);
+export async function boardControl(
+	cardId: string,
+	options: BoardCommonOptions & {
+		board?: string;
+		operation: 'hold' | 'resume' | 'approve';
+		runId?: string;
+		ownerEpoch?: string;
+		generation?: string;
 	}
-
-	return summary;
-}
-
-/**
- * Resolve a card to a FREE pool worker for the CLI `board tick` (Board Phase 6).
- * Mirrors the desktop `resolveCardAssignment`: a named-but-missing profile is a
- * config error; a pinned agent (`assigneeAgentId` or a legacy profile's
- * `baseAgentId`) yields a single candidate; a role-only card floats to the
- * opt-in project pool. The first non-busy candidate wins.
- */
-function resolveCliAssignment(
-	projectRoot: string,
-	card: BoardCard,
-	busyAgentIds: ReadonlySet<string>,
-	sessions: SessionInfo[]
-): CardAssignment {
-	let profile;
-	if (card.assigneeProfileId) {
-		profile = listProfiles(projectRoot).find((p) => p.id === card.assigneeProfileId);
-		if (!profile) {
-			return { kind: 'unresolvable', reason: `Profile "${card.assigneeProfileId}" not found.` };
-		}
-	}
-
-	const pinnedId = card.assigneeAgentId ?? profile?.baseAgentId;
-	const candidates = pinnedId
-		? [pinnedId]
-		: selectPoolAgentIds(
-				projectRoot,
-				sessions.map((s) => ({
-					id: s.id,
-					// Same fallback chain as the desktop pool wiring (index.ts): a
-					// worker whose stored record carries only cwd must not vanish
-					// from CLI dispatch. SessionInfo has no fullPath to fall back to.
-					dir: s.projectRoot || s.cwd,
-					boardWorker: s.boardWorker === true,
-				}))
-			);
-	if (candidates.length === 0) return { kind: 'no-free-worker' };
-
-	const chosen = candidates.find((id) => !busyAgentIds.has(id));
-	if (!chosen) return { kind: 'no-free-worker' };
-
-	const base = sessions.find((s) => s.id === chosen);
-	if (!base) return { kind: 'unresolvable', reason: `Agent "${chosen}" not found.` };
-
-	const baseValues: ProfileBaseAgentValues = {
-		customModel: base.customModel,
-		customEffort: base.customEffort,
-		customArgs: base.customArgs,
-		appendSystemPrompt: (base as unknown as { appendSystemPrompt?: string }).appendSystemPrompt,
-	};
-	const overrides: ProfileSpawnOverrides = profile
-		? resolveProfileSpawnOverrides(profile, baseValues)
-		: {
-				customModel: baseValues.customModel,
-				customEffort: baseValues.customEffort,
-				appendSystemPrompt: baseValues.appendSystemPrompt,
-				customArgs: baseValues.customArgs,
-			};
-	return { kind: 'assigned', agentId: chosen, overrides };
-}
-
-/**
- * Run a claimed card's assignee through the CLI spawn path (`spawnAgent`) on the
- * resolved base session, honoring SSH + role model/effort/args overrides. Returns
- * a {@link CardSpawnResult} the pure `applyCardResult` can evaluate for markers /
- * exit status.
- */
-async function spawnCard(
-	projectRoot: string,
-	card: BoardCard,
-	base: SessionInfo,
-	overrides: ProfileSpawnOverrides
-): Promise<CardSpawnResult> {
-	// Preserve role overrides in the task preamble alongside canonical system context.
-	const rolePreamble = overrides.appendSystemPrompt
-		? `${overrides.appendSystemPrompt}\n\n${CARD_HANDOFF_REMINDER}\n\n---\n\n`
-		: `${CARD_HANDOFF_REMINDER}\n\n---\n\n`;
-	const prompt = `${rolePreamble}${card.title}\n\n${card.body}`.trim();
-
-	// Phase 4: a card that opted into isolation runs in its own checkout, created
-	// on first claim and reused by later attempts. Same provisioning helper the
-	// desktop path uses, so CLI and desktop cannot drift. A failure blocks the
-	// card rather than silently sharing the project root with other cards.
-	let worktree: { path: string; branch: string } | undefined;
-	if (card.worktree) {
-		if (base.sessionSshRemoteConfig?.enabled) {
-			return { output: `<!-- maestro:card-block: ${WORKTREE_SSH_UNSUPPORTED} -->`, exitCode: 0 };
-		}
-		const ensured = await ensureCardWorktree(projectRoot, card.worktree);
-		if (!ensured.ok) {
-			return {
-				output: `<!-- maestro:card-block: Card worktree unavailable: ${ensured.reason} -->`,
-				exitCode: 0,
-			};
-		}
-		worktree = { path: ensured.path, branch: ensured.branch };
-	}
-
-	const runCwd = worktree?.path ?? projectRoot;
-	const appendSystemPrompt = await prepareMaestroSystemPromptCli({
-		...base,
-		cwd: runCwd,
-		projectRoot: runCwd,
-	});
-	const result = await spawnAgent(base.toolType as ToolType, runCwd, prompt, undefined, {
-		appendSystemPrompt,
-		additionalDirectories: base.additionalDirectories,
-		customModel: overrides.customModel,
-		customEffort: overrides.customEffort,
-		customArgs: overrides.customArgs,
-		customEnvVars: base.customEnvVars,
-		sshRemoteConfig: base.sessionSshRemoteConfig,
-		enableMaestroP: base.enableMaestroP,
-		maestroPMode: base.maestroPMode,
-		maestroPPath: base.maestroPPath,
-	});
-
-	return {
-		output: result.response ?? '',
-		exitCode: result.success ? 0 : 1,
-		error: result.success ? undefined : result.error,
-		...(worktree ? { worktreePath: worktree.path, worktreeBranch: worktree.branch } : {}),
-	};
-}
-
-/**
- * Build the auto-decompose spawn callback backed by the CLI spawn path.
- *
- * Decomposition always runs in `projectRoot`, even for a triage card that
- * requests worktree isolation (desktop parity: `decomposeBoardCard` does the
- * same). It is a read-the-repo planning pass whose only output is the JSON
- * child list; the card's own work - the part that mutates files - is what runs
- * in the isolated checkout, and provisioning a worktree just to read from it
- * would cost a checkout per triage card for nothing.
- */
-function makeDecomposeSpawn(projectRoot: string, sessions: SessionInfo[]): DecomposeSpawn {
-	return async (prompt: string, triageCard: BoardCard) => {
-		const assignment = resolveCliAssignment(projectRoot, triageCard, new Set(), sessions);
-		// Decomposition just needs any capable model: prefer the resolved worker,
-		// else fall back to the first agent in the project.
-		const chosenId = assignment.kind === 'assigned' ? assignment.agentId : undefined;
-		const base =
-			(chosenId ? sessions.find((s) => s.id === chosenId) : undefined) ??
-			sessions.find((s) => s.projectRoot === projectRoot);
-		if (!base) return null;
-		const overrides = assignment.kind === 'assigned' ? assignment.overrides : undefined;
-		const appendSystemPrompt = await prepareMaestroSystemPromptCli({
-			...base,
-			cwd: projectRoot,
-			projectRoot,
+): Promise<void> {
+	requireEncore('board', options.json);
+	try {
+		const { board, card } = await selectHostCard(cardId, options);
+		const value = await hostCommand({
+			action: 'control',
+			target: hostTarget(board, options),
+			cardId: card.id,
+			cardRevision: readRevision(options.cardRevision, card.storageRevision),
+			operation: options.operation,
+			...(options.runId
+				? {
+						runToken: {
+							runId: options.runId,
+							ownerEpoch: readRevision(options.ownerEpoch),
+							generation: readRevision(options.generation),
+						},
+					}
+				: {}),
 		});
-		const result = await spawnAgent(base.toolType as ToolType, projectRoot, prompt, undefined, {
-			appendSystemPrompt,
-			additionalDirectories: base.additionalDirectories,
-			customModel: overrides?.customModel,
-			customEffort: overrides?.customEffort,
-			customEnvVars: base.customEnvVars,
-			sshRemoteConfig: base.sessionSshRemoteConfig,
-			enableMaestroP: base.enableMaestroP,
-			maestroPMode: base.maestroPMode,
-			maestroPPath: base.maestroPPath,
-		});
-		return result.success ? (result.response ?? '') : null;
-	};
+		console.log(
+			options.json ? JSON.stringify(value) : formatSuccess(`Board ${options.operation} accepted.`)
+		);
+	} catch (error) {
+		reportError(error, options.json);
+	}
 }
 
 // ─── Small helpers ───────────────────────────────────────────────────────────
@@ -1191,19 +904,6 @@ function countByStatus(board: Board): string {
 			.map((s) => `${s}: ${counts.get(s)}`)
 			.join(', ') || 'empty'
 	);
-}
-
-/** Resolve a board by id (exact or 8-char prefix). Throws on ambiguous/missing. */
-function resolveBoard(projectRoot: string, boardId: string): Board {
-	const boards = listBoards(projectRoot);
-	const exact = boards.find((b) => b.id === boardId);
-	if (exact) return exact;
-	const prefix = boards.filter((b) => b.id.startsWith(boardId));
-	if (prefix.length === 1) return prefix[0];
-	if (prefix.length > 1) {
-		throw new Error(`Board id "${boardId}" is ambiguous (${prefix.length} matches).`);
-	}
-	throw new Error(`Board "${boardId}" not found in project.`);
 }
 
 /** Board CRUD always talks to the currently running host; it never opens a local database. */

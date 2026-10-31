@@ -3,7 +3,7 @@
  *
  * Provides IPC handlers for the persistent Board (the task DAG stored in
  * `.maestro/board.yaml`): list boards, get a board, and card-level mutations
- * (create / update / delete / set status). No dispatcher yet (Phase 3).
+ * (create / update / delete / set status), plus the shared fenced runtime entry.
  *
  * This module is a thin transport layer: filesystem I/O, validation, and cycle
  * rejection live in the domain module (`src/main/board/board-storage.ts`). Each
@@ -27,7 +27,6 @@ import {
 	updateCard,
 	updateCardStatus,
 	deleteCard,
-	saveBoard,
 	enqueueBoardWrite,
 	listBoardWorkers,
 	listBoardWorkerAccessOptions,
@@ -36,7 +35,12 @@ import {
 	setBoardWorkerEnabled,
 	setBoardWorkerAccess,
 } from '../../board/board-storage';
-import { applyCardCancel } from '../../board/board-dispatcher';
+import {
+	executeBoardRuntimeCommand,
+	cancelBoardRuntimeCard,
+	controlBoardRuntimeCard,
+} from '../../board/board-runtime-host';
+import { parseBoardCommand, type BoardCommandResult } from '../../../shared/board/commands';
 import { startCardPr } from '../../board/board-pr';
 import type { BoardCardToastPayload } from '../../board/board-toast';
 import type {
@@ -75,10 +79,34 @@ export interface BoardHandlerDependencies {
 /**
  * Register all Board IPC handlers. Storage handlers need no service dependency -
  * the storage layer reads/writes `.maestro/board.yaml` under the passed project
- * root on demand. `board:cancelCard` is the exception: it goes through the live
- * dispatcher so the in-flight process is actually killed.
+ * root on demand. Stop/Resume resolve the persisted attempt and call the same
+ * owning runtime as CLI; an unavailable owner never fabricates termination.
  */
 export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
+	ipcMain.handle(
+		'board:runtimeCommand',
+		async (event, input: Record<string, unknown>): Promise<BoardCommandResult> => {
+			try {
+				const command = input && parseBoardCommand(input);
+				if (!command || (command.action !== 'tick' && command.action !== 'control'))
+					throw new BoardStorageError('invalid-input', 'Invalid Board runtime command');
+				const window = deps.getMainWindow?.();
+				const native =
+					!!window &&
+					!window.isDestroyed() &&
+					event.sender === window.webContents &&
+					event.senderFrame === window.webContents.mainFrame;
+				return await executeBoardRuntimeCommand(
+					command,
+					native ? 'native-desktop-main-frame' : undefined
+				);
+			} catch (error) {
+				if (!(error instanceof BoardStorageError)) throw error;
+				return { ok: false, error: { code: error.code, message: error.message } };
+			}
+		}
+	);
+
 	ipcMain.handle(
 		'board:captureCatalog',
 		withIpcErrorLogging(handlerOpts('captureCatalog'), async () => getBoardCaptureCatalog())
@@ -343,29 +371,17 @@ export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
 		withIpcErrorLogging(
 			handlerOpts('cancelCard'),
 			async (options: { projectRoot: string; boardId: string; cardId: string }): Promise<Board> => {
-				const { projectRoot, boardId, cardId } = options;
-				// Preferred path: the dispatcher that owns this board kills the process
-				// and persists the cancel itself.
-				const canceled =
-					deps.getCueEngine()?.cancelBoardCard(projectRoot, boardId, cardId) ?? false;
-				if (!canceled) {
-					// No dispatcher owns the board in this process (engine off, or the app
-					// restarted while the card was running), so there is nothing to kill -
-					// but the card is still stuck `running` in the file. Finalize it so the
-					// user can act on it now instead of waiting out the stale-reclaim
-					// window. Serialized like every other async read-modify-write.
-					await enqueueBoardWrite(projectRoot, () => {
-						const board = listBoards(projectRoot).find((b) => b.id === boardId);
-						if (!board) throw new Error(`Board "${boardId}" not found`);
-						if (applyCardCancel(board, cardId, new Date().toISOString())) {
-							saveBoard(projectRoot, board);
-						}
-					});
-				}
-				const updated = getBoard(projectRoot, boardId);
-				if (!updated) throw new Error(`Board "${boardId}" not found`);
-				return updated;
+				return cancelBoardRuntimeCard(options.projectRoot, options.boardId, options.cardId);
 			}
+		)
+	);
+
+	ipcMain.handle(
+		'board:resumeCard',
+		withIpcErrorLogging(
+			handlerOpts('resumeCard'),
+			async (options: { projectRoot: string; boardId: string; cardId: string }): Promise<Board> =>
+				controlBoardRuntimeCard(options.projectRoot, options.boardId, options.cardId, 'resume')
 		)
 	);
 

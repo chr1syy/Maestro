@@ -1,3 +1,4 @@
+import { executeBoardRuntimeCommand } from './board-runtime-host';
 /** Ordinary (non-human) commands share the desktop's current facade and host registers. */
 import { maybeCreateCardPr } from './board-pr';
 import type { CardPrResult } from './board-pr';
@@ -18,6 +19,8 @@ import {
 
 export const executeBoardCommand: BoardCommandHost = async (command) => {
 	try {
+		if (command.action === 'tick' || command.action === 'control')
+			return await executeBoardRuntimeCommand(command);
 		if (command.action === 'query') return { ok: true, value: queryBoardWorkspace(command.query) };
 		if (command.action === 'catalog') return { ok: true, value: getBoardCaptureCatalog() };
 		const projectRoot =

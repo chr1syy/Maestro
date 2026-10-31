@@ -1,3 +1,4 @@
+import type { BoardRuntimeCommand, BoardCommandResult } from '../../shared/board/commands';
 /**
  * Preload API for Board operations
  *
@@ -27,6 +28,8 @@ export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
 export function createBoardApi() {
 	return {
 		captureCatalog: (): Promise<BoardCaptureCatalog> => ipcRenderer.invoke('board:captureCatalog'),
+		runtimeCommand: (command: BoardRuntimeCommand): Promise<BoardCommandResult> =>
+			ipcRenderer.invoke('board:runtimeCommand', command),
 		captureCard: (command: BoardCaptureCommand): Promise<BoardCaptureResponse> =>
 			ipcRenderer.invoke('board:captureCard', command),
 		queryWorkspace: (query?: BoardWorkspaceQuery): Promise<BoardWorkspaceQueryResponse> =>
@@ -91,6 +94,8 @@ export function createBoardApi() {
 
 		// Cancel a running card: kills the agent process and returns the card to
 		// `todo` with a `canceled` run. Returns the updated board.
+		resumeCard: (projectRoot: string, boardId: string, cardId: string): Promise<Board> =>
+			ipcRenderer.invoke('board:resumeCard', { projectRoot, boardId, cardId }),
 		cancelCard: (projectRoot: string, boardId: string, cardId: string): Promise<Board> =>
 			ipcRenderer.invoke('board:cancelCard', { projectRoot, boardId, cardId }),
 

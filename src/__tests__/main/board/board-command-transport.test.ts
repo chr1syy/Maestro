@@ -1,3 +1,23 @@
+import { registerBoardHandlers } from '../../../main/ipc/handlers/board';
+const ipcHandlers = vi.hoisted(() => new Map<string, (...args: any[]) => any>());
+vi.mock('electron', () => ({
+	ipcMain: {
+		handle: (name: string, callback: (...args: any[]) => any) => ipcHandlers.set(name, callback),
+	},
+}));
+vi.mock('../../../main/stores/getters', () => ({ getLiveSessions: () => [] }));
+import { BoardRuntime, type BoardRunService } from '../../../main/board/board-runtime';
+import {
+	configureBoardRuntimeHost,
+	executeBoardRuntimeCommand,
+	cancelBoardRuntimeCard,
+} from '../../../main/board/board-runtime-host';
+import {
+	registerBoardWorker,
+	setBoardWorkerAccess,
+} from '../../../main/board/board-workspace-storage';
+import type { BoardRuntimeToken } from '../../../shared/board/commands';
+import type { CardSpawnResult } from '../../../main/board/board-dispatcher';
 // @vitest-environment node
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
@@ -142,7 +162,7 @@ beforeEach(async () => {
 	});
 	fs.writeFileSync(
 		path.join(dir, 'maestro-settings.json'),
-		JSON.stringify({ encoreFeatures: { board: true } })
+		JSON.stringify({ encoreFeatures: { board: true, maestroCue: true } })
 	);
 	fs.writeFileSync(
 		path.join(dir, 'maestro-sessions.json'),
@@ -184,6 +204,7 @@ beforeEach(async () => {
 	await connection.connect();
 });
 afterEach(async () => {
+	configureBoardRuntimeHost(() => null);
 	connection?.disconnect();
 	await server?.close();
 	await runtime?.connection.close();
@@ -674,4 +695,262 @@ it('updates canonical roles without legacy aliases and refuses CLI human review 
 		ok: false,
 		error: { code: 'protected-field' },
 	});
+});
+
+function installBoardOwner(direct = true) {
+	const request = capture(card({ startModeOverride: direct ? 'direct' : 'approval' }));
+	if (request.action !== 'capture') throw new Error('capture required');
+	facade.capture(request.capture, true);
+	registerBoardWorker(db, 'a');
+	setBoardWorkerAccess(db, 'a', [], ['repo0', 'repo1']);
+	let settle!: (result: CardSpawnResult) => void;
+	const service: BoardRunService = {
+		spawn: vi.fn(async (_spec, hooks) => {
+			if (!hooks.beforeLaunch()) return { output: '', exitCode: null, executionStarted: false };
+			hooks.onStarted(12345);
+			return new Promise<CardSpawnResult>((resolve) => {
+				settle = resolve;
+			});
+		}),
+		stop: vi.fn(),
+		probe: () => 'unknown',
+	};
+	const owner = new BoardRuntime(
+		facade,
+		{
+			info: { pid: 101, mode: 'host', bootTime: 1, startedAt: new Date(1).toISOString() },
+			verify: () => ({ ok: true }),
+		},
+		() => ({
+			registryRevision: 1,
+			dispatchEnabled: true,
+			agentStates: { a: { live: true, busy: false, location: { kind: 'local' } } },
+			repository: {
+				id: 'repo0',
+				workingDirectory: roots[0],
+				record: { id: 'repo0', workingDirectory: roots[0], validated: true },
+				identity: 'fixture-git',
+				location: { kind: 'local' },
+			},
+		}),
+		service,
+		() => 'unknown'
+	);
+	expect(owner.acquire()).toEqual({ ok: true });
+	configureBoardRuntimeHost(() => owner);
+	return {
+		owner,
+		service,
+		finish: () =>
+			settle({
+				output: '<!-- maestro:card-complete -->',
+				exitCode: 0,
+				executionStarted: true,
+				terminationConfirmed: true,
+			}),
+	};
+}
+const tick = (operationId = 'fixture-operation'): BoardCommand => ({
+	action: 'tick',
+	target: target(),
+	operationId,
+});
+function control(operation: 'hold' | 'resume' | 'approve', runToken?: BoardRuntimeToken) {
+	return {
+		action: 'control' as const,
+		target: target(),
+		cardId: 'c',
+		cardRevision: facade.read(roots[0], 'b').cards[0].storageRevision!,
+		operation,
+		...(runToken ? { runToken } : {}),
+	};
+}
+
+describe('fenced host intake shared by desktop and real CLI', () => {
+	it('returns runtime-unavailable offline without creating an owner or reservation', async () => {
+		await send(capture());
+		expect(await send(tick())).toMatchObject({ ok: false, error: { code: 'runtime-unavailable' } });
+		const reply = await cli('tick', '--agent', 'creator', '--json');
+		expect(reply).toMatchObject({ code: 1, value: { details: { code: 'runtime-unavailable' } } });
+		expect(db.prepare('SELECT * FROM runtime_owner').all()).toEqual([]);
+		expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
+	});
+	it('races desktop and actual Commander/WebSocket tick at one attempt and native service', async () => {
+		const fixture = installBoardOwner();
+		const request = tick();
+		const [desktop, actualCli] = await Promise.all([
+			executeBoardRuntimeCommand(request as Extract<BoardCommand, { action: 'tick' }>),
+			cli('tick', '--agent', 'creator', '--json'),
+		]);
+		expect(desktop.ok).toBe(true);
+		expect(actualCli.code).toBe(0);
+		expect(fixture.service.spawn).toHaveBeenCalledTimes(1);
+		expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(1);
+		expect(db.prepare('SELECT * FROM runs').all()).toHaveLength(1);
+		expect(await send(request)).toMatchObject({ ok: false, error: { code: 'stale-revision' } });
+		await send(tick('retry'));
+		expect(fixture.service.spawn).toHaveBeenCalledTimes(1);
+		fixture.finish();
+		await vi.waitFor(() => expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0));
+	});
+	it('keeps a Stop reserved until matching termination and Resume clears only hold', async () => {
+		const fixture = installBoardOwner();
+		const reply = await send(tick());
+		const token = result<{ runToken: BoardRuntimeToken }[]>(reply)[0].runToken;
+		const stopped = await cancelBoardRuntimeCard(roots[0], 'b', 'c');
+		expect(stopped.cards[0].heldByUser).toBe(true);
+		expect(fixture.service.stop).toHaveBeenCalledWith(expect.objectContaining({ runToken: token }));
+		expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(1);
+		expect(await send(control('resume', token))).toMatchObject({
+			ok: false,
+			error: { reason: 'termination-unconfirmed' },
+		});
+		fixture.finish();
+		await vi.waitFor(() => expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0));
+		expect(await send(control('resume', token))).toMatchObject({ ok: true });
+		expect(facade.read(roots[0], 'b').cards[0].heldByUser).not.toBe(true);
+	});
+	it('rejects authority forgery and required approval across native host/CLI/status', async () => {
+		const fixture = installBoardOwner(false);
+		expect(await send(tick())).toMatchObject({
+			ok: true,
+			value: [{ ok: false, reason: 'approval-required' }],
+		});
+		expect(await send(control('approve'))).toMatchObject({
+			ok: false,
+			error: { code: 'protected-field' },
+		});
+		expect(await raw({ ...control('approve'), human: true })).toMatchObject({
+			ok: false,
+			error: { code: 'invalid-input' },
+		});
+		expect(await raw({ ...control('approve'), actorAuthority: 'human' })).toMatchObject({
+			ok: false,
+			error: { code: 'invalid-input' },
+		});
+		expect(
+			await send({
+				action: 'status',
+				target: target(),
+				cardId: 'c',
+				cardRevision: facade.read(roots[0], 'b').cards[0].storageRevision!,
+				status: 'todo',
+			})
+		).toMatchObject({ ok: true });
+		expect(await send(tick('after-status'))).toMatchObject({
+			ok: true,
+			value: [{ reason: 'approval-required' }],
+		});
+		expect(fixture.service.spawn).not.toHaveBeenCalled();
+		const approved = await executeBoardRuntimeCommand(
+			control('approve'),
+			'native-fixture-main-frame'
+		);
+		expect(approved).toMatchObject({ ok: true });
+		expect(await send(tick('after-human-grant'))).toMatchObject({
+			ok: true,
+			value: [{ ok: true }],
+		});
+		expect(fixture.service.spawn).toHaveBeenCalledTimes(1);
+		fixture.finish();
+		await vi.waitFor(() => expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0));
+	});
+	it('rejects wrong attempt, source and unknown token without Stop or partial writes', async () => {
+		const fixture = installBoardOwner();
+		const reply = await send(tick());
+		const token = result<{ runToken: BoardRuntimeToken }[]>(reply)[0].runToken;
+		expect(
+			await send(control('hold', { ...token, generation: token.generation + 1 }))
+		).toMatchObject({ ok: false, error: { reason: 'attempt-conflict' } });
+		const wrong = control('hold', token);
+		wrong.target = target(1);
+		expect(await send(wrong)).toMatchObject({ ok: false });
+		expect(fixture.service.stop).not.toHaveBeenCalled();
+		expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(1);
+		fixture.finish();
+		await vi.waitFor(() => expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0));
+	});
+});
+
+it('uses the real desktop IPC handler and derives approval only from its main-frame sender', async () => {
+	const fixture = installBoardOwner(false);
+	const contents = { mainFrame: {} };
+	registerBoardHandlers({
+		getCueEngine: () => null,
+		getMainWindow: () => ({ isDestroyed: () => false, webContents: contents }) as never,
+	});
+	const handle = ipcHandlers.get('board:runtimeCommand')!;
+	expect(
+		await handle({ sender: {}, senderFrame: contents.mainFrame }, control('approve'))
+	).toMatchObject({ ok: false, error: { code: 'protected-field' } });
+	expect(await handle({ sender: contents, senderFrame: {} }, control('approve'))).toMatchObject({
+		ok: false,
+		error: { code: 'protected-field' },
+	});
+	expect(
+		await handle(
+			{ sender: contents, senderFrame: contents.mainFrame },
+			{ ...control('approve'), human: true }
+		)
+	).toMatchObject({ ok: false, error: { code: 'invalid-input' } });
+	expect(
+		await handle({ sender: contents, senderFrame: contents.mainFrame }, control('approve'))
+	).toMatchObject({ ok: true });
+	expect(await handle({ sender: contents, senderFrame: contents.mainFrame }, tick())).toMatchObject(
+		{ ok: true, value: [{ ok: true }] }
+	);
+	expect(fixture.service.spawn).toHaveBeenCalledTimes(1);
+	const token = db.prepare('SELECT specification_json FROM runs').get() as {
+		specification_json: string;
+	};
+	const actualToken = JSON.parse(token.specification_json).runToken;
+	expect(
+		await cli(
+			'hold',
+			'c',
+			'--agent',
+			'creator',
+			'--json',
+			'--run-id',
+			actualToken.runId,
+			'--owner-epoch',
+			String(actualToken.ownerEpoch),
+			'--generation',
+			String(actualToken.generation)
+		)
+	).toMatchObject({ code: 0, value: { accepted: true } });
+	expect(fixture.service.stop).toHaveBeenCalledTimes(1);
+	fixture.finish();
+	await vi.waitFor(() => expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0));
+	expect(
+		await cli(
+			'resume',
+			'c',
+			'--agent',
+			'creator',
+			'--json',
+			'--run-id',
+			actualToken.runId,
+			'--owner-epoch',
+			String(actualToken.ownerEpoch),
+			'--generation',
+			String(actualToken.generation)
+		)
+	).toMatchObject({ code: 0, value: { accepted: true } });
+});
+
+it('invalidates native grants on specification edits and rejects stale approvals without starting', async () => {
+	const fixture = installBoardOwner(false);
+	const old = control('approve');
+	expect(await executeBoardRuntimeCommand(old, 'native-main-frame')).toMatchObject({ ok: true });
+	const saved = facade.read(roots[0], 'b');
+	expect(
+		await send(capture({ ...saved.cards[0], body: 'Changed after human approval' }))
+	).toMatchObject({ ok: true });
+	expect(await send(tick())).toMatchObject({ ok: true, value: [{ reason: 'approval-required' }] });
+	await expect(executeBoardRuntimeCommand(old, 'native-main-frame')).rejects.toThrow(
+		'changed since read'
+	);
+	expect(fixture.service.spawn).not.toHaveBeenCalled();
+	expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
 });

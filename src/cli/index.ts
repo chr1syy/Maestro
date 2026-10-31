@@ -92,6 +92,7 @@ import {
 	boardRemoveCard,
 	boardSetStatus,
 	boardTick,
+	boardControl,
 	boardWatch,
 } from './commands/board';
 import {
@@ -1660,6 +1661,23 @@ board
 	.option('--json', 'Output as JSON (for scripting)')
 	.action(boardSetStatus);
 
+for (const operation of ['hold', 'resume', 'approve'] as const) {
+	board
+		.command(`${operation} <cardId>`)
+		.description(
+			operation === 'approve'
+				? 'Request approval (requires native human authority)'
+				: `${operation} a fenced Board attempt`
+		)
+		.option('-a, --agent <id-or-name>', 'Agent project context')
+		.option('--board <id>', 'Collection legacy id')
+		.option('--run-id <id>', 'Exact host run identity')
+		.option('--owner-epoch <n>', 'Exact host owner epoch')
+		.option('--generation <n>', 'Exact host attempt generation')
+		.option('--json', 'Machine-readable response')
+		.action((cardId, options) => boardControl(cardId, { ...options, operation }));
+}
+
 // Central identity and capture flags are registered on the actual Commander commands.
 for (const command of board.commands) {
 	command
@@ -1687,21 +1705,24 @@ for (const command of board.commands) {
 
 board
 	.command('tick')
-	.description('Run one dispatcher pass headlessly (promote, claim, spawn, apply)')
+	.description('Request one fenced Board dispatch pass from the running host')
 	.requiredOption('-a, --agent <id-or-name>', 'Agent whose project owns the board(s)')
 	.option('--board <boardId>', 'Tick only a specific board')
+	.option('--request-id <id>', 'Stable operation identity for retry')
+	.option('--source <key>', 'Canonical source identity')
+	.option('--collection <key>', 'Canonical collection identity')
+	.option('--revision <n>', 'Expected collection revision')
 	.option('--json', 'Output as JSON (for scripting)')
 	.action(boardTick);
 
 board
 	.command('watch')
-	.description(
-		'Run `board tick` on a loop until Ctrl-C. The desktop Cue engine ticks the same ' +
-			'boards; overlapping dispatchers on the same board are unsupported: the write ' +
-			'chain is process-local. Use one dispatcher per board. No daemonization, no lock files.'
-	)
+	.description('Request fenced host ticks until Ctrl-C; the host owns every run.')
 	.requiredOption('-a, --agent <id-or-name>', 'Agent whose project owns the board(s)')
 	.option('--board <boardId>', 'Watch only a specific board')
+	.option('--source <key>', 'Canonical source identity')
+	.option('--collection <key>', 'Canonical collection identity')
+	.option('--revision <n>', 'Expected collection revision')
 	.option('--interval <seconds>', 'Seconds between ticks (default 30, minimum 5)')
 	.option('--json', 'Output one JSON object per tick (for scripting)')
 	.action(boardWatch);

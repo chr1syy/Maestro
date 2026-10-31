@@ -18,7 +18,29 @@ export interface BoardCommandTarget {
 	collectionKey: string;
 	expectedRevision: number;
 }
+export interface BoardRuntimeToken {
+	runId: string;
+	ownerEpoch: number;
+	generation: number;
+}
+export type BoardRuntimeCommand =
+	| { action: 'tick'; target: BoardCommandTarget; operationId: string }
+	| {
+			action: 'control';
+			target: BoardCommandTarget;
+			cardId: string;
+			cardRevision: number;
+			operation: 'hold' | 'resume' | 'approve';
+			runToken?: BoardRuntimeToken;
+	  };
+export interface BoardTickResult {
+	cardId: string;
+	ok: boolean;
+	reason?: string;
+	runToken?: BoardRuntimeToken;
+}
 export type BoardCommand =
+	| BoardRuntimeCommand
 	| { action: 'query'; query: BoardWorkspaceQuery }
 	| { action: 'catalog' }
 	| { action: 'capture'; target: BoardCommandTarget; capture: BoardCaptureCommand }
@@ -50,6 +72,8 @@ export type BoardCommandResult =
 				| Board
 				| Board[]
 				| { success: boolean; prUrl?: string; error?: string }
+				| BoardTickResult[]
+				| { accepted: true; runToken?: BoardRuntimeToken }
 				| null;
 			readiness?: Record<string, string[]>;
 	  }
@@ -81,6 +105,8 @@ export function parseBoardCommand(message: Record<string, unknown>): BoardComman
 		delete: ['target', 'force'],
 		'delete-card': ['target', 'cardId', 'cardRevision'],
 		status: ['target', 'cardId', 'cardRevision', 'status'],
+		tick: ['target', 'operationId'],
+		control: ['target', 'cardId', 'cardRevision', 'operation', 'runToken'],
 	};
 	if (
 		typeof action !== 'string' ||
@@ -118,7 +144,29 @@ export function parseBoardCommand(message: Record<string, unknown>): BoardComman
 		!revision(target.expectedRevision)
 	)
 		return;
-	if (action === 'card-pr') {
+	if (action === 'tick') {
+		if (!text(message.operationId)) return;
+	} else if (action === 'control') {
+		if (
+			!text(message.cardId) ||
+			!revision(message.cardRevision) ||
+			!['hold', 'resume', 'approve'].includes(message.operation as string)
+		)
+			return;
+		if (message.runToken !== undefined) {
+			const token = message.runToken;
+			if (
+				!record(token) ||
+				!keys(token, ['runId', 'ownerEpoch', 'generation']) ||
+				!text(token.runId) ||
+				!revision(token.ownerEpoch) ||
+				token.ownerEpoch === 0 ||
+				!revision(token.generation) ||
+				token.generation === 0
+			)
+				return;
+		}
+	} else if (action === 'card-pr') {
 		if (!text(message.cardId)) return;
 	} else if (action === 'capture') {
 		const command = message.capture;

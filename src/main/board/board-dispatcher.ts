@@ -246,12 +246,12 @@ export function promoteEligibleCards(board: Board, nowIso: string): BoardCard[] 
  * added today should jump a `normal` backlog - while the age tie-break keeps
  * dispatch deterministic and stable across ticks within one priority.
  */
-function readyCardsInDispatchOrder(board: Board): BoardCard[] {
+export function readyCardsInDispatchOrder(board: Board, includeTodo = false): BoardCard[] {
 	return board.cards
 		.map((card, index) => ({ card, index }))
 		.filter(
 			(entry) =>
-				entry.card.status === 'ready' &&
+				(entry.card.status === 'ready' || (includeTodo && entry.card.status === 'todo')) &&
 				!entry.card.heldByUser &&
 				getBlockers(entry.card, board).length === 0
 		)

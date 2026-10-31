@@ -124,14 +124,11 @@ Press **Stop** on a `running` card to kill its agent process. The attempt is rec
 
 Stop is a **hold**, not a pause that expires. The card returns to **To Do** carrying an explicit user hold, and the dispatcher's promote pass skips held cards entirely, so it will not be picked up again on the next tick or any tick after it. A held tile shows a `held` badge so it is clear why it is sitting still.
 
-You resume it yourself, either way:
-
-- Press **Resume** on the tile (it appears in the same spot Stop occupied).
-- Move the card out of To Do and back - drag it, press `m` on the tile and use the "Move to" picker, or run `maestro-cli board set-status <cardId> todo`. Any manual status move releases the hold.
+Press **Resume** on the tile, or use `board resume` with the exact run token after termination. Ordinary card edits and status moves preserve holds.
 
 A held card does **not** unblock its children, exactly like any other non-`done` card: a child only becomes eligible once every parent is strictly `done`. So stopping a card parks the work behind it too.
 
-Cancellation itself is a desktop-app action. `maestro-cli` cannot stop an in-flight run, because the agent process belongs to whichever dispatcher started it, in another process. Releasing a hold from the CLI works fine, because that is only a board file change.
+Desktop Stop and CLI `board hold` use the same host runtime and exact persisted run token. Stop sets a durable hold immediately; capacity stays reserved until the owning run service confirms termination. `board resume` clears only the hold after termination and never grants dispatch or review approval.
 
 ## Notifications
 
@@ -221,7 +218,7 @@ Board list, show, capture and CRUD commands use the running Maestro host through
 
 Use `--revision` and `--card-revision` to retain a previously read optimistic concurrency token. Without these flags, the command reads the current host snapshot and submits its revisions; a concurrent write is still rejected. JSON failures retain the readable `error` and include machine-readable `details.code`, `details.message` and host capture errors. An unavailable host returns an error without falling back to a local database.
 
-Capture accepts `--scope-agent` or `--scope-group`, optional `--assignee-agent` pin, `--assignee` with `--profile-namespace`, `--repository`, `--working-directory` and `--start-mode direct|approval`. The host validates current membership and repository boundaries. Any Maestro agent can capture a draft without joining the worker registry. Missing execution bindings remain non-executable drafts. Required dispatch approval and human review cannot be granted by CLI status edits or authority flags; an already authorized direct policy remains usable. Tick/watch integration with global claims is a separate lifecycle step.
+Capture accepts `--scope-agent` or `--scope-group`, optional `--assignee-agent` pin, `--assignee` with `--profile-namespace`, `--repository`, `--working-directory` and `--start-mode direct|approval`. The host validates current membership and repository boundaries. Any Maestro agent can capture a draft without joining the worker registry. Missing execution bindings remain non-executable drafts. Required dispatch approval and human review cannot be granted by CLI status edits or authority flags; an already authorized direct policy remains usable. Tick/watch use the same host claim/lifecycle entry.
 
 ```bash
 # Profiles
@@ -255,9 +252,11 @@ maestro-cli board watch --agent <id-or-name> --interval 60
 
 A few behaviors worth knowing:
 
-- `board create` is the bootstrap command: a board id is all the other commands need, so you never have to open the app to start a headless workflow.
+- `board create` uses the running host. Mutations require a registered project/source and unambiguous collection identity.
 - `board delete` refuses a board that still has cards which are not `done` unless you pass `--force`. Force only bypasses unfinished-card confirmation; running cards must still be stopped first. Deletion takes the whole board, cards and run history included.
 - `board update-card` and `profile update` change only the flags you actually pass. Pass an empty string (`--assignee ""`, `--model ""`) to clear a field. `profile update` keeps the profile's id, so cards assigned to that role keep working; `profile create` would mint a new id and leave them pointing at nothing.
-- A `running` card cannot be edited, moved or removed. Stop it before deleting it or its board; `--force` does not bypass this protection. The CLI has no handle on the in-flight agent process (it belongs to whichever dispatcher started it), so it cannot stop the run for you - use the stop button on the card in the app.
+- A `running` card cannot be edited, moved or removed. Use `board hold <cardId> --run-id <id> --owner-epoch <n> --generation <n> --agent <agent> --json` to request Stop on the exact host attempt; `--force` cannot release its reservation. Use `board resume` with that token after termination.
 - `board set-status` accepts manual statuses (`triage`, `todo`, `review`, `blocked`, `done`), but cannot approve a human review or grant required dispatch approval. For a qualifying card carrying `prOnDone`, this command opens the pull request and waits for the result. `board tick` never opens a pull request.
-- `board watch` is just `board tick` on a timer (default 30 seconds, minimum 5), stopped with Ctrl-C. It does not daemonize and takes no lock. Running two dispatchers on the same board (the desktop app with Cue enabled, plus a `watch`) is unsupported: each one can overwrite the other's latest card transition, because their read-modify-write cycles are not serialized across processes (atomic writes only prevent torn files). Pick one dispatcher per board - the CLI tick is meant for headless projects the app is not also dispatching.
+- `board tick` and `board watch` request the existing host runtime through the authenticated command socket. They never open a Board DB, spawn an agent, reclaim a run by age or start a scheduler locally. `watch` polls that same host entry (default 30 seconds, minimum 5) until Ctrl-C. Concurrent desktop/CLI requests share fenced claims and attempts. Missing host/owner and conflicts return machine-readable errors or per-card waiting reasons. A successful intake reports `accepted` and a run token; it does not establish process execution or task success.
+- CLI `board approve` cannot grant required human approval. The native `board.runtimeCommand` IPC endpoint derives that authority from the actual desktop main-frame sender, with grants bound to the captured specification revision. Hold/Resume and ordinary status changes preserve required approval.
+- The transport requires the owning Cue/bootstrap context to install `configureBoardRuntimeHost` with its existing `BoardRuntime`. The global Cue wiring is a separate integration step; an unconfigured host returns `runtime-unavailable`.

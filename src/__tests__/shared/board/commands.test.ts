@@ -13,6 +13,26 @@ const status = { action: 'status', target, cardId: 'c', cardRevision: 1, status:
 
 describe('Board wire parser and native runtime dispatch', () => {
 	it.each([
+		{ action: 'tick', target, operationId: '' },
+		{ action: 'tick', target, operationId: 'r', actorAuthority: 'human' },
+		{ action: 'control', target, operation: 'kill', cardId: 'c', cardRevision: 1 },
+		{
+			action: 'control',
+			target,
+			operation: 'hold',
+			cardId: 'c',
+			cardRevision: 1,
+			runToken: { runId: 'r', ownerEpoch: 0, generation: 1 },
+		},
+		{
+			action: 'control',
+			target,
+			operation: 'resume',
+			cardId: 'c',
+			cardRevision: 1,
+			runToken: { runId: 'r', ownerEpoch: 1, generation: 1, human: true },
+		},
+		{ action: 'control', target, operation: 'approve', cardId: 'c', cardRevision: 1, human: true },
 		{ ...status, human: true },
 		{ ...status, actorAuthority: 'human' },
 		{ ...status, target: { ...target, human: true } },

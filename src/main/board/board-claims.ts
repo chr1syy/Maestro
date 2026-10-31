@@ -40,11 +40,9 @@ export interface BoardClaimCommand extends BoardCardKey {
 	workerAgentId: string;
 	readRevision: BoardClaimReadRevision;
 }
-export interface BoardRunToken {
-	runId: string;
-	ownerEpoch: number;
-	generation: number;
-}
+export type { BoardRuntimeToken as BoardRunToken } from '../../shared/board/commands';
+import type { BoardRuntimeToken as BoardRunToken } from '../../shared/board/commands';
+
 /** Immutable preparation, also consumed by the fenced runtime. */
 export interface BoardRunSpecification {
 	key: BoardCardKey;

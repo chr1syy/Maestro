@@ -82,6 +82,7 @@ let boardApi: {
 	setCardStatus: ReturnType<typeof vi.fn>;
 	deleteCard: ReturnType<typeof vi.fn>;
 	cancelCard: ReturnType<typeof vi.fn>;
+	resumeCard: ReturnType<typeof vi.fn>;
 	onBoardChanged: ReturnType<typeof vi.fn>;
 };
 
@@ -188,6 +189,7 @@ function installApis(initialBoards: Board[], profiles?: unknown[]): void {
 		setCardStatus: vi.fn().mockResolvedValue(initialBoards[0]),
 		deleteCard: vi.fn().mockResolvedValue(initialBoards[0]),
 		cancelCard: vi.fn().mockResolvedValue(initialBoards[0]),
+		resumeCard: vi.fn().mockResolvedValue(initialBoards[0]),
 		onBoardChanged: vi.fn((cb: (payload: { projectRoot: string }) => void) => {
 			boardChangedListeners.push(cb);
 			return unsubscribeBoardChanged;
@@ -420,14 +422,15 @@ describe('BoardModal run cancellation', () => {
 		expect(notifyToast).toHaveBeenCalledWith(
 			expect.objectContaining({
 				color: 'orange',
-				message: 'Stopped the run. The card is held in To Do until you resume it.',
+				message:
+					'Stop requested. The card is held; capacity is released after termination is confirmed.',
 			})
 		);
 	});
 
 	// AB1 / Decision 2: Resume mirrors Stop. It only shows on held cards, and it
-	// clears the flag through `updateCard` so the promote pass sees the card again.
-	it('shows a resume button on held cards only, and clears the hold through updateCard', async () => {
+	// requests the fenced host to release the hold after termination.
+	it('shows a resume button on held cards only, and requests hold release through the owning runtime', async () => {
 		const held = makeCard({ id: 'cardA', title: 'Card A', heldByUser: true });
 		const idle = makeCard({ id: 'cardB', title: 'Card B' });
 		const board: Board = { id: 'b1', name: 'My Board', cards: [held, idle] };
@@ -441,12 +444,8 @@ describe('BoardModal run cancellation', () => {
 		expect(screen.getByText('held')).toBeInTheDocument();
 
 		fireEvent.click(resume);
-		await waitFor(() => expect(boardApi.updateCard).toHaveBeenCalledTimes(1));
-		expect(boardApi.updateCard).toHaveBeenCalledWith(
-			PROJECT_ROOT,
-			'b1',
-			expect.objectContaining({ id: 'cardA', status: 'todo', heldByUser: false })
-		);
+		await waitFor(() => expect(boardApi.resumeCard).toHaveBeenCalledTimes(1));
+		expect(boardApi.resumeCard).toHaveBeenCalledWith(PROJECT_ROOT, 'b1', 'cardA');
 	});
 });
 

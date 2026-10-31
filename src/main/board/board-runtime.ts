@@ -1,3 +1,4 @@
+import { parseCardMarkers } from '../../shared/board/cardMarkers';
 /** Durable Board lifecycle around the existing Cue runner. No queue, timer,
  * lockfile algorithm or process controller. Transport/Cue hosts inject their
  * existing lock and native liveness evidence; unknown always keeps capacity. */
@@ -100,6 +101,85 @@ export class BoardRuntime {
 	claim(command: BoardClaimCommand) {
 		if (!this.owns()) return { ok: false as const, reason: 'owner-conflict' as const };
 		return this.storage.claim(command, () => this.context());
+	}
+
+	/** Shared transport/Cue intake. Claim is synchronous before the native service
+	 * yields; requests return the durable token rather than waiting for a whole turn. */
+	dispatch(command: BoardClaimCommand) {
+		const claim = this.claim(command);
+		if (!claim.ok) return claim;
+		const current = this.read(claim.runToken);
+		if (current?.life.phase === 'prepared') {
+			void this.start(claim.runToken).catch(() => {
+				this.uncertain(claim.runToken, 'launch-or-result-uncertain');
+			});
+		}
+		return claim;
+	}
+
+	/** Host-owned selection data. No caller supplies membership or registry revision. */
+	intakeRevision() {
+		return this.context().registryRevision;
+	}
+
+	/** Native dispatch grant. Revision checks and grant are one transaction. */
+	approve(
+		key: import('./board-workspace-storage').BoardCardKey,
+		collectionRevision: number,
+		cardRevision: number,
+		principal: string
+	): Verdict {
+		return this.storage.db
+			.transaction((): Verdict => {
+				if (!this.owns()) return { ok: false, reason: 'owner-conflict' };
+				const collection = this.storage.workspace.readCollection(key);
+				const card = collection?.cards.find((c) => c.cardId === key.cardId);
+				if (!collection || !card) return { ok: false, reason: 'not-found' };
+				if (collection.revision !== collectionRevision || card.revision !== cardRevision)
+					return { ok: false, reason: 'stale-revision' };
+				const policy = card.payload.capturePolicy as BoardCard['capturePolicy'];
+				if (
+					!policy ||
+					policy.effectiveStartMode !== 'approval' ||
+					!principal ||
+					!Number.isSafeInteger(policy.specificationRevision) ||
+					policy.specificationRevision < 0 ||
+					policy.specificationRevision > cardRevision
+				)
+					return { ok: false, reason: 'invalid-specification' };
+				if (
+					this.storage.db
+						.prepare('SELECT 1 FROM reservations WHERE collection_key=? AND card_id=?')
+						.get(key.collectionKey, key.cardId)
+				)
+					return { ok: false, reason: 'attempt-active' };
+				this.storage.db
+					.prepare(
+						'UPDATE cards SET payload_json=?, revision=revision+1 WHERE collection_key=? AND id=?'
+					)
+					.run(
+						canonicalJson({
+							...card.payload,
+							capturePolicy: {
+								...policy,
+								dispatchApproval: 'granted',
+								grant: {
+									specificationRevision: policy.specificationRevision,
+									principal,
+									grantedAt: new Date().toISOString(),
+								},
+							},
+						}),
+						key.collectionKey,
+						key.cardId
+					);
+				this.storage.db
+					.prepare('UPDATE collections SET revision=revision+1 WHERE collection_key=?')
+					.run(key.collectionKey);
+				this.storage.db.prepare('UPDATE workspace SET revision=revision+1 WHERE id=1').run();
+				return { ok: true };
+			})
+			.immediate();
 	}
 
 	/** Only the prepared -> starting winner invokes the existing run service. */
@@ -422,7 +502,7 @@ export class BoardRuntime {
 							result.executionStarted === false
 								? {
 										...result,
-										output: '',
+										output: parseCardMarkers(result.output).blocked ? result.output : '',
 										exitCode: null,
 										error: result.error ?? 'Agent did not start',
 									}

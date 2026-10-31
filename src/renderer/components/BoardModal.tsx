@@ -947,7 +947,8 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				notifyToast({
 					color: 'orange',
 					title: 'Board',
-					message: 'Stopped the run. The card is held in To Do until you resume it.',
+					message:
+						'Stop requested. The card is held; capacity is released after termination is confirmed.',
 				});
 			} catch (err) {
 				logger.error(`Failed to cancel card: ${String(err)}`);
@@ -958,28 +959,19 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 		[board, projectRoot, applyBoard]
 	);
 
-	/**
-	 * AB1: release the hold a Stop put on a card. The card never left `todo`, so
-	 * this only clears `heldByUser` and lets the dispatcher's promote pass see it
-	 * again on the next tick. Goes through `updateCard` rather than a dedicated
-	 * IPC: the flag lives on the card, and `validateBoardCard` serializes it only
-	 * when it is `true`, so writing `false` drops it from `board.yaml` entirely.
-	 */
+	/** Release only through the owning runtime, after termination is confirmed. */
 	const handleResumeCard = useCallback(
 		async (cardId: string) => {
 			if (!board || !projectRoot) return;
 			const card = board.cards.find((c) => c.id === cardId);
 			if (!card?.heldByUser) return;
 			try {
-				const updated = await window.maestro.board.updateCard(projectRoot, board.id, {
-					...card,
-					heldByUser: false,
-				});
+				const updated = await window.maestro.board.resumeCard(projectRoot, board.id, cardId);
 				applyBoard(updated);
 				notifyToast({
 					color: 'green',
 					title: 'Board',
-					message: 'Resumed the card. It runs again once its parents are done.',
+					message: 'Released the hold. Dispatch still requires all execution and approval checks.',
 				});
 			} catch (err) {
 				logger.error(`Failed to resume card: ${String(err)}`);

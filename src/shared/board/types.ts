@@ -581,6 +581,7 @@ export type BoardCaptureResponse =
 				code: string;
 				message: string;
 				captureErrors?: import('./domain').BoardCaptureError[];
+				reason?: string;
 			};
 	  };
 
