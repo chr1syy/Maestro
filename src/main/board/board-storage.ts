@@ -717,6 +717,8 @@ export function stampBoardRunPr(
 
 /** Optional board settings accepted at creation time. */
 export interface CreateBoardOptions {
+	/** Optional explicit source identity from authenticated transport. */
+	expectedSourceKey?: string;
 	/** Cap on how many cards may be `running` at once. Must be a positive integer. */
 	maxInProgress?: number;
 	/** Opt this board into the LLM auto-decompose pass for `triage` cards. */
@@ -736,12 +738,15 @@ export function createBoard(
 ): Board {
 	const trimmed = (name ?? '').trim();
 	if (!trimmed) {
-		throw new Error('createBoard: name is required');
+		throw new BoardWorkspaceStorageError('invalid-input', 'createBoard: name is required');
 	}
 	const board: Board = { id: generateUUID(), name: trimmed, cards: [] };
 	if (options.maxInProgress !== undefined) {
 		if (!Number.isFinite(options.maxInProgress) || options.maxInProgress < 1) {
-			throw new Error('createBoard: maxInProgress must be a positive integer');
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
+				'createBoard: maxInProgress must be a positive integer'
+			);
 		}
 		board.maxInProgress = Math.floor(options.maxInProgress);
 	}
@@ -752,6 +757,11 @@ export function createBoard(
 		throw new BoardWorkspaceStorageError(
 			sources.length ? 'legacy-mapping-ambiguous' : 'legacy-mapping-missing',
 			'Creating a collection requires exactly one explicit source'
+		);
+	if (options.expectedSourceKey !== undefined && sources[0] !== options.expectedSourceKey)
+		throw new BoardWorkspaceStorageError(
+			'identity-mismatch',
+			'Board source does not match project'
 		);
 	const saved = facade.project(
 		facade.workspace.createCollection({
@@ -776,13 +786,18 @@ export function createBoard(
  * resolving. Throws if the board is missing or the name is blank. Returns the
  * renamed board.
  */
-export function renameBoard(projectRoot: string, boardId: string, name: string): Board {
+export function renameBoard(
+	projectRoot: string,
+	boardId: string,
+	name: string,
+	expectedRevision?: number
+): Board {
 	const trimmed = (name ?? '').trim();
 	if (!trimmed) {
-		throw new Error('renameBoard: name is required');
+		throw new BoardWorkspaceStorageError('invalid-input', 'renameBoard: name is required');
 	}
 	const boards = loadBoards(projectRoot);
-	const board = requireBoard(boards, boardId);
+	const board = requireBoard(boards, boardId, expectedRevision);
 	board.name = trimmed;
 	saveBoard(projectRoot, board, board.storage?.expectedRevision);
 	return board;
@@ -798,17 +813,21 @@ export function renameBoard(projectRoot: string, boardId: string, name: string):
 export function deleteBoard(
 	projectRoot: string,
 	boardId: string,
-	options: { force?: boolean } = {}
+	options: { force?: boolean; expectedRevision?: number } = {}
 ): Board[] {
 	const boards = loadBoards(projectRoot);
-	const board = requireBoard(boards, boardId);
+	const board = requireBoard(boards, boardId, options.expectedRevision);
 	if (board.cards.some((card) => card.status === 'running')) {
-		throw new Error('This board has running cards. Stop them before deleting the board.');
+		throw new BoardWorkspaceStorageError(
+			'invalid-input',
+			'This board has running cards. Stop them before deleting the board.'
+		);
 	}
 	if (!options.force) {
 		const unfinished = board.cards.filter((c) => c.status !== 'done');
 		if (unfinished.length > 0) {
-			throw new Error(
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
 				`Board "${board.name}" still has ${unfinished.length} card(s) that are not done. ` +
 					`Pass --force to delete it and everything on it anyway.`
 			);
@@ -822,11 +841,13 @@ export function deleteBoard(
 }
 
 /** Load a board by id or throw a caller-surfaceable error when it is missing. */
-function requireBoard(boards: Board[], boardId: string): Board {
+function requireBoard(boards: Board[], boardId: string, expectedRevision?: number): Board {
 	const board = boards.find((b) => b.id === boardId);
 	if (!board) {
-		throw new Error(`Board "${boardId}" not found`);
+		throw new BoardWorkspaceStorageError('not-found', `Board "${boardId}" not found`);
 	}
+	if (expectedRevision !== undefined && board.storage?.expectedRevision !== expectedRevision)
+		throw new BoardWorkspaceStorageError('stale-revision', 'Board changed since read');
 	return board;
 }
 
@@ -878,7 +899,8 @@ export function updateCardStatus(
 	projectRoot: string,
 	boardId: string,
 	cardId: string,
-	status: CardStatus
+	status: CardStatus,
+	expectedRevision?: number
 ): Board {
 	// The `CardStatus` annotation is compile-time only, and this runs behind an
 	// IPC boundary the renderer and the web-desktop bridge both reach. An
@@ -886,25 +908,33 @@ export function updateCardStatus(
 	// validator then dropped the whole card as malformed - a silent delete. Fail
 	// the write instead.
 	if (!(CARD_STATUSES as readonly string[]).includes(status)) {
-		throw new Error(
+		throw new BoardWorkspaceStorageError(
+			'invalid-input',
 			`updateCardStatus: "${status}" is not a valid card status. ` +
 				`Valid: ${CARD_STATUSES.join(', ')}.`
 		);
 	}
 	if (DERIVED_STATUSES.has(status)) {
-		throw new Error(
+		throw new BoardWorkspaceStorageError(
+			'invalid-input',
 			`updateCardStatus: "${status}" is set by the dispatcher, not manually. ` +
 				`Move the card to "todo" instead - it is promoted to "ready" once its parents are done.`
 		);
 	}
 	const boards = loadBoards(projectRoot);
-	const board = requireBoard(boards, boardId);
+	const board = requireBoard(boards, boardId, expectedRevision);
 	const card = board.cards.find((c) => c.id === cardId);
 	if (!card) {
-		throw new Error(`updateCardStatus: card "${cardId}" not found on board "${boardId}"`);
+		throw new BoardWorkspaceStorageError(
+			'invalid-input',
+			`updateCardStatus: card "${cardId}" not found on board "${boardId}"`
+		);
 	}
 	if (card.status === 'running') {
-		throw new Error('This card is running. Stop it before changing its status.');
+		throw new BoardWorkspaceStorageError(
+			'invalid-input',
+			'This card is running. Stop it before changing its status.'
+		);
 	}
 	card.status = status;
 	// Status changes preserve intake holds and never grant dispatch approval.
@@ -988,13 +1018,21 @@ export function updateCard(projectRoot: string, boardId: string, card: BoardCard
  * A card is never made its own parent (a self-edge, if the deleted card somehow
  * listed one of its own children as a parent).
  */
-export function deleteCard(projectRoot: string, boardId: string, cardId: string): Board {
+export function deleteCard(
+	projectRoot: string,
+	boardId: string,
+	cardId: string,
+	expectedRevision?: number
+): Board {
 	const boards = loadBoards(projectRoot);
-	const board = requireBoard(boards, boardId);
+	const board = requireBoard(boards, boardId, expectedRevision);
 	const doomed = board.cards.find((c) => c.id === cardId);
 	if (!doomed) return board;
 	if (doomed.status === 'running') {
-		throw new Error('This card is running. Stop it before deleting the card.');
+		throw new BoardWorkspaceStorageError(
+			'invalid-input',
+			'This card is running. Stop it before deleting the card.'
+		);
 	}
 
 	const inheritedParents = doomed.parents.filter((id) => id !== cardId);
