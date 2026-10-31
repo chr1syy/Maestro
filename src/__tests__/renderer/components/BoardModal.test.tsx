@@ -1289,6 +1289,48 @@ it('shows the handler message without Electron IPC plumbing on load failure', as
 });
 
 describe('Board worker registry interactions', () => {
+	it('shows session changes, missing agents and observed runs without asserting a reservation', async () => {
+		const card = makeCard({
+			id: 'run',
+			title: 'Observed work',
+			status: 'running',
+			runs: [{ attempt: 1, startedAt: '2026-10-31T00:00:00Z', workerAgentId: 's1' }],
+		});
+		installApis([{ id: 'b1', name: 'Board', cards: [card] }]);
+		Object.assign(boardApi, {
+			listWorkers: vi.fn().mockResolvedValue([
+				{
+					agentId: 's1',
+					enabled: true,
+					paused: false,
+					payload: { roleRefs: [], allowedRepositoryIds: [] },
+				},
+				{
+					agentId: 'gone',
+					enabled: false,
+					paused: true,
+					payload: { roleRefs: [], allowedRepositoryIds: [] },
+				},
+			]),
+			listWorkerAccessOptions: vi.fn().mockResolvedValue({ roles: [], repositories: [] }),
+		});
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(screen.getByRole('button', { name: 'Workers' }));
+		expect(
+			await screen.findByText(/gone — agent missing; disabled, intake paused; occupancy unknown/)
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/global occupancy unknown; observed running card in loaded boards: Observed work/
+			)
+		).toBeInTheDocument();
+		act(() =>
+			useSessionStore.setState((state) => ({
+				sessions: state.sessions.map((session) => ({ ...session, state: 'busy' })),
+			}))
+		);
+		expect(screen.getByText(/Agent state: busy; global occupancy unknown/)).toBeInTheDocument();
+	});
 	it('registers an agent and updates role, repository, pause and enabled state visibly', async () => {
 		installApis([{ id: 'b1', name: 'Board', cards: [] }]);
 		let workers: Array<{

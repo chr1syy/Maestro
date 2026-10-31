@@ -27,6 +27,7 @@ import { useFocusAfterRender } from '../hooks/utils/useFocusAfterRender';
 import { ConfirmModal } from './ConfirmModal';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { useSessionStore, selectActiveSession } from '../stores/sessionStore';
+import { useLiveSessions } from '../hooks/session/useLiveSessions';
 import { jumpToAgent } from '../services/agentNavigation';
 import { getModalActions, useModalStore, selectModalOpen } from '../stores/modalStore';
 import { notifyToast } from '../stores/notificationStore';
@@ -38,6 +39,7 @@ import { logger } from '../utils/logger';
 import { captureException } from '../utils/sentry';
 import { triggerHaptic, HAPTIC_PATTERNS, isCoarsePointer } from '../utils/touch';
 import { openUrl } from '../utils/openUrl';
+import { observedWorkerRun } from '../utils/boardWorkerStatus';
 
 export interface BoardModalProps {
 	theme: Theme;
@@ -137,6 +139,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const activeSession = useSessionStore(selectActiveSession);
 	const projectRoot = activeSession?.projectRoot ?? '';
 	const allSessions = useSessionStore((s) => s.sessions);
+	const liveSessions = useLiveSessions();
 
 	// Legacy cards display the current project worker marker until dispatch is migrated.
 	const projectAgents = useMemo(
@@ -1114,8 +1117,17 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 								</button>
 							</div>
 						)}
-						{allSessions.map((session) => {
+						{workers
+							.filter((worker) => !allSessions.some((session) => session.id === worker.agentId))
+							.map((worker) => (
+								<div key={worker.agentId} className="py-2">
+									{worker.agentId} — agent missing; {worker.enabled ? 'enabled' : 'disabled'}
+									{worker.paused ? ', intake paused' : ''}; occupancy unknown
+								</div>
+							))}
+						{liveSessions.map((session) => {
 							const worker = workers.find((entry) => entry.agentId === session.id);
+							const observedRun = observedWorkerRun(boards, session.id);
 							const roles = worker?.payload.roleRefs;
 							const repos = worker?.payload.allowedRepositoryIds;
 							const validAccess =
@@ -1169,6 +1181,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 											</button>
 										)}
 									</div>
+									{worker && (
+										<div>
+											Agent state: {session.state}; global occupancy unknown
+											{observedRun && `; observed running card in loaded boards: ${observedRun}`}
+										</div>
+									)}
 									{worker && validAccess && (
 										<div>
 											<div>
