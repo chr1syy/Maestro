@@ -314,6 +314,27 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		});
 		expect(facade.query()).toEqual(before);
 	});
+	it('preserves an existing scoped card and its revisions when an edit pins a foreign agent', async () => {
+		const created = await api.captureCard(command());
+		if (!created.ok) throw new Error(created.error.message);
+		const before = facade.read(dir, 'b');
+		const existing = before.cards[0];
+		const result = await api.captureCard({
+			projectRoot: dir,
+			boardId: 'b',
+			expectedRevision: before.storage!.expectedRevision,
+			card: { ...existing, assigneeAgentId: 'foreign', title: 'Rejected edit' },
+		});
+		expect(result).toMatchObject({
+			ok: false,
+			error: { code: 'invalid-input', message: expect.stringContaining('pin-role-conflict') },
+		});
+		db.close();
+		db = openBoardDb(path.join(dir, 'board.sqlite'));
+		facade = new BoardStorageFacade(db);
+		configureBoardStorage(facade);
+		expect(facade.read(dir, 'b')).toEqual(before);
+	});
 	it('re-reads membership and profile pins rather than keeping an initial snapshot', async () => {
 		agents = agents.map((agent) => ({ ...agent, groupId: 'other' }));
 		expect(await api.captureCard(command())).toMatchObject({
