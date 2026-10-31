@@ -28,7 +28,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { MODAL_PRIORITIES } from '../constants/modalPriorities';
 import { useSessionStore, selectActiveSession } from '../stores/sessionStore';
 import { jumpToAgent } from '../services/agentNavigation';
-import { getModalActions } from '../stores/modalStore';
+import { getModalActions, useModalStore, selectModalOpen } from '../stores/modalStore';
 import { notifyToast } from '../stores/notificationStore';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
@@ -170,23 +170,68 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 
 	const [showWorkers, setShowWorkers] = useState(false);
 	const [workers, setWorkers] = useState<StoredBoardWorker[]>([]);
+	const workersRevision = useRef(0);
 	const [workerBusy, setWorkerBusy] = useState(false);
+	const creatorOpen = useModalStore(selectModalOpen('newInstance'));
+	const [pendingWorkerId, setPendingWorkerId] = useState<string | null>(null);
+	const [workerCreationError, setWorkerCreationError] = useState<string | null>(null);
+	const createdWorkerId = useRef<string | null>(null);
+	const registeringCreatedWorker = useRef(false);
+	const registerCreatedWorker = useCallback(async (agentId: string) => {
+		if (registeringCreatedWorker.current) return;
+		registeringCreatedWorker.current = true;
+		workersRevision.current++;
+		setPendingWorkerId(agentId);
+		setWorkerBusy(true);
+		setWorkerCreationError(null);
+		try {
+			setWorkers(await window.maestro.board.registerWorker(agentId));
+			setPendingWorkerId(null);
+		} catch (error) {
+			setWorkerCreationError(
+				`Agent created; worker registration failed: ${ipcErrorMessage(error)}`
+			);
+		} finally {
+			registeringCreatedWorker.current = false;
+			setWorkerBusy(false);
+		}
+	}, []);
+	const createWorker = useCallback(() => {
+		createdWorkerId.current = null;
+		setWorkerCreationError(null);
+		useModalStore.getState().openModal('newInstance', {
+			duplicatingSessionId: null,
+			presetWorkingDir: projectRoot || undefined,
+			onCreated: (agentId) => {
+				if (createdWorkerId.current) return;
+				createdWorkerId.current = agentId;
+				void registerCreatedWorker(agentId);
+			},
+			onCreationStarted: () => setWorkerBusy(true),
+			onCreationError: (message) => {
+				setWorkerCreationError(message);
+				setWorkerBusy(false);
+			},
+		});
+	}, [projectRoot, registerCreatedWorker]);
 	const [workerAccessOptions, setWorkerAccessOptions] = useState<
 		Awaited<ReturnType<typeof window.maestro.board.listWorkerAccessOptions>>
 	>({ roles: [], repositories: [] });
 	const refreshWorkers = useCallback(async () => {
+		const revision = workersRevision.current;
 		try {
 			const [registered, options] = await Promise.all([
 				window.maestro.board.listWorkers(),
 				window.maestro.board.listWorkerAccessOptions(),
 			]);
-			setWorkers(registered);
+			if (revision === workersRevision.current) setWorkers(registered);
 			setWorkerAccessOptions(options);
 		} catch (err) {
 			notifyToast({ color: 'red', title: 'Board workers', message: ipcErrorMessage(err) });
 		}
 	}, []);
 	const changeWorker = useCallback(async (action: () => Promise<StoredBoardWorker[]>) => {
+		workersRevision.current++;
 		setWorkerBusy(true);
 		try {
 			setWorkers(await action());
@@ -1044,6 +1089,31 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						<p style={{ color: theme.colors.warning }}>
 							Worker settings are not yet enforced by dispatch. Do not rely on pause to stop work.
 						</p>
+						<button
+							disabled={workerBusy || creatorOpen || pendingWorkerId !== null}
+							onClick={createWorker}
+						>
+							Create agent and add worker
+						</button>
+						{workerCreationError && (
+							<p role="alert" className="select-text" style={{ color: theme.colors.error }}>
+								{workerCreationError}
+							</p>
+						)}
+						{pendingWorkerId && (
+							<div>
+								<p>
+									Agent awaiting worker registration:{' '}
+									{allSessions.find((s) => s.id === pendingWorkerId)?.name ?? pendingWorkerId}
+								</p>
+								<button
+									disabled={workerBusy}
+									onClick={() => void registerCreatedWorker(pendingWorkerId)}
+								>
+									Retry worker registration
+								</button>
+							</div>
+						)}
 						{allSessions.map((session) => {
 							const worker = workers.find((entry) => entry.agentId === session.id);
 							const roles = worker?.payload.roleRefs;

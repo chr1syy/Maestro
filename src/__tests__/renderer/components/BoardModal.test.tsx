@@ -9,6 +9,7 @@ import { LayerStackProvider } from '../../../renderer/contexts/LayerStackContext
 
 import { act, fireEvent, render, screen, waitFor, cleanup, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useModalStore, selectModalData } from '../../../renderer/stores/modalStore';
 import { BoardModal } from '../../../renderer/components/BoardModal';
 import { useSessionStore } from '../../../renderer/stores/sessionStore';
 import { notifyToast } from '../../../renderer/stores/notificationStore';
@@ -1362,5 +1363,97 @@ describe('Board worker registry interactions', () => {
 			roleRefs: [{ namespace: 'project', profileId: 'review' }],
 			allowedRepositoryIds: ['repo'],
 		});
+	});
+});
+
+describe('Board native worker creation', () => {
+	beforeEach(() => useModalStore.getState().closeAll());
+
+	function setupCreator() {
+		installApis([{ id: 'b1', name: 'Board', cards: [] }]);
+		const api = {
+			listWorkers: vi.fn().mockResolvedValue([]),
+			listWorkerAccessOptions: vi.fn().mockResolvedValue({ roles: [], repositories: [] }),
+			registerWorker: vi.fn(async (agentId: string) => [
+				{
+					agentId,
+					enabled: true,
+					paused: false,
+					payload: { roleRefs: [], allowedRepositoryIds: [] },
+				},
+			]),
+		};
+		Object.assign(boardApi, api);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(screen.getByRole('button', { name: 'Workers' }));
+		fireEvent.click(screen.getByRole('button', { name: 'Create agent and add worker' }));
+		return { api, request: selectModalData('newInstance')(useModalStore.getState())! };
+	}
+
+	it('opens the existing native creator and registers only its successful real ID once', async () => {
+		const open = vi.spyOn(useModalStore.getState(), 'openModal');
+		const { api, request } = setupCreator();
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(request).toMatchObject({ duplicatingSessionId: null, presetWorkingDir: PROJECT_ROOT });
+		expect(screen.getByRole('button', { name: 'Create agent and add worker' })).toBeDisabled();
+		expect(api.registerWorker).not.toHaveBeenCalled();
+		const session = createMockSession({
+			id: 'native-real-id',
+			name: 'Native worker',
+			projectRoot: PROJECT_ROOT,
+		});
+		act(() => {
+			request.onCreationStarted?.();
+			useModalStore.getState().closeModal('newInstance');
+			useSessionStore.getState().addSession(session);
+			request.onCreated?.(session.id);
+			request.onCreated?.(session.id);
+		});
+		await screen.findByText('Native worker — enabled');
+		expect(api.registerWorker).toHaveBeenCalledExactlyOnceWith(session.id);
+		open.mockRestore();
+	});
+
+	it('retains the created agent and retries registration without reopening the creator', async () => {
+		const open = vi.spyOn(useModalStore.getState(), 'openModal');
+		const { api, request } = setupCreator();
+		api.registerWorker.mockRejectedValueOnce(new Error('registry unavailable'));
+		const session = createMockSession({
+			id: 'created-id',
+			name: 'Retained agent',
+			projectRoot: PROJECT_ROOT,
+		});
+		act(() => {
+			useModalStore.getState().closeModal('newInstance');
+			useSessionStore.getState().addSession(session);
+			request.onCreated?.(session.id);
+		});
+		expect(await screen.findByRole('alert')).toHaveTextContent('registry unavailable');
+		expect(screen.getByRole('button', { name: 'Create agent and add worker' })).toBeDisabled();
+		fireEvent.click(screen.getByRole('button', { name: 'Retry worker registration' }));
+		await screen.findByText('Retained agent — enabled');
+		expect(api.registerWorker.mock.calls).toEqual([[session.id], [session.id]]);
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(useSessionStore.getState().sessions.filter((s) => s.id === session.id)).toHaveLength(1);
+		expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole('button', { name: 'Retry worker registration' })
+		).not.toBeInTheDocument();
+		open.mockRestore();
+	});
+
+	it('shows creation failures and cancellation never registers a phantom worker', async () => {
+		const { api, request } = setupCreator();
+		act(() => {
+			request.onCreationStarted?.();
+			useModalStore.getState().closeModal('newInstance');
+			request.onCreationError?.('Invalid native agent path');
+		});
+		expect(await screen.findByRole('alert')).toHaveTextContent('Invalid native agent path');
+		expect(api.registerWorker).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole('button', { name: 'Create agent and add worker' }));
+		act(() => useModalStore.getState().closeModal('newInstance'));
+		expect(screen.getByRole('button', { name: 'Create agent and add worker' })).toBeEnabled();
+		expect(api.registerWorker).not.toHaveBeenCalled();
 	});
 });
