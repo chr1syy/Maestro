@@ -79,8 +79,19 @@ export function createBoardRunService(
 	probe: BoardRunService['probe'] = () => 'unknown'
 ): BoardRunService {
 	return {
-		spawn: (spec, hooks) =>
-			spawnBoardCard(
+		spawn: (spec, hooks) => {
+			const worker = ctx.getStoredSessions().find((session) => session.id === spec.workerAgentId);
+			const location = worker?.sessionSshRemoteConfig?.enabled
+				? { kind: 'ssh', remoteId: worker.sessionSshRemoteConfig.remoteId }
+				: worker?.sshRemoteId
+					? { kind: 'ssh', remoteId: worker.sshRemoteId }
+					: { kind: 'local' };
+			if (!worker || canonicalJson(location) !== canonicalJson(spec.repository.location))
+				return Promise.resolve({
+					...blockedSpawnResult('Selected worker execution location changed'),
+					executionStarted: false,
+				});
+			return spawnBoardCard(
 				spec.repository.workingDirectory,
 				{
 					card: spec.card as unknown as BoardCard,
@@ -90,7 +101,8 @@ export function createBoardRunService(
 				},
 				ctx,
 				spec.key.collectionKey
-			),
+			);
+		},
 		stop: (spec) => {
 			cancelBoardCardRun(
 				spec.repository.workingDirectory,
@@ -507,6 +519,7 @@ async function runCardPrompt(
 		beforeLaunch: lifecycle?.beforeLaunch,
 		prepareLaunch: card.reviewHandoff
 			? async () => {
+					if (baseSession.sessionSshRemoteConfig?.enabled) return false;
 					const artifact = await readBoardRunArtifact(card.reviewHandoff!.artifact.worktreePath);
 					return (
 						!!artifact && canonicalJson(artifact) === canonicalJson(card.reviewHandoff!.artifact)

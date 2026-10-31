@@ -233,6 +233,8 @@ import {
 	type BoardSpawnContext,
 } from './board/board-spawn';
 import { isPidAlive } from '../shared/maestro-lib/client/discovery';
+import { BoardStorageError } from './board/board-storage';
+import { probeBoardRemoteRepository } from './board/board-remote-source';
 import { configureBoardSourceHost } from './board/board-source-host';
 import { BoardCueHost } from './board/board-cue';
 import { configureBoardRuntimeHost } from './board/board-runtime-host';
@@ -1534,7 +1536,11 @@ app
 			const storage = getBoardStorage();
 			const catalog = storage.captureCatalog();
 			const sessions = boardSpawnContext.getStoredSessions();
-			const fingerprint = canonicalJson({ catalog, workers: listBoardWorkers() });
+			const fingerprint = canonicalJson({
+				catalog,
+				workers: listBoardWorkers(),
+				sshRemotes: store.get('sshRemotes', []),
+			});
 			if (fingerprint !== registryFingerprint) {
 				registryFingerprint = fingerprint;
 				registryRevision++;
@@ -1631,6 +1637,26 @@ app
 				const record = JSON.parse(row.payload_json);
 				if (record.validated !== true) return;
 				const cwd = card.payload.workingDirectory;
+				if (record.location?.kind === 'ssh') {
+					try {
+						const identity = await probeBoardRemoteRepository(
+							record.location.remoteId,
+							record.workingDirectory,
+							cwd
+						);
+						repositoryProofs.set(id, {
+							id: String(card.payload.repositoryId),
+							workingDirectory: cwd,
+							record,
+							location: record.location,
+							identity,
+						});
+					} catch (error) {
+						if (!(error instanceof BoardStorageError)) throw error;
+						// An unresolved remote never enters the local Git/realpath path.
+					}
+					return;
+				}
 				// Native Git validates the explicit directory; never substitute a worker CWD.
 				const git = await execGitReadOnly(
 					['rev-parse', '--show-toplevel', '--absolute-git-dir'],

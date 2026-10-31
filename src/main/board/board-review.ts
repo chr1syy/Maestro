@@ -78,6 +78,11 @@ export async function captureBoardCardFromHost(command: BoardCaptureCommand, hum
 			'invalid-input',
 			'Review requires a completed source attempt with a clean artifact and reported checks'
 		);
+	if (spec?.repository?.location?.kind === 'ssh')
+		throw new BoardStorageError(
+			'legacy-mapping-missing',
+			'Remote review artifact requires an explicit remote artifact adapter'
+		);
 	const artifact = await readBoardRunArtifact(run.artifact.worktreePath);
 	if (!artifact || canonicalJson(artifact) !== canonicalJson(run.artifact))
 		throw new BoardStorageError(
@@ -131,6 +136,7 @@ export async function prepareBoardReviewHandoff(
 		| undefined;
 	if (!row?.outcome_json) return null;
 	const spec = JSON.parse(row.specification_json);
+	if (spec.repository?.location?.kind === 'ssh') return null;
 	const run = JSON.parse(row.outcome_json).cardOutcome?.run;
 	if (
 		spec.key?.sourceKey !== handoff.sourceKey ||

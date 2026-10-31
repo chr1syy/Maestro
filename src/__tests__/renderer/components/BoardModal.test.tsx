@@ -1875,6 +1875,54 @@ describe('BoardModal central workspace identity', () => {
 			card: { title: 'Edited closed source' },
 		});
 	});
+	it.each([false, true])(
+		'edits and repairs an SSH source through its explicit central reference (active SSH agent: %s)',
+		async (activeRemote) => {
+			const value = installWorkspace();
+			value.sources[0].location = {
+				location: { kind: 'ssh', remoteId: 'remote-one' },
+				path: '/remote-only/repo',
+			};
+			useSessionStore.setState({
+				sessions: activeRemote
+					? [
+							createMockSession({
+								id: 'ssh-agent',
+								projectRoot: '/remote-only/repo',
+								sessionSshRemoteConfig: { enabled: true, remoteId: 'remote-one' },
+							}),
+						]
+					: [],
+				activeSessionId: activeRemote ? 'ssh-agent' : '',
+			});
+			boardApi.captureCard.mockResolvedValue({
+				ok: true,
+				value: value.collections[0].board,
+				readiness: {},
+			});
+			render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+			fireEvent.click(await screen.findByText('Project one card'));
+			fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Edited SSH card' } });
+			fireEvent.click(screen.getByRole('button', { name: 'Revalidate selected source' }));
+			await waitFor(() =>
+				expect(boardApi.sourceCommand).toHaveBeenCalledWith({
+					action: 'revalidate',
+					sourceKey: 'one',
+				})
+			);
+			fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+			await waitFor(() => expect(boardApi.captureCard).toHaveBeenCalledTimes(1));
+			expect(boardApi.captureCard.mock.calls[0][0]).toMatchObject({
+				projectRoot: 'maestro-board-source:one',
+				boardId: 'same-board',
+				card: { title: 'Edited SSH card' },
+			});
+			expect(boardApi.queryWorkspace).not.toHaveBeenCalledWith({
+				projectRoot: '/remote-only/repo',
+			});
+		}
+	);
+
 	it('loads global collections without an active agent or a project-root fallback', async () => {
 		installWorkspace();
 		useSessionStore.setState({ sessions: [], activeSessionId: '' });

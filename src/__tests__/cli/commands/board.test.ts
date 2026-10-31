@@ -1,3 +1,4 @@
+import { BOARD_SOURCE_PROJECT_PREFIX } from '../../../shared/board/types';
 import { BoardRuntime } from '../../../main/board/board-runtime';
 import { configureBoardRuntimeHost } from '../../../main/board/board-runtime-host';
 import {
@@ -229,6 +230,51 @@ describe('maestro-cli board', () => {
 		if (projectRoot && fs.existsSync(projectRoot)) {
 			fs.rmSync(projectRoot, { recursive: true, force: true });
 		}
+	});
+
+	it('routes SSH agent list, rename and tick by explicit source identity and permits closed-source mutations without local paths', async () => {
+		const remoteRoot = '/remote-only/Repo';
+		const plan = planBoardMigration({
+			source: { location: { kind: 'ssh', remoteId: 'remote-one' }, path: remoteRoot },
+			repository: {
+				id: 'remote-repository',
+				workingDirectory: remoteRoot,
+				validated: true,
+				location: { kind: 'ssh', remoteId: 'remote-one' },
+			},
+			boardBytes: Buffer.from(
+				JSON.stringify({ boards: [{ id: 'remote-board', name: 'Remote board', cards: [] }] })
+			),
+			profileBytes: null,
+			workers: [],
+		});
+		applyBoardMigration(db, plan);
+		mockGetSessionById.mockReturnValue({
+			id: 'agent-1',
+			name: 'Remote worker',
+			projectRoot: remoteRoot,
+			sessionSshRemoteConfig: { enabled: true, remoteId: 'remote-one' },
+		});
+		await boardList({ agent: 'Alpha', json: true });
+		expect(JSON.parse(logSpy.mock.calls.at(-1)![0])).toMatchObject([{ id: 'remote-board' }]);
+		await boardRename('remote-board', 'Renamed remote board', { agent: 'Alpha', json: true });
+		expect(facade.query({ sourceKey: plan.sourceKey }).collections[0].board.name).toBe(
+			'Renamed remote board'
+		);
+		await boardTick({ agent: 'Alpha', json: true });
+		expect(exitSpy).not.toHaveBeenCalled();
+		await boardRename('remote-board', 'Closed source edit', { source: plan.sourceKey, json: true });
+		expect(facade.query({ sourceKey: plan.sourceKey }).collections[0].board.name).toBe(
+			'Closed source edit'
+		);
+		expect(mockSpawnAgent).not.toHaveBeenCalled();
+		mockGetSessionById.mockReturnValue({
+			id: 'agent-1',
+			projectRoot: remoteRoot,
+			sessionSshRemoteConfig: { enabled: true, remoteId: 'other-remote' },
+		});
+		await boardList({ agent: 'Alpha', json: true });
+		expect(exitSpy).toHaveBeenCalledWith(1);
 	});
 
 	it('board create then board list round-trips through host SQLite', async () => {
@@ -1234,7 +1280,13 @@ describe('maestro-cli board', () => {
 			const branch = 'board/tick/ssh';
 			seedBoard({ path: path.join(projectRoot, 'worktrees', branch), branch });
 
-			await boardTick({ agent: 'Alpha', json: true });
+			// Explicitly retain the fixture's selected central source while toggling the
+			// worker transport: this case exercises the final SSH worktree guard.
+			await boardTick({
+				agent: 'Alpha',
+				projectRoot: BOARD_SOURCE_PROJECT_PREFIX + facade.sourceKeys(repoRoot)[0],
+				json: true,
+			});
 			await vi.waitFor(() =>
 				expect(db.prepare('SELECT * FROM reservations').all()).toHaveLength(0)
 			);

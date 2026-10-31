@@ -1,3 +1,4 @@
+import { BOARD_SOURCE_PROJECT_PREFIX } from '../../shared/board/types';
 /**
  * Board per-card "open PR when done" (Board F3).
  *
@@ -339,7 +340,15 @@ export function startCardPr(
 	options: StartCardPrOptions = {}
 ): void {
 	let request: CardPrRequest | null;
+	let remoteSource = false;
 	try {
+		if (projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)) {
+			const sourceKey = projectRoot.slice(BOARD_SOURCE_PROJECT_PREFIX.length);
+			remoteSource =
+				queryBoardWorkspace({ sourceKey }).sources.find((source) => source.sourceKey === sourceKey)
+					?.location?.location.kind === 'ssh';
+		}
+
 		const board = listBoards(projectRoot).find((entry) => entry.id === boardId);
 		request = board ? resolveCardPrRequest(board, cardId) : null;
 	} catch (error) {
@@ -364,6 +373,14 @@ export function startCardPr(
 			}),
 		mainRepoCwd: projectRoot,
 		...options,
+		...(remoteSource
+			? {
+					createPr: async () => ({
+						success: false,
+						error: 'Remote PR completion requires an explicit remote Git/PR adapter',
+					}),
+				}
+			: {}),
 	});
 }
 
@@ -397,6 +414,7 @@ export function startBoardRunPr(
 			updatedAt: new Date().toISOString(),
 		});
 	};
+
 	return maybeCreateCardPr(spec.key.cardId, {
 		loadBoard,
 		expectedRun,
@@ -404,6 +422,14 @@ export function startBoardRunPr(
 		stampPrError: (_id, error) => stamp({ prError: error.slice(0, PR_ERROR_MAX_LENGTH) }),
 		mainRepoCwd: spec.repository.workingDirectory,
 		...options,
+		...(spec.repository.location.kind === 'ssh'
+			? {
+					createPr: async () => ({
+						success: false,
+						error: 'Remote PR completion requires an explicit remote Git/PR adapter',
+					}),
+				}
+			: {}),
 	});
 }
 

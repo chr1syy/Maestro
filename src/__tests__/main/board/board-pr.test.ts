@@ -12,12 +12,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const listBoards = vi.fn();
+const queryBoardWorkspace = vi.fn();
 const stampBoardRunPr = vi.fn();
 const enqueueBoardWrite = vi.fn(async (_root: string, fn: () => void) => fn());
 const createPullRequest = vi.fn();
 
 vi.mock('../../../main/board/board-storage', () => ({
 	listBoards: (...args: unknown[]) => listBoards(...args),
+	queryBoardWorkspace: (...args: unknown[]) => queryBoardWorkspace(...args),
 	stampBoardRunPr: (...args: unknown[]) => stampBoardRunPr(...args),
 	enqueueBoardWrite: (...args: unknown[]) => enqueueBoardWrite(...(args as [string, () => void])),
 }));
@@ -147,9 +149,10 @@ describe('resolveCardPrRequest', () => {
 	});
 
 	it('falls back to the card worktree path when the run recorded none', () => {
+		const legacyWorktree = { enabled: true, path: '/elsewhere/checkout' };
 		const handWritten = card({
 			runs: [run({ worktreePath: undefined })],
-			worktree: { enabled: true, path: '/elsewhere/checkout' },
+			worktree: legacyWorktree,
 		});
 		expect(resolveCardPrRequest(board([handWritten]), 'c1')?.worktreePath).toBe(
 			'/elsewhere/checkout'
@@ -542,4 +545,29 @@ it('does not stamp a replacement card with the same attempt number', () => {
 	const replacement = board([card({ runs: [run({ startedAt: '2026-08-01T00:00:00.000Z' })] })]);
 	expect(stampCardPrUrl(replacement, 'c1', 'old-url', NOW, run())).toBe(false);
 	expect(stampCardPrError(replacement, 'c1', 'old-error', NOW, run())).toBe(false);
+});
+
+it('records and surfaces unsupported remote PR completion without invoking local Git or gh', async () => {
+	const saved = board();
+	listBoards.mockReturnValue([saved]);
+	queryBoardWorkspace.mockReturnValue({
+		sources: [
+			{
+				sourceKey: 'remote-source',
+				location: { location: { kind: 'ssh', remoteId: 'remote' }, path: '/remote-only/repo' },
+			},
+		],
+	});
+	const notify = vi.fn();
+	startCardPr('maestro-board-source:remote-source', 'b1', 'c1', { notify });
+	await vi.waitFor(() => expect(stampBoardRunPr).toHaveBeenCalledTimes(1));
+	expect(createPullRequest).not.toHaveBeenCalled();
+	expect(saved.cards[0].runs?.[0].prError).toContain('remote Git/PR adapter');
+	expect(notify).toHaveBeenCalledWith(
+		expect.objectContaining({
+			color: 'red',
+			dismissible: true,
+			message: expect.stringContaining('remote Git/PR adapter'),
+		})
+	);
 });

@@ -1,3 +1,5 @@
+import { isSessionRemote } from '../utils/sessionHelpers';
+import { BOARD_SOURCE_PROJECT_PREFIX } from '../../shared/board/types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -168,7 +170,9 @@ interface CardDraft {
  */
 export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const activeSession = useSessionStore(selectActiveSession);
-	const activeProjectRoot = activeSession?.projectRoot ?? '';
+	const activeProjectRoot = isSessionRemote(activeSession)
+		? ''
+		: (activeSession?.projectRoot ?? '');
 	const [collections, setCollections] = useState<BoardWorkspaceCollection[]>([]);
 	const [roleSource, setRoleSource] = useState<{ sourceKey: string; namespace: string } | null>(
 		null
@@ -183,7 +187,12 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const allSessions = useSessionStore((s) => s.sessions);
 	const projectRoots = useMemo(
 		() => [
-			...new Set(allSessions.map((s) => s.projectRoot).filter((root): root is string => !!root)),
+			...new Set(
+				allSessions
+					.filter((s) => !isSessionRemote(s))
+					.map((s) => s.projectRoot)
+					.filter((root): root is string => !!root)
+			),
 		],
 		[allSessions]
 	);
@@ -211,6 +220,13 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			: projectFilter === 'all'
 				? activeProjectRoot
 				: (sourceRoots[projectFilter] ?? ''));
+	const sourceLocation = sources.find(
+		(source) => source.sourceKey === (editorCollection?.sourceKey ?? projectFilter)
+	)?.location;
+	const projectLocationLabel =
+		sourceLocation?.location.kind === 'ssh'
+			? `${sourceLocation.location.remoteId || 'Unresolved SSH'}: ${sourceLocation.path}`
+			: projectRoot;
 	const boards = useMemo(() => collections.map((entry) => entry.board), [collections]);
 
 	// Legacy cards display the current project worker marker until dispatch is migrated.
@@ -409,8 +425,11 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
 				const roots: Record<string, string> = {};
 				for (const source of response.value.sources) {
-					if (source.location?.location.kind === 'local')
-						roots[source.sourceKey] = source.location.path;
+					if (source.location)
+						roots[source.sourceKey] =
+							source.location.location.kind === 'local'
+								? source.location.path
+								: `${BOARD_SOURCE_PROJECT_PREFIX}${source.sourceKey}`;
 				}
 				for (const { root, result } of mappings) {
 					if (result?.ok) {
@@ -1329,9 +1348,9 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							<span
 								className="text-xs truncate min-w-0"
 								style={{ color: theme.colors.textDim }}
-								title={projectRoot}
+								title={projectLocationLabel}
 							>
-								{truncatePath(projectRoot)}
+								{truncatePath(projectLocationLabel)}
 							</span>
 						)}
 					</div>
@@ -1643,7 +1662,9 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 								<option value="all">All projects</option>
 								{sources.map((source) => (
 									<option key={source.sourceKey} value={source.projectRef.sourceKey}>
-										{sourceRoots[source.sourceKey] ?? source.sourceKey}
+										{source.location?.location.kind === 'ssh'
+											? `${source.location.location.remoteId || 'Unresolved SSH'}: ${source.location.path}`
+											: (sourceRoots[source.sourceKey] ?? source.sourceKey)}
 									</option>
 								))}
 							</select>
@@ -2736,7 +2757,10 @@ function CardEditor({
 							{catalog?.repositories.map((repo) => (
 								<option key={repo.id} value={repo.id}>
 									{repo.id}: {repo.workingDirectory}
-									{repo.validated ? '' : ' (unvalidated)'}
+									{repo.location?.kind === 'ssh'
+										? ` [SSH: ${repo.location.remoteId || 'unresolved'}]`
+										: ''}
+									{repo.validated ? '' : ` (unresolved: ${repo.diagnostic ?? 'revalidate source'})`}
 								</option>
 							))}
 						</select>

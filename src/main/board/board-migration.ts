@@ -1,6 +1,7 @@
 /** Pure planning of explicitly supplied legacy Board sources. No discovery or writes. */
 import { createHash } from 'node:crypto';
 import * as yaml from 'js-yaml';
+import { isPathAtOrUnderRoot } from '../../shared/worktreePaths';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { validateBoard, validateBoardCard } from '../../shared/board/types';
 import { validateAgentProfile } from '../../shared/profiles/types';
@@ -10,7 +11,12 @@ import { selectPoolAgentIds } from '../../shared/board/pool';
 export interface BoardMigrationInput {
 	/** Canonical location and source path supplied by the caller, never inferred from a worker. */
 	source: { location: { kind: 'local' } | { kind: 'ssh'; remoteId: string }; path: string };
-	repository: { id: string; workingDirectory: string; validated: boolean } | null;
+	repository: {
+		id: string;
+		workingDirectory: string;
+		validated: boolean;
+		location?: BoardMigrationInput['source']['location'];
+	} | null;
 	boardBytes: Uint8Array | null;
 	profileBytes: Uint8Array | null;
 	workers: unknown[];
@@ -425,9 +431,25 @@ export function applyBoardMigration(
 					.prepare('SELECT payload_json FROM repositories WHERE id = ?')
 					.get(plan.repository.id) as { payload_json: string } | undefined;
 				const payload = canonicalJson(plan.repository);
-				if (existing && existing.payload_json !== payload)
-					throw new Error('Board migration repository conflict');
-				if (!existing)
+				if (existing && existing.payload_json !== payload) {
+					const previous = JSON.parse(existing.payload_json);
+					// Discovery's typed pending SSH record is not an imported repository.
+					// Complete this exact identity atomically with the original import snapshot.
+					if (
+						plan.source?.location.kind !== 'ssh' ||
+						plan.repository.id !== `source:${plan.sourceKey}` ||
+						previous.sourceStatus !== 'unresolved' ||
+						previous.validated !== false ||
+						previous.workingDirectory !== plan.source.path ||
+						canonicalJson({ location: previous.location }) !==
+							canonicalJson({ location: plan.source.location })
+					)
+						throw new Error('Board migration repository conflict');
+					db.prepare('UPDATE repositories SET payload_json=? WHERE id=?').run(
+						payload,
+						plan.repository.id
+					);
+				} else if (!existing)
 					db.prepare('INSERT INTO repositories VALUES (?, ?)').run(plan.repository.id, payload);
 			}
 			applyMigrationWorkerAccess(db, plan);
@@ -451,6 +473,7 @@ export function applyBoardMigration(
 
 /** Accumulate only migration-owned grants, without overwriting central or older unmarked restrictions. */
 function applyMigrationWorkerAccess(db: Database.Database, plan: BoardMigrationPlan): void {
+	const location = plan.source?.location ?? { kind: 'local' as const };
 	const candidates = plan.snapshot.workers.flatMap((worker) => {
 		const raw = record(worker);
 		return raw && typeof raw.id === 'string'
@@ -459,14 +482,28 @@ function applyMigrationWorkerAccess(db: Database.Database, plan: BoardMigrationP
 						id: raw.id,
 						dir: typeof raw.dir === 'string' ? raw.dir : null,
 						boardWorker:
-							raw.boardWorker === true && record(raw.sessionSshRemoteConfig)?.enabled !== true,
+							raw.boardWorker === true &&
+							(location.kind === 'ssh'
+								? (record(raw.sessionSshRemoteConfig)?.enabled === true
+										? record(raw.sessionSshRemoteConfig)?.remoteId
+										: raw.sshRemoteId) === location.remoteId
+								: record(raw.sessionSshRemoteConfig)?.enabled !== true && !raw.sshRemoteId),
 					},
 				]
 			: [];
 	});
 	const allowed = new Set(
 		plan.repository?.validated
-			? selectPoolAgentIds(plan.repository.workingDirectory, candidates)
+			? location.kind === 'ssh'
+				? candidates
+						.filter(
+							(c) =>
+								c.boardWorker &&
+								c.dir &&
+								isPathAtOrUnderRoot(c.dir, plan.repository!.workingDirectory)
+						)
+						.map((c) => c.id)
+				: selectPoolAgentIds(plan.repository.workingDirectory, candidates)
 			: []
 	);
 	for (const worker of plan.snapshot.workers) {

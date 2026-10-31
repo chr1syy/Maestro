@@ -1,6 +1,8 @@
 /** Central Board facade. Legacy project roots resolve only to explicitly registered or imported sources.
  * YAML is migration input only; no fallback reader or exporter exists here.
  */
+import { BOARD_SOURCE_PROJECT_PREFIX } from '../../shared/board/types';
+import { isPathAtOrUnderRoot } from '../../shared/worktreePaths';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type Database from 'better-sqlite3';
@@ -83,6 +85,12 @@ export function setBoardSavedListener(listener: BoardSavedListener | null): void
  * Custom/SSH identities must be supplied explicitly by the host resolver.
  */
 export function resolveLocalBoardSourceKeys(projectRoot: string): string[] {
+	if (projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)) {
+		const sourceKey = projectRoot.slice(BOARD_SOURCE_PROJECT_PREFIX.length);
+		if (!/^[a-f0-9]{64}$/.test(sourceKey))
+			throw new BoardWorkspaceStorageError('invalid-input', 'Invalid central source reference');
+		return [sourceKey];
+	}
 	try {
 		return [
 			boardMigrationSourceKey({ location: { kind: 'local' }, path: fs.realpathSync(projectRoot) }),
@@ -180,11 +188,13 @@ export class BoardStorageFacade {
 					if (
 						!repository ||
 						!card.workingDirectory ||
-						!fs.statSync(card.workingDirectory).isDirectory() ||
-						!isPathWithin(
-							foldPathCase(fs.realpathSync(card.workingDirectory)),
-							foldPathCase(fs.realpathSync(repository.workingDirectory))
-						)
+						(repository.location?.kind === 'ssh'
+							? !isPathAtOrUnderRoot(card.workingDirectory, repository.workingDirectory)
+							: !fs.statSync(card.workingDirectory).isDirectory() ||
+								!isPathWithin(
+									foldPathCase(fs.realpathSync(card.workingDirectory)),
+									foldPathCase(fs.realpathSync(repository.workingDirectory))
+								))
 					) {
 						if (!reasons.includes('repository-unresolved')) reasons.push('repository-unresolved');
 					}
@@ -665,7 +675,7 @@ export class BoardStorageFacade {
 				const repository = this.captureCatalog().repositories.find(
 					(repo) => repo.id === card.repositoryId
 				);
-				if (repository?.validated && card.workingDirectory) {
+				if (repository?.validated && card.workingDirectory && repository.location?.kind !== 'ssh') {
 					try {
 						if (
 							!isPathWithin(
@@ -682,6 +692,15 @@ export class BoardStorageFacade {
 						// A vanished path remains a repairable reference, never executable.
 					}
 				}
+				if (
+					repository?.location?.kind === 'ssh' &&
+					card.workingDirectory &&
+					!isPathAtOrUnderRoot(card.workingDirectory, repository.workingDirectory)
+				)
+					throw new BoardWorkspaceStorageError(
+						'identity-mismatch',
+						'Remote directory is outside the selected repository'
+					);
 				if (!result.ok)
 					throw new BoardWorkspaceStorageError(
 						'invalid-input',
@@ -998,7 +1017,11 @@ export function createBoard(
 			'identity-mismatch',
 			'Board source does not match project'
 		);
-	if (facade.resolveSourceKeys === resolveLocalBoardSourceKeys) {
+	if (projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)) facade.sourceKeys(projectRoot);
+	if (
+		facade.resolveSourceKeys === resolveLocalBoardSourceKeys &&
+		!projectRoot.startsWith(BOARD_SOURCE_PROJECT_PREFIX)
+	) {
 		facade.db
 			.prepare('INSERT OR IGNORE INTO board_source_locations VALUES (?, ?)')
 			.run(

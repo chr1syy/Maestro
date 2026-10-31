@@ -411,3 +411,42 @@ it('authorizes writes in the isolated checkout even when the base agent has full
 		`Write only within ${WORKTREE_PATH}`
 	);
 });
+
+it('routes a claimed SSH repository through the selected worker SSH config and blocks changed locations before executing', async () => {
+	const specification: BoardRunSpecification = {
+		key: { sourceKey: 'remote-source', collectionKey: 'remote-collection', cardId: 'c1' },
+		card: { ...card() },
+		readRevision: { workspace: 1, collection: 1, card: 1, registry: 1 },
+		runToken: { runId: 'remote-run', ownerEpoch: 1, generation: 1 },
+		attempt: 1,
+		owner: { processIdentity: 'owner', epoch: 1 },
+		workerAgentId: 'agent-1',
+		overrides: {},
+		repository: {
+			id: 'remote-repo',
+			workingDirectory: '/remote-only/repo',
+			record: {},
+			identity: 'remote-proof',
+			location: { kind: 'ssh', remoteId: 'remote-one' },
+		},
+	};
+	const hooks = { canPrepare: () => true, beforeLaunch: vi.fn(() => true), onStarted: vi.fn() };
+	await createBoardRunService(
+		context({ sessionSshRemoteConfig: { enabled: true, remoteId: 'remote-one' } })
+	).spawn(specification, hooks);
+	expect(executeCuePrompt).toHaveBeenCalledWith(
+		expect.objectContaining({
+			projectRoot: '/remote-only/repo',
+			sshRemoteConfig: { enabled: true, remoteId: 'remote-one' },
+			beforeLaunch: hooks.beforeLaunch,
+		})
+	);
+	expect(ensureCardWorktree).not.toHaveBeenCalled();
+	executeCuePrompt.mockClear();
+	for (const session of [{}, { sessionSshRemoteConfig: { enabled: true, remoteId: 'other' } }]) {
+		const result = await createBoardRunService(context(session)).spawn(specification, hooks);
+		expect(result.executionStarted).toBe(false);
+		expect(result.output).toContain('execution location changed');
+	}
+	expect(executeCuePrompt).not.toHaveBeenCalled();
+});

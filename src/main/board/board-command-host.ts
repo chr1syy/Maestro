@@ -70,6 +70,12 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 					'Human review requires an explicit authorized UI action'
 				);
 			if (command.action === 'card-pr') {
+				const source = snapshot.sources.find((source) => source.sourceKey === entry.sourceKey);
+				if (source?.location?.location.kind === 'ssh')
+					throw new BoardStorageError(
+						'legacy-mapping-missing',
+						'Remote PR completion requires an explicit remote Git/PR adapter'
+					);
 				if (!entry.board.cards.some((card) => card.id === command.cardId && card.status === 'done'))
 					throw new BoardStorageError('invalid-input', 'PR requires a completed card');
 				return { ok: true as const, value: null };

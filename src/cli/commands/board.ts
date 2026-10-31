@@ -1,3 +1,5 @@
+import { boardMigrationSourceKey } from '../../main/board/board-migration';
+import { BOARD_SOURCE_PROJECT_PREFIX } from '../../shared/board/types';
 import { requireEncore } from '../utils/encore-gate';
 /** Board capture/CRUD uses the running host's central workspace and validation.
  * Dispatch and control use the same owning runtime as desktop.
@@ -650,9 +652,9 @@ export async function boardTick(options: BoardTickOptions): Promise<void> {
 	requireEncore('board', options.json);
 	requireEncore('maestroCue', options.json);
 	try {
-		const session = resolveAgentSession(options.agent);
+		resolveAgentSession(options.agent);
 		const summaries = await tickBoardsOnce(
-			session.projectRoot,
+			selectedProjectRoot(options)!,
 			options.board,
 			options.json,
 			options
@@ -698,7 +700,8 @@ export async function boardWatch(options: BoardWatchOptions): Promise<void> {
 	let projectRoot: string;
 	let intervalMs: number;
 	try {
-		projectRoot = resolveAgentSession(options.agent).projectRoot;
+		resolveAgentSession(options.agent);
+		projectRoot = selectedProjectRoot(options)!;
 		intervalMs = parseWatchInterval(options.interval) * 1000;
 	} catch (error) {
 		return reportError(error, options.json);
@@ -927,9 +930,22 @@ async function hostCommand<T = unknown>(command: BoardCommand): Promise<T> {
 	return reply.value as T;
 }
 function selectedProjectRoot(options: BoardCommonOptions): string | undefined {
+	if (options.projectRoot?.startsWith(BOARD_SOURCE_PROJECT_PREFIX)) return options.projectRoot;
+	const session = options.agent ? resolveAgentSession(options.agent) : undefined;
+	if (session?.sessionSshRemoteConfig?.enabled) {
+		const remoteId = session.sessionSshRemoteConfig.remoteId;
+		const root = options.projectRoot ?? session.projectRoot;
+		if (!remoteId || !root)
+			throw new Error('SSH source requires an explicit remote identity and project directory.');
+		return (
+			BOARD_SOURCE_PROJECT_PREFIX +
+			boardMigrationSourceKey({ location: { kind: 'ssh', remoteId }, path: root })
+		);
+	}
 	return (
 		options.projectRoot ??
-		(options.agent ? resolveAgentSession(options.agent).projectRoot : undefined)
+		session?.projectRoot ??
+		(options.source ? BOARD_SOURCE_PROJECT_PREFIX + options.source : undefined)
 	);
 }
 async function queryHost(options: BoardCommonOptions): Promise<BoardWorkspaceQueryResult> {

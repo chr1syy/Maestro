@@ -582,7 +582,13 @@ export interface BoardCaptureCatalog {
 	agents: { id: string; groupId?: string | null }[];
 	groups: { id: string }[];
 	profiles: { namespace: string; profile: import('../profiles/types').AgentProfile }[];
-	repositories: { id: string; workingDirectory: string; validated: boolean }[];
+	repositories: {
+		id: string;
+		workingDirectory: string;
+		validated: boolean;
+		location?: { kind: 'local' } | { kind: 'ssh'; remoteId: string };
+		diagnostic?: string;
+	}[];
 	defaultStartMode: BoardStartMode;
 }
 export interface BoardCaptureCommand {
@@ -630,3 +636,6 @@ export type BoardSourceCommand =
 export type BoardSourceResponse =
 	| { ok: true }
 	| { ok: false; error: { code: string; message: string } };
+
+/** Compatibility command reference for a central source; never a filesystem path. */
+export const BOARD_SOURCE_PROJECT_PREFIX = 'maestro-board-source:';

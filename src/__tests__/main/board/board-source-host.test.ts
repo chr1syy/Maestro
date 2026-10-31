@@ -69,7 +69,12 @@ it('never treats an SSH session directory as a local migration source', async ()
 		await discoverBoardSources(storage, [
 			{ id: 'remote', dir, boardWorker: true, sessionSshRemoteConfig: { enabled: true } },
 		]);
-		expect(storage.query().sources).toEqual([]);
+		expect(storage.query().sources).toMatchObject([
+			{ location: { location: { kind: 'ssh', remoteId: '' }, path: dir } },
+		]);
+		expect(storage.captureCatalog().repositories).toMatchObject([
+			{ validated: false, diagnostic: expect.stringContaining('remote identity') },
+		]);
 		expect(listBoardWorkers(db)).toEqual([]);
 	} finally {
 		db.close();
