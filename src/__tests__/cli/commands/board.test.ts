@@ -11,7 +11,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { execFileSync } from 'child_process';
 import { substituteTemplateVariables } from '../../../shared/templateVariables';
 
@@ -49,6 +48,15 @@ vi.mock('../../../main/utils/pr-creator', () => ({
 	createPullRequest: (...args: unknown[]) => mockCreatePullRequest(...args),
 }));
 
+vi.mock('../../../cli/services/maestro-client', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../../../cli/services/maestro-client')>()),
+	withMaestroClient: async (action: (connection: unknown) => Promise<unknown>) =>
+		action({
+			sendCommand: (message: Record<string, unknown>) =>
+				answerBoardCommand(message, executeBoardCommand),
+		}),
+}));
+
 import {
 	boardList,
 	boardCreate,
@@ -71,6 +79,15 @@ import {
 	deleteCard,
 } from '../../../main/board/board-storage';
 import { upsertProfile } from '../../../main/profiles/profile-storage';
+import { openBoardDb } from '../../../main/board/board-db';
+import { applyBoardMigration, planBoardMigration } from '../../../main/board/board-migration';
+import {
+	BoardStorageFacade,
+	configureBoardStorage,
+	configureBoardCaptureHost,
+} from '../../../main/board/board-storage';
+import { answerBoardCommand } from '../../../shared/board/commands';
+import { executeBoardCommand } from '../../../main/board/board-command-host';
 import type { BoardCard } from '../../../shared/board/types';
 
 function card(id: string, overrides: Partial<BoardCard> = {}): BoardCard {
@@ -87,17 +104,64 @@ function card(id: string, overrides: Partial<BoardCard> = {}): BoardCard {
 	};
 }
 
+/** Seed historical/runtime data in the fixture DB, never through caller CRUD authority. */
+function seedCard(
+	db: ReturnType<typeof openBoardDb>,
+	projectRoot: string,
+	boardId: string,
+	value: BoardCard
+): void {
+	const { runs, ...editable } = value;
+	addCard(projectRoot, boardId, {
+		...editable,
+		status: value.status === 'running' ? 'todo' : value.status,
+	});
+	const board = loadBoards(projectRoot).find((entry) => entry.id === boardId)!;
+	db.prepare('UPDATE cards SET payload_json = ? WHERE collection_key = ? AND id = ?').run(
+		JSON.stringify(value),
+		board.storage!.collectionKey,
+		value.id
+	);
+	for (const run of runs ?? [])
+		db.prepare('INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)').run(
+			`${board.storage!.collectionKey}:${value.id}:${run.attempt}`,
+			board.storage!.collectionKey,
+			value.id,
+			run.attempt,
+			'{}',
+			JSON.stringify(run)
+		);
+}
+
 describe('maestro-cli board', () => {
 	let projectRoot = '';
+	let db: ReturnType<typeof openBoardDb>;
+	let namespace: string;
 	let logSpy: MockInstance;
-	let errorSpy: MockInstance;
 	let exitSpy: MockInstance;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
-		projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'board-cli-'));
+		projectRoot = fs.mkdtempSync(path.resolve('.maestro/board-global-workers-20261031/cli-'));
+		db = openBoardDb(path.join(projectRoot, 'board.sqlite'));
+		const plan = planBoardMigration({
+			source: { location: { kind: 'local' }, path: projectRoot },
+			boardBytes: Buffer.from('{"boards":[]}'),
+			workers: [],
+			repository: { id: 'repo', workingDirectory: projectRoot, validated: true },
+			profileBytes: Buffer.from(
+				'{"profiles":[{"id":"p1","name":"Role"},{"id":"p2","name":"Role 2"}]}'
+			),
+		});
+		applyBoardMigration(db, plan);
+		namespace = plan.profileNamespace;
+		configureBoardStorage(new BoardStorageFacade(db));
+		configureBoardCaptureHost(() => ({
+			agents: [{ id: 'agent-1' }, { id: 'agent-2-0123456789abcdef' }],
+			groups: [],
+		}));
 		logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-		errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		vi.spyOn(console, 'error').mockImplementation(() => {});
 		exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
 		mockResolveAgentId.mockReturnValue('agent-1');
 		mockGetSessionById.mockReturnValue({
@@ -111,16 +175,19 @@ describe('maestro-cli board', () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		configureBoardStorage(null);
+		db.close();
 		if (projectRoot && fs.existsSync(projectRoot)) {
 			fs.rmSync(projectRoot, { recursive: true, force: true });
 		}
 	});
 
-	it('board create then board list round-trips through .maestro/board.yaml', async () => {
+	it('board create then board list round-trips through host SQLite', async () => {
 		await boardCreate('Bootstrapped', { agent: 'Alpha', json: true });
 		const created = JSON.parse(logSpy.mock.calls.map((c) => c[0]).join('\n'));
 		expect(created.name).toBe('Bootstrapped');
-		expect(fs.existsSync(path.join(projectRoot, '.maestro', 'board.yaml'))).toBe(true);
+		expect(fs.existsSync(path.join(projectRoot, '.maestro', 'board.yaml'))).toBe(false);
+		expect(db.prepare('SELECT * FROM collections').all()).toHaveLength(1);
 
 		logSpy.mockClear();
 		await boardList({ agent: 'Alpha', json: true });
@@ -187,14 +254,7 @@ describe('maestro-cli board', () => {
 
 	it('board delete refuses unfinished cards without --force', async () => {
 		const b = createBoard(projectRoot, 'Busy');
-		saveBoards(
-			projectRoot,
-			loadBoards(projectRoot).map((entry) =>
-				entry.id === b.id
-					? { ...entry, cards: [...entry.cards, card('c1', { status: 'running' })] }
-					: entry
-			)
-		);
+		seedCard(db, projectRoot, b.id, card('c1', { status: 'running' }));
 		await boardDelete(b.id, { agent: 'Alpha', json: true });
 		expect(exitSpy).toHaveBeenCalledWith(1);
 		expect(loadBoards(projectRoot)).toHaveLength(1);
@@ -217,7 +277,7 @@ describe('maestro-cli board', () => {
 
 	it('board delete --force preserves a board with running cards', async () => {
 		const b = createBoard(projectRoot, 'Busy');
-		saveBoards(projectRoot, [{ ...b, cards: [card('c1', { status: 'running' })] }]);
+		seedCard(db, projectRoot, b.id, card('c1', { status: 'running' }));
 		await boardDelete(b.id, { agent: 'Alpha', force: true, json: true });
 		expect(exitSpy).toHaveBeenCalledWith(1);
 		expect(loadBoards(projectRoot)[0].cards[0].status).toBe('running');
@@ -238,6 +298,7 @@ describe('maestro-cli board', () => {
 			agent: 'Alpha',
 			title: 'New card',
 			assignee: 'profile-x',
+			profileNamespace: namespace,
 			body: 'do it',
 			parents: '',
 			json: true,
@@ -255,7 +316,10 @@ describe('maestro-cli board', () => {
 			agent: 'Alpha',
 			title: 'Isolated',
 			assignee: 'p1',
+			profileNamespace: namespace,
 			worktree: true,
+			workingDirectory: projectRoot,
+			repository: 'repo',
 			json: true,
 		});
 		const created = loadBoards(projectRoot)[0].cards[0];
@@ -272,6 +336,7 @@ describe('maestro-cli board', () => {
 			agent: 'Alpha',
 			title: 'Urgent',
 			assignee: 'p1',
+			profileNamespace: namespace,
 			priority: 'high',
 			json: true,
 		});
@@ -279,6 +344,7 @@ describe('maestro-cli board', () => {
 			agent: 'Alpha',
 			title: 'Ordinary',
 			assignee: 'p1',
+			profileNamespace: namespace,
 			priority: 'normal',
 			json: true,
 		});
@@ -293,6 +359,7 @@ describe('maestro-cli board', () => {
 			agent: 'Alpha',
 			title: 'Typo',
 			assignee: 'p1',
+			profileNamespace: namespace,
 			priority: 'urgent',
 			json: true,
 		});
@@ -385,6 +452,7 @@ describe('maestro-cli board', () => {
 			agent: 'Alpha',
 			title: 'Child',
 			assignee: 'p1',
+			profileNamespace: namespace,
 			parents: 'a, b',
 			json: true,
 		});
@@ -426,6 +494,8 @@ describe('maestro-cli board', () => {
 			parents: '',
 			priority: 'high',
 			worktree: true,
+			workingDirectory: projectRoot,
+			repository: 'repo',
 			json: true,
 		});
 		const updated = loadBoards(projectRoot)[0].cards.find((c) => c.id === 'c1')!;
@@ -445,25 +515,18 @@ describe('maestro-cli board', () => {
 
 	it('board update-card refuses a running card', async () => {
 		const b = createBoard(projectRoot, 'B');
-		saveBoards(
-			projectRoot,
-			loadBoards(projectRoot).map((entry) =>
-				entry.id === b.id
-					? { ...entry, cards: [...entry.cards, card('c1', { status: 'running', title: 'Live' })] }
-					: entry
-			)
-		);
+		seedCard(db, projectRoot, b.id, card('c1', { status: 'running', title: 'Live' }));
 		await boardUpdateCard('c1', { agent: 'Alpha', title: 'Nope', json: true });
 		expect(exitSpy).toHaveBeenCalledWith(1);
 		expect(loadBoards(projectRoot)[0].cards[0].title).toBe('Live');
 	});
 
-	it('board update-card refuses to strip the last assignee', async () => {
+	it('board update-card permits removing the last assignee as a non-executable draft', async () => {
 		const b = createBoard(projectRoot, 'B');
 		addCard(projectRoot, b.id, card('c1'));
 		await boardUpdateCard('c1', { agent: 'Alpha', assignee: '', json: true });
-		expect(exitSpy).toHaveBeenCalledWith(1);
-		expect(loadBoards(projectRoot)[0].cards[0].assigneeProfileId).toBe('p1');
+		expect(exitSpy).not.toHaveBeenCalled();
+		expect(loadBoards(projectRoot)[0].cards[0].assigneeProfileId).toBeUndefined();
 	});
 
 	it('board update-card refuses a parents edit that would close a cycle', async () => {
@@ -495,14 +558,7 @@ describe('maestro-cli board', () => {
 
 	it('board remove-card refuses a running card without --force', async () => {
 		const b = createBoard(projectRoot, 'B');
-		saveBoards(
-			projectRoot,
-			loadBoards(projectRoot).map((entry) =>
-				entry.id === b.id
-					? { ...entry, cards: [...entry.cards, card('c1', { status: 'running' })] }
-					: entry
-			)
-		);
+		seedCard(db, projectRoot, b.id, card('c1', { status: 'running' }));
 		await boardRemoveCard('c1', { agent: 'Alpha', json: true });
 		expect(exitSpy).toHaveBeenCalledWith(1);
 		expect(loadBoards(projectRoot)[0].cards).toHaveLength(1);
@@ -510,14 +566,7 @@ describe('maestro-cli board', () => {
 
 	it('board remove-card --force still refuses a running card', async () => {
 		const b = createBoard(projectRoot, 'B');
-		saveBoards(
-			projectRoot,
-			loadBoards(projectRoot).map((entry) =>
-				entry.id === b.id
-					? { ...entry, cards: [...entry.cards, card('c1', { status: 'running' })] }
-					: entry
-			)
-		);
+		seedCard(db, projectRoot, b.id, card('c1', { status: 'running' }));
 		await boardRemoveCard('c1', { agent: 'Alpha', force: true, json: true });
 		expect(exitSpy).toHaveBeenCalledWith(1);
 		expect(loadBoards(projectRoot)[0].cards).toHaveLength(1);
@@ -612,7 +661,7 @@ describe('maestro-cli board', () => {
 		/** A card that satisfies every gate condition once it lands in `done`. */
 		function prReadyCard(overrides: Partial<BoardCard> = {}): BoardCard {
 			return card('c1', {
-				status: 'review',
+				status: 'blocked',
 				prOnDone: {},
 				worktree: { path: '/tmp/wt/c1', branch: 'board/b/c1' },
 				runs: [
@@ -620,7 +669,7 @@ describe('maestro-cli board', () => {
 						attempt: 1,
 						startedAt: '2026-08-04T00:00:00.000Z',
 						endedAt: '2026-08-04T00:01:00.000Z',
-						outcome: 'success',
+						outcome: 'done',
 						summary: 'did the thing',
 						worktreePath: '/tmp/wt/c1',
 						worktreeBranch: 'board/b/c1',
@@ -632,7 +681,7 @@ describe('maestro-cli board', () => {
 
 		it('opens the PR, awaits it, and stamps the url on the run', async () => {
 			const b = createBoard(projectRoot, 'B');
-			addCard(projectRoot, b.id, prReadyCard());
+			seedCard(db, projectRoot, b.id, prReadyCard());
 			let resolved = false;
 			mockCreatePullRequest.mockImplementation(async () => {
 				await new Promise((r) => setTimeout(r, 5));
@@ -654,7 +703,7 @@ describe('maestro-cli board', () => {
 
 		it('persists prError and leaves the card done when the PR fails', async () => {
 			const b = createBoard(projectRoot, 'B');
-			addCard(projectRoot, b.id, prReadyCard());
+			seedCard(db, projectRoot, b.id, prReadyCard());
 			mockCreatePullRequest.mockResolvedValue({
 				success: false,
 				error: 'branch has no commits ahead of rc',
@@ -673,7 +722,7 @@ describe('maestro-cli board', () => {
 
 		it('attempts nothing for a card that never opted in', async () => {
 			const b = createBoard(projectRoot, 'B');
-			addCard(projectRoot, b.id, prReadyCard({ prOnDone: undefined }));
+			seedCard(db, projectRoot, b.id, prReadyCard({ prOnDone: undefined }));
 
 			await boardSetStatus('c1', 'done', { agent: 'Alpha', json: true });
 
@@ -685,7 +734,7 @@ describe('maestro-cli board', () => {
 
 		it('attempts nothing for a move into a status other than done', async () => {
 			const b = createBoard(projectRoot, 'B');
-			addCard(projectRoot, b.id, prReadyCard());
+			seedCard(db, projectRoot, b.id, prReadyCard());
 			await boardSetStatus('c1', 'blocked', { agent: 'Alpha', json: true });
 			expect(mockCreatePullRequest).not.toHaveBeenCalled();
 		});
@@ -696,7 +745,10 @@ describe('maestro-cli board', () => {
 				agent: 'Alpha',
 				title: 'Targeted',
 				assignee: 'p1',
+				profileNamespace: namespace,
 				worktree: true,
+				workingDirectory: projectRoot,
+				repository: 'repo',
 				prOnDone: 'rc',
 				json: true,
 			});
@@ -704,7 +756,10 @@ describe('maestro-cli board', () => {
 				agent: 'Alpha',
 				title: 'Default base',
 				assignee: 'p1',
+				profileNamespace: namespace,
 				worktree: true,
+				workingDirectory: projectRoot,
+				repository: 'repo',
 				prOnDone: true,
 				json: true,
 			});
@@ -758,9 +813,9 @@ describe('maestro-cli board', () => {
 			expect(exitSpy).not.toHaveBeenCalled();
 		});
 
-		it('exits non-zero when the board file fails to load (fail-closed)', async () => {
+		it('exits non-zero when the central board schema is unavailable (fail-closed)', async () => {
 			fs.mkdirSync(path.join(projectRoot, '.maestro'), { recursive: true });
-			fs.writeFileSync(path.join(projectRoot, '.maestro', 'board.yaml'), 'boards: [', 'utf-8');
+			db.exec('DROP TABLE collections');
 			await boardWatch({ agent: 'Alpha', interval: '5', json: true });
 			expect(exitSpy).toHaveBeenCalledWith(1);
 		});

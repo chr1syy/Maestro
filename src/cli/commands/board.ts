@@ -1,35 +1,19 @@
 import { requireEncore } from '../utils/encore-gate';
-/**
- * `maestro-cli board` - drive the persistent Board (task DAG) headlessly.
- *
- * Mirrors the `board:*` IPC surface by delegating to the SAME Electron-free
- * storage module the desktop handlers use (`src/main/board/board-storage`), so
- * CLI and desktop never drift. Every command needs a project root, resolved
- * from a target agent (`--agent <id-or-name>` -> that agent's `projectRoot`).
- *
- * `board tick` runs one dispatcher pass headlessly. It reuses the PURE
- * orchestration helpers from the Phase 3 dispatcher (promote / claim / apply)
- * and the existing CLI spawn path (`spawnAgent`) - it does not fork a second
- * spawn implementation. SSH remote config and profile model/effort/role
- * overrides are honored exactly as the desktop dispatcher honors them.
+/** Board capture/CRUD uses the running host's central workspace and validation.
+ * Dispatch tick/watch remain separate until the fenced runtime integration lands.
  */
 
-import { generateUUID } from '../../shared/uuid';
 import {
-	listBoards,
-	getBoard,
-	createBoard,
-	renameBoard,
-	deleteBoard,
-	addCard,
-	updateCard,
-	updateCardStatus,
-	deleteCard,
-	saveBoard,
-	stampBoardRunPr,
-	enqueueBoardWrite,
-} from '../../main/board/board-storage';
-import { maybeCreateCardPr, type CardPrResult } from '../../main/board/board-pr';
+	withMaestroClient,
+	MaestroNotRunningError,
+	CommandTimeoutError,
+} from '../services/maestro-client';
+import { requestBoardCommand } from '../../shared/maestro-lib/client/board';
+import type { BoardCommand, BoardCommandTarget } from '../../shared/board/commands';
+import type { BoardWorkspaceQueryResult, BoardWorkspaceCollection } from '../../shared/board/types';
+import { generateUUID } from '../../shared/uuid';
+import { listBoards, getBoard, saveBoard, enqueueBoardWrite } from '../../main/board/board-storage';
+import { type CardPrResult } from '../../main/board/board-pr';
 import type { Board, BoardCard, CardPrOnDone, CardStatus } from '../../shared/board/types';
 import { CARD_PRIORITIES, CARD_STATUSES } from '../../shared/board/types';
 import { getBlockers } from '../../shared/board/graph';
@@ -64,7 +48,18 @@ import { formatError, formatSuccess, formatWarning } from '../output/formatter';
 import type { SessionInfo, ToolType } from '../../shared/types';
 
 interface BoardCommonOptions {
-	agent: string;
+	agent?: string;
+	projectRoot?: string;
+	source?: string;
+	collection?: string;
+	revision?: string;
+	cardRevision?: string;
+	scopeAgent?: string;
+	scopeGroup?: string;
+	profileNamespace?: string;
+	repository?: string;
+	workingDirectory?: string;
+	startMode?: string;
 	json?: boolean;
 }
 
@@ -151,8 +146,18 @@ export const MIN_WATCH_INTERVAL_SECONDS = 5;
  * into post-error code (matches the repo's try/catch-at-boundary convention). */
 function reportError(error: unknown, json: boolean | undefined): never {
 	const message = error instanceof Error ? error.message : String(error);
+	const details =
+		error instanceof Error && 'boardError' in error
+			? error.boardError
+			: {
+					code:
+						error instanceof MaestroNotRunningError || error instanceof CommandTimeoutError
+							? 'runtime-unavailable'
+							: 'invalid-input',
+					message,
+				};
 	if (json) {
-		console.log(JSON.stringify({ type: 'error', error: message }));
+		console.log(JSON.stringify({ type: 'error', error: message, details }));
 	} else {
 		console.error(formatError(message));
 	}
@@ -188,8 +193,9 @@ function resolveAssigneeAgentId(value: string): string {
 /** `board list --agent <id>` - list boards in the agent's project. */
 export async function boardList(options: BoardCommonOptions): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const boards = listBoards(session.projectRoot);
+		const boards = (await queryHost(options)).collections
+			.filter((entry) => !options.collection || entry.collectionKey === options.collection)
+			.map((entry) => entry.board);
 
 		if (options.json) {
 			console.log(JSON.stringify(boards, null, 2));
@@ -204,6 +210,10 @@ export async function boardList(options: BoardCommonOptions): Promise<void> {
 			const byStatus = countByStatus(b);
 			const cap = b.maxInProgress ? `  |  WIP cap: ${b.maxInProgress}` : '';
 			lines.push(`  ${b.name}  [${b.id.slice(0, 8)}]`);
+			if (b.storage)
+				lines.push(
+					`     source: ${b.storage.sourceKey}  collection: ${b.storage.collectionKey}  revision: ${b.storage.expectedRevision}`
+				);
 			lines.push(`     ${b.cards.length} card(s)  |  ${byStatus}${cap}`);
 			lines.push('');
 		}
@@ -223,7 +233,6 @@ export async function boardList(options: BoardCommonOptions): Promise<void> {
  */
 export async function boardCreate(name: string, options: BoardCreateOptions): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
 		const trimmed = (name ?? '').trim();
 		if (!trimmed) throw new Error('A board name is required (board create <name>).');
 
@@ -240,7 +249,17 @@ export async function boardCreate(name: string, options: BoardCreateOptions): Pr
 			maxInProgress = parsed;
 		}
 
-		const board = createBoard(session.projectRoot, trimmed, {
+		const projectRoot = selectedProjectRoot(options);
+		const snapshot = await queryHost(options);
+		const sourceKey =
+			options.source ?? (snapshot.sources.length === 1 ? snapshot.sources[0].sourceKey : undefined);
+		if (!projectRoot || !sourceKey)
+			throw new Error('Create requires --project-root and an unambiguous --source.');
+		const board = await hostCommand<Board>({
+			action: 'create',
+			projectRoot,
+			sourceKey,
+			name: trimmed,
 			maxInProgress,
 			autoDecompose: options.autoDecompose === true,
 		});
@@ -263,13 +282,16 @@ export async function boardRename(
 	options: BoardCommonOptions
 ): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const board = resolveBoard(session.projectRoot, boardId);
+		const board = (await selectHostBoard(boardId, options)).board;
 		const trimmed = (newName ?? '').trim();
 		if (!trimmed) throw new Error('A new board name is required (board rename <boardId> <name>).');
 
 		const previous = board.name;
-		const renamed = renameBoard(session.projectRoot, board.id, trimmed);
+		const renamed = await hostCommand<Board>({
+			action: 'rename',
+			target: hostTarget(board, options),
+			name: trimmed,
+		});
 
 		if (options.json) {
 			console.log(JSON.stringify(renamed, null, 2));
@@ -290,9 +312,12 @@ export async function boardRename(
  */
 export async function boardDelete(boardId: string, options: BoardDeleteOptions): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const board = resolveBoard(session.projectRoot, boardId);
-		const remaining = deleteBoard(session.projectRoot, board.id, { force: options.force === true });
+		const board = (await selectHostBoard(boardId, options)).board;
+		const remaining = await hostCommand<Board[]>({
+			action: 'delete',
+			target: hostTarget(board, options),
+			force: options.force === true,
+		});
 
 		if (options.json) {
 			console.log(
@@ -317,8 +342,7 @@ export async function boardDelete(boardId: string, options: BoardDeleteOptions):
 /** `board show <boardId> --agent <id>` - print a board and its cards. */
 export async function boardShow(boardId: string, options: BoardShowOptions): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const board = resolveBoard(session.projectRoot, boardId);
+		const board = (await selectHostBoard(boardId, options)).board;
 
 		if (options.json) {
 			console.log(JSON.stringify(board, null, 2));
@@ -326,6 +350,10 @@ export async function boardShow(boardId: string, options: BoardShowOptions): Pro
 		}
 		const lines: string[] = [`${board.name}  [${board.id.slice(0, 8)}]`];
 		lines.push(`${board.cards.length} card(s)  |  ${countByStatus(board)}`);
+		if (board.storage)
+			lines.push(
+				`source: ${board.storage.sourceKey}  collection: ${board.storage.collectionKey}  revision: ${board.storage.expectedRevision}`
+			);
 		lines.push('');
 		for (const card of board.cards) {
 			lines.push(`  [${card.status}]  ${card.title}  (${card.id.slice(0, 8)})`);
@@ -353,8 +381,7 @@ export async function boardShow(boardId: string, options: BoardShowOptions): Pro
 /** `board add-card <boardId> --title ... --assignee ...` - append a card. */
 export async function boardAddCard(boardId: string, options: BoardAddCardOptions): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const board = resolveBoard(session.projectRoot, boardId);
+		const board = (await selectHostBoard(boardId, options)).board;
 
 		const title = (options.title ?? '').trim();
 		if (!title) throw new Error('A card title is required (--title <title>).');
@@ -364,11 +391,6 @@ export async function boardAddCard(boardId: string, options: BoardAddCardOptions
 		// runs on that agent with its own settings.
 		const assignee = (options.assignee ?? '').trim();
 		const assigneeAgent = (options.assigneeAgent ?? '').trim();
-		if (!assignee && !assigneeAgent) {
-			throw new Error(
-				'An assignee is required: --assignee <profileId> (role) and/or --assignee-agent <agentId> (pin).'
-			);
-		}
 
 		const parents = parseParents(options.parents);
 
@@ -392,8 +414,11 @@ export async function boardAddCard(boardId: string, options: BoardAddCardOptions
 		if (assigneeAgent) card.assigneeAgentId = resolveAssigneeAgentId(assigneeAgent);
 		// `normal` is the default and is never serialized.
 		if (priority === 'high' || priority === 'low') card.priority = priority;
+		applyCaptureOptions(card, options);
+		if (options.worktree && !card.workingDirectory)
+			throw new Error('--worktree requires --working-directory.');
 		if (options.worktree)
-			card.worktree = buildCardWorktreeRef(session.projectRoot, board.id, cardId);
+			card.worktree = buildCardWorktreeRef(card.workingDirectory!, board.id, cardId);
 		// Board F3 opt-in. Only meaningful together with `--worktree` (the PR is
 		// opened for that worktree's branch), but not enforced here: a card can gain
 		// its worktree later via `update-card --worktree`.
@@ -401,10 +426,11 @@ export async function boardAddCard(boardId: string, options: BoardAddCardOptions
 			card.prOnDone = parsePrOnDone(options.prOnDone);
 		}
 
-		addCard(session.projectRoot, board.id, card);
+		const saved = await captureHost(board, card, options);
+		const captured = saved.cards.find((value) => value.id === card.id)!;
 
 		if (options.json) {
-			console.log(JSON.stringify(card, null, 2));
+			console.log(JSON.stringify(captured, null, 2));
 			return;
 		}
 		console.log(
@@ -431,9 +457,10 @@ export async function boardUpdateCard(
 	options: BoardUpdateCardOptions
 ): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const located = locateCard(session.projectRoot, cardId, options.board);
+		const located = await selectHostCard(cardId, options);
 		const { board, card } = located;
+		if (options.cardRevision !== undefined)
+			card.storageRevision = readRevision(options.cardRevision);
 		if (card.status === 'running') {
 			throw new Error(
 				`Card "${card.title}" (${card.id.slice(0, 8)}) is running and cannot be edited. ` +
@@ -467,13 +494,7 @@ export async function boardUpdateCard(
 			else delete next.assigneeAgentId;
 			changed = true;
 		}
-		// A card with no assignee at all fails validation deep inside storage with
-		// "invalid card shape"; say what actually went wrong instead.
-		if (!next.assigneeProfileId && !next.assigneeAgentId) {
-			throw new Error(
-				'A card must keep an assignee: --assignee <profileId> and/or --assignee-agent <agentId>.'
-			);
-		}
+
 		if (options.parents !== undefined) {
 			next.parents = parseParents(options.parents);
 			changed = true;
@@ -485,8 +506,10 @@ export async function boardUpdateCard(
 			else delete next.priority;
 			changed = true;
 		}
+		if (applyCaptureOptions(next, options)) changed = true;
 		if (options.worktree === true) {
-			next.worktree = buildCardWorktreeRef(session.projectRoot, board.id, card.id);
+			if (!next.workingDirectory) throw new Error('--worktree requires --working-directory.');
+			next.worktree = buildCardWorktreeRef(next.workingDirectory!, board.id, card.id);
 			changed = true;
 		} else if (options.worktree === false) {
 			delete next.worktree;
@@ -506,10 +529,10 @@ export async function boardUpdateCard(
 			);
 		}
 
-		updateCard(session.projectRoot, board.id, next);
+		const saved = await captureHost(board, next, options);
 
 		if (options.json) {
-			const fresh = getBoard(session.projectRoot, board.id);
+			const fresh = saved;
 			console.log(JSON.stringify(fresh?.cards.find((c) => c.id === next.id) ?? next, null, 2));
 			return;
 		}
@@ -531,8 +554,7 @@ export async function boardRemoveCard(
 	options: BoardRemoveCardOptions
 ): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
-		const { board, card } = locateCard(session.projectRoot, cardId, options.board);
+		const { board, card } = await selectHostCard(cardId, options);
 
 		if (card.status === 'running') {
 			throw new Error(
@@ -542,7 +564,12 @@ export async function boardRemoveCard(
 		}
 
 		const dependents = board.cards.filter((c) => c.parents.includes(card.id));
-		deleteCard(session.projectRoot, board.id, card.id);
+		await hostCommand({
+			action: 'delete-card',
+			target: hostTarget(board, options),
+			cardId: card.id,
+			cardRevision: readRevision(options.cardRevision, card.storageRevision),
+		});
 
 		if (options.json) {
 			console.log(
@@ -584,19 +611,29 @@ export async function boardSetStatus(
 	options: BoardSetStatusOptions
 ): Promise<void> {
 	try {
-		const session = resolveAgentSession(options.agent);
 		if (!(CARD_STATUSES as readonly string[]).includes(status)) {
 			throw new Error(`Invalid status "${status}". Valid: ${CARD_STATUSES.join(', ')}.`);
 		}
 
-		const located = locateCard(session.projectRoot, cardId, options.board);
-		if (located.card.status === 'review' && status === 'done')
-			throw new Error('Human review approval requires an explicit UI action');
-		updateCardStatus(session.projectRoot, located.board.id, located.card.id, status as CardStatus);
+		const located = await selectHostCard(cardId, options);
+		await hostCommand({
+			action: 'status',
+			target: hostTarget(located.board, options),
+			cardId: located.card.id,
+			cardRevision: readRevision(options.cardRevision, located.card.storageRevision),
+			status: status as CardStatus,
+		});
 
 		const pr =
 			status === 'done'
-				? await createCardPrFromCli(session.projectRoot, located.board.id, located.card.id, options)
+				? await hostCommand<CardPrResult | null>({
+						action: 'card-pr',
+						target: hostTarget((await selectHostBoard(located.board.id, options)).board, {
+							...options,
+							revision: undefined,
+						}),
+						cardId: located.card.id,
+					})
 				: null;
 
 		if (options.json) {
@@ -623,39 +660,6 @@ export async function boardSetStatus(
 	} catch (error) {
 		reportError(error, options.json);
 	}
-}
-
-/**
- * Run the PR-on-done flow for a card the CLI just moved into `done`, with the
- * same storage wiring `startCardPr` binds in the desktop host: fresh board reads,
- * and both stamps applied inside the shared board write queue. Returns `null` when
- * the gate declined (no `prOnDone`, no branch, or a PR already exists).
- */
-function createCardPrFromCli(
-	projectRoot: string,
-	boardId: string,
-	cardId: string,
-	options: BoardSetStatusOptions
-): Promise<CardPrResult | null> {
-	return maybeCreateCardPr(cardId, {
-		loadBoard: () => getBoard(projectRoot, boardId),
-		stampPrUrl: (id, prUrl, run) =>
-			enqueueBoardWrite(projectRoot, () => {
-				const board = getBoard(projectRoot, boardId);
-				if (board) stampBoardRunPr(projectRoot, board, id, run, { prUrl });
-			}),
-		stampPrError: (id, error, run) =>
-			enqueueBoardWrite(projectRoot, () => {
-				const board = getBoard(projectRoot, boardId);
-				if (board) stampBoardRunPr(projectRoot, board, id, run, { prError: error.slice(0, 500) });
-			}),
-		mainRepoCwd: projectRoot,
-		// No toast sink: there is no renderer to relay to from a CLI process. The
-		// outcome is printed by the caller and persisted on the run either way.
-		onLog: (level, message) => {
-			if (!options.json && level !== 'info') console.error(formatWarning(`[pr] ${message}`));
-		},
-	});
 }
 
 /** `board tick --agent <id> [--board <id>]` - run one dispatcher pass headlessly. */
@@ -1202,22 +1206,146 @@ function resolveBoard(projectRoot: string, boardId: string): Board {
 	throw new Error(`Board "${boardId}" not found in project.`);
 }
 
-/** Find the board that owns a card id (exact or prefix), scoped by --board. */
-function locateCard(
-	projectRoot: string,
-	cardId: string,
-	boardHint: string | undefined
-): { board: Board; card: BoardCard } {
-	const boards = boardHint ? [resolveBoard(projectRoot, boardHint)] : listBoards(projectRoot);
-	const matches: Array<{ board: Board; card: BoardCard }> = [];
-	for (const board of boards) {
-		for (const card of board.cards) {
-			if (card.id === cardId || card.id.startsWith(cardId)) matches.push({ board, card });
-		}
+/** Board CRUD always talks to the currently running host; it never opens a local database. */
+async function hostCommand<T = unknown>(command: BoardCommand): Promise<T> {
+	const reply = await withMaestroClient((client) => requestBoardCommand(client, command));
+	if (!reply.ok) {
+		const failure =
+			typeof reply.error === 'object'
+				? reply.error
+				: { code: 'runtime-unavailable', message: String(reply.error) };
+		throw Object.assign(new Error(failure.message), { boardError: failure });
 	}
-	if (matches.length === 1) return matches[0];
-	if (matches.length > 1) {
-		throw new Error(`Card id "${cardId}" is ambiguous (${matches.length} matches). Use --board.`);
+	return reply.value as T;
+}
+function selectedProjectRoot(options: BoardCommonOptions): string | undefined {
+	return (
+		options.projectRoot ??
+		(options.agent ? resolveAgentSession(options.agent).projectRoot : undefined)
+	);
+}
+async function queryHost(options: BoardCommonOptions): Promise<BoardWorkspaceQueryResult> {
+	const projectRoot = selectedProjectRoot(options);
+	return hostCommand({
+		action: 'query',
+		query: {
+			...(projectRoot ? { projectRoot } : {}),
+			...(options.source ? { sourceKey: options.source } : {}),
+		},
+	});
+}
+async function selectHostBoard(
+	id: string,
+	options: BoardCommonOptions
+): Promise<BoardWorkspaceCollection> {
+	const snapshot = await queryHost(options);
+	const candidates = snapshot.collections.filter(
+		(entry) => !options.collection || entry.collectionKey === options.collection
+	);
+	const exact = candidates.filter((entry) => entry.board.id === id || entry.collectionKey === id);
+	const matches = exact.length
+		? exact
+		: candidates.filter((entry) => entry.board.id.startsWith(id));
+	if (matches.length !== 1)
+		throw new Error(
+			`Board "${id}" ${matches.length ? 'is ambiguous; use --source and --collection' : 'not found'}.`
+		);
+	return matches[0];
+}
+async function selectHostCard(
+	id: string,
+	options: BoardCommonOptions & { board?: string }
+): Promise<{ board: Board; card: BoardCard }> {
+	const collections = options.board
+		? [await selectHostBoard(options.board, options)]
+		: (await queryHost(options)).collections.filter(
+				(entry) => !options.collection || entry.collectionKey === options.collection
+			);
+	const all = collections.flatMap(({ board }) => board.cards.map((card) => ({ board, card })));
+	const exact = all.filter(({ card }) => card.id === id);
+	const matches = exact.length ? exact : all.filter(({ card }) => card.id.startsWith(id));
+	if (matches.length !== 1)
+		throw new Error(
+			`Card "${id}" ${matches.length ? 'is ambiguous; use --source and --collection' : 'not found'}.`
+		);
+	return matches[0];
+}
+function readRevision(raw: string | undefined, fallback?: number): number {
+	const value = raw === undefined ? fallback : Number(raw);
+	if (value === undefined || !Number.isSafeInteger(value) || value < 0 || raw?.trim() === '')
+		throw new Error('A non-negative integer revision is required.');
+	return value;
+}
+function hostTarget(board: Board, options: BoardCommonOptions): BoardCommandTarget {
+	const projectRoot = selectedProjectRoot(options);
+	if (!projectRoot)
+		throw new Error(
+			'Mutation requires --project-root or --agent; no working directory is inferred.'
+		);
+	if (!board.storage) throw new Error('Host returned a board without central identity.');
+	return {
+		projectRoot,
+		sourceKey: board.storage.sourceKey,
+		collectionKey: board.storage.collectionKey,
+		expectedRevision: readRevision(options.revision, board.storage.expectedRevision ?? undefined),
+	};
+}
+async function captureHost(
+	board: Board,
+	card: BoardCard,
+	options: BoardCommonOptions
+): Promise<Board> {
+	const target = hostTarget(board, options);
+	return hostCommand({
+		action: 'capture',
+		target,
+		capture: {
+			projectRoot: target.projectRoot,
+			boardId: board.id,
+			expectedRevision: target.expectedRevision,
+			card,
+		},
+	});
+}
+function applyCaptureOptions(
+	card: BoardCard,
+	options: BoardCommonOptions & { assignee?: string }
+): boolean {
+	let changed = false;
+	if (options.scopeAgent !== undefined && options.scopeGroup !== undefined)
+		throw new Error('Choose exactly one of --scope-agent or --scope-group.');
+	if (options.scopeAgent !== undefined || options.scopeGroup !== undefined) {
+		card.executionScope =
+			options.scopeAgent !== undefined
+				? { kind: 'agent', agentId: options.scopeAgent }
+				: { kind: 'group', groupId: options.scopeGroup! };
+		changed = true;
 	}
-	throw new Error(`Card "${cardId}" not found in project.`);
+	if (options.profileNamespace !== undefined || options.assignee !== undefined) {
+		const namespace = options.profileNamespace ?? card.role?.namespace;
+		const profileId =
+			options.assignee !== undefined
+				? options.assignee.trim()
+				: (card.role?.profileId ?? card.assigneeProfileId);
+		if (profileId && namespace) card.role = { namespace, profileId };
+		else if (options.assignee === '') delete card.role;
+		else throw new Error('--assignee requires an explicit --profile-namespace.');
+		Reflect.deleteProperty(card, 'profileNamespace');
+		changed = true;
+	}
+	if (options.repository !== undefined) {
+		card.repositoryId = options.repository;
+		changed = true;
+	}
+	if (options.workingDirectory !== undefined) {
+		card.workingDirectory = options.workingDirectory;
+		changed = true;
+	}
+	if (options.startMode !== undefined) {
+		if (options.startMode !== 'direct' && options.startMode !== 'approval')
+			throw new Error('--start-mode must be direct or approval.');
+		card.startModeOverride = options.startMode;
+		changed = true;
+	}
+	return changed;
 }

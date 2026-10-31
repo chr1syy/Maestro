@@ -217,7 +217,11 @@ Worktree cards are local-only: an agent configured to run over an SSH remote exe
 
 ## CLI
 
-The Board and Profiles are fully drivable headlessly with `maestro-cli`, mirroring the in-app actions. Every command resolves the project from a target agent.
+Board list, show, capture and CRUD commands use the running Maestro host through its authenticated command bridge. With no filter, `board list --json` returns all central collections. `--agent` selects that agent's registered project; `--project-root`, `--source` and `--collection` select explicit central identities. Legacy board/card IDs or prefixes are accepted only when the filtered host snapshot resolves exactly one match. Mutations require a project root or target agent, and never infer a repository from the creator's working directory.
+
+Use `--revision` and `--card-revision` to retain a previously read optimistic concurrency token. Without these flags, the command reads the current host snapshot and submits its revisions; a concurrent write is still rejected. JSON failures retain the readable `error` and include machine-readable `details.code`, `details.message` and host capture errors. An unavailable host returns an error without falling back to a local database.
+
+Capture accepts `--scope-agent` or `--scope-group`, optional `--assignee-agent` pin, `--assignee` with `--profile-namespace`, `--repository`, `--working-directory` and `--start-mode direct|approval`. The host validates current membership and repository boundaries. Any Maestro agent can capture a draft without joining the worker registry. Missing execution bindings remain non-executable drafts. Required dispatch approval and human review cannot be granted by CLI status edits or authority flags; an already authorized direct policy remains usable. Tick/watch integration with global claims is a separate lifecycle step.
 
 ```bash
 # Profiles
@@ -235,7 +239,7 @@ maestro-cli board rename <boardId> "New name" --agent <id-or-name>
 maestro-cli board delete <boardId> --agent <id-or-name> [--force]
 
 # Cards
-maestro-cli board add-card <boardId> --agent <id-or-name> --title "Design schema" --assignee <profileId> --body "..." --parents <id1,id2> --worktree
+maestro-cli board add-card <boardId> --agent <id-or-name> --source <sourceKey> --title "Design schema" --scope-group <groupId> --assignee <profileId> --profile-namespace <namespace> --repository <repositoryId> --working-directory <path> --body "..." --parents <id1,id2> --worktree
 maestro-cli board update-card <cardId> --agent <id-or-name> --title "Design the schema" --priority high
 maestro-cli board remove-card <cardId> --agent <id-or-name>
 maestro-cli board set-status <cardId> done --agent <id-or-name>
@@ -255,5 +259,5 @@ A few behaviors worth knowing:
 - `board delete` refuses a board that still has cards which are not `done` unless you pass `--force`. Force only bypasses unfinished-card confirmation; running cards must still be stopped first. Deletion takes the whole board, cards and run history included.
 - `board update-card` and `profile update` change only the flags you actually pass. Pass an empty string (`--assignee ""`, `--model ""`) to clear a field. `profile update` keeps the profile's id, so cards assigned to that role keep working; `profile create` would mint a new id and leave them pointing at nothing.
 - A `running` card cannot be edited, moved or removed. Stop it before deleting it or its board; `--force` does not bypass this protection. The CLI has no handle on the in-flight agent process (it belongs to whichever dispatcher started it), so it cannot stop the run for you - use the stop button on the card in the app.
-- `board set-status` accepts manual statuses (`triage`, `todo`, `review`, `blocked`, `done`), so a headless approval is `board set-status <cardId> done`. For a qualifying card carrying `prOnDone`, this command opens the pull request and waits for the result. `board tick` never opens a pull request.
+- `board set-status` accepts manual statuses (`triage`, `todo`, `review`, `blocked`, `done`), but cannot approve a human review or grant required dispatch approval. For a qualifying card carrying `prOnDone`, this command opens the pull request and waits for the result. `board tick` never opens a pull request.
 - `board watch` is just `board tick` on a timer (default 30 seconds, minimum 5), stopped with Ctrl-C. It does not daemonize and takes no lock. Running two dispatchers on the same board (the desktop app with Cue enabled, plus a `watch`) is unsupported: each one can overwrite the other's latest card transition, because their read-modify-write cycles are not serialized across processes (atomic writes only prevent torn files). Pick one dispatcher per board - the CLI tick is meant for headless projects the app is not also dispatching.

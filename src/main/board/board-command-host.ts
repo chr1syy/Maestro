@@ -1,4 +1,7 @@
 /** Ordinary (non-human) commands share the desktop's current facade and host registers. */
+import { maybeCreateCardPr } from './board-pr';
+import type { CardPrResult } from './board-pr';
+import { getBoard, stampBoardRunPr } from './board-storage';
 import type { BoardCommandHost } from '../../shared/board/commands';
 import {
 	BoardStorageError,
@@ -19,11 +22,15 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 		if (command.action === 'catalog') return { ok: true, value: getBoardCaptureCatalog() };
 		const projectRoot =
 			command.action === 'create' ? command.projectRoot : command.target.projectRoot;
-		return await enqueueBoardWrite(projectRoot, () => {
+		const result = await enqueueBoardWrite(projectRoot, () => {
 			if (command.action === 'create') {
 				return {
 					ok: true as const,
-					value: createBoard(projectRoot, command.name, { expectedSourceKey: command.sourceKey }),
+					value: createBoard(projectRoot, command.name, {
+						expectedSourceKey: command.sourceKey,
+						maxInProgress: command.maxInProgress,
+						autoDecompose: command.autoDecompose,
+					}),
 				};
 			}
 			const target = command.target;
@@ -40,6 +47,28 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 				);
 			if (entry.revision !== target.expectedRevision)
 				throw new BoardStorageError('stale-revision', 'Board changed since read');
+			// This route has no human authority. A review cannot be escaped through
+			// an intermediate status or through a whole-card capture replacement.
+			const requestedCard =
+				command.action === 'capture'
+					? command.capture.card
+					: command.action === 'status'
+						? { id: command.cardId, status: command.status }
+						: undefined;
+			if (
+				requestedCard &&
+				requestedCard.status !== 'review' &&
+				entry.board.cards.some((card) => card.id === requestedCard.id && card.status === 'review')
+			)
+				throw new BoardStorageError(
+					'protected-field',
+					'Human review requires an explicit authorized UI action'
+				);
+			if (command.action === 'card-pr') {
+				if (!entry.board.cards.some((card) => card.id === command.cardId && card.status === 'done'))
+					throw new BoardStorageError('invalid-input', 'PR requires a completed card');
+				return { ok: true as const, value: null };
+			}
 			if (command.action === 'capture') {
 				if (command.capture.boardId !== entry.board.id)
 					throw new BoardStorageError(
@@ -79,6 +108,12 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 							),
 			};
 		});
+		if (command.action !== 'card-pr') return result;
+		const snapshot = queryBoardWorkspace({ projectRoot, sourceKey: command.target.sourceKey });
+		const board = snapshot.collections.find(
+			(entry) => entry.collectionKey === command.target.collectionKey
+		)!.board;
+		return { ok: true, value: await createCardPrFromHost(projectRoot, board.id, command.cardId) };
 	} catch (error) {
 		if (!(error instanceof BoardStorageError)) throw error;
 		return {
@@ -91,3 +126,29 @@ export const executeBoardCommand: BoardCommandHost = async (command) => {
 		};
 	}
 };
+
+function createCardPrFromHost(
+	projectRoot: string,
+	boardId: string,
+	cardId: string
+): Promise<CardPrResult | null> {
+	return maybeCreateCardPr(cardId, {
+		loadBoard: () => getBoard(projectRoot, boardId),
+		stampPrUrl: (id, prUrl, run) =>
+			enqueueBoardWrite(projectRoot, () => {
+				const board = getBoard(projectRoot, boardId);
+				if (board) stampBoardRunPr(projectRoot, board, id, run, { prUrl });
+			}),
+		stampPrError: (id, error, run) =>
+			enqueueBoardWrite(projectRoot, () => {
+				const board = getBoard(projectRoot, boardId);
+				if (board) stampBoardRunPr(projectRoot, board, id, run, { prError: error.slice(0, 500) });
+			}),
+		mainRepoCwd: projectRoot,
+		// No toast sink: there is no renderer to relay to from a CLI process. The
+		// outcome is printed by the caller and persisted on the run either way.
+		onLog: (level, message) => {
+			if (level !== 'info') console.error(`[board-pr] ${message}`);
+		},
+	});
+}

@@ -329,7 +329,9 @@ function mergePayload(
 		// defineProperty also treats a JSON key named __proto__ as ordinary data.
 		Object.defineProperty(result, field, {
 			value:
-				isRecord(value) && Object.hasOwn(stored, field) && isRecord(stored[field])
+				isRecord(value) &&
+				Object.prototype.hasOwnProperty.call(stored, field) &&
+				isRecord(stored[field])
 					? mergePayload(stored[field], value)
 					: value,
 			enumerable: true,
@@ -357,7 +359,10 @@ function patchPayload(
 		}
 		let written: unknown = set;
 		for (const field of removal) {
-			written = isRecord(written) && Object.hasOwn(written, field) ? written[field] : undefined;
+			written =
+				isRecord(written) && Object.prototype.hasOwnProperty.call(written, field)
+					? written[field]
+					: undefined;
 		}
 		if (written !== undefined) {
 			throw new BoardWorkspaceStorageError('invalid-input', 'Cannot set and unset the same field');
@@ -377,7 +382,10 @@ function patchPayload(
 	for (const removal of removals) {
 		let parent: unknown = next;
 		for (const field of removal.slice(0, -1)) {
-			parent = isRecord(parent) && Object.hasOwn(parent, field) ? parent[field] : undefined;
+			parent =
+				isRecord(parent) && Object.prototype.hasOwnProperty.call(parent, field)
+					? parent[field]
+					: undefined;
 		}
 		if (isRecord(parent)) delete parent[removal[removal.length - 1]];
 	}

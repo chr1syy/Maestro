@@ -22,7 +22,15 @@ export type BoardCommand =
 	| { action: 'query'; query: BoardWorkspaceQuery }
 	| { action: 'catalog' }
 	| { action: 'capture'; target: BoardCommandTarget; capture: BoardCaptureCommand }
-	| { action: 'create'; projectRoot: string; sourceKey: string; name: string }
+	| {
+			action: 'create';
+			projectRoot: string;
+			sourceKey: string;
+			name: string;
+			maxInProgress?: number;
+			autoDecompose?: boolean;
+	  }
+	| { action: 'card-pr'; target: BoardCommandTarget; cardId: string }
 	| { action: 'rename'; target: BoardCommandTarget; name: string }
 	| { action: 'delete'; target: BoardCommandTarget; force?: boolean }
 	| { action: 'delete-card'; target: BoardCommandTarget; cardId: string; cardRevision: number }
@@ -36,7 +44,13 @@ export type BoardCommand =
 export type BoardCommandResult =
 	| {
 			ok: true;
-			value: BoardWorkspaceQueryResult | BoardCaptureCatalog | Board | Board[];
+			value:
+				| BoardWorkspaceQueryResult
+				| BoardCaptureCatalog
+				| Board
+				| Board[]
+				| { success: boolean; prUrl?: string; error?: string }
+				| null;
 			readiness?: Record<string, string[]>;
 	  }
 	| Extract<BoardCaptureResponse, { ok: false }>;
@@ -61,7 +75,8 @@ export function parseBoardCommand(message: Record<string, unknown>): BoardComman
 		query: ['query'],
 		catalog: [],
 		capture: ['target', 'capture'],
-		create: ['projectRoot', 'sourceKey', 'name'],
+		create: ['projectRoot', 'sourceKey', 'name', 'maxInProgress', 'autoDecompose'],
+		'card-pr': ['target', 'cardId'],
 		rename: ['target', 'name'],
 		delete: ['target', 'force'],
 		'delete-card': ['target', 'cardId', 'cardRevision'],
@@ -79,12 +94,19 @@ export function parseBoardCommand(message: Record<string, unknown>): BoardComman
 			: undefined;
 	if (action === 'catalog') return { action };
 	if (action === 'create')
-		return text(message.projectRoot) && text(message.sourceKey) && text(message.name)
+		return (message.maxInProgress === undefined ||
+			(Number.isSafeInteger(message.maxInProgress) && (message.maxInProgress as number) > 0)) &&
+			(message.autoDecompose === undefined || typeof message.autoDecompose === 'boolean') &&
+			text(message.projectRoot) &&
+			text(message.sourceKey) &&
+			text(message.name)
 			? {
 					action,
 					projectRoot: message.projectRoot,
 					sourceKey: message.sourceKey,
 					name: message.name,
+					maxInProgress: message.maxInProgress as number | undefined,
+					autoDecompose: message.autoDecompose as boolean | undefined,
 				}
 			: undefined;
 	if (
@@ -96,7 +118,9 @@ export function parseBoardCommand(message: Record<string, unknown>): BoardComman
 		!revision(target.expectedRevision)
 	)
 		return;
-	if (action === 'capture') {
+	if (action === 'card-pr') {
+		if (!text(message.cardId)) return;
+	} else if (action === 'capture') {
 		const command = message.capture;
 		if (
 			!record(command) ||
