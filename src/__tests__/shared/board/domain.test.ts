@@ -76,4 +76,36 @@ describe('global Board capture', () => {
 			'repository-unresolved',
 		]);
 	});
+	it('captures deleted agents and pins without substituting another worker', () => {
+		const options = {
+			executionScope: { kind: 'agent' as const, agentId: 'deleted' },
+			assigneeAgentId: 'deleted',
+			repositoryId: 'repo-a',
+			workingDirectory: '/repo-a',
+		};
+		const captured = validateCapture(options, context);
+		expect(captured).toMatchObject({ ok: true, options });
+		if (!captured.ok) throw new Error('expected capture');
+		expect(
+			evaluateCaptureReadiness(captured.options, {
+				...context,
+				repositoryIds: ['repo-a', 'repo-b'],
+			})
+		).toEqual(['target-missing']);
+	});
+	it('requires an explicit known repository even when several are available', () => {
+		const readinessContext = { ...context, repositoryIds: ['repo-a', 'repo-b'] };
+		const scope = { executionScope: { kind: 'agent' as const, agentId: 'a' } };
+		expect(evaluateCaptureReadiness(scope, readinessContext)).toEqual(['repository-unresolved']);
+		expect(
+			evaluateCaptureReadiness(
+				{ ...scope, repositoryId: 'repo-b', workingDirectory: '/repo-b' },
+				readinessContext
+			)
+		).toEqual([]);
+		expect(validateCapture({ ...scope, assigneeAgentId: 'b' }, context)).toEqual({
+			ok: false,
+			errors: ['pin-outside-scope'],
+		});
+	});
 });
