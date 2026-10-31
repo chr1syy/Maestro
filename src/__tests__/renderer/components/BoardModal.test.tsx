@@ -70,6 +70,8 @@ function makeCard(overrides: Partial<BoardCard> & { id: string; title: string })
 // Board IPC stub, reassigned per test. The global test harness does not include
 // the board/profiles namespaces, so install them here.
 let boardApi: {
+	upsertRole: ReturnType<typeof vi.fn>;
+	setStartPolicy: ReturnType<typeof vi.fn>;
 	queryWorkspace: ReturnType<typeof vi.fn>;
 	captureCatalog: ReturnType<typeof vi.fn>;
 	captureCard: ReturnType<typeof vi.fn>;
@@ -147,6 +149,11 @@ function installApis(initialBoards: Board[], profiles?: unknown[]): void {
 	profilesChangedListeners = [];
 	unsubscribeProfilesChanged = vi.fn();
 	boardApi = {
+		upsertRole: vi.fn(async (_root: string, profile: { id: string }) => ({
+			namespace: 'fixture-namespace',
+			profileId: profile.id,
+		})),
+		setStartPolicy: vi.fn().mockResolvedValue({ ok: true }),
 		queryWorkspace: vi.fn(async (query) =>
 			workspaceResponse(query ? initialBoards : await boardApi.list())
 		),
@@ -154,7 +161,7 @@ function installApis(initialBoards: Board[], profiles?: unknown[]): void {
 			async (): Promise<BoardCaptureCatalog> => ({
 				agents: useSessionStore.getState().sessions.map(({ id, groupId }) => ({ id, groupId })),
 				groups: useSessionStore.getState().groups.map(({ id }) => ({ id })),
-				profiles: (await profilesApi.list()).map((profile: any) => ({
+				profiles: (await profilesApi.list()).map((profile: { id: string }) => ({
 					namespace: 'fixture-namespace',
 					profile,
 				})),
@@ -1104,9 +1111,9 @@ describe('BoardModal inline role quick-create (G2)', () => {
 		installApis([{ id: 'b1', name: 'My Board', cards: [] }], []);
 		// Echo the upserted profile back as the full list, the way the main process
 		// returns it after writing profiles.yaml.
-		profilesApi.upsert.mockImplementation(async (_root: string, p: unknown) => {
+		boardApi.upsertRole.mockImplementation(async (_root: string, p: unknown) => {
 			profilesApi.list.mockResolvedValue([p]);
-			return [p];
+			return { namespace: 'fixture-namespace', profileId: (p as { id: string }).id };
 		});
 
 		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
@@ -1114,8 +1121,9 @@ describe('BoardModal inline role quick-create (G2)', () => {
 		fireEvent.change(nameInput, { target: { value: 'Reviewer' } });
 		fireEvent.click(screen.getByRole('button', { name: /^Create$/i }));
 
-		await waitFor(() => expect(profilesApi.upsert).toHaveBeenCalledTimes(1));
-		const [proj, profile] = profilesApi.upsert.mock.calls[0];
+		await waitFor(() => expect(boardApi.upsertRole).toHaveBeenCalledTimes(1));
+		expect(profilesApi.upsert).not.toHaveBeenCalled();
+		const [proj, profile] = boardApi.upsertRole.mock.calls[0];
 		expect(proj).toBe(PROJECT_ROOT);
 		// Base agent defaults to the active Left Bar agent (s1).
 		expect(profile).toMatchObject({ name: 'Reviewer', baseAgentId: 's1' });
@@ -1134,9 +1142,9 @@ describe('BoardModal inline role quick-create (G2)', () => {
 
 	it('omits baseAgentId when the pool role ("None") is chosen', async () => {
 		installApis([{ id: 'b1', name: 'My Board', cards: [] }], []);
-		profilesApi.upsert.mockImplementation(async (_root: string, p: unknown) => {
+		boardApi.upsertRole.mockImplementation(async (_root: string, p: unknown) => {
 			profilesApi.list.mockResolvedValue([p]);
-			return [p];
+			return { namespace: 'fixture-namespace', profileId: (p as { id: string }).id };
 		});
 
 		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
@@ -1148,8 +1156,8 @@ describe('BoardModal inline role quick-create (G2)', () => {
 		fireEvent.change(baseSelect, { target: { value: '' } });
 		fireEvent.click(screen.getByRole('button', { name: /^Create$/i }));
 
-		await waitFor(() => expect(profilesApi.upsert).toHaveBeenCalledTimes(1));
-		const profile = profilesApi.upsert.mock.calls[0][1];
+		await waitFor(() => expect(boardApi.upsertRole).toHaveBeenCalledTimes(1));
+		const profile = boardApi.upsertRole.mock.calls[0][1];
 		expect(profile).toMatchObject({ name: 'Floater' });
 		// A pool role floats to any free worker, so it stores no base agent.
 		expect(profile).not.toHaveProperty('baseAgentId');
@@ -1157,7 +1165,7 @@ describe('BoardModal inline role quick-create (G2)', () => {
 
 	it('surfaces a red toast and keeps the mini-form open when the upsert rejects', async () => {
 		installApis([{ id: 'b1', name: 'My Board', cards: [] }], []);
-		profilesApi.upsert.mockRejectedValue(new Error('disk full'));
+		boardApi.upsertRole.mockRejectedValue(new Error('disk full'));
 
 		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
 		const nameInput = await openMiniForm();
@@ -1836,6 +1844,33 @@ describe('BoardModal central workspace identity', () => {
 		expect(screen.queryByText('Changed centrally')).not.toBeInTheDocument();
 	});
 
+	it('edits a persisted source using its host location after the last agent disappears', async () => {
+		const value = installWorkspace();
+		value.sources = value.sources.map((source) => ({
+			...source,
+			location: {
+				location: { kind: 'local' as const },
+				path: source.sourceKey === 'one' ? '/project-one' : '/project-two',
+			},
+		}));
+		useSessionStore.setState({ sessions: [], activeSessionId: '' });
+		boardApi.captureCard.mockResolvedValue({
+			ok: true,
+			value: value.collections[0].board,
+			readiness: {},
+		});
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Project one card'));
+		fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Edited closed source' } });
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+		await waitFor(() => expect(boardApi.captureCard).toHaveBeenCalledTimes(1));
+		expect(boardApi.captureCard.mock.calls[0][0]).toMatchObject({
+			projectRoot: '/project-one',
+			boardId: 'same-board',
+			expectedRevision: 10,
+			card: { title: 'Edited closed source' },
+		});
+	});
 	it('loads global collections without an active agent or a project-root fallback', async () => {
 		installWorkspace();
 		useSessionStore.setState({ sessions: [], activeSessionId: '' });
@@ -2289,7 +2324,7 @@ describe('BoardModal host capture editor', () => {
 
 	it('does not invent a namespace or create a second role when a legacy role write is absent from the host catalog', async () => {
 		installCapture();
-		profilesApi.upsert.mockResolvedValue([]);
+		boardApi.upsertRole.mockResolvedValue({ namespace: 'missing-namespace', profileId: 'missing' });
 		await openNew();
 		fireEvent.click(screen.getByRole('button', { name: /New role/ }));
 		fireEvent.change(screen.getByPlaceholderText('Role name, e.g. Reviewer'), {
@@ -2300,7 +2335,7 @@ describe('BoardModal host capture editor', () => {
 		const previousCalls = boardApi.captureCatalog.mock.calls.length;
 		fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
 		await waitFor(() => expect(boardApi.captureCatalog).toHaveBeenCalledTimes(previousCalls + 1));
-		expect(profilesApi.upsert).toHaveBeenCalledTimes(1);
+		expect(boardApi.upsertRole).toHaveBeenCalledTimes(1);
 		expect(screen.getByLabelText('Title')).toHaveValue('Explicit capture');
 	});
 });
@@ -2341,4 +2376,16 @@ describe('separate review card', () => {
 		expect(card.body).toContain('Checks: tests passed');
 		expect(work.status).toBe('done');
 	});
+});
+
+it('sends the displayed collection revision when a human changes its start policy', async () => {
+	installApis([{ id: 'b1', name: 'Board', cards: [] }]);
+	render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+	const select = await screen.findByLabelText('Board start policy');
+	fireEvent.change(select, { target: { value: 'direct' } });
+	await waitFor(() =>
+		expect(boardApi.setStartPolicy).toHaveBeenCalledWith(PROJECT_ROOT, 'b1', 1, 'direct')
+	);
+	expect(boardApi.captureCard).not.toHaveBeenCalled();
+	expect(boardApi.setCardStatus).not.toHaveBeenCalled();
 });

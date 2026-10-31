@@ -175,10 +175,10 @@ describe('central bootstrap and revision boundaries', () => {
 		const ledger = db.prepare('SELECT * FROM migrations').all();
 		const runs = db.prepare('SELECT * FROM runs').all();
 		db.exec(
-			'DROP TABLE board_sources; ALTER TABLE runs DROP COLUMN lifecycle_json; PRAGMA user_version = 3'
+			'DROP TABLE board_source_locations; DROP TABLE board_sources; ALTER TABLE runs DROP COLUMN lifecycle_json; PRAGMA user_version = 3'
 		);
 		reopen();
-		expect(db.pragma('user_version', { simple: true })).toBe(5);
+		expect(db.pragma('user_version', { simple: true })).toBe(6);
 		expect(loadBoards(projectRoot)).toEqual(before);
 		expect(db.prepare('SELECT * FROM migrations').all()).toEqual(ledger);
 		expect(db.prepare('SELECT * FROM runs').all()).toEqual(runs);
@@ -483,7 +483,7 @@ describe('board-storage malformed handling', () => {
 
 	it('quarantines a board missing its id/name envelope', () => {
 		const raw = yaml.dump({ boards: [{ name: 'No id', cards: [] }] });
-		const imported = importBytes(raw);
+		importBytes(raw);
 		expect(loadBoards(projectRoot)).toEqual([]);
 	});
 

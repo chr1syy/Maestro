@@ -166,3 +166,16 @@ describe('central Board query with real SQLite and preload/IPC transport', () =>
 		expect(() => facade.query({ sourceKey: 'unknown' })).toThrow(BoardWorkspaceStorageError);
 	});
 });
+
+it('returns persisted source locations after all source sessions disappear', async () => {
+	const first = await createBoardApi().queryWorkspace();
+	expect(first.ok).toBe(true);
+	if (!first.ok) throw new Error(first.error.message);
+	expect(first.value.sources.map((source) => source.location?.path).sort()).toEqual(
+		[...roots].sort()
+	);
+	db.close();
+	db = openBoardDb(path.join(dir, 'board.sqlite'));
+	configureBoardStorage(new BoardStorageFacade(db));
+	expect(await createBoardApi().queryWorkspace()).toEqual(first);
+});

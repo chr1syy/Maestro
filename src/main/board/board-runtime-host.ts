@@ -119,6 +119,15 @@ export async function executeBoardRuntimeCommand(
 		return approved.ok ? { ok: true, value: { accepted: true } } : failed(approved.reason);
 	}
 	const token = command.runToken;
+	if (!token && (command.operation === 'hold' || command.operation === 'resume')) {
+		runtime.storage.setIdleHold(
+			key,
+			target.expectedRevision,
+			command.cardRevision,
+			command.operation === 'hold'
+		);
+		return { ok: true, value: { accepted: true } };
+	}
 	const attempt = token ? runtime.read(token) : null;
 	if (!token || !attempt || canonicalJson(attempt.spec.key) !== canonicalJson(key))
 		return failed('attempt-conflict');
@@ -151,8 +160,7 @@ export async function controlBoardRuntimeCard(
   WHERE collection_key=? AND card_id=? ORDER BY attempt DESC LIMIT 1`
 		)
 		.get(key.collectionKey, cardId) as { specification_json: string } | undefined;
-	if (!row) throw new BoardStorageError('runtime-unavailable', 'No fenced attempt to stop');
-	const token = JSON.parse(row.specification_json).runToken;
+	const token = row ? JSON.parse(row.specification_json).runToken : undefined;
 	const card = entry.board.cards.find((c) => c.id === cardId);
 	if (!card) throw new BoardStorageError('not-found', 'Card not found');
 	const result = await executeBoardRuntimeCommand({

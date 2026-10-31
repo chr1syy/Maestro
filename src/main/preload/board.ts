@@ -27,6 +27,18 @@ export type { Board, BoardCard, CardStatus } from '../../shared/board/types';
  */
 export function createBoardApi() {
 	return {
+		upsertRole: (
+			projectRoot: string,
+			profile: import('../../shared/profiles/types').AgentProfile
+		): Promise<import('../../shared/board/types').BoardRoleRef> =>
+			ipcRenderer.invoke('board:upsertRole', { projectRoot, profile }),
+		setStartPolicy: (
+			projectRoot: string,
+			boardId: string,
+			expectedRevision: number,
+			mode: 'approval' | 'direct'
+		): Promise<BoardCaptureResponse> =>
+			ipcRenderer.invoke('board:setStartPolicy', { projectRoot, boardId, expectedRevision, mode }),
 		captureCatalog: (): Promise<BoardCaptureCatalog> => ipcRenderer.invoke('board:captureCatalog'),
 		runtimeCommand: (command: BoardRuntimeCommand): Promise<BoardCommandResult> =>
 			ipcRenderer.invoke('board:runtimeCommand', command),

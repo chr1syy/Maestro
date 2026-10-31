@@ -3,6 +3,7 @@
  * SQLite checks and writes share one IMMEDIATE transaction. A prepared claim is
  * capacity reserved, not evidence that a process started or work succeeded. */
 import type Database from 'better-sqlite3';
+import { hasUnresolvedMigrationBlockers } from './board-migration';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
 import {
@@ -268,9 +269,8 @@ export function claimBoardCard(
 					.get(command.sourceKey) as { payload_json: string } | undefined;
 				const blockers: unknown = ledger ? JSON.parse(ledger.payload_json) : [];
 				if (
-					!Array.isArray(blockers) ||
-					blockers.length > 0 ||
-					(migration?.blockers && migration.blockers.length > 0)
+					hasUnresolvedMigrationBlockers(blockers) ||
+					(migration?.blockers && hasUnresolvedMigrationBlockers(migration.blockers))
 				)
 					return waiting('migration-blocked');
 				if (

@@ -644,3 +644,81 @@ async function race(commands: BoardClaimCommand[], hosts: BoardClaimHostContext[
 			if (child.exitCode === null && child.signalCode === null) child.kill();
 	}
 }
+
+it('re-evaluates ordinary imported policy/holds without freezing unrelated direct cards', () => {
+	const project = path.join(dir, 'legacy');
+	fs.mkdirSync(project);
+	const legacy = (id: string, status: string, extra = {}) => ({
+		id,
+		title: id,
+		body: '',
+		parents: [],
+		status,
+		assigneeAgentId: 'worker',
+		...extra,
+	});
+	const plan = planBoardMigration({
+		source: { location: { kind: 'local' }, path: project },
+		repository: { id: 'repo-0', workingDirectory: projects[0], validated: true },
+		profileBytes: null,
+		workers: [],
+		boardBytes: Buffer.from(
+			JSON.stringify({
+				boards: [
+					{
+						id: 'board',
+						name: 'Imported',
+						maxInProgress: 3,
+						cards: [
+							legacy('clean', 'todo'),
+							legacy('held', 'todo', { heldByUser: true, assigneeAgentId: 'other' }),
+							legacy('done', 'done'),
+							legacy('triage', 'triage'),
+							legacy('review', 'review'),
+						],
+					},
+				],
+			})
+		),
+	});
+	applyBoardMigration(db, plan);
+	projects.push(project);
+	const ledger = db
+		.prepare('SELECT payload_json FROM migration_blockers WHERE source_key=?')
+		.get(plan.sourceKey);
+	expect(facade.claim(command(2, 'other', 'held'), () => host)).toMatchObject({
+		ok: false,
+		reason: 'held',
+	});
+	const held = command(2, 'other', 'held');
+	facade.setIdleHold(held, held.readRevision.collection, held.readRevision.card, false);
+	expect(facade.claim(command(2, 'other', 'held'), () => host).ok).toBe(true);
+	expect(facade.claim(command(2, 'worker', 'clean'), () => host).ok).toBe(true);
+	expect(facade.claim(command(2, 'foreign', 'triage'), () => host).ok).toBe(false);
+	expect(facade.claim(command(2, 'foreign', 'review'), () => host).ok).toBe(false);
+	expect(
+		db.prepare('SELECT payload_json FROM migration_blockers WHERE source_key=?').get(plan.sourceKey)
+	).toEqual(ledger);
+	expect(
+		db.prepare('SELECT snapshot FROM migrations WHERE source_key=?').get(plan.sourceKey)
+	).toEqual({ snapshot: Buffer.from(canonicalJson(plan)) });
+});
+
+it.each([
+	'invalid-card',
+	'duplicate-card-id',
+	'running-worker-unknown',
+	'reconciliation-required',
+	'future-unknown-reason',
+])('retains source safety fence %s', (reason) => {
+	const key = command();
+	db.prepare('UPDATE migration_blockers SET payload_json=? WHERE source_key=?').run(
+		JSON.stringify([{ board: 0, card: 1, reasons: [reason] }]),
+		key.sourceKey
+	);
+	expect(facade.claim(command(), () => host)).toMatchObject({
+		ok: false,
+		reason: 'migration-blocked',
+	});
+	expect(db.prepare('SELECT count(*) AS n FROM reservations').get()).toEqual({ n: 0 });
+});

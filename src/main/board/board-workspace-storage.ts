@@ -169,7 +169,7 @@ export function setBoardWorkerAccess(
 			)
 				throw new Error('Board worker repository not found');
 		}
-		const next = canonicalJson({ ...payload, roleRefs, allowedRepositoryIds });
+		const next = canonicalJson({ ...payload, roleRefs, allowedRepositoryIds, accessManaged: true });
 		if (canonicalJson(payload) === next) return;
 		db.prepare('UPDATE workers SET payload_json = ? WHERE agent_id = ?').run(next, agentId);
 		db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();

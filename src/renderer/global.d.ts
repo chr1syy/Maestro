@@ -4911,6 +4911,16 @@ interface MaestroAPI {
 		runtimeCommand: (
 			command: import('../shared/board/commands').BoardRuntimeCommand
 		) => Promise<import('../shared/board/commands').BoardCommandResult>;
+		upsertRole: (
+			projectRoot: string,
+			profile: import('../shared/profiles/types').AgentProfile
+		) => Promise<import('../shared/board/types').BoardRoleRef>;
+		setStartPolicy: (
+			projectRoot: string,
+			boardId: string,
+			expectedRevision: number,
+			mode: 'approval' | 'direct'
+		) => Promise<import('../shared/board/types').BoardCaptureResponse>;
 		captureCard: (
 			command: import('../shared/board/types').BoardCaptureCommand
 		) => Promise<import('../shared/board/types').BoardCaptureResponse>;

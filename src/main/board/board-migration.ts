@@ -37,6 +37,7 @@ export interface MigrationCard extends MigrationEntry {
 }
 
 export interface BoardMigrationPlan {
+	source?: BoardMigrationInput['source'];
 	sourceKey: string;
 	profileNamespace: string;
 	snapshot: { boardBase64: string | null; profileBase64: string | null; workers: unknown[] };
@@ -207,6 +208,7 @@ export function planBoardMigration(input: BoardMigrationInput): BoardMigrationPl
 	}
 	return {
 		sourceKey,
+		source: input.source,
 		profileNamespace,
 		snapshot: {
 			boardBase64:
@@ -265,9 +267,15 @@ export function applyBoardMigration(
 	return db
 		.transaction((): BoardMigrationResult => {
 			const previous = db
-				.prepare('SELECT hashes_json, mapping_json FROM migrations WHERE source_key = ?')
-				.get(plan.sourceKey) as { hashes_json: string; mapping_json: string } | undefined;
+				.prepare('SELECT hashes_json, mapping_json, snapshot FROM migrations WHERE source_key = ?')
+				.get(plan.sourceKey) as
+				| { hashes_json: string; mapping_json: string; snapshot: Buffer }
+				| undefined;
 			if (previous) {
+				applyMigrationWorkerAccess(
+					db,
+					JSON.parse(previous.snapshot.toString()) as BoardMigrationPlan
+				);
 				return {
 					status: previous.hashes_json === hashesJson ? 'already-imported' : 'source-changed',
 					mapping: JSON.parse(previous.mapping_json) as BoardMigrationMapping,
@@ -281,6 +289,11 @@ export function applyBoardMigration(
 				profiles: [],
 			};
 			const blockers: unknown[] = [...plan.conflicts];
+			if (plan.source)
+				db.prepare('INSERT OR IGNORE INTO board_source_locations VALUES (?, ?)').run(
+					plan.sourceKey,
+					canonicalJson(plan.source)
+				);
 			const insertCollection = db.prepare(
 				'INSERT INTO collections (collection_key, source_key, legacy_board_id, payload_json) VALUES (?, ?, ?, ?)'
 			);
@@ -417,50 +430,7 @@ export function applyBoardMigration(
 				if (!existing)
 					db.prepare('INSERT INTO repositories VALUES (?, ?)').run(plan.repository.id, payload);
 			}
-			const candidates = plan.snapshot.workers.flatMap((worker) => {
-				const raw = record(worker);
-				return raw && typeof raw.id === 'string'
-					? [
-							{
-								id: raw.id,
-								dir: typeof raw.dir === 'string' ? raw.dir : null,
-								boardWorker: raw.boardWorker === true,
-							},
-						]
-					: [];
-			});
-			const allowed = new Set(
-				plan.repository?.validated
-					? selectPoolAgentIds(plan.repository.workingDirectory, candidates)
-					: []
-			);
-			for (const worker of plan.snapshot.workers) {
-				const raw = record(worker);
-				if (!raw || raw.boardWorker !== true || typeof raw.id !== 'string' || !raw.id) continue;
-				// Existing central restrictions win, including an empty role/repository list.
-				db.prepare(
-					'INSERT INTO workers (agent_id, enabled, paused, payload_json) VALUES (?, 1, 0, ?) ON CONFLICT (agent_id) DO NOTHING'
-				).run(
-					raw.id,
-					canonicalJson({
-						roleRefs: allowed.has(raw.id)
-							? plan.profiles
-									.filter(
-										(p) =>
-											!p.conflicts.length &&
-											(!record(p.raw)?.baseAgentId || record(p.raw)?.baseAgentId === raw.id)
-									)
-									.map((p) => ({ namespace: plan.profileNamespace, profileId: p.legacyId }))
-							: [],
-						allowedRepositoryIds: allowed.has(raw.id) ? [plan.repository!.id] : [],
-						migration: {
-							sourceKey: plan.sourceKey,
-							raw: worker,
-							blockers: allowed.has(raw.id) ? [] : ['repository-unresolved'],
-						},
-					})
-				);
-			}
+			applyMigrationWorkerAccess(db, plan);
 			db.prepare('INSERT INTO migrations VALUES (?, ?, ?, ?, ?)').run(
 				plan.sourceKey,
 				hashesJson,
@@ -477,4 +447,104 @@ export function applyBoardMigration(
 			return { status: 'imported', mapping };
 		})
 		.immediate();
+}
+
+/** Accumulate only migration-owned grants, without overwriting central or older unmarked restrictions. */
+function applyMigrationWorkerAccess(db: Database.Database, plan: BoardMigrationPlan): void {
+	const candidates = plan.snapshot.workers.flatMap((worker) => {
+		const raw = record(worker);
+		return raw && typeof raw.id === 'string'
+			? [
+					{
+						id: raw.id,
+						dir: typeof raw.dir === 'string' ? raw.dir : null,
+						boardWorker:
+							raw.boardWorker === true && record(raw.sessionSshRemoteConfig)?.enabled !== true,
+					},
+				]
+			: [];
+	});
+	const allowed = new Set(
+		plan.repository?.validated
+			? selectPoolAgentIds(plan.repository.workingDirectory, candidates)
+			: []
+	);
+	for (const worker of plan.snapshot.workers) {
+		const raw = record(worker);
+		if (!raw || raw.boardWorker !== true || typeof raw.id !== 'string' || !raw.id) continue;
+		const previous = db
+			.prepare('SELECT payload_json FROM workers WHERE agent_id = ?')
+			.get(raw.id) as { payload_json: string } | undefined;
+		const existing = previous
+			? (JSON.parse(previous.payload_json) as {
+					roleRefs?: { namespace: string; profileId: string }[];
+					allowedRepositoryIds?: string[];
+					accessManaged?: boolean;
+					migration?: { sourceKey: string; raw: unknown; sources?: Record<string, unknown> };
+				})
+			: null;
+		// Only migration-owned access may accumulate. A central registration or an
+		// explicit access edit (even empty) is authoritative; pause/enable are never reset.
+		if (existing && (!existing.migration || existing.accessManaged !== false)) continue;
+		const roleRefs = allowed.has(raw.id)
+			? plan.profiles
+					.filter(
+						(p) =>
+							!p.conflicts.length &&
+							(!record(p.raw)?.baseAgentId || record(p.raw)?.baseAgentId === raw.id)
+					)
+					.map((p) => ({ namespace: plan.profileNamespace, profileId: p.legacyId! }))
+			: [];
+		const repositories = allowed.has(raw.id) ? [plan.repository!.id] : [];
+		const roles = [...(existing?.roleRefs ?? []), ...roleRefs];
+		const payload = canonicalJson({
+			...existing,
+			accessManaged: false,
+			roleRefs: roles.filter(
+				(role, index) =>
+					roles.findIndex(
+						(other) => other.namespace === role.namespace && other.profileId === role.profileId
+					) === index
+			),
+			allowedRepositoryIds: [
+				...new Set([...(existing?.allowedRepositoryIds ?? []), ...repositories]),
+			],
+			migration: {
+				...(existing?.migration ?? {}),
+				sourceKey: existing?.migration?.sourceKey ?? plan.sourceKey,
+				raw: existing?.migration?.raw ?? worker,
+				sources: { ...(existing?.migration?.sources ?? {}), [plan.sourceKey]: worker },
+				blockers:
+					existing?.allowedRepositoryIds?.length || repositories.length
+						? []
+						: ['repository-unresolved'],
+			},
+		});
+		if (previous && canonicalJson(existing) === payload) continue;
+		db.prepare(
+			'INSERT INTO workers (agent_id, enabled, paused, payload_json) VALUES (?, 1, 0, ?) ON CONFLICT (agent_id) DO UPDATE SET payload_json = excluded.payload_json'
+		).run(raw.id, payload);
+		db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+	}
+}
+
+/** These provenance reasons are enforced from current state by the shared claim
+ * gates. Structural/unknown-run blockers remain immutable safety fences. */
+export function hasUnresolvedMigrationBlockers(blockers: unknown): boolean {
+	if (!Array.isArray(blockers)) return true;
+	const currentStateReasons = new Set([
+		'approval-required',
+		'human-review',
+		'inactive',
+		'held',
+		'missing-scope',
+		'repository-unresolved',
+		'profile-unresolved',
+		'pin-role-conflict',
+	]);
+	return blockers.some((entry) => {
+		if (typeof entry === 'string') return !currentStateReasons.has(entry);
+		if (!entry || typeof entry !== 'object' || !Array.isArray(entry.reasons)) return true;
+		return hasUnresolvedMigrationBlockers(entry.reasons);
+	});
 }

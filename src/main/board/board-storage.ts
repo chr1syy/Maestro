@@ -4,6 +4,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type Database from 'better-sqlite3';
+import { validateAgentProfile, type AgentProfile } from '../../shared/profiles/types';
 import {
 	validateBoard,
 	validateBoardCard,
@@ -224,6 +225,113 @@ export class BoardStorageFacade {
 		})();
 	}
 
+	/** Privileged collection policy changes affect future captures, never existing grants. */
+	setStartPolicy(
+		projectRoot: string,
+		boardId: string,
+		expectedRevision: number,
+		mode: 'approval' | 'direct',
+		human = false
+	): Board {
+		if (!human)
+			throw new BoardWorkspaceStorageError(
+				'protected-field',
+				'Board start policy requires a native human action'
+			);
+		if (mode !== 'approval' && mode !== 'direct')
+			throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board start policy');
+		this.db
+			.transaction(() => {
+				const board = this.read(projectRoot, boardId);
+				const ref = this.reference(projectRoot, board);
+				if (ref.expectedRevision !== expectedRevision)
+					throw new BoardWorkspaceStorageError('stale-revision', 'Board changed since read');
+				const row = this.workspace.readCollection(ref)!;
+				this.db
+					.prepare(
+						'UPDATE collections SET payload_json = ?, revision = revision + 1 WHERE collection_key = ?'
+					)
+					.run(canonicalJson({ ...row.payload, defaultStartMode: mode }), ref.collectionKey);
+				this.db.prepare('UPDATE workspace SET revision = revision + 1 WHERE id = 1').run();
+			})
+			.immediate();
+		boardSavedListener?.(projectRoot, this.list(projectRoot));
+		return this.read(projectRoot, boardId);
+	}
+
+	/** Intake control before any fenced attempt exists; never releases run capacity. */
+	setIdleHold(
+		key: import('./board-workspace-storage').BoardCardKey,
+		collectionRevision: number,
+		cardRevision: number,
+		held: boolean
+	): void {
+		this.db
+			.transaction(() => {
+				const collection = this.workspace.readCollection(key);
+				const card = collection?.cards.find((c) => c.cardId === key.cardId);
+				if (!collection || !card)
+					throw new BoardWorkspaceStorageError('not-found', 'Card not found');
+				if (collection.revision !== collectionRevision || card.revision !== cardRevision)
+					throw new BoardWorkspaceStorageError('stale-revision', 'Card changed since read');
+				if (
+					this.db
+						.prepare('SELECT 1 FROM reservations WHERE collection_key=? AND card_id=?')
+						.get(key.collectionKey, key.cardId)
+				)
+					throw new BoardWorkspaceStorageError(
+						'protected-field',
+						'Active attempt requires its runtime token'
+					);
+				if (
+					!held &&
+					(card.payload.status === 'running' ||
+						this.db
+							.prepare(
+								'SELECT 1 FROM runs WHERE collection_key=? AND card_id=? AND outcome_json IS NULL'
+							)
+							.get(key.collectionKey, key.cardId))
+				)
+					throw new BoardWorkspaceStorageError(
+						'protected-field',
+						'Uncertain legacy attempt requires reconciliation'
+					);
+				this.db
+					.prepare(
+						'UPDATE cards SET payload_json=?, revision=revision+1 WHERE collection_key=? AND id=?'
+					)
+					.run(canonicalJson({ ...card.payload, heldByUser: held }), key.collectionKey, key.cardId);
+				this.db
+					.prepare('UPDATE collections SET revision=revision+1 WHERE collection_key=?')
+					.run(key.collectionKey);
+				this.db.prepare('UPDATE workspace SET revision=revision+1 WHERE id=1').run();
+			})
+			.immediate();
+	}
+
+	/** Board role edits are central; legacy profiles.yaml stays immutable. */
+	upsertRole(projectRoot: string, input: AgentProfile) {
+		const profile = validateAgentProfile(input);
+		if (!profile) throw new BoardWorkspaceStorageError('invalid-input', 'Invalid Board role');
+		const sources = this.sourceKeys(projectRoot);
+		if (sources.length !== 1)
+			throw new BoardWorkspaceStorageError('identity-mismatch', 'Role requires one source');
+		const sourceKey = sources[0];
+		const namespace = `legacy:${sourceKey}`;
+		this.db
+			.transaction(() => {
+				this.db
+					.prepare(
+						'INSERT INTO profiles VALUES (?, ?, ?, ?) ON CONFLICT (profile_namespace, id) DO UPDATE SET payload_json=excluded.payload_json'
+					)
+					.run(namespace, profile.id, canonicalJson(profile), sourceKey);
+				this.db.prepare('UPDATE workspace SET revision=revision+1 WHERE id=1').run();
+			})
+			.immediate();
+		boardSavedListener?.(projectRoot, this.list(projectRoot));
+		return { namespace, profileId: profile.id };
+	}
+
 	sourceKeys(projectRoot: string): string[] {
 		const keys = [...new Set(this.resolveSourceKeys(projectRoot))].filter(
 			(key) =>
@@ -293,7 +401,29 @@ export class BoardStorageFacade {
 				);
 			return {
 				revision: snapshot.revision,
-				sources: snapshot.sourceKeys.map((sourceKey) => ({ sourceKey, projectRef: { sourceKey } })),
+				sources: snapshot.sourceKeys.map((sourceKey) => {
+					const row = this.db
+						.prepare('SELECT payload_json FROM board_source_locations WHERE source_key=?')
+						.get(sourceKey) as { payload_json: string } | undefined;
+					const imported = !row
+						? (this.db
+								.prepare('SELECT snapshot FROM migrations WHERE source_key=?')
+								.get(sourceKey) as { snapshot: Buffer } | undefined)
+						: undefined;
+					const plan = imported ? JSON.parse(imported.snapshot.toString()) : null;
+					const candidate = plan?.repository
+						? { location: { kind: 'local' as const }, path: plan.repository.workingDirectory }
+						: undefined;
+					// Older snapshots omitted the source path. Recover a local location only
+					// when its canonical identity actually matches; never relabel an SSH source.
+					const location = row
+						? JSON.parse(row.payload_json)
+						: (plan?.source ??
+							(candidate && boardMigrationSourceKey(candidate) === sourceKey
+								? candidate
+								: undefined));
+					return { sourceKey, projectRef: { sourceKey }, ...(location ? { location } : {}) };
+				}),
 				collections: snapshot.collections
 					.filter((entry) => filters.every((key) => key === entry.sourceKey))
 					.map((entry) => ({
@@ -766,6 +896,14 @@ export function createBoard(
 			'identity-mismatch',
 			'Board source does not match project'
 		);
+	if (facade.resolveSourceKeys === resolveLocalBoardSourceKeys) {
+		facade.db
+			.prepare('INSERT OR IGNORE INTO board_source_locations VALUES (?, ?)')
+			.run(
+				sources[0],
+				canonicalJson({ location: { kind: 'local' }, path: fs.realpathSync(projectRoot) })
+			);
+	}
 	const saved = facade.project(
 		facade.workspace.createCollection({
 			sourceKey: sources[0],

@@ -78,6 +78,7 @@ describe('Board worker registry', () => {
 				paused: true,
 				payload: {
 					migration: { sourceKey: 'original' },
+					accessManaged: true,
 					roleRefs: [{ namespace: 'n', profileId: 'role' }],
 					allowedRepositoryIds: ['repo'],
 				},

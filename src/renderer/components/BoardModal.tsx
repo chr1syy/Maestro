@@ -309,7 +309,6 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	const [catalog, setCatalog] = useState<BoardCaptureCatalog | null>(null);
 	const [catalogError, setCatalogError] = useState<string | null>(null);
 	const catalogGeneration = useRef(0);
-	const createdProfileIds = useRef(new Set<string>());
 	const refreshCaptureCatalog = useCallback(async () => {
 		const generation = ++catalogGeneration.current;
 		try {
@@ -341,6 +340,7 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 
 	// Board lifecycle UI (Phase 6): inline rename + delete confirmation.
 	const [renaming, setRenaming] = useState(false);
+	const createdRoles = useRef(new Map<string, BoardRoleRef>());
 	const [renameValue, setRenameValue] = useState('');
 	const [pendingBoardDelete, setPendingBoardDelete] = useState(false);
 
@@ -397,10 +397,14 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 				if (generation !== loadGenerationRef.current) return;
 				if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
 				const roots: Record<string, string> = {};
+				for (const source of response.value.sources) {
+					if (source.location?.location.kind === 'local')
+						roots[source.sourceKey] = source.location.path;
+				}
 				for (const { root, result } of mappings) {
 					if (result?.ok) {
 						const keys = [...new Set(result.value.collections.map((entry) => entry.sourceKey))];
-						if (keys.length === 1) roots[keys[0]] = root;
+						if (keys.length === 1 && !roots[keys[0]]) roots[keys[0]] = root;
 					}
 				}
 				setSourceRoots(roots);
@@ -1250,6 +1254,34 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 						<span className="text-xs shrink-0" style={{ color: theme.colors.textDim }}>
 							card DAG · dispatched on the Cue tick
 						</span>
+						{board && !draft && (
+							<select
+								aria-label="Board start policy"
+								value={board.defaultStartMode ?? 'approval'}
+								disabled={!projectRoot}
+								className="rounded-md px-2 py-1 text-xs outline-none"
+								style={inputStyle}
+								onChange={async (event) => {
+									try {
+										const response = await window.maestro.board.setStartPolicy(
+											projectRoot,
+											board.id,
+											board.storage!.expectedRevision!,
+											event.target.value as 'approval' | 'direct'
+										);
+										if (!response.ok) throw new Error(response.error.message);
+										await load();
+									} catch (error) {
+										captureException(error, { tags: { operation: 'board:setStartPolicy' } });
+										notifyToast({ color: 'red', title: 'Board', message: String(error) });
+									}
+								}}
+							>
+								<option value="approval">New cards: require approval</option>
+								<option value="direct">New cards: schedule directly</option>
+							</select>
+						)}
+
 						{/* Show the host-confirmed writer project for the selected collection. */}
 						{projectRoot && (
 							<span
@@ -1613,17 +1645,21 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							saveError={saveError}
 							onRefreshCatalog={() => void refreshCaptureCatalog().catch(() => {})}
 							onCreateRole={async (profile) => {
-								if (!createdProfileIds.current.has(profile.id)) {
-									await window.maestro.profiles.upsert(projectRoot, profile);
-									createdProfileIds.current.add(profile.id);
+								let role = createdRoles.current.get(profile.id);
+								if (!role) {
+									role = await window.maestro.board.upsertRole(projectRoot, profile);
+									createdRoles.current.set(profile.id, role);
 								}
 								const updated = await refreshCaptureCatalog();
-								const matches = updated.profiles.filter((entry) => entry.profile.id === profile.id);
-								if (matches.length !== 1)
+								if (
+									!updated.profiles.some(
+										(entry) =>
+											entry.namespace === role!.namespace && entry.profile.id === role!.profileId
+									)
+								)
 									throw new Error(
-										'Role created, but its Board namespace is not available in the host catalog. Select a catalog role once registered.'
+										'Role created, but its Board namespace is not available in the host catalog.'
 									);
-								const role = { namespace: matches[0].namespace, profileId: profile.id };
 								setDraft((p) => (p ? { ...p, role, assigneeProfileId: profile.id } : p));
 							}}
 							board={board}

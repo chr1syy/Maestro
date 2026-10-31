@@ -1,5 +1,6 @@
 /** The existing Cue heartbeat owns central intake. Desktop and CLI attach to
  * these same per-card runtime adapters; storage, owner and run service are shared. */
+import { refreshBoardSources } from './board-source-host';
 import type { DataDirLock } from '../../shared/maestro-lib/runtime/data-dir-lock';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
@@ -61,6 +62,7 @@ export class BoardCueHost {
 	};
 
 	async tick(): Promise<void> {
+		await refreshBoardSources();
 		// All registered sources, including projects without an open Left Bar agent.
 		const storage = this.deps.storage();
 		for (const initial of storage.query().collections) {

@@ -791,6 +791,41 @@ function control(operation: 'hold' | 'resume' | 'approve', runToken?: BoardRunti
 }
 
 describe('fenced host intake shared by desktop and real CLI', () => {
+	it('holds and resumes an unstarted card through the same host without inventing a token or approval', async () => {
+		installBoardOwner();
+		const before = facade.read(roots[0], 'b').cards[0].capturePolicy;
+		expect(await send(control('hold'))).toMatchObject({ ok: true });
+		expect(facade.read(roots[0], 'b').cards[0].heldByUser).toBe(true);
+		expect(await send(control('resume'))).toMatchObject({ ok: true });
+		expect(facade.workspace.readCollection(target())!.cards[0].payload.heldByUser).toBe(false);
+		expect(facade.read(roots[0], 'b').cards[0].capturePolicy).toEqual(before);
+		expect(db.prepare('SELECT * FROM reservations').all()).toEqual([]);
+		expect(db.prepare('SELECT * FROM runs').all()).toEqual([]);
+	});
+
+	it('never resumes or releases a legacy attempt whose termination is unknown', async () => {
+		installBoardOwner(false);
+		const key = target();
+		db.prepare(
+			'INSERT INTO runs (run_id, collection_key, card_id, attempt, specification_json) VALUES (?, ?, ?, ?, ?)'
+		).run(
+			'legacy-uncertain',
+			key.collectionKey,
+			'c',
+			1,
+			JSON.stringify({ raw: { workerAgentId: 'a' } })
+		);
+		expect(await send(control('hold'))).toMatchObject({ ok: true });
+		expect(await send(control('resume'))).toMatchObject({
+			ok: false,
+			error: { code: 'protected-field' },
+		});
+		expect(facade.read(roots[0], 'b').cards[0].heldByUser).toBe(true);
+		expect(facade.read(roots[0], 'b').cards[0].capturePolicy!.dispatchApproval).toBe('required');
+		expect(
+			db.prepare('SELECT outcome_json FROM runs WHERE run_id=?').get('legacy-uncertain')
+		).toEqual({ outcome_json: null });
+	});
 	it('returns runtime-unavailable offline without creating an owner or reservation', async () => {
 		await send(capture());
 		expect(await send(tick())).toMatchObject({ ok: false, error: { code: 'runtime-unavailable' } });

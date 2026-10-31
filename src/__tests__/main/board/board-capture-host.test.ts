@@ -322,7 +322,7 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		const result = await api.captureCard({
 			projectRoot: dir,
 			boardId: 'b',
-			expectedRevision: before.storage!.expectedRevision,
+			expectedRevision: before.storage!.expectedRevision!,
 			card: { ...existing, assigneeAgentId: 'foreign', title: 'Rejected edit' },
 		});
 		expect(result).toMatchObject({
@@ -546,4 +546,50 @@ describe('authoritative host capture over real SQLite and preload/IPC', () => {
 		await expect(api.captureCard(command())).rejects.toThrow(/policy write failed/);
 		expect(facade.query()).toEqual(before);
 	});
+});
+
+it('changes only future capture policy through a revision-checked native action', async () => {
+	expect((await api.captureCard(command())).ok).toBe(true);
+	const before = facade.read(dir, 'b');
+	const revision = before.storage!.expectedRevision!;
+	expect(await api.setStartPolicy(dir, 'b', revision, 'direct')).toMatchObject({
+		ok: true,
+		value: { defaultStartMode: 'direct' },
+	});
+	expect(facade.read(dir, 'b').cards).toEqual(before.cards);
+	expect(await api.setStartPolicy(dir, 'b', revision, 'approval')).toMatchObject({
+		ok: false,
+		error: { code: 'stale-revision' },
+	});
+	const created = addCard(dir, 'b', card({ id: 'new' }));
+	expect(created.cards.find((c) => c.id === 'new')!.capturePolicy?.dispatchApproval).toBe(
+		'not-required'
+	);
+	expect(created.cards.find((c) => c.id === 'c')!.capturePolicy?.dispatchApproval).toBe('required');
+	expect(() =>
+		facade.setStartPolicy(dir, 'b', created.storage!.expectedRevision!, 'approval')
+	).toThrow('native human');
+	transport.event = { sender: transport.event.sender, senderFrame: {} };
+	expect(
+		await api.setStartPolicy(dir, 'b', created.storage!.expectedRevision!, 'approval')
+	).toMatchObject({ ok: false, error: { code: 'protected-field' } });
+	expect(facade.read(dir, 'b').defaultStartMode).toBe('direct');
+});
+
+it('creates namespaced roles through native transport without touching legacy profiles', async () => {
+	const role = await api.upsertRole(dir, { id: 'new-role', name: 'New central role' });
+	expect(role).toEqual({ namespace, profileId: 'new-role' });
+	expect(
+		(await api.captureCatalog()).profiles.find(
+			(p) => p.namespace === namespace && p.profile.id === 'new-role'
+		)?.profile.name
+	).toBe('New central role');
+	expect(fs.existsSync(path.join(dir, '.maestro/profiles.yaml'))).toBe(false);
+	transport.event = { sender: {}, senderFrame: {} };
+	await expect(api.upsertRole(dir, { id: 'forged-role', name: 'Forged' })).rejects.toThrow(
+		'desktop main frame'
+	);
+	expect((await api.captureCatalog()).profiles.some((p) => p.profile.id === 'forged-role')).toBe(
+		false
+	);
 });

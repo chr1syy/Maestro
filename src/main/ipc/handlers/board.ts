@@ -10,11 +10,13 @@
  * handler is a 1-line delegation, mirroring the Cue and Profiles IPC handlers.
  */
 
+import { refreshBoardSources } from '../../board/board-source-host';
 import { ipcMain, type BrowserWindow } from 'electron';
 import { getLiveSessions } from '../../stores/getters';
 import { withIpcErrorLogging, type CreateHandlerOptions } from '../../utils/ipcHandler';
 import {
 	getBoardCaptureCatalog,
+	getBoardStorage,
 	captureBoardCard,
 	listBoards,
 	queryBoardWorkspace,
@@ -108,8 +110,85 @@ export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
 	);
 
 	ipcMain.handle(
+		'board:setStartPolicy',
+		async (
+			event,
+			options: {
+				projectRoot: string;
+				boardId: string;
+				expectedRevision: number;
+				mode: 'approval' | 'direct';
+			}
+		): Promise<BoardCaptureResponse> => {
+			try {
+				const window = deps.getMainWindow?.();
+				const human =
+					!!window &&
+					!window.isDestroyed() &&
+					event?.sender === window.webContents &&
+					event.senderFrame === window.webContents.mainFrame;
+				if (!human)
+					throw new BoardStorageError(
+						'protected-field',
+						'Board start policy requires the desktop main frame'
+					);
+				if (
+					!options ||
+					Object.keys(options).some(
+						(key) => !['projectRoot', 'boardId', 'expectedRevision', 'mode'].includes(key)
+					)
+				)
+					throw new BoardStorageError('invalid-input', 'Invalid policy command');
+				const value = await enqueueBoardWrite(options.projectRoot, () =>
+					getBoardStorage().setStartPolicy(
+						options.projectRoot,
+						options.boardId,
+						options.expectedRevision,
+						options.mode,
+						true
+					)
+				);
+				return { ok: true, value, readiness: getBoardStorage().captureReadiness(value) };
+			} catch (error) {
+				if (!(error instanceof BoardStorageError)) throw error;
+				return { ok: false, error: { code: error.code, message: error.message } };
+			}
+		}
+	);
+
+	ipcMain.handle(
+		'board:upsertRole',
+		async (
+			event,
+			options: {
+				projectRoot: string;
+				profile: import('../../../shared/profiles/types').AgentProfile;
+			}
+		) => {
+			const window = deps.getMainWindow?.();
+			if (
+				!window ||
+				window.isDestroyed() ||
+				event?.sender !== window.webContents ||
+				event.senderFrame !== window.webContents.mainFrame
+			)
+				throw new BoardStorageError(
+					'protected-field',
+					'Board role editing requires the desktop main frame'
+				);
+			await refreshBoardSources();
+			return enqueueBoardWrite(options.projectRoot, () =>
+				getBoardStorage().upsertRole(options.projectRoot, options.profile)
+			);
+		}
+	);
+
+	ipcMain.handle(
 		'board:captureCatalog',
-		withIpcErrorLogging(handlerOpts('captureCatalog'), async () => getBoardCaptureCatalog())
+		withIpcErrorLogging(handlerOpts('captureCatalog'), async () => {
+			await refreshBoardSources();
+			return getBoardCaptureCatalog();
+		})
 	);
 	// This native-only channel derives authority from the actual top-level desktop sender.
 	// Remote/web/CLI callers use ordinary mutations and cannot claim human policy authority.
@@ -156,6 +235,7 @@ export function registerBoardHandlers(deps: BoardHandlerDependencies): void {
 			handlerOpts('queryWorkspace'),
 			async (query?: BoardWorkspaceQuery): Promise<BoardWorkspaceQueryResponse> => {
 				try {
+					await refreshBoardSources();
 					return { ok: true, value: queryBoardWorkspace(query) };
 				} catch (error) {
 					if (!(error instanceof BoardStorageError)) throw error;

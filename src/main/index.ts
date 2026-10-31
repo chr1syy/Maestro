@@ -233,6 +233,7 @@ import {
 	type BoardSpawnContext,
 } from './board/board-spawn';
 import { isPidAlive } from '../shared/maestro-lib/client/discovery';
+import { configureBoardSourceHost } from './board/board-source-host';
 import { BoardCueHost } from './board/board-cue';
 import { configureBoardRuntimeHost } from './board/board-runtime-host';
 import type { BoardClaimHostContext } from './board/board-claims';
@@ -630,6 +631,7 @@ configureBoardCaptureHost(() => ({
 	agents: sessionsStore.get('sessions', []),
 	groups: groupsStore.get('groups', []),
 }));
+configureBoardSourceHost(() => sessionsStore.get('sessions', []));
 const agentConfigsStore = getAgentConfigsStore();
 const agentCapabilitiesStore = getAgentCapabilitiesStore();
 const windowStateStore = getWindowStateStore();

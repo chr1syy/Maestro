@@ -250,6 +250,7 @@ export interface BoardProjectRef {
 }
 
 export interface BoardSourceCatalogEntry {
+	location?: { location: { kind: 'local' } | { kind: 'ssh'; remoteId: string }; path: string };
 	sourceKey: string;
 	projectRef: BoardProjectRef;
 }
