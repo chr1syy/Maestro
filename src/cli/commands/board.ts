@@ -26,14 +26,10 @@ import {
 	updateCardStatus,
 	deleteCard,
 	saveBoard,
+	stampBoardRunPr,
 	enqueueBoardWrite,
 } from '../../main/board/board-storage';
-import {
-	maybeCreateCardPr,
-	stampCardPrUrl,
-	stampCardPrError,
-	type CardPrResult,
-} from '../../main/board/board-pr';
+import { maybeCreateCardPr, type CardPrResult } from '../../main/board/board-pr';
 import type { Board, BoardCard, CardPrOnDone, CardStatus } from '../../shared/board/types';
 import { CARD_PRIORITIES, CARD_STATUSES } from '../../shared/board/types';
 import { getBlockers } from '../../shared/board/graph';
@@ -594,6 +590,8 @@ export async function boardSetStatus(
 		}
 
 		const located = locateCard(session.projectRoot, cardId, options.board);
+		if (located.card.status === 'review' && status === 'done')
+			throw new Error('Human review approval requires an explicit UI action');
 		updateCardStatus(session.projectRoot, located.board.id, located.card.id, status as CardStatus);
 
 		const pr =
@@ -644,16 +642,12 @@ function createCardPrFromCli(
 		stampPrUrl: (id, prUrl, run) =>
 			enqueueBoardWrite(projectRoot, () => {
 				const board = getBoard(projectRoot, boardId);
-				if (board && stampCardPrUrl(board, id, prUrl, new Date().toISOString(), run)) {
-					saveBoard(projectRoot, board);
-				}
+				if (board) stampBoardRunPr(projectRoot, board, id, run, { prUrl });
 			}),
 		stampPrError: (id, error, run) =>
 			enqueueBoardWrite(projectRoot, () => {
 				const board = getBoard(projectRoot, boardId);
-				if (board && stampCardPrError(board, id, error, new Date().toISOString(), run)) {
-					saveBoard(projectRoot, board);
-				}
+				if (board) stampBoardRunPr(projectRoot, board, id, run, { prError: error.slice(0, 500) });
 			}),
 		mainRepoCwd: projectRoot,
 		// No toast sink: there is no renderer to relay to from a CLI process. The
@@ -877,7 +871,7 @@ async function tickBoard(
 			spawn: makeDecomposeSpawn(projectRoot, sessions),
 			promptTemplate: decomposeTemplate,
 			reload: () => getBoard(projectRoot, boardId),
-			save: (fresh) => saveBoard(projectRoot, fresh),
+			save: (fresh) => saveBoard(projectRoot, fresh, fresh.storage?.expectedRevision),
 			now: () => new Date().toISOString(),
 			onLog: (level, message) => {
 				if (!json && level !== 'info') console.error(`  [decompose] ${message}`);
@@ -938,7 +932,7 @@ async function tickBoard(
 			claimed.length > 0 ||
 			unresolvable.length > 0
 		) {
-			saveBoard(projectRoot, board);
+			saveBoard(projectRoot, board, board.storage?.expectedRevision);
 		}
 
 		return claimed;
@@ -965,7 +959,7 @@ async function tickBoard(
 			new Date().toISOString(),
 			DEFAULT_MAX_FAILURES
 		);
-		saveBoard(projectRoot, fresh);
+		saveBoard(projectRoot, fresh, fresh.storage?.expectedRevision);
 		if (status === 'done') summary.done++;
 		else if (status === 'blocked') summary.blocked++;
 		summary.notes.push(`${card.title} (${card.id.slice(0, 8)}) -> ${status}`);

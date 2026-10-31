@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-export const BOARD_SCHEMA_VERSION = 2;
+export const BOARD_SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE workspace (
@@ -66,6 +66,17 @@ CREATE TABLE migration_blockers (
 );
 `;
 
+const ARCHIVE_SCHEMA = `
+CREATE TABLE collection_archives (
+ collection_key TEXT PRIMARY KEY REFERENCES collections(collection_key)
+);
+CREATE TABLE card_archives (
+ collection_key TEXT NOT NULL, card_id TEXT NOT NULL,
+ PRIMARY KEY (collection_key, card_id),
+ FOREIGN KEY (collection_key, card_id) REFERENCES cards(collection_key, id)
+);
+`;
+
 /** Explicit path prevents tests or callers from accidentally opening the live workspace. */
 export function openBoardDb(
 	dbPath: string,
@@ -93,8 +104,9 @@ export function openBoardDb(
 			}
 			if (current < 2) {
 				db.exec(MIGRATION_HOLDS_SCHEMA);
-				db.pragma(`user_version = ${BOARD_SCHEMA_VERSION}`);
 			}
+			if (current < 3) db.exec(ARCHIVE_SCHEMA);
+			db.pragma(`user_version = ${BOARD_SCHEMA_VERSION}`);
 		}).immediate();
 		return db;
 	} catch (error) {

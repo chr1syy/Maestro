@@ -87,6 +87,10 @@ function duplicates(values: unknown[]): Set<string> {
 }
 
 /** Retains raw entries and bytes even when legacy validators reject or normalize them. */
+export function boardMigrationSourceKey(source: BoardMigrationInput['source']): string {
+	return hash(canonicalJson(source));
+}
+
 export function planBoardMigration(input: BoardMigrationInput): BoardMigrationPlan {
 	if (
 		!input.source.path ||
@@ -94,7 +98,7 @@ export function planBoardMigration(input: BoardMigrationInput): BoardMigrationPl
 	) {
 		throw new Error('Canonical source identity is required');
 	}
-	const sourceKey = hash(canonicalJson(input.source));
+	const sourceKey = boardMigrationSourceKey(input.source);
 	const profileNamespace = `legacy:${sourceKey}`;
 	const rawBoards = entries(input.boardBytes, 'boards');
 	const rawProfiles = entries(input.profileBytes, 'profiles');

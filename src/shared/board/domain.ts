@@ -41,7 +41,7 @@ function nonBlank(value: unknown): value is string {
 export function validateCapture(raw: unknown, context: BoardCaptureContext): BoardCaptureResult {
 	if (!record(raw)) return { ok: false, errors: ['invalid-options'] };
 	const errors: BoardCaptureError[] = [];
-	const options: BoardCaptureOptions = {};
+	const options: BoardCaptureOptions = { ...raw };
 	if (raw.kind !== undefined) {
 		if (
 			raw.kind === 'work' ||
@@ -60,14 +60,14 @@ export function validateCapture(raw: unknown, context: BoardCaptureContext): Boa
 			nonBlank(scope.agentId) &&
 			!('groupId' in scope)
 		) {
-			options.executionScope = { kind: 'agent', agentId: scope.agentId };
+			options.executionScope = { ...scope, kind: 'agent', agentId: scope.agentId };
 		} else if (
 			record(scope) &&
 			scope.kind === 'group' &&
 			nonBlank(scope.groupId) &&
 			!('agentId' in scope)
 		) {
-			options.executionScope = { kind: 'group', groupId: scope.groupId };
+			options.executionScope = { ...scope, kind: 'group', groupId: scope.groupId };
 		} else errors.push('invalid-scope');
 	}
 	if (raw.assigneeAgentId !== undefined) {
@@ -76,7 +76,7 @@ export function validateCapture(raw: unknown, context: BoardCaptureContext): Boa
 	}
 	if (raw.role !== undefined) {
 		if (record(raw.role) && nonBlank(raw.role.namespace) && nonBlank(raw.role.profileId)) {
-			options.role = { namespace: raw.role.namespace, profileId: raw.role.profileId };
+			options.role = { ...raw.role, namespace: raw.role.namespace, profileId: raw.role.profileId };
 		} else errors.push('invalid-role');
 	}
 	if (raw.repositoryId !== undefined) {

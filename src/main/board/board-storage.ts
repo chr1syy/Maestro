@@ -1,44 +1,9 @@
-/**
- * Board storage - single owner of `.maestro/board.yaml`.
- *
- * Mirrors the Cue config (`.maestro/cue.yaml`) and Phase 1 profiles
- * (`.maestro/profiles.yaml`) conventions: all filesystem reads/writes for the
- * board file flow through this module so path resolution and directory creation
- * live in exactly one place. Uses the shared `js-yaml` helper - no new
- * dependency.
- *
- * The file format is a single top-level `boards:` list, each board holding its
- * own `cards:`:
- *
- *   boards:
- *     - id: 8f3c…
- *       name: Backend rework
- *       maxInProgress: 2
- *       cards:
- *         - id: a
- *           title: Design schema
- *           body: …
- *           assigneeProfileId: reviewer
- *           parents: []
- *           status: todo
- *           createdAt: 2026-07-10T00:00:00.000Z
- *           updatedAt: 2026-07-10T00:00:00.000Z
- *
- * Load validates each board/card via the shared validators and skips malformed
- * cards with a logged warning, so one bad entry never blocks the rest. Save
- * refuses to persist a board whose parent graph contains a cycle (Phase 3
- * relies on the DAG being acyclic).
- *
- * Writes are atomic (temp file + rename via `atomicWriteFileSync`) so a crash
- * or a concurrent reader never observes a truncated board.yaml, and async
- * read-modify-write callers serialize per file through
- * {@link enqueueBoardWrite}.
+/** Central Board facade. Legacy project roots resolve only to proven imported sources.
+ * YAML is migration input only; no fallback reader or exporter exists here.
  */
-
-import * as fs from 'fs';
-import * as path from 'path';
-import * as yaml from 'js-yaml';
-import { MAESTRO_DIR, BOARD_CONFIG_PATH } from '../../shared/maestro-paths';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type Database from 'better-sqlite3';
 import {
 	validateBoard,
 	validateBoardCard,
@@ -46,238 +11,393 @@ import {
 	type Board,
 	type BoardCard,
 	type CardStatus,
+	type BoardStorageRef,
+	type CardRun,
 } from '../../shared/board/types';
+import { validateCapture } from '../../shared/board/domain';
 import { hasCycle } from '../../shared/board/graph';
+import { canonicalJson } from '../../shared/canonicalJson';
 import { generateUUID } from '../../shared/uuid';
-import { logger } from '../utils/logger';
-import { atomicWriteFileSync } from '../utils/atomic-json-store';
+import { resolveUserDataDir } from '../../shared/userDataDir';
 import { createKeyedWriteQueue } from '../../shared/keyedWriteQueue';
+import { logger } from '../utils/logger';
+import { openBoardDb } from './board-db';
+import { boardMigrationSourceKey } from './board-migration';
+import {
+	BoardWorkspaceStorage,
+	BoardWorkspaceStorageError,
+	BOARD_CARD_EDITABLE_FIELDS,
+	BOARD_COLLECTION_EDITABLE_FIELDS,
+	type BoardCollectionSnapshot,
+	type BoardCollectionWrite,
+	type BoardWorkspacePatch,
+	type BoardCardWrite,
+} from './board-workspace-storage';
 
-const LOG_CONTEXT = 'Board';
-
-/**
- * Per-file write chain for board.yaml, keyed by the absolute file path (so two
- * projects never block each other). The storage mutations below are synchronous
- * and therefore cannot interleave with each other inside a single tick, but an
- * async caller that does its own read → await → write cycle can. Route those
- * through {@link enqueueBoardWrite} so the whole cycle is serialized against
- * every other queued mutation on the same file.
- *
- * Uses the shared `createKeyedWriteQueue` rather than a bespoke chain; Cue's
- * `enqueueYamlWrite` (cue-engine.ts) predates it and can adopt the same helper.
- */
-const boardWriteQueue = createKeyedWriteQueue();
-
-/**
- * Run `work` serialized against every other queued mutation for this project's
- * board.yaml. Callers that read-modify-write across an `await` MUST use this;
- * purely synchronous callers do not need it.
- */
-export function enqueueBoardWrite<T>(projectRoot: string, work: () => T | Promise<T>): Promise<T> {
-	return boardWriteQueue.enqueue(boardConfigPath(projectRoot), async () => work());
-}
-
-/** Absolute path to a project's board.yaml (may not exist yet). */
-function boardConfigPath(projectRoot: string): string {
-	return path.join(projectRoot, BOARD_CONFIG_PATH);
-}
-
-/**
- * Notified after every successful board.yaml write, with the boards that were
- * just persisted.
- */
+export { BoardWorkspaceStorageError as BoardStorageError } from './board-workspace-storage';
 export type BoardSavedListener = (projectRoot: string, boards: Board[]) => void;
-
 let boardSavedListener: BoardSavedListener | null = null;
-
-/**
- * Register (or clear, with `null`) the post-save hook.
- *
- * This module is imported by the CLI as well as the desktop app, and the CLI has
- * no `webContents` to push to - so the broadcast itself lives in the host
- * (`src/main/index.ts` wires a listener that sends `board:changed`) and storage
- * only announces that a write happened. One listener, set once at startup; the
- * setter is idempotent and last-write-wins.
- */
 export function setBoardSavedListener(listener: BoardSavedListener | null): void {
 	boardSavedListener = listener;
 }
 
-/**
- * Thrown when board.yaml exists but cannot be read or parsed.
- *
- * This is deliberately NOT the same as "no board yet". A missing file returns
- * `[]`; an unreadable or malformed one throws, because the alternative (the old
- * behavior) was catastrophic: `loadBoards` returned `[]`, the very next
- * `saveBoards` wrote that empty list over the top, and every board the user had
- * was gone. Failing closed keeps the damaged file on disk where a human can fix
- * it, at the cost of the Board being unavailable until they do.
+/** Default local identity is exactly the canonical project-root identity used at import.
+ * No file discovery/import, repository fallback, remote guessing, or YAML reads.
+ * Custom/SSH identities must be supplied explicitly by the host resolver.
  */
-export class BoardStorageError extends Error {
-	readonly filePath: string;
-
-	constructor(filePath: string, cause: unknown) {
-		const detail = cause instanceof Error ? cause.message : String(cause);
-		super(`Failed to read board file ${filePath}: ${detail}`);
-		this.name = 'BoardStorageError';
-		this.filePath = filePath;
+export function resolveLocalBoardSourceKeys(projectRoot: string): string[] {
+	try {
+		return [
+			boardMigrationSourceKey({ location: { kind: 'local' }, path: fs.realpathSync(projectRoot) }),
+		];
+	} catch {
+		throw new BoardWorkspaceStorageError(
+			'legacy-mapping-missing',
+			'Canonical local Board source unavailable'
+		);
 	}
 }
 
-/** ISO timestamp. Kept as a helper so tests can reason about the shape. */
+/** Injectable facade: fixtures and host share the same SQLite adapter and source resolver. */
+export class BoardStorageFacade {
+	readonly workspace: BoardWorkspaceStorage;
+	constructor(
+		readonly db: Database.Database,
+		readonly resolveSourceKeys: (
+			projectRoot: string
+		) => readonly string[] = resolveLocalBoardSourceKeys
+	) {
+		this.workspace = new BoardWorkspaceStorage(db);
+	}
+
+	sourceKeys(projectRoot: string): string[] {
+		const keys = [...new Set(this.resolveSourceKeys(projectRoot))].filter(
+			(key) => !!this.db.prepare('SELECT 1 FROM migrations WHERE source_key = ?').get(key)
+		);
+		if (!keys.length)
+			throw new BoardWorkspaceStorageError(
+				'legacy-mapping-missing',
+				'No imported central source for this project'
+			);
+		return keys;
+	}
+
+	read(projectRoot: string, boardId: string): Board {
+		const key = this.workspace.resolveLegacyCollection(this.sourceKeys(projectRoot), boardId);
+		const snapshot = this.workspace.readCollection(key)!;
+		if (snapshot.archived)
+			throw new BoardWorkspaceStorageError('not-found', 'Board archived', { key });
+		return this.project(snapshot);
+	}
+
+	list(projectRoot: string): Board[] {
+		return this.sourceKeys(projectRoot)
+			.flatMap((sourceKey) => this.workspace.listCollections(sourceKey))
+			.filter((entry) => !entry.archived)
+			.map((entry) => this.project(this.workspace.readCollection(entry)!));
+	}
+
+	project(snapshot: BoardCollectionSnapshot): Board {
+		const raw = {
+			...snapshot.payload,
+			cards: snapshot.cards.filter((card) => !card.archived).map((card) => card.payload),
+		};
+		const board = validateBoard(raw);
+		// Malformed imported records remain in SQLite and its snapshot, never silently disappear on save.
+		if (!board)
+			throw new BoardWorkspaceStorageError(
+				'invalid-payload',
+				'Central Board needs repair before legacy projection',
+				{ key: snapshot }
+			);
+		board.cards.forEach((card) => {
+			card.storageRevision = snapshot.cards.find((entry) => entry.cardId === card.id)!.revision;
+		});
+		board.storage = {
+			sourceKey: snapshot.sourceKey,
+			collectionKey: snapshot.collectionKey,
+			expectedRevision: snapshot.revision,
+			cardRevisions: Object.fromEntries(snapshot.cards.map((card) => [card.cardId, card.revision])),
+		};
+		return board;
+	}
+
+	reference(projectRoot: string, board: Board): BoardStorageRef {
+		const ref = board.storage;
+		if (
+			!ref ||
+			typeof ref.sourceKey !== 'string' ||
+			typeof ref.collectionKey !== 'string' ||
+			(ref.expectedRevision !== null &&
+				(!Number.isSafeInteger(ref.expectedRevision) || ref.expectedRevision < 0)) ||
+			!ref.cardRevisions ||
+			typeof ref.cardRevisions !== 'object' ||
+			Array.isArray(ref.cardRevisions)
+		)
+			throw new BoardWorkspaceStorageError(
+				'invalid-input',
+				'Board save requires the identity and revision returned by its read'
+			);
+		if (!this.sourceKeys(projectRoot).includes(ref.sourceKey))
+			throw new BoardWorkspaceStorageError(
+				'identity-mismatch',
+				'Board source does not belong to project'
+			);
+		const stored = this.workspace.readCollection(ref);
+		if (stored && (stored.legacyBoardId !== board.id || stored.archived))
+			throw new BoardWorkspaceStorageError(
+				'identity-mismatch',
+				'Board identity changed or archived'
+			);
+		return ref;
+	}
+
+	plan(projectRoot: string, board: Board): BoardCollectionWrite {
+		const ref = this.reference(projectRoot, board);
+		const stored = this.workspace.readCollection(ref);
+		if (stored && ref.expectedRevision !== stored.revision)
+			throw new BoardWorkspaceStorageError('stale-revision', 'Board changed since read', {
+				key: ref,
+				expectedRevision: ref.expectedRevision,
+				actualRevision: stored.revision,
+			});
+		if (hasCycle(board))
+			throw new BoardWorkspaceStorageError('invalid-input', 'Board has a cyclic parent graph');
+		const validated = validateBoard(board);
+		if (!validated || validated.cards.length !== board.cards.length)
+			throw new BoardWorkspaceStorageError('invalid-payload', 'Invalid Board; no data written');
+		const cards: BoardCardWrite[] = board.cards.map((card) => {
+			const original = stored?.cards.find((entry) => entry.cardId === card.id);
+			if (original?.archived)
+				throw new BoardWorkspaceStorageError('protected-field', 'Cannot reuse an archived card ID');
+			if (card.status === 'running' && original?.payload.status !== 'running')
+				throw new BoardWorkspaceStorageError(
+					'runtime-unavailable',
+					'Global fenced claims require Phase03 runtime'
+				);
+			if (
+				original &&
+				canonicalJson({ runs: validateBoardCard(original.payload)?.runs }) !==
+					canonicalJson({ runs: card.runs })
+			)
+				throw new BoardWorkspaceStorageError(
+					'runtime-unavailable',
+					'Run lifecycle requires the fenced runtime; use stampBoardRunPr for PR results'
+				);
+			if (!original && card.runs?.length)
+				throw new BoardWorkspaceStorageError('protected-field', 'CRUD cannot create run history');
+			if (original?.payload.heldByUser === true && card.heldByUser !== true)
+				throw new BoardWorkspaceStorageError(
+					'protected-field',
+					'Clearing a hold requires an explicit resume command'
+				);
+			const captureFields = [
+				'kind',
+				'executionScope',
+				'assigneeAgentId',
+				'role',
+				'repositoryId',
+				'workingDirectory',
+				'startModeOverride',
+			];
+			const captureChanged = captureFields.some(
+				(field) =>
+					canonicalJson({ value: original?.payload[field] }) !==
+					canonicalJson({ value: (card as unknown as Record<string, unknown>)[field] })
+			);
+			if (captureChanged) {
+				const result = validateCapture(card, {
+					agents: [],
+					groups: [],
+					profiles: [],
+					defaultStartMode: 'approval',
+					canRelaxStartPolicy: false,
+				});
+				if (!result.ok)
+					throw new BoardWorkspaceStorageError(
+						'invalid-input',
+						`Invalid capture: ${result.errors.join(', ')}`
+					);
+			}
+			return {
+				cardId: card.id,
+				expectedRevision: original ? ref.cardRevisions[card.id] : null,
+				...this.patch(
+					original?.payload ?? { id: card.id },
+					card as unknown as Record<string, unknown>,
+					BOARD_CARD_EDITABLE_FIELDS,
+					['storageRevision', 'runs'],
+					(validateBoardCard(original?.payload) as unknown as Record<string, unknown> | null) ??
+						undefined
+				),
+			};
+		});
+		for (const original of stored?.cards ?? []) {
+			if (original.archived || board.cards.some((card) => card.id === original.cardId)) continue;
+			cards.push({
+				cardId: original.cardId,
+				expectedRevision: ref.cardRevisions[original.cardId],
+				delete: true,
+			});
+		}
+		return {
+			sourceKey: ref.sourceKey,
+			collectionKey: ref.collectionKey,
+			expectedRevision: ref.expectedRevision,
+			legacyBoardId: board.id,
+			...this.patch(
+				stored?.payload ?? { id: board.id },
+				board as unknown as Record<string, unknown>,
+				BOARD_COLLECTION_EDITABLE_FIELDS,
+				['cards', 'storage'],
+				stored
+					? (validateBoard({ ...stored.payload, cards: [] }) as unknown as Record<string, unknown>)
+					: undefined
+			),
+			cards,
+		};
+	}
+
+	private patch(
+		stored: Record<string, unknown>,
+		next: Record<string, unknown>,
+		allowed: ReadonlySet<string>,
+		ignored: readonly string[] = [],
+		baseline: Record<string, unknown> = stored
+	): BoardWorkspacePatch {
+		const set: Record<string, unknown> = {};
+		const unset: (string | readonly string[])[] = [];
+		for (const field of new Set([...Object.keys(stored), ...Object.keys(next)])) {
+			if (ignored.includes(field)) continue;
+			// Older callers do not know these execution fields. Omission is not an unset.
+			if (
+				!(field in next) &&
+				[
+					'kind',
+					'executionScope',
+					'role',
+					'profileNamespace',
+					'repositoryId',
+					'workingDirectory',
+					'startModeOverride',
+				].includes(field)
+			)
+				continue;
+			if (canonicalJson({ value: baseline[field] }) === canonicalJson({ value: next[field] }))
+				continue;
+			if (!allowed.has(field)) {
+				// Unmentioned raw fields are retained; caller-supplied replacements are rejected.
+				if (next[field] !== undefined)
+					throw new BoardWorkspaceStorageError(
+						'protected-field',
+						`Cannot edit Board field: ${field}`
+					);
+				continue;
+			}
+			if (next[field] === undefined) unset.push(field);
+			else set[field] = next[field];
+		}
+		const scope = set.executionScope as { kind?: string } | undefined;
+		const previous = stored.executionScope as { kind?: string } | undefined;
+		if (scope && previous && scope.kind !== previous.kind) {
+			if (scope.kind === 'agent') unset.push(['executionScope', 'groupId']);
+			if (scope.kind === 'group') unset.push(['executionScope', 'agentId']);
+		}
+		return { set, unset };
+	}
+
+	save(projectRoot: string, boards: Board[]): Board[] {
+		const plans = boards.map((board) => this.plan(projectRoot, board));
+		const saved = this.workspace.writeCollections(plans).map((snapshot) => this.project(snapshot));
+		saved.forEach((board, index) => Object.assign(boards[index], board));
+		return saved;
+	}
+}
+
+let configuredFacade: BoardStorageFacade | null = null;
+let defaultFacade: BoardStorageFacade | null = null;
+/** Injection does not own/close the supplied DB. Restoring null returns to the lazy machine-local DB. */
+export function configureBoardStorage(facade: BoardStorageFacade | null): void {
+	configuredFacade = facade;
+}
+function storage(): BoardStorageFacade {
+	if (configuredFacade) return configuredFacade;
+	return (defaultFacade ??= new BoardStorageFacade(
+		openBoardDb(path.join(resolveUserDataDir(), 'board', 'board.sqlite'))
+	));
+}
+export function closeBoardStorage(): void {
+	defaultFacade?.db.close();
+	defaultFacade = null;
+}
+
+const boardWriteQueue = createKeyedWriteQueue();
+/** Advisory in-process queue only. SQLite revisions protect across desktop/CLI processes. */
+export function enqueueBoardWrite<T>(projectRoot: string, work: () => T | Promise<T>): Promise<T> {
+	const facade = storage();
+	const sources = facade.sourceKeys(projectRoot).sort();
+	return boardWriteQueue.enqueue(canonicalJson(sources), async () => work());
+}
 function nowIso(): string {
 	return new Date().toISOString();
 }
-
-/**
- * Load and validate all boards for a project.
- *
- * Three distinct outcomes, and the distinction matters:
- *  - **Missing file** -> `[]`. The normal "no board yet" case.
- *  - **Read or parse failure** -> throws {@link BoardStorageError}. Every
- *    mutation path funnels through here, so a damaged file blocks writes rather
- *    than being silently replaced by an empty board.
- *  - **Valid file** -> the boards. Individual malformed cards are still skipped
- *    with a logged warning (one bad card never blocks the rest), and duplicate
- *    board ids keep the first occurrence.
- */
 export function loadBoards(projectRoot: string): Board[] {
-	const filePath = boardConfigPath(projectRoot);
-	let raw: string;
-	try {
-		raw = fs.readFileSync(filePath, 'utf-8');
-	} catch (err) {
-		// Missing file is the common case (no board yet) - not an error. Anything
-		// else (permissions, a directory in the way, I/O failure) is real and must
-		// not be mistaken for "no boards".
-		if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
-			return [];
-		}
-		throw new BoardStorageError(filePath, err);
-	}
-
-	let parsed: unknown;
-	try {
-		parsed = yaml.load(raw);
-	} catch (err) {
-		logger.warn(
-			`Failed to parse ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-			LOG_CONTEXT
-		);
-		throw new BoardStorageError(filePath, err);
-	}
-
-	// An empty file parses to null/undefined - treat that as "no boards yet"
-	// rather than corruption, since that is what an empty `.maestro/board.yaml`
-	// legitimately means.
-	if (parsed === null || parsed === undefined) {
-		return [];
-	}
-	if (typeof parsed !== 'object') {
-		throw new BoardStorageError(filePath, new Error('expected a mapping at the top level'));
-	}
-
-	const list = (parsed as { boards?: unknown }).boards;
-	if (list === undefined || list === null) {
-		return [];
-	}
-	if (!Array.isArray(list)) {
-		throw new BoardStorageError(filePath, new Error('`boards` is present but is not a list'));
-	}
-
-	const boards: Board[] = [];
-	const seenIds = new Set<string>();
-	for (const entry of list) {
-		const before = Array.isArray((entry as { cards?: unknown })?.cards)
-			? (entry as { cards: unknown[] }).cards.length
-			: 0;
-		const board = validateBoard(entry);
-		if (!board) {
-			logger.warn(`Skipping malformed board entry in ${filePath}`, LOG_CONTEXT);
-			continue;
-		}
-		if (board.cards.length < before) {
-			logger.warn(
-				`Skipped ${before - board.cards.length} malformed card(s) in board "${board.id}"`,
-				LOG_CONTEXT
-			);
-		}
-		if (seenIds.has(board.id)) {
-			logger.warn(`Skipping duplicate board id "${board.id}" in ${filePath}`, LOG_CONTEXT);
-			continue;
-		}
-		seenIds.add(board.id);
-		boards.push(board);
-	}
-	return boards;
+	return storage().list(projectRoot);
 }
-
-/** Alias for {@link loadBoards} - the public "list" verb used by IPC callers. */
 export function listBoards(projectRoot: string): Board[] {
 	return loadBoards(projectRoot);
 }
-
-/** Return a single board by id, or `null` when it does not exist. */
 export function getBoard(projectRoot: string, boardId: string): Board | null {
-	return loadBoards(projectRoot).find((b) => b.id === boardId) ?? null;
+	// Missing/ambiguous legacy mapping deliberately throws a typed error, never YAML fallback.
+	return storage().read(projectRoot, boardId);
 }
-
-/**
- * Persist the given boards to a project's `.maestro/board.yaml`, creating
- * `.maestro/` if needed. Invalid cards are dropped before writing so the file on
- * disk always round-trips cleanly. Rejects (throws) if any board's parent graph
- * contains a cycle - the DAG invariant Phase 3's dispatcher relies on. Returns
- * the absolute path written.
- */
+function announce(projectRoot: string): void {
+	try {
+		boardSavedListener?.(projectRoot, loadBoards(projectRoot));
+	} catch (error) {
+		logger.warn(`Board saved listener threw: ${String(error)}`, 'Board');
+	}
+}
+/** Batch patches only named collections; omission never deletes siblings. */
 export function saveBoards(projectRoot: string, boards: Board[]): string {
-	const valid = boards.map((b) => validateBoard(b)).filter((b): b is Board => b !== null);
-
-	for (const board of valid) {
-		if (hasCycle(board)) {
-			throw new Error(`saveBoards: board "${board.id}" has a cyclic parent graph`);
-		}
-	}
-
-	const maestroDir = path.join(projectRoot, MAESTRO_DIR);
-	if (!fs.existsSync(maestroDir)) {
-		fs.mkdirSync(maestroDir, { recursive: true });
-	}
-	const filePath = boardConfigPath(projectRoot);
-	const content = yaml.dump({ boards: valid }, { lineWidth: -1 });
-	// Atomic (temp file + rename): a crash mid-write leaves the previous
-	// board.yaml intact instead of a truncated file that would load as empty.
-	atomicWriteFileSync(filePath, content);
-	// Announce the write so the host can push `board:changed` to open windows.
-	// Advisory only: a listener that throws must never fail the write that
-	// already landed on disk.
-	if (boardSavedListener) {
-		try {
-			boardSavedListener(projectRoot, valid);
-		} catch (err) {
-			logger.warn(
-				`Board saved listener threw: ${err instanceof Error ? err.message : String(err)}`,
-				LOG_CONTEXT
-			);
-		}
-	}
-	return filePath;
+	storage().save(projectRoot, boards);
+	announce(projectRoot);
+	return 'board:workspace';
 }
-
-/**
- * Upsert a single board into a project's `.maestro/board.yaml`: replace the
- * board with the same id in place, or append it when new. All other boards are
- * preserved. Used by the Phase 3 dispatcher to persist card-status changes for
- * one board without disturbing its siblings. Returns the absolute path written.
- */
-export function saveBoard(projectRoot: string, board: Board): string {
-	const boards = loadBoards(projectRoot);
-	const index = boards.findIndex((b) => b.id === board.id);
-	if (index >= 0) {
-		boards[index] = board;
-	} else {
-		boards.push(board);
-	}
-	return saveBoards(projectRoot, boards);
+/** expectedRevision must be the token of the read that produced this board. */
+export function saveBoard(
+	projectRoot: string,
+	board: Board,
+	expectedRevision = board.storage?.expectedRevision
+): string {
+	if (!board.storage || expectedRevision !== board.storage.expectedRevision)
+		throw new BoardWorkspaceStorageError('invalid-input', 'Explicit read revision required');
+	return saveBoards(projectRoot, [board]);
+}
+/** Existing-run PR result path shared by desktop and CLI, with exact run identity and revisions. */
+export function stampBoardRunPr(
+	projectRoot: string,
+	board: Board,
+	cardId: string,
+	run: Pick<CardRun, 'attempt' | 'startedAt'>,
+	result: { prUrl: string } | { prError: string }
+): Board {
+	const facade = storage();
+	const ref = facade.reference(projectRoot, board);
+	if (ref.expectedRevision === null)
+		throw new BoardWorkspaceStorageError('not-found', 'Board is not persisted');
+	const snapshot = facade.workspace.stampRunPr({
+		...ref,
+		cardId,
+		expectedRevision: ref.expectedRevision,
+		expectedCardRevision: ref.cardRevisions[cardId],
+		run,
+		result,
+		updatedAt: nowIso(),
+	});
+	const saved = facade.project(snapshot);
+	announce(projectRoot);
+	return saved;
 }
 
 /** Optional board settings accepted at creation time. */
@@ -311,7 +431,20 @@ export function createBoard(
 		board.maxInProgress = Math.floor(options.maxInProgress);
 	}
 	if (options.autoDecompose) board.autoDecompose = true;
-	saveBoard(projectRoot, board);
+	const facade = storage();
+	const sources = facade.sourceKeys(projectRoot);
+	if (sources.length !== 1)
+		throw new BoardWorkspaceStorageError(
+			'legacy-mapping-ambiguous',
+			'Creating a collection requires exactly one explicit source'
+		);
+	board.storage = {
+		sourceKey: sources[0],
+		collectionKey: generateUUID(),
+		expectedRevision: null,
+		cardRevisions: {},
+	};
+	saveBoard(projectRoot, board, null);
 	return board;
 }
 
@@ -329,18 +462,16 @@ export function renameBoard(projectRoot: string, boardId: string, name: string):
 	const boards = loadBoards(projectRoot);
 	const board = requireBoard(boards, boardId);
 	board.name = trimmed;
-	saveBoards(projectRoot, boards);
+	saveBoard(projectRoot, board, board.storage?.expectedRevision);
 	return board;
 }
 
 /**
- * Delete an entire board and every card on it. Returns the remaining boards
+ * Archive a board while retaining cards and historical run references. Returns remaining boards
  * (mirroring `deleteProfile`). Throws if the board is missing.
  *
- * Guard rail: a board with any card that is not `done` refuses to delete unless
- * `force` is set. Unlike a single card, this is unrecoverable and takes the run
- * history of everything on the board with it. Running cards always prevent
- * deletion, even with force; their owning dispatcher must stop them first.
+ * A board with unfinished cards requires force. Running cards or reservations
+ * always prevent archival. SQLite rows and their foreign keys remain intact.
  */
 export function deleteBoard(
 	projectRoot: string,
@@ -361,9 +492,11 @@ export function deleteBoard(
 			);
 		}
 	}
-	const remaining = boards.filter((b) => b.id !== boardId);
-	saveBoards(projectRoot, remaining);
-	return remaining;
+	const facade = storage();
+	const ref = facade.reference(projectRoot, board);
+	facade.workspace.writeCollection({ ...ref, delete: true });
+	announce(projectRoot);
+	return loadBoards(projectRoot);
 }
 
 /** Load a board by id or throw a caller-surfaceable error when it is missing. */
@@ -393,7 +526,7 @@ export function addCard(projectRoot: string, boardId: string, card: BoardCard): 
 		throw new Error(`addCard: card "${validated.id}" already exists on board "${boardId}"`);
 	}
 	board.cards.push(validated);
-	saveBoards(projectRoot, boards);
+	saveBoard(projectRoot, board, board.storage?.expectedRevision);
 	return board;
 }
 
@@ -416,11 +549,8 @@ const DERIVED_STATUSES: ReadonlySet<CardStatus> = new Set<CardStatus>(['ready', 
  * to set a dispatcher-derived status (see {@link DERIVED_STATUSES}). Returns the
  * updated board.
  *
- * AB1: a manual move also releases a user hold. A stopped card sits in `todo`
- * with `heldByUser` set, so dragging it (or `maestro-cli board set-status`) is
- * the other way a person says "go" besides the Resume button. Leaving the flag
- * on would strand the card: it would land wherever the user dropped it and still
- * never be promoted, with nothing on screen explaining why.
+ * Status changes preserve user holds. An explicit resume command owns release.
+
  */
 export function updateCardStatus(
 	projectRoot: string,
@@ -455,9 +585,9 @@ export function updateCardStatus(
 		throw new Error('This card is running. Stop it before changing its status.');
 	}
 	card.status = status;
-	delete card.heldByUser;
+	// Status changes preserve intake holds and never grant dispatch approval.
 	card.updatedAt = nowIso();
-	saveBoards(projectRoot, boards);
+	saveBoard(projectRoot, board, board.storage?.expectedRevision);
 	return board;
 }
 
@@ -474,6 +604,12 @@ export function updateCard(projectRoot: string, boardId: string, card: BoardCard
 	if (index < 0) {
 		throw new Error(`updateCard: card "${card.id}" not found on board "${boardId}"`);
 	}
+	if (
+		card.storageRevision === undefined ||
+		card.storageRevision !== board.storage?.cardRevisions[card.id]
+	) {
+		throw new BoardWorkspaceStorageError('stale-revision', 'Card edit requires its read revision');
+	}
 	const stored = board.cards[index];
 	if (card.status !== stored.status && DERIVED_STATUSES.has(card.status)) {
 		throw new Error(`updateCard: "${card.status}" is set by the dispatcher, not manually.`);
@@ -489,6 +625,7 @@ export function updateCard(projectRoot: string, boardId: string, card: BoardCard
 
 	const validated = validateBoardCard(
 		{
+			...stored,
 			...card,
 			runs: card.runs ?? stored.runs,
 			heldByUser: card.heldByUser === undefined ? stored.heldByUser : card.heldByUser,
@@ -501,7 +638,7 @@ export function updateCard(projectRoot: string, boardId: string, card: BoardCard
 		throw new Error('updateCard: invalid card shape');
 	}
 	board.cards[index] = validated;
-	saveBoards(projectRoot, boards);
+	saveBoard(projectRoot, board, board.storage?.expectedRevision);
 	return board;
 }
 
@@ -548,6 +685,6 @@ export function deleteCard(projectRoot: string, boardId: string, cardId: string)
 		);
 		card.updatedAt = nowIso();
 	}
-	saveBoards(projectRoot, boards);
+	saveBoard(projectRoot, board, board.storage?.expectedRevision);
 	return board;
 }

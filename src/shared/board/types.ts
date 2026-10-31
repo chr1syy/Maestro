@@ -1,12 +1,11 @@
 /**
  * Board - shared contracts.
  *
- * A Board is a persistent task DAG stored per-project in `.maestro/board.yaml`
- * (human-diffable, git-trackable, mirroring the Cue `.maestro/cue.yaml`
- * convention). Each **card** is a unit of work assigned to an Agent Profile
- * (Phase 1) and gated on its parent cards: a card becomes eligible to run only
- * once every parent it lists is `done`. Phase 2 (this module) is the data
- * foundation only - no dispatcher (Phase 3) and no rich UI (Phase 4).
+ * A Board is a persistent task DAG in the machine-local SQLite workspace.
+ * Legacy project YAML is migration input only. Collections and cards carry
+ * explicit source identities and read revisions across desktop/CLI boundaries.
+ * Captured drafts may be incomplete; execution is separately gated by scope,
+ * repository, approval and the fenced runtime.
  *
  * This module is pure and framework-free (no Electron/React imports) so it can
  * run in main, renderer, and CLI alike.
@@ -179,8 +178,8 @@ export interface CardRun {
  * `parents` are card ids this card depends on; the card is eligible only when
  * every parent is `done` (see {@link getEligibleCards}).
  *
- * ── Assignee model (Board Phase 6: worker pool) ──────────────────────────────
- * A card resolves to a worker via two optional fields; at least one is required:
+ * ── Legacy assignee fields ─────────────────────────────────────────────────
+ * These preserved assignment fields do not grant execution authority:
  *   - `assigneeProfileId` names an {@link AgentProfile} (a *role*: model/effort/
  *     role-prompt overrides). A role-only card (profile has no `baseAgentId`)
  *     floats to any FREE opt-in worker in the board's project directory.
@@ -189,7 +188,9 @@ export interface CardRun {
  * Resolution: `assigneeAgentId` (or a legacy profile's `baseAgentId`) pins a
  * single worker; otherwise the free project pool is used.
  */
-export interface BoardCard {
+export interface BoardCard extends BoardCaptureOptions {
+	/** Central read token; transport metadata only, never persisted in card payload. */
+	storageRevision?: number;
 	/** Stable unique id (UUID). */
 	id: string;
 	/** Human-facing title shown on the card. */
@@ -241,10 +242,17 @@ export interface BoardCard {
 	updatedAt: string;
 }
 
-/**
- * A named board: an ordered collection of cards plus optional concurrency cap.
- */
+/** Explicit central identity and optimistic concurrency token, carried across transports. */
+export interface BoardStorageRef {
+	sourceKey: string;
+	collectionKey: string;
+	expectedRevision: number | null;
+	cardRevisions: Record<string, number>;
+}
+
+/** A named collection of cards plus optional concurrency cap. */
 export interface Board {
+	storage?: BoardStorageRef;
 	/** Stable unique id (UUID). */
 	id: string;
 	/** Human-facing board name. */
@@ -292,7 +300,7 @@ function validateWorktreeRef(raw: unknown): WorktreeRef | null {
 	const r = raw as Record<string, unknown>;
 	const p = optionalString(r.path);
 	if (!p) return null;
-	const ref: WorktreeRef = { path: p };
+	const ref: WorktreeRef = { ...r, path: p };
 	const branch = optionalString(r.branch);
 	if (branch !== undefined) ref.branch = branch;
 	return ref;
@@ -306,7 +314,8 @@ function validateWorktreeRef(raw: unknown): WorktreeRef | null {
 function validateCardPrOnDone(raw: unknown): CardPrOnDone | null {
 	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
 	const r = raw as Record<string, unknown>;
-	const prOnDone: CardPrOnDone = {};
+	const prOnDone: CardPrOnDone = { ...r };
+	delete prOnDone.targetBranch;
 	const targetBranch = optionalString(r.targetBranch);
 	if (targetBranch !== undefined) prOnDone.targetBranch = targetBranch.trim();
 	return prOnDone;
@@ -319,7 +328,20 @@ function validateCardRun(raw: unknown): CardRun | null {
 	const attempt = typeof r.attempt === 'number' && Number.isFinite(r.attempt) ? r.attempt : null;
 	const startedAt = optionalString(r.startedAt);
 	if (attempt === null || !startedAt) return null;
-	const run: CardRun = { attempt, startedAt };
+	const run: CardRun = { ...r, attempt, startedAt };
+	for (const field of [
+		'endedAt',
+		'outcome',
+		'summary',
+		'workerAgentId',
+		'worktreePath',
+		'worktreeBranch',
+		'prUrl',
+		'prError',
+		'metadata',
+	]) {
+		delete (run as unknown as Record<string, unknown>)[field];
+	}
 	const endedAt = optionalString(r.endedAt);
 	if (endedAt !== undefined) run.endedAt = endedAt;
 	if (
@@ -348,13 +370,13 @@ function validateCardRun(raw: unknown): CardRun | null {
 
 /**
  * Validate an untrusted object as a {@link BoardCard}. Returns a normalized card
- * on success, or `null` when the shape is malformed. Used by the YAML storage
- * layer to skip bad entries without throwing, and by IPC handlers before
+ * on success, or `null` when the shape is malformed. Used by migration,
+ * the central storage facade and IPC handlers before
  * persisting caller input.
  *
- * Rules: `id` and `title` must be non-empty strings, and the card must name an
- * assignee - at least one of `assigneeProfileId` (role) or `assigneeAgentId`
- * (pinned agent) must be a non-empty string. `status` must be a known
+ * Rules: `id` and `title` must be non-empty strings. Draft cards may omit
+ * assignees and scope; capture readiness explains why they cannot run.
+ * Unknown execution/migration fields are retained. `status` must be a known
  * {@link CardStatus}. `parents` defaults to `[]` and keeps only non-empty string
  * ids. Missing `createdAt`/`updatedAt` fall back to {@link nowIso} when supplied.
  * Optional `worktree`/`prOnDone`/`runs` are validated structurally and dropped
@@ -369,8 +391,8 @@ export function validateBoardCard(raw: unknown, nowIso?: string): BoardCard | nu
 	const assigneeProfileId =
 		typeof r.assigneeProfileId === 'string' ? r.assigneeProfileId.trim() : '';
 	const assigneeAgentId = typeof r.assigneeAgentId === 'string' ? r.assigneeAgentId.trim() : '';
-	// A card must resolve to *someone*: a role (profile) or a pinned agent.
-	if (!id || !title || (!assigneeProfileId && !assigneeAgentId)) return null;
+	// Missing assignment is a capturable draft, not permission to select a fallback worker.
+	if (!id || !title) return null;
 	if (!isCardStatus(r.status)) return null;
 
 	const parents = Array.isArray(r.parents)
@@ -384,6 +406,7 @@ export function validateBoardCard(raw: unknown, nowIso?: string): BoardCard | nu
 	const updatedAt = optionalString(r.updatedAt) ?? createdAt;
 
 	const card: BoardCard = {
+		...r,
 		id,
 		title,
 		body,
@@ -392,6 +415,10 @@ export function validateBoardCard(raw: unknown, nowIso?: string): BoardCard | nu
 		createdAt,
 		updatedAt,
 	};
+	// Normalize known presentation fields while keeping unknown execution/migration metadata.
+	delete card.priority;
+	delete card.heldByUser;
+	delete card.prOnDone;
 	if (assigneeProfileId) card.assigneeProfileId = assigneeProfileId;
 	if (assigneeAgentId) card.assigneeAgentId = assigneeAgentId;
 
@@ -418,16 +445,16 @@ export function validateBoardCard(raw: unknown, nowIso?: string): BoardCard | nu
 		const runs = r.runs
 			.map((run) => validateCardRun(run))
 			.filter((run): run is CardRun => run !== null);
-		if (runs.length > 0) card.runs = runs;
+		if (runs.length !== r.runs.length) return null;
+		card.runs = runs;
 	}
 
 	return card;
 }
 
 /**
- * Validate an untrusted object as a {@link Board}. Malformed cards are skipped
- * (defense in depth mirrors the profile storage layer). Returns `null` only
- * when the board envelope itself (`id`/`name`) is unusable.
+ * Validate an untrusted Board without silently dropping malformed/duplicate cards.
+ * Invalid legacy records remain in the migration snapshot and fail legacy projection.
  */
 export function validateBoard(raw: unknown, nowIso?: string): Board | null {
 	if (!raw || typeof raw !== 'object') return null;
@@ -442,14 +469,13 @@ export function validateBoard(raw: unknown, nowIso?: string): Board | null {
 	if (Array.isArray(r.cards)) {
 		for (const entry of r.cards) {
 			const card = validateBoardCard(entry, nowIso);
-			if (!card) continue;
-			if (seenIds.has(card.id)) continue;
+			if (!card || seenIds.has(card.id)) return null;
 			seenIds.add(card.id);
 			cards.push(card);
 		}
 	}
 
-	const board: Board = { id, name, cards };
+	const board: Board = { ...r, id, name, cards };
 	if (
 		typeof r.maxInProgress === 'number' &&
 		Number.isFinite(r.maxInProgress) &&

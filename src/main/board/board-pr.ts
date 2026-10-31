@@ -21,7 +21,7 @@
 
 import type { Board, BoardCard, CardRun } from '../../shared/board/types';
 import { createPullRequest } from '../utils/pr-creator';
-import { listBoards, saveBoard, enqueueBoardWrite } from './board-storage';
+import { listBoards, stampBoardRunPr, enqueueBoardWrite } from './board-storage';
 import { canonicalJson } from '../../shared/canonicalJson';
 import { buildCardPrToastPayload, type BoardCardToastPayload } from './board-toast';
 
@@ -333,16 +333,15 @@ export function startCardPr(
 		stampPrUrl: (id, prUrl, run) =>
 			enqueueBoardWrite(projectRoot, () => {
 				const board = listBoards(projectRoot).find((b) => b.id === boardId);
-				if (board && stampCardPrUrl(board, id, prUrl, new Date().toISOString(), run)) {
-					saveBoard(projectRoot, board);
-				}
+				if (board) stampBoardRunPr(projectRoot, board, id, run, { prUrl });
 			}),
 		stampPrError: (id, error, run) =>
 			enqueueBoardWrite(projectRoot, () => {
 				const board = listBoards(projectRoot).find((b) => b.id === boardId);
-				if (board && stampCardPrError(board, id, error, new Date().toISOString(), run)) {
-					saveBoard(projectRoot, board);
-				}
+				if (board)
+					stampBoardRunPr(projectRoot, board, id, run, {
+						prError: error.slice(0, PR_ERROR_MAX_LENGTH),
+					});
 			}),
 		mainRepoCwd: projectRoot,
 		...options,

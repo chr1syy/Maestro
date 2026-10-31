@@ -1694,7 +1694,7 @@ app
 				},
 				listBoards: (projectRoot) => listBoards(projectRoot),
 				saveBoard: (projectRoot, board) => {
-					saveBoard(projectRoot, board);
+					saveBoard(projectRoot, board, board.storage?.expectedRevision);
 				},
 				resolveOverrides: (projectRoot, card) =>
 					resolveCardOverrides(projectRoot, card, boardSpawnContext),
@@ -1798,7 +1798,7 @@ app
 							decomposeBoardCard(projectRoot, card, prompt, boardSpawnContext, signal),
 						reload: () => listBoards(projectRoot).find((b) => b.id === board.id) ?? null,
 						save: (merged) => {
-							saveBoard(projectRoot, merged);
+							saveBoard(projectRoot, merged, merged.storage?.expectedRevision);
 						},
 						onLog: (level, message) => {
 							if (level === 'error') logger.error(message, 'Board');
