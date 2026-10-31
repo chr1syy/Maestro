@@ -18,7 +18,7 @@ Each source has an explicit identity and profile namespace. Select the source to
 
 Manage existing workers, create workers, assign roles and pause intake from the Board. Each executable card requires either one agent or one group as its scope. A group card may additionally require a role or pin a member. Membership, availability, role, repository and working directory are checked again at claim time; a missing or busy target waits with a reason instead of falling back to another worker or directory. Existing worker markings are migrated into the central registry.
 
-The board default controls whether new cards enter with approval required or are directly eligible; a card can override it. New boards default to approval, and imported cards retain their prior intent. A required approval is granted through the desktop, not by changing a status or passing CLI authority flags.
+The board default controls whether new cards enter with approval required or are directly eligible; a card can override it. New boards default to approval, and imported cards retain their prior intent. A required approval is granted through the desktop, not by changing a status or passing CLI authority flags. Open the saved card and choose **Approve start**. Save pending edits first so the action approves the specification you read. The editor shows the refreshed host approval state; if approval is rejected, it keeps your draft and displays the error. Start approval leaves holds and human review unchanged.
 
 ## Cards and runs
 

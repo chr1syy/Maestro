@@ -70,6 +70,7 @@ function makeCard(overrides: Partial<BoardCard> & { id: string; title: string })
 // Board IPC stub, reassigned per test. The global test harness does not include
 // the board/profiles namespaces, so install them here.
 let boardApi: {
+	runtimeCommand: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 	sourceCommand: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 	upsertRole: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 	setStartPolicy: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
@@ -150,6 +151,7 @@ function installApis(initialBoards: Board[], profiles?: unknown[]): void {
 	profilesChangedListeners = [];
 	unsubscribeProfilesChanged = vi.fn();
 	boardApi = {
+		runtimeCommand: vi.fn(),
 		sourceCommand: vi.fn().mockResolvedValue({ ok: true }),
 		upsertRole: vi.fn(async (_root: string, profile: { id: string }) => ({
 			namespace: 'fixture-namespace',
@@ -2024,6 +2026,158 @@ describe('BoardModal host capture editor', () => {
 			target: { value: canonicalJson({ namespace, profileId: 'same-role' }) },
 		});
 	}
+
+	it('captures with default approval, approves the read specification and shows only host-confirmed granted state', async () => {
+		const board = installCapture();
+		boardApi.captureCard.mockImplementationOnce(async ({ card }: BoardCaptureCommand) => {
+			board.cards = [
+				{
+					...card,
+					storageRevision: 3,
+					capturePolicy: {
+						effectiveStartMode: 'approval',
+						dispatchApproval: 'required',
+						specificationRevision: 3,
+					},
+				},
+			];
+			return { ok: true, value: board, readiness: { [card.id]: ['approval-required'] } };
+		});
+		let grant!: () => void;
+		boardApi.runtimeCommand.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					grant = () => {
+						board.cards[0] = {
+							...board.cards[0],
+							storageRevision: 4,
+							capturePolicy: {
+								...board.cards[0].capturePolicy!,
+								dispatchApproval: 'granted',
+							},
+						};
+						board.storage = { ...board.storage!, expectedRevision: 13 };
+						resolve({ ok: true, value: { accepted: true } });
+					};
+				})
+		);
+		await openNew();
+		selectScope({ kind: 'agent', agentId: 's1' });
+		fireEvent.click(screen.getByRole('button', { name: /Create card/i }));
+		fireEvent.click(
+			await screen.findByText('Explicit capture', { selector: '[class*="font-medium"]' })
+		);
+		const approve = screen.getByRole('button', { name: 'Approve start' });
+		fireEvent.click(approve);
+		expect(boardApi.runtimeCommand).toHaveBeenCalledWith({
+			action: 'control',
+			operation: 'approve',
+			target: {
+				projectRoot: PROJECT_ROOT,
+				sourceKey: 'source-one',
+				collectionKey: 'b1',
+				expectedRevision: 12,
+			},
+			cardId: board.cards[0].id,
+			cardRevision: 3,
+		});
+		expect(approve).toBeDisabled();
+		expect(screen.queryByText('Start approval: granted')).not.toBeInTheDocument();
+		await act(async () => grant());
+		expect(await screen.findByText('Start approval: granted')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Approve start' })).not.toBeInTheDocument();
+		expect(boardApi.setCardStatus).not.toHaveBeenCalled();
+		expect(boardApi.captureCard).toHaveBeenCalledTimes(1);
+		fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Edit after grant' } });
+		fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+		await waitFor(() => expect(boardApi.captureCard).toHaveBeenCalledTimes(2));
+		expect(boardApi.captureCard.mock.calls[1][0]).toMatchObject({
+			expectedRevision: 13,
+			card: { storageRevision: 4 },
+		});
+	});
+
+	it('keeps the read snapshot when the post-approval host refresh fails', async () => {
+		installCapture(
+			makeCard({
+				id: 'c1',
+				title: 'Refresh approval',
+				storageRevision: 3,
+				capturePolicy: {
+					effectiveStartMode: 'approval',
+					dispatchApproval: 'required',
+					specificationRevision: 3,
+				},
+			})
+		);
+		render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+		fireEvent.click(await screen.findByText('Refresh approval'));
+		await screen.findByRole('option', { name: 'Reviewer (namespace-two)' });
+		boardApi.runtimeCommand.mockResolvedValue({ ok: true, value: { accepted: true } });
+		boardApi.queryWorkspace.mockResolvedValue({
+			ok: false,
+			error: { code: 'source-unavailable', message: 'Could not read approval state' },
+		});
+		fireEvent.click(screen.getByRole('button', { name: 'Approve start' }));
+		expect(await screen.findByRole('alert')).toHaveTextContent('Could not read approval state');
+		expect(screen.getByLabelText('Title')).toHaveValue('Refresh approval');
+		expect(screen.queryByText('Start approval: granted')).not.toBeInTheDocument();
+		expect(screen.getByText('Start approval: required')).toBeInTheDocument();
+	});
+
+	it.each(['stale-revision', 'protected-field', 'runtime-unavailable', 'transport-error'])(
+		'preserves the draft and read tokens after rejected approval: %s',
+		async (code) => {
+			const original = makeCard({
+				id: 'c1',
+				title: 'Approval draft',
+				storageRevision: 3,
+				capturePolicy: {
+					effectiveStartMode: 'approval',
+					dispatchApproval: 'required',
+					specificationRevision: 3,
+				},
+			});
+			const board = installCapture(original);
+			if (code === 'transport-error')
+				boardApi.runtimeCommand.mockRejectedValue(new Error('Transport lost'));
+			else
+				boardApi.runtimeCommand.mockResolvedValue({
+					ok: false,
+					error: { code, message: 'Approval rejected' },
+				});
+			render(<BoardModal theme={mockTheme} onClose={vi.fn()} />);
+			fireEvent.click(await screen.findByText('Approval draft'));
+			await screen.findByRole('option', { name: 'Reviewer (namespace-two)' });
+			fireEvent.change(screen.getByLabelText('Body / instructions'), {
+				target: { value: 'Unsaved instructions' },
+			});
+			expect(screen.getByRole('button', { name: 'Approve start' })).toBeDisabled();
+			fireEvent.change(screen.getByLabelText('Body / instructions'), { target: { value: '' } });
+			fireEvent.click(screen.getByRole('button', { name: 'Approve start' }));
+			expect(await screen.findByRole('alert')).toHaveTextContent(code);
+			expect(screen.getByLabelText('Title')).toHaveValue('Approval draft');
+			expect(screen.getByLabelText('Body / instructions')).toHaveValue('');
+			boardApi.list.mockResolvedValue([
+				{
+					...board,
+					storage: { ...board.storage!, expectedRevision: 14 },
+					cards: [{ ...original, storageRevision: 5 }],
+				},
+			]);
+			await act(async () => {
+				emitBoardChanged();
+			});
+			fireEvent.click(screen.getByRole('button', { name: 'Approve start' }));
+			await waitFor(() => expect(boardApi.runtimeCommand).toHaveBeenCalledTimes(2));
+			expect(boardApi.runtimeCommand.mock.calls[1][0]).toMatchObject({
+				target: { expectedRevision: 12 },
+				cardRevision: 3,
+			});
+			expect(boardApi.captureCard).not.toHaveBeenCalled();
+			expect(boardApi.setCardStatus).not.toHaveBeenCalled();
+		}
+	);
 
 	it('sends explicit group, pin, namespaced role, repository, cwd and direct policy via the exact command', async () => {
 		installCapture();

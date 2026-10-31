@@ -614,13 +614,13 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 	}, [selectedCollection, projectRoot]);
 
 	const openEditCard = useCallback(
-		(card: BoardCard, focusMove = false) => {
+		(card: BoardCard, focusMove = false, collection = selectedCollection) => {
 			setCycleError(null);
 			setSaveError(null);
 			setFocusMovePicker(focusMove);
-			if (!selectedCollection) return;
+			if (!collection) return;
 			const existing: CardDraft = {
-				collection: structuredClone(selectedCollection),
+				collection: structuredClone(collection),
 				projectRoot,
 				kind: card.kind,
 				id: card.id,
@@ -970,6 +970,66 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 			setSaving(false);
 		}
 	}, [draft, board, projectRoot, canSaveDraft, closeEditor, applyBoard, load, collections]);
+
+	const handleApproveStart = useCallback(async () => {
+		if (!draft?.id || isDraftDirty || saving || !draft.projectRoot) return;
+		const card = draft.collection.board.cards.find((entry) => entry.id === draft.id);
+		if (card?.capturePolicy?.dispatchApproval !== 'required' || card.storageRevision === undefined)
+			return;
+		setSaving(true);
+		setSaveError(null);
+		try {
+			const result = await window.maestro.board.runtimeCommand({
+				action: 'control',
+				operation: 'approve',
+				target: {
+					projectRoot: draft.projectRoot,
+					sourceKey: draft.collection.sourceKey,
+					collectionKey: draft.collection.collectionKey,
+					expectedRevision: draft.collection.revision,
+				},
+				cardId: draft.id,
+				cardRevision: card.storageRevision,
+			});
+			if (!result.ok) {
+				setSaveError(result.error);
+				return;
+			}
+			// Read the host state after its grant. Never manufacture a granted policy
+			// or replace the read tokens on a rejected approval.
+			const refreshed = await window.maestro.board.queryWorkspace({
+				sourceKey: draft.collection.sourceKey,
+			});
+			if (!refreshed.ok) {
+				setSaveError(refreshed.error);
+				return;
+			}
+			const collection = refreshed.value.collections.find(
+				(entry) => entry.collectionKey === draft.collection.collectionKey
+			);
+			const saved = collection?.board.cards.find((entry) => entry.id === draft.id);
+			if (!collection || !saved) {
+				setSaveError({
+					code: 'not-found',
+					message: 'Approved card is no longer available. Reload the board.',
+				});
+				return;
+			}
+			if (
+				draftBaselineRef.current?.collection === draft.collection &&
+				draftBaselineRef.current.id === draft.id
+			) {
+				openEditCard(saved, false, collection);
+			}
+			setCaptureResult(null);
+			await load(false);
+		} catch (err) {
+			setSaveError({ code: 'transport-error', message: ipcErrorMessage(err) });
+			captureException(err, { tags: { operation: 'board:approveStart' } });
+		} finally {
+			setSaving(false);
+		}
+	}, [draft, isDraftDirty, saving, load, openEditCard]);
 
 	const handleDeleteCard = useCallback(
 		async (cardId: string) => {
@@ -1747,6 +1807,8 @@ export function BoardModal({ theme, onClose }: BoardModalProps) {
 							onToggleParent={toggleParent}
 							onAddReview={openReview}
 							canAddReview={!isDraftDirty}
+							canApproveStart={!isDraftDirty && !!draft.projectRoot}
+							onApproveStart={() => void handleApproveStart()}
 							onSave={() => void handleSaveCard()}
 							onCancel={requestCloseEditor}
 							onMove={(status) => void handleMoveDraft(status)}
@@ -2467,6 +2529,8 @@ interface CardEditorProps {
 	onToggleParent: (parentId: string) => void;
 	onAddReview: () => void;
 	canAddReview: boolean;
+	canApproveStart: boolean;
+	onApproveStart: () => void;
 	onSave: () => void;
 	onCancel: () => void;
 	/** Persist a column change immediately (existing cards only). */
@@ -2503,6 +2567,8 @@ function CardEditor({
 	onToggleParent,
 	onAddReview,
 	canAddReview,
+	canApproveStart,
+	onApproveStart,
 	onSave,
 	onCancel,
 	onMove,
@@ -2600,6 +2666,33 @@ function CardEditor({
 			<div className="text-sm font-bold" style={{ color: theme.colors.textMain }}>
 				{draft.id === null ? 'New card' : 'Edit card'}
 			</div>
+
+			{isExisting && (
+				<div className="text-sm" style={{ color: theme.colors.textMain }}>
+					Start approval:{' '}
+					{board.cards.find((card) => card.id === draft.id)?.capturePolicy?.dispatchApproval ??
+						'unknown'}
+					{board.cards.find((card) => card.id === draft.id)?.capturePolicy?.dispatchApproval ===
+						'required' && (
+						<>
+							<button
+								type="button"
+								className="ml-3"
+								disabled={!canApproveStart || saving || draft.storageRevision === undefined}
+								onClick={onApproveStart}
+							>
+								Approve start
+							</button>
+							{!canApproveStart && (
+								<span>
+									{' '}
+									Save changes and reopen the card before approving its saved specification.
+								</span>
+							)}
+						</>
+					)}
+				</div>
+			)}
 
 			{saveError && (
 				<div role="alert" style={{ color: theme.colors.error }}>

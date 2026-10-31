@@ -330,13 +330,15 @@ describe('global Cue intake on the shared persistent runtime', () => {
 	});
 	it('waits for native approval and then dispatches through the same global Cue runtime', async () => {
 		edit({ heldByUser: true }, 1);
-		edit({
-			capturePolicy: {
-				effectiveStartMode: 'approval',
-				dispatchApproval: 'required',
-				specificationRevision: 0,
-			},
+		const before = storage.query().collections[0];
+		// Exercise the capture policy boundary, rather than injecting a grant requirement.
+		const captured = storage.capture({
+			projectRoot: roots[0],
+			boardId: before.board.id,
+			expectedRevision: before.revision,
+			card: { ...before.board.cards[0], startModeOverride: 'approval' },
 		});
+		expect(captured.cards[0].capturePolicy?.dispatchApproval).toBe('required');
 		await tick();
 		expect(waits).toContainEqual({ cardId: 'same', reason: 'approval-required' });
 		expect(service.spawn).not.toHaveBeenCalled();
@@ -356,9 +358,31 @@ describe('global Cue intake on the shared persistent runtime', () => {
 		await expect(executeBoardRuntimeCommand(command)).rejects.toMatchObject({
 			code: 'protected-field',
 		});
+		await expect(
+			executeBoardRuntimeCommand(
+				{ ...command, cardRevision: command.cardRevision + 1 },
+				'native-fixture-main-frame'
+			)
+		).rejects.toMatchObject({ code: 'stale-revision' });
+		await expect(
+			executeBoardRuntimeCommand(
+				{
+					...command,
+					target: { ...command.target, expectedRevision: command.target.expectedRevision + 1 },
+				},
+				'native-fixture-main-frame'
+			)
+		).rejects.toMatchObject({ code: 'stale-revision' });
+		expect(storage.query().collections[0].board.cards[0].capturePolicy?.dispatchApproval).toBe(
+			'required'
+		);
+		expect(reserved()).toHaveLength(0);
 		expect(await executeBoardRuntimeCommand(command, 'native-fixture-main-frame')).toMatchObject({
 			ok: true,
 		});
+		expect(storage.query().collections[0].board.cards[0].capturePolicy?.dispatchApproval).toBe(
+			'granted'
+		);
 		await tick();
 		expect(service.spawn).toHaveBeenCalledOnce();
 		settle(good);
