@@ -3088,6 +3088,7 @@ pianolaSupervise
 	.option('--agents <ids>', 'Comma-separated agent IDs')
 	.option('--groups <ids>', 'Comma-separated group IDs')
 	.option('--exclude <ids>', 'Comma-separated excluded agent IDs')
+	.option('--future-local-agents', 'Reconcile a future-agent selection (requires existing --id)')
 	.option('--json', 'Output as JSON')
 	.action((options) => pianolaSuperviseScope(options));
 
@@ -3119,6 +3120,7 @@ pianolaSupervise
 pianolaSupervise
 	.command('list')
 	.description('List registered supervised targets')
+	.option('--live', 'Read worker and coverage status from the desktop host')
 	.option('--json', 'Output as JSON (for scripting)')
 	.action((options) => pianolaSuperviseList(options));
 
